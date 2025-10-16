@@ -1,0 +1,3 @@
+cargo:rustc-link-search=/Users/ivan/Projects/Ivan/loadlynx/firmware/eload-core/target/thumbv7em-none-eabihf/debug/build/defmt-a3ebd61630cf59da/out
+cargo:rustc-check-cfg=cfg(c_variadic)
+cargo:rustc-check-cfg=cfg(no_cas)
