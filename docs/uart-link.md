@@ -1,7 +1,7 @@
 # MCU↔MCU 串口通信方案（硬件 + 软件）
 
 范围
-- 适用对象：STM32G431（`firmware/eload-core`）与 ESP32‑S3（`firmware/host-bridge`）之间的板间链路。
+- 适用对象：STM32G431（`firmware/analog`）与 ESP32‑S3（`firmware/digital`）之间的板间链路。
 - 本文仅聚焦“通信方案（硬件+软件）”，不展开其他备选总线/器件对比。
 
 目标

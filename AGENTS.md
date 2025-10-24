@@ -1,16 +1,16 @@
 # Repository Guidelines
 
 ## Project Structure & Module Organization
-- `firmware/eload-core/` — STM32G431 (Rust + Embassy) core control loop.
-- `firmware/host-bridge/` — ESP32‑S3 (Rust + esp‑hal) UI/bridge.
+- `firmware/analog/` — STM32G431 (Rust + Embassy) core control loop.
+- `firmware/digital/` — ESP32‑S3 (Rust + esp‑hal) UI/bridge.
 - `libs/` — shared drivers/protocols (placeholders).
 - `docs/` — design notes and datasheets.
 - `scripts/` — flash/build helpers.
 
 ## Build, Test, and Development Commands
-- G431 build: `make g431-build` or `(cd firmware/eload-core && cargo build)`.
+- G431 build: `make g431-build` or `(cd firmware/analog && cargo build)`.
 - G431 run/flash (defmt RTT): `make g431-run` or `scripts/flash_g431.sh` after build.
-- S3 build: `make s3-build` or `(cd firmware/host-bridge && cargo +esp build)`.
+- S3 build: `make s3-build` or `(cd firmware/digital && cargo +esp build)`.
 - S3 flash/monitor: `scripts/flash_s3.sh [--release] [--port /dev/tty.*]`.
 - Format: `make fmt` or `cargo fmt --all`.
 
@@ -39,4 +39,3 @@ Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for 
 - Chip/runners are configured via crate `.cargo/config.toml`; adjust only if board/chip changes.
 - Do not commit secrets or machine‑specific paths; prefer flags/env (e.g., `--port /dev/tty.*`).
 - Probe‑RS chip may vary by package; verify `STM32G431CB` before flashing.
-

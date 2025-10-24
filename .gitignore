@@ -1,2 +1,5 @@
 downloads/
 tmp/
+
+# Rust build artifacts
+**/target/

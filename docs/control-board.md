@@ -4,7 +4,7 @@
 
 ## 外设清单（已知）
 - 计算与桥接：
-  - MCU：ESP32‑S3（UI/桥接/网络；对应 `firmware/host-bridge/`）。
+  - MCU：ESP32‑S3（UI/桥接/网络；对应 `firmware/digital/`）。
   - 板间通信：与 G431 通过 UART 帧通信（详见 `docs/uart-link.md`）。
 - 人机接口（HMI）：
   - 显示：屏幕（类型未定，为可选/待定）。

@@ -1,9 +1,0 @@
-[build]
-target = "xtensa-esp32s3-none-elf"
-
-[target.'cfg(all(target_arch = "xtensa", target_os = "none"))']
-runner = "espflash flash --monitor"
-
-[env]
-DEFMT_LOG = "info"
-

@@ -5,13 +5,13 @@
 all: g431-build
 
 g431-build:
-	cd firmware/eload-core && cargo build
+	cd firmware/analog && cargo build
 
 g431-run:
-	cd firmware/eload-core && cargo run
+	cd firmware/analog && cargo run
 
 s3-build:
-	cd firmware/host-bridge && cargo +esp build
+	cd firmware/digital && cargo +esp build
 
 fmt:
 	cargo fmt --all || true

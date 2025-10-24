@@ -1,6 +1,0 @@
-cargo:rustc-link-lib=static=cortex-m
-cargo:rustc-link-search=/Users/ivan/Projects/Ivan/loadlynx/firmware/eload-core/target/thumbv7em-none-eabihf/debug/build/cortex-m-7e2acdb0059cbd68/out
-cargo:rustc-cfg=cortex_m
-cargo:rustc-cfg=armv7m
-cargo:rustc-cfg=armv7em
-cargo:rustc-cfg=has_fpu

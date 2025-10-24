@@ -10,8 +10,8 @@
 
 ## 提交规范
 - 使用 Conventional Commits（英文），例如：
-  - `feat(eload-core): add ADC sampling skeleton`
-  - `chore(host-bridge): setup ESP-IDF cmake`
+  - `feat(analog): add ADC sampling skeleton`
+  - `chore(digital): setup ESP-IDF cmake`
 
 ## 构建与验证
 - G431：Rust + Embassy，目标 `thumbv7em-none-eabihf`，使用 probe-rs 调试与烧录。

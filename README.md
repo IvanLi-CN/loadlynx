@@ -2,8 +2,8 @@
 
 本仓库采用分体式架构：由 STM32G431 执行快速电流/功率闭环与保护，ESP32‑S3 负责 UI / Wi‑Fi / OTA / 记录与标定，以及与上位机工具的桥接。
 
-- 核心回路（G431，Rust + Embassy）：`firmware/eload-core/`
-- 宿主桥（S3，Rust + esp-hal + Embassy）：`firmware/host-bridge/`
+- 核心回路（G431，Rust + Embassy）：`firmware/analog/`
+- 宿主桥（S3，Rust + esp-hal + Embassy）：`firmware/digital/`
 - 共享库与协议：`libs/`
 - 文档与脚本：`docs/`, `scripts/`
 
@@ -28,37 +28,37 @@
 - probe-rs 工具链（调试/烧录）
 - ESP‑IDF (v5+) 与 `idf.py`
 
-### G431（eload-core）
+### G431（analog）
 - 目标三元组：`thumbv7em-none-eabihf`
 - 建议 Runner：`probe-rs run --chip STM32G431CB`（具体后缀依 probe-rs 芯片库而定）
 - 本仓库默认在 `.cargo/config.toml` 中设置目标与 runner，你也可以通过脚本执行：
 
 ```sh
 # 构建
-(cd firmware/eload-core && cargo build)
+(cd firmware/analog && cargo build)
 
 # 烧录（使用 probe-rs 直接调用）
 probe-rs run --chip STM32G431CB --protocol swd --speed 4000 \
-  --firmware target/thumbv7em-none-eabihf/debug/eload-core
+  --firmware target/thumbv7em-none-eabihf/debug/analog
 ```
 
-### ESP32‑S3（host-bridge）
+### ESP32‑S3（digital）
 - 需要正确安装 `espup`/Xtensa 工具链与 `espflash`（Rust 生态）。
 
 ```sh
 # 构建（Rust + esp-hal）
-(cd firmware/host-bridge && cargo build)
+(cd firmware/digital && cargo build)
 
 # 烧录与监视（自动探测串口）
-(cd firmware/host-bridge && cargo run --release)
+(cd firmware/digital && cargo run --release)
 
 # 或指定端口
 loadlynx/scripts/flash_s3.sh --release --port /dev/tty.usbserial-xxxx
 ```
 
 ## 目录结构
-- `firmware/eload-core/` — G431 最小 Embassy 应用（定时与日志占位）
-- `firmware/host-bridge/` — S3 最小 ESP‑IDF 应用（UART/任务占位）
+- `firmware/analog/` — G431 最小 Embassy 应用（定时与日志占位）
+- `firmware/digital/` — S3 最小 ESP‑IDF 应用（UART/任务占位）
 - `libs/` — 共享驱动与协议约定（占位）
 - `docs/` — 控制环路/热设计/接口协议笔记（占位）
 - `scripts/` — 烧录与构建脚本

@@ -4,7 +4,7 @@
 
 ## 外设清单（已知）
 - 计算与控制：
-  - MCU：STM32G431（执行快速闭环与保护；对应 `firmware/eload-core/`）。
+  - MCU：STM32G431（执行快速闭环与保护；对应 `firmware/analog/`）。
   - 闭环：硬件 CC（运放闭环），结合 ADC 采样与固件保护策略。
 - 采样与设定：
   - 电流采样：分流电阻 Kelvin 接入 ADC。
@@ -63,4 +63,3 @@ Open Items
 - MOSFET selection and parallel strategy
 - Sense resistor power/thermal sizing
 - Loop compensation prototype and validation plan
-

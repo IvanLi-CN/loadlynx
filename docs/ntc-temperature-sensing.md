@@ -5,7 +5,7 @@ Scope
 -----
 - Supply: 3.3 V. ADC usable range: 0–2.9 V.
 - Two temperature ranges: 0–100 °C and 0–150 °C.
-- Two MCUs sample these sensors: STM32G431 (eload-core) and ESP32‑S3 (host-bridge).
+- Two MCUs sample these sensors: STM32G431 (analog) and ESP32‑S3 (digital).
 - Total: 4 identical NTC channels (each range × each MCU).
 
 Sensor Selection

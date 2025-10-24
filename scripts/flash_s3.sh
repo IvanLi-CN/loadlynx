@@ -18,6 +18,6 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-cd firmware/host-bridge
+cd firmware/digital
 # Runner in .cargo/config.toml uses espflash; allow overriding port via env
 ESPFLASH_OPTS=${PORT_ARG} cargo +esp run ${PROFILE}
