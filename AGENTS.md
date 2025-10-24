@@ -39,3 +39,9 @@ Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for 
 - Chip/runners are configured via crate `.cargo/config.toml`; adjust only if board/chip changes.
 - Do not commit secrets or machine‑specific paths; prefer flags/env (e.g., `--port /dev/tty.*`).
 - Probe‑RS chip may vary by package; verify `STM32G431CB` before flashing.
+
+## Documentation & Datasheet Localization
+- The `docs/` tree hosts design notes (`*.md`), domain-specific subfolders (e.g., `fans/`, `heatsinks/`), and vendor material converted into Markdown under `docs/other-datasheets/`.
+- When new datasheets or external PDFs are needed, prefer converting them to Markdown via `mineru` (or an equivalent tool). Store the Markdown in `docs/other-datasheets/` using kebab-case filenames and keep the original title/version at the top of the file.
+- Place extracted images/figures in `docs/assets/<document-name>/` and reference them from Markdown via relative paths such as `../assets/<document-name>/<file>.jpg`. Avoid committing raw PDFs or hotlinking external resources.
+- If localized material is specific to a board or subsystem, add a dedicated summary under `docs/` and link it from the top-level README or relevant index so the team can discover it easily.
