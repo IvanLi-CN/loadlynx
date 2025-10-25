@@ -18,7 +18,7 @@
 • Enhanced body diode dV/dt and dI/dt Capability   
 • Lead-Free
 
-![](IRFP4668PBF_images/c3d81b0658a54d2881ed9c258064c6868f456c862db589f0e34beded1634781c.jpg)
+![](../assets/irfp4668pbf/c3d81b0658a54d2881ed9c258064c6868f456c862db589f0e34beded1634781c.jpg)
 
 <table><tr><td rowspan=2 colspan=1>Base Part Number</td><td rowspan=2 colspan=1>Package Type</td><td rowspan=1 colspan=2>Standard Pack</td><td rowspan=2 colspan=1>Orderable Part Number</td></tr><tr><td rowspan=1 colspan=1>Form</td><td rowspan=1 colspan=1>Quantity</td></tr><tr><td rowspan=1 colspan=1>IRFP4668PbF</td><td rowspan=1 colspan=1>TO-247AC</td><td rowspan=1 colspan=1>Tube</td><td rowspan=1 colspan=1>25</td><td rowspan=1 colspan=1>IRFP4668PbF</td></tr></table>
 
@@ -56,49 +56,49 @@ $\textcircled{6}$ Coss eff. (ER) is a fixed capacitance that gives the same ener
 $\textcircled{7}$ When mounted on 1" square PCB (FR-4 or $_ { \mathsf { G } - 1 0 }$ Material). For recommended footprint and soldering techniques.   
 $\textcircled{8}$ $\mathsf { R } _ { \Theta }$ is measured at ${ \mathsf T } _ { \mathsf J }$ approximately $9 0 ^ { \circ } \mathsf { C }$ .
 
-![](IRFP4668PBF_images/5cde31dfbc6d31ead8dff33118921773a52e5f1ac46b7a1a0f98a9f7834d13b7.jpg)  
+![](../assets/irfp4668pbf/5cde31dfbc6d31ead8dff33118921773a52e5f1ac46b7a1a0f98a9f7834d13b7.jpg)  
 Fig 1. Typical Output Characteristics
 
-![](IRFP4668PBF_images/ce0c228fc6f96b65ae9e3e1e584c87fa8ce238dff4cca189467d6e8a5404e6c5.jpg)  
+![](../assets/irfp4668pbf/ce0c228fc6f96b65ae9e3e1e584c87fa8ce238dff4cca189467d6e8a5404e6c5.jpg)  
 Fig 3. Typical Transfer Characteristics
 
-![](IRFP4668PBF_images/7bf3f4dc94dcd5c68ea5e05cf9e8db77da3af5020f6fed5f66b99206ba4fdf77.jpg)  
+![](../assets/irfp4668pbf/7bf3f4dc94dcd5c68ea5e05cf9e8db77da3af5020f6fed5f66b99206ba4fdf77.jpg)  
 Fig 5. Typical Capacitance vs. Drain-to-Source Voltage
 
-![](IRFP4668PBF_images/a0cf48ffdd65bf5927d90a1f45236faa1963d0cd2d90c33fe35ab1bb349ace6b.jpg)  
+![](../assets/irfp4668pbf/a0cf48ffdd65bf5927d90a1f45236faa1963d0cd2d90c33fe35ab1bb349ace6b.jpg)  
 Fig 2. Typical Output Characteristics
 
-![](IRFP4668PBF_images/60295a13bd1b3d0d48ac18f0995ff58efd055e3f3b9ebdc8e4283f5c4a27c54f.jpg)  
+![](../assets/irfp4668pbf/60295a13bd1b3d0d48ac18f0995ff58efd055e3f3b9ebdc8e4283f5c4a27c54f.jpg)  
 Fig 4. Normalized On-Resistance vs. Temperature
 
-![](IRFP4668PBF_images/eddc15e70b5eb1e1c04f73d2f64a4e3081e53a3c4c6c48612c7d616515eb517a.jpg)  
+![](../assets/irfp4668pbf/eddc15e70b5eb1e1c04f73d2f64a4e3081e53a3c4c6c48612c7d616515eb517a.jpg)  
 Fig 6. Typical Gate Charge vs. Gate-to-Source Voltage
 
-![](IRFP4668PBF_images/271f447fbdc369600348632982242b328c1da04283a999fda3099483d95e6fc2.jpg)  
+![](../assets/irfp4668pbf/271f447fbdc369600348632982242b328c1da04283a999fda3099483d95e6fc2.jpg)  
 Fig 7. Typical Source-to-Drain Diode Forward Voltage
 
-![](IRFP4668PBF_images/3988c5f17d9a9a806ea93ce9d899394468d4e2c6bc4bae415a20d54563dbb8a9.jpg)  
+![](../assets/irfp4668pbf/3988c5f17d9a9a806ea93ce9d899394468d4e2c6bc4bae415a20d54563dbb8a9.jpg)  
 Fig 9. Maximum Drain Current vs. Case Temperature
 
-![](IRFP4668PBF_images/6f228608693a1006ebb631142047a873cdd877340d575bee00bcfc7681c94f9c.jpg)  
+![](../assets/irfp4668pbf/6f228608693a1006ebb631142047a873cdd877340d575bee00bcfc7681c94f9c.jpg)  
 Fig 11. Typical Coss Stored Energy
 
-![](IRFP4668PBF_images/5cd29ceb9f5cb0cdaa85477b063275f52590c2d7bfce4fd6e3dcdf3b86c8b31b.jpg)  
+![](../assets/irfp4668pbf/5cd29ceb9f5cb0cdaa85477b063275f52590c2d7bfce4fd6e3dcdf3b86c8b31b.jpg)  
 Fig 8. Maximum Safe Operating Area
 
-![](IRFP4668PBF_images/f0c42946af0c577970df6da6423d935eb18cd96af185137f407f372c8ee81bdc.jpg)  
+![](../assets/irfp4668pbf/f0c42946af0c577970df6da6423d935eb18cd96af185137f407f372c8ee81bdc.jpg)  
 Fig 10. Drain-to-Source Breakdown Voltage
 
-![](IRFP4668PBF_images/1a437c15b6dd95723f8e99b02b49a91093469cf6af885b13098e6c318e5ae69f.jpg)  
+![](../assets/irfp4668pbf/1a437c15b6dd95723f8e99b02b49a91093469cf6af885b13098e6c318e5ae69f.jpg)  
 Fig 12. Maximum Avalanche Energy vs. Drain Current
 
-![](IRFP4668PBF_images/a5b82aeb02ac8633ea45f0ca62724cabd72b09edbf317784434509241acdfddf.jpg)  
+![](../assets/irfp4668pbf/a5b82aeb02ac8633ea45f0ca62724cabd72b09edbf317784434509241acdfddf.jpg)  
 Fig 13. Maximum Effective Transient Thermal Impedance, Junction-to-Case
 
-![](IRFP4668PBF_images/722acfad92756649ed0c6d04dbdcbdef6e65d63338ea1c0a662418a9dcd987d3.jpg)  
+![](../assets/irfp4668pbf/722acfad92756649ed0c6d04dbdcbdef6e65d63338ea1c0a662418a9dcd987d3.jpg)  
 Fig 14. Typical Avalanche Current vs. Pulsewidth
 
-![](IRFP4668PBF_images/f205da6abfba38fbb492ef5bb2a60da2c9925d5955881bd89098f8c3e27e56fe.jpg)  
+![](../assets/irfp4668pbf/f205da6abfba38fbb492ef5bb2a60da2c9925d5955881bd89098f8c3e27e56fe.jpg)  
 Fig 15. Maximum Avalanche Energy vs. Temperature
 
 # Notes on Repetitive Avalanche Curves , Figures 14, 15: (For further info, see AN-1005 at www.irf.com)
@@ -116,47 +116,47 @@ $$
 \begin{array} { r l } & { \mathsf { P } _ { \mathsf { D } ( \mathsf { a v e } ) } = 1 / 2 ( \mathbf { \nabla } 1 . 3 { \cdot } \mathsf { B V } { \cdot } \mathsf { I } _ { \mathsf { a v } } ) = \Delta \mathsf { T } / \mathsf { Z } _ { \mathsf { t h , J C } } } \\ & { \qquad \mathsf { I } _ { \mathsf { a v } } = 2 \Delta \mathsf { T } / \left[ \mathsf { 1 } . 3 { \cdot } \mathsf { B V } { \cdot } \mathsf { Z } _ { \mathsf { t h } } \right] } \\ & { \qquad \mathsf { E } _ { \mathsf { A S } ( \mathsf { A R } ) } = \mathsf { P } _ { \mathsf { D } ( \mathsf { a v e } ) } { \cdot } \mathsf { I } _ { \mathsf { a v } } } \end{array}
 $$
 
-![](IRFP4668PBF_images/77dc2d776598965b692dec75a7489cf6776e72386570501467f03c857516c4af.jpg)  
+![](../assets/irfp4668pbf/77dc2d776598965b692dec75a7489cf6776e72386570501467f03c857516c4af.jpg)  
 Fig. 16 Threshold Voltage vs. Temperature
 
-![](IRFP4668PBF_images/b34dfacec2a4bbd91781e7a8e3ae8bbe0bbf7e223134584a9221fe669fc1e53e.jpg)  
+![](../assets/irfp4668pbf/b34dfacec2a4bbd91781e7a8e3ae8bbe0bbf7e223134584a9221fe669fc1e53e.jpg)  
 Fig 18. Typical Recovery Current vs. dif/dt
 
-![](IRFP4668PBF_images/dd1b79201569106507f7e2b86e3cb73a2e42073d70c2bb2e82de7c00c41c3b6d.jpg)  
+![](../assets/irfp4668pbf/dd1b79201569106507f7e2b86e3cb73a2e42073d70c2bb2e82de7c00c41c3b6d.jpg)  
 Fig. 17 Typical Recovery Current vs. dif/dt
 
-![](IRFP4668PBF_images/c239203266462715002cdd3e2681d054ae755e705312b7cd7b0223c66e5c8da5.jpg)  
+![](../assets/irfp4668pbf/c239203266462715002cdd3e2681d054ae755e705312b7cd7b0223c66e5c8da5.jpg)  
 Fig 19. Typical Stored Charge vs. dif/dt
 
-![](IRFP4668PBF_images/5be14e8e953b2800c2e345dc3efc4c90b6a3eb31d0840a7b7a39e0952ee1df20.jpg)  
+![](../assets/irfp4668pbf/5be14e8e953b2800c2e345dc3efc4c90b6a3eb31d0840a7b7a39e0952ee1df20.jpg)  
 Fig 20. Typical Stored Charge vs. dif/dt
 
-![](IRFP4668PBF_images/4ff54df10051fe395381852112025111cbb84232954b9b992928bc62566b9336.jpg)  
+![](../assets/irfp4668pbf/4ff54df10051fe395381852112025111cbb84232954b9b992928bc62566b9336.jpg)  
 Fig 21. Peak Diode Recovery dv/dt Test Circuit for N-Channel HEXFET $\textsuperscript { \textregistered }$ Power MOSFETs
 
-![](IRFP4668PBF_images/cd36b95300d3bace47db3d773298ca42cd39513b34dbdb57bee848f7748f1999.jpg)
+![](../assets/irfp4668pbf/cd36b95300d3bace47db3d773298ca42cd39513b34dbdb57bee848f7748f1999.jpg)
 
-![](IRFP4668PBF_images/7d1b9e56ddd0856d604d7af638ec9b45a4dc7f5f32653e6633ff79f0065e621d.jpg)  
+![](../assets/irfp4668pbf/7d1b9e56ddd0856d604d7af638ec9b45a4dc7f5f32653e6633ff79f0065e621d.jpg)  
 Fig 22a. Unclamped Inductive Test Circuit
 
-![](IRFP4668PBF_images/54ed5030369d2908ceeb0722ceca6aac9a89b33bd48cbdd43f1b9385394dcb8f.jpg)  
+![](../assets/irfp4668pbf/54ed5030369d2908ceeb0722ceca6aac9a89b33bd48cbdd43f1b9385394dcb8f.jpg)  
 Fig 22b. Unclamped Inductive Waveforms
 
-![](IRFP4668PBF_images/a70a9ae980f2b4a97ba417f00bc77341731cf1ba697dddb4549c41405d3f57d5.jpg)  
+![](../assets/irfp4668pbf/a70a9ae980f2b4a97ba417f00bc77341731cf1ba697dddb4549c41405d3f57d5.jpg)  
 Fig 23a. Switching Time Test Circuit
 
-![](IRFP4668PBF_images/e83986e9dd3dfe948f3e92eeda9b9cb5295a1ec98b60b5b71745937bf67d2cb8.jpg)  
+![](../assets/irfp4668pbf/e83986e9dd3dfe948f3e92eeda9b9cb5295a1ec98b60b5b71745937bf67d2cb8.jpg)  
 Fig 23b. Switching Time Waveforms
 
-![](IRFP4668PBF_images/d579114c17b46a34df999416578de7e2754714c03dd9dabe4d15c337fc49e919.jpg)  
+![](../assets/irfp4668pbf/d579114c17b46a34df999416578de7e2754714c03dd9dabe4d15c337fc49e919.jpg)  
 Fig 24a. Gate Charge Test Circuit
 
-![](IRFP4668PBF_images/2f791e63d7368d3a57dcc332dce1ec1c84d531071df05a901c67d718f482ba44.jpg)  
+![](../assets/irfp4668pbf/2f791e63d7368d3a57dcc332dce1ec1c84d531071df05a901c67d718f482ba44.jpg)  
 Fig 24b. Gate Charge Waveform
 
 # TO-247AC Package Outline (Dimensions are
 
-![](IRFP4668PBF_images/a3a5dd86e063ef4d8c51876bf92463448aa775a80b71b68c2c78a8a9fe244ed2.jpg)
+![](../assets/irfp4668pbf/a3a5dd86e063ef4d8c51876bf92463448aa775a80b71b68c2c78a8a9fe244ed2.jpg)
 
 # TO-247AC Part Marking Information
 
@@ -188,7 +188,7 @@ DIODES
 
 <table><tr><td rowspan="3">SYMBOL</td><td colspan="4">DIMENSIONS</td><td rowspan="3">NOTES</td></tr><tr><td colspan="2">INCHES</td><td colspan="2">MILLIME TERS</td></tr><tr><td>MIN.</td><td>MAX.</td><td>MIN.</td><td>MAX.</td></tr><tr><td>A</td><td>.183</td><td>.209</td><td>4.65</td><td>5.31</td><td></td></tr><tr><td>A1</td><td>.087</td><td>.102</td><td>2.21</td><td>2.59</td><td></td></tr><tr><td>A2</td><td>.059</td><td>.098</td><td>1.50</td><td>2.49</td><td></td></tr><tr><td>b</td><td>.039</td><td>.055</td><td>0.99</td><td>1.40</td><td></td></tr><tr><td>b1</td><td>.039</td><td>.053</td><td>0.99</td><td>1.35</td><td></td></tr><tr><td>b2</td><td>.065</td><td>.094</td><td>1.65</td><td>2.39</td><td></td></tr><tr><td>b3</td><td>.065</td><td>.092</td><td>1.65</td><td>2.34</td><td></td></tr><tr><td>b4</td><td>.102</td><td>.135</td><td>2.59</td><td>3.43</td><td></td></tr><tr><td>b5</td><td>.102</td><td>.133</td><td>2.59</td><td>3.38</td><td></td></tr><tr><td>c</td><td>.015</td><td>.035</td><td>0.38</td><td>0.89</td><td></td></tr><tr><td>c1</td><td>.015</td><td>.033</td><td>0.38</td><td>0.84</td><td></td></tr><tr><td>D</td><td>.776</td><td>.815</td><td>19.71</td><td>20.70</td><td>45</td></tr><tr><td>D1</td><td>.515</td><td>-</td><td>13.08</td><td></td><td></td></tr><tr><td>D2</td><td>.020</td><td>.053</td><td>0.51</td><td>1.35</td><td></td></tr><tr><td>E</td><td>.602</td><td>.625</td><td>15.29</td><td>15.87</td><td>4</td></tr><tr><td>E1 E2</td><td>.530</td><td>-</td><td>13.46</td><td>-</td><td></td></tr><tr><td>e</td><td>.178</td><td>.216</td><td>4.52</td><td>5.49</td><td></td></tr><tr><td>øk L</td><td colspan="2">.215 BSC</td><td colspan="2">5.46 BSC</td><td></td></tr><tr><td rowspan="8">L1 øP 0P1</td><td colspan="2">.010</td><td colspan="2">0.25</td><td></td></tr><tr><td colspan="2">.559 .634</td><td>14.20</td><td>16.10</td><td></td></tr><tr><td>.146</td><td>.169</td><td>3.71</td><td>4.29</td><td></td></tr><tr><td>.140</td><td>.144</td><td>3.56</td><td>3.66</td><td></td></tr><tr><td></td><td>.291</td><td></td><td>7.39</td><td></td></tr><tr><td>.209</td><td>.224</td><td>5.31</td><td>5.69</td><td></td></tr><tr><td></td><td>.217 BSC</td><td></td><td>5.51 BSC</td><td></td></tr><tr><td colspan="2">S</td><td></td><td></td><td></td><td></td></tr></table>
 
-![](IRFP4668PBF_images/c13c95c8880027a56310e35a102f426521337584f42314ee3fbd6e42af112074.jpg)
+![](../assets/irfp4668pbf/c13c95c8880027a56310e35a102f426521337584f42314ee3fbd6e42af112074.jpg)
 
 # Revision History
 

@@ -4,7 +4,7 @@
 
 <table><tr><td rowspan=1 colspan=3>Key Parameters</td></tr><tr><td rowspan=1 colspan=1>VDs max</td><td rowspan=1 colspan=1>200</td><td rowspan=1 colspan=1>V</td></tr><tr><td rowspan=1 colspan=1>VDS (Avalanche) typ.</td><td rowspan=1 colspan=1>240</td><td rowspan=1 colspan=1>V</td></tr><tr><td rowspan=1 colspan=1>RDs(on) typ. @ 10V</td><td rowspan=1 colspan=1>21</td><td rowspan=1 colspan=1>mΩ</td></tr><tr><td rowspan=1 colspan=1>IRp max @ Tc= 100°</td><td rowspan=1 colspan=1>130</td><td rowspan=1 colspan=1>A</td></tr><tr><td rowspan=1 colspan=1>Tj max</td><td rowspan=1 colspan=1>175</td><td rowspan=1 colspan=1>°C</td></tr></table>
 
-![](IRFP4227PBF_images/3e90f9e05d3709c12f655375e3dec4a21e986ea5d2b585279314e7da0a170957.jpg)
+![](../assets/irfp4227pbf/3e90f9e05d3709c12f655375e3dec4a21e986ea5d2b585279314e7da0a170957.jpg)
 
 # Features
 
@@ -37,90 +37,90 @@ $\textcircled{1}$ Repetitive rating; pulse width limited by max. junction temper
 
 # Notes:
 
-![](IRFP4227PBF_images/bb0bb10f30c9e9ba22701ddc3eddb6f0c2084f5f064052c362a8a6628f871530.jpg)  
+![](../assets/irfp4227pbf/bb0bb10f30c9e9ba22701ddc3eddb6f0c2084f5f064052c362a8a6628f871530.jpg)  
 Fig. 1. Typical Output Characteristics
 
-![](IRFP4227PBF_images/14e1940afaad784acfd1d8e87a0247892cd631636f096a839f719d56eb4b302b.jpg)  
+![](../assets/irfp4227pbf/14e1940afaad784acfd1d8e87a0247892cd631636f096a839f719d56eb4b302b.jpg)  
 Fig. 2. Typical Output Characteristics
 
-![](IRFP4227PBF_images/cacfad98e6856312afa166e70989a3eb68b023be49fafcdf405f6606aa28dcf1.jpg)  
+![](../assets/irfp4227pbf/cacfad98e6856312afa166e70989a3eb68b023be49fafcdf405f6606aa28dcf1.jpg)  
 Fig. 3. Typical Transfer Characteristics
 
-![](IRFP4227PBF_images/c3c2fa57510b7cebc20541ca9931836816b62ef18b3d8b25cba779ff40a6590f.jpg)  
+![](../assets/irfp4227pbf/c3c2fa57510b7cebc20541ca9931836816b62ef18b3d8b25cba779ff40a6590f.jpg)  
 Fig. 4. Normalized On-Resistance vs. Temperature
 
-![](IRFP4227PBF_images/a9a43b7c395c8022b34b92957181117b648f9574f763d6384473bbc180ffaf58.jpg)  
+![](../assets/irfp4227pbf/a9a43b7c395c8022b34b92957181117b648f9574f763d6384473bbc180ffaf58.jpg)  
 Fig 5. Typical EpuLsSE VS. Drain-to-Source Voltage
 
-![](IRFP4227PBF_images/8892737caf67b26af829fa2c2bf42651e2e112725c5b78c13b7a272faa769d37.jpg)  
+![](../assets/irfp4227pbf/8892737caf67b26af829fa2c2bf42651e2e112725c5b78c13b7a272faa769d37.jpg)  
 Fig 6. Typical EpuLsE VS. Drain Current
 
-![](IRFP4227PBF_images/6e819aeafa64311c53114e8cd79f7b9727b6fcd6d8fb21a91aafc1250fba1a86.jpg)  
+![](../assets/irfp4227pbf/6e819aeafa64311c53114e8cd79f7b9727b6fcd6d8fb21a91aafc1250fba1a86.jpg)  
 Fig. 7. Typical EpuLSE VS. Temperature
 
-![](IRFP4227PBF_images/16d70c5f1d072dc41d005fc5a8ac0fd8fc46376d6654e6500c6cc9021a3d5ff6.jpg)  
+![](../assets/irfp4227pbf/16d70c5f1d072dc41d005fc5a8ac0fd8fc46376d6654e6500c6cc9021a3d5ff6.jpg)  
 Fig 9. Typical Capacitance vs.Drain-to-Source Voltage
 
-![](IRFP4227PBF_images/2af6168feed4f366d12e4c4b5b5cf62bdf2c9bf2fff2bb039a428aa185d85f59.jpg)  
+![](../assets/irfp4227pbf/2af6168feed4f366d12e4c4b5b5cf62bdf2c9bf2fff2bb039a428aa185d85f59.jpg)  
 Fig 11. Maximum Drain Current vs. Case Temperature
 
-![](IRFP4227PBF_images/44fb2b17028ecd3adc0718054cb023711ff263f345c39fbf7d414987d2cbc417.jpg)  
+![](../assets/irfp4227pbf/44fb2b17028ecd3adc0718054cb023711ff263f345c39fbf7d414987d2cbc417.jpg)  
 Fig 8. Typical Source-Drain Diode Forward Voltage
 
-![](IRFP4227PBF_images/ed1bc38872cda927ac91871fb4a0ba11803a313dad81051b24890a9cff5ffc24.jpg)  
+![](../assets/irfp4227pbf/ed1bc38872cda927ac91871fb4a0ba11803a313dad81051b24890a9cff5ffc24.jpg)  
 Fig 10. Typical Gate Charge vs. Gate-to-Source Voltage
 
-![](IRFP4227PBF_images/a206cee32e409ece957257a201118f23c7c0758b758b358a27b13bc24a5d13ae.jpg)  
+![](../assets/irfp4227pbf/a206cee32e409ece957257a201118f23c7c0758b758b358a27b13bc24a5d13ae.jpg)  
 Fig 12. Maximum Safe Operating Area
 
-![](IRFP4227PBF_images/9c7d717f77a576eb3695e72905c1418fd0abb034cd45ec0d0de8803b82288ea0.jpg)  
+![](../assets/irfp4227pbf/9c7d717f77a576eb3695e72905c1418fd0abb034cd45ec0d0de8803b82288ea0.jpg)  
 Fig. 13. On-Resistance Vs. Gate Voltage
 
-![](IRFP4227PBF_images/0a55b25f5a9ec5c9f5459abe8bd817f930f24d1ef4a1dd434c5df8abd026658f.jpg)  
+![](../assets/irfp4227pbf/0a55b25f5a9ec5c9f5459abe8bd817f930f24d1ef4a1dd434c5df8abd026658f.jpg)  
 Fig. 15. Threshold Voltage vs. Temperature
 
-![](IRFP4227PBF_images/33d505dbf1d0e94f7469b6e241b86fa3e28dd337863d6c02e15349c26e88ff45.jpg)  
+![](../assets/irfp4227pbf/33d505dbf1d0e94f7469b6e241b86fa3e28dd337863d6c02e15349c26e88ff45.jpg)  
 Fig. 14. Maximum Avalanche Energy Vs. Temperature
 
-![](IRFP4227PBF_images/c81829f8317c1d3fd985e488d0bbb61adcee9434e04ed29e7ca2654342975618.jpg)
+![](../assets/irfp4227pbf/c81829f8317c1d3fd985e488d0bbb61adcee9434e04ed29e7ca2654342975618.jpg)
 
-![](IRFP4227PBF_images/ad9a33ef5ea4b0d1dbab98146f1bcb885b2c9c9ebf6808e91a05ba526a3f59cc.jpg)  
+![](../assets/irfp4227pbf/ad9a33ef5ea4b0d1dbab98146f1bcb885b2c9c9ebf6808e91a05ba526a3f59cc.jpg)  
 Fig. 16. Typical Repetitive peak Current vs. Case temperature   
 Fig 17. Maximum Effective Transient Thermal Impedance, Junction-to-Case
 
-![](IRFP4227PBF_images/a3845df7a0ab5a8bf510093de00a95779f4920ba2460bbb40330f7987015e5ee.jpg)  
+![](../assets/irfp4227pbf/a3845df7a0ab5a8bf510093de00a95779f4920ba2460bbb40330f7987015e5ee.jpg)  
 Fig 18. Diode Reverse Recovery Test Circuit for N-Channel HEXFET $\textsuperscript { \textregistered }$ Power MOSFETs
 
-![](IRFP4227PBF_images/b7dc406554c66cb46ad0d46cd499e40252166d165f6de6afd667c9ef46c53ffb.jpg)  
+![](../assets/irfp4227pbf/b7dc406554c66cb46ad0d46cd499e40252166d165f6de6afd667c9ef46c53ffb.jpg)  
 Fig 19a. Unclamped Inductive Test Circuit
 
-![](IRFP4227PBF_images/d78b91f1f5a200a913c380b5df062cc048546532a132c3b3b0be2e984a910f42.jpg)  
+![](../assets/irfp4227pbf/d78b91f1f5a200a913c380b5df062cc048546532a132c3b3b0be2e984a910f42.jpg)  
 Fig 19b. Unclamped Inductive Waveforms
 
-![](IRFP4227PBF_images/f1216261f5447d13801cd02617d60c4d313b556859094beb86919eae0ca571ab.jpg)  
+![](../assets/irfp4227pbf/f1216261f5447d13801cd02617d60c4d313b556859094beb86919eae0ca571ab.jpg)  
 Fig 20a. Gate Charge Test Circuit
 
-![](IRFP4227PBF_images/0b40304cd707577a21602722ee0918b98bb0a86d07b9d93c8662a61cc13f20dc.jpg)  
+![](../assets/irfp4227pbf/0b40304cd707577a21602722ee0918b98bb0a86d07b9d93c8662a61cc13f20dc.jpg)  
 Fig 20b. Gate Charge Waveform
 
-![](IRFP4227PBF_images/b78f23bfd4c2f3a123515e41b2e5530c2408f55c628bf0c0d2d78ae42ac256b3.jpg)  
+![](../assets/irfp4227pbf/b78f23bfd4c2f3a123515e41b2e5530c2408f55c628bf0c0d2d78ae42ac256b3.jpg)  
 Fig 21a. $\mathbf { \Delta t } _ { \mathsf { s t } }$ and EpuLsE Test Circuit
 
-![](IRFP4227PBF_images/90591e4e43e2755bf4f155248bde947e41710fae91c4fbfe5ba8d3d2409d5ce3.jpg)  
+![](../assets/irfp4227pbf/90591e4e43e2755bf4f155248bde947e41710fae91c4fbfe5ba8d3d2409d5ce3.jpg)  
 Fig 21b. tst Test Waveforms
 
-![](IRFP4227PBF_images/e92d1e761dbe8ef1bacc103a074ef989de84ae8fbc2f0728c1cf1af0a2bb014a.jpg)  
+![](../assets/irfp4227pbf/e92d1e761dbe8ef1bacc103a074ef989de84ae8fbc2f0728c1cf1af0a2bb014a.jpg)  
 Fig 21c. EpuLsE Test Waveforms
 
-![](IRFP4227PBF_images/9384e32eb860054c5036b918a24099e967a2e637ecb39c45f2aedc0de87ee708.jpg)  
+![](../assets/irfp4227pbf/9384e32eb860054c5036b918a24099e967a2e637ecb39c45f2aedc0de87ee708.jpg)  
 Fig 22a. Switching Time Test Circuit
 
-![](IRFP4227PBF_images/e8f185446a50216fee1a2a7ee78cd7d95d4707a315856d5940bd902f94ade134.jpg)  
+![](../assets/irfp4227pbf/e8f185446a50216fee1a2a7ee78cd7d95d4707a315856d5940bd902f94ade134.jpg)  
 Fig 22b. Switching Time Waveforms
 
 # TO-247AC Package Outline (Dimensions are shown in millimeters (inches))
 
-![](IRFP4227PBF_images/f98e826c8e4c5df7ffd556dc4fcafa588b9efeaf27ed14fb77ab00a615378025.jpg)
+![](../assets/irfp4227pbf/f98e826c8e4c5df7ffd556dc4fcafa588b9efeaf27ed14fb77ab00a615378025.jpg)
 
 # NOTES:
 
@@ -152,7 +152,7 @@ DIODES
 
 # TO-247AC Part Marking Information
 
-![](IRFP4227PBF_images/6b98262d8e2233d5454ae8dc2776c3e6aef7f62c3c43f2320c2dec6ea8740dc3.jpg)
+![](../assets/irfp4227pbf/6b98262d8e2233d5454ae8dc2776c3e6aef7f62c3c43f2320c2dec6ea8740dc3.jpg)
 
 TO-247AC package is not recommended for Surface Mount Application.
 

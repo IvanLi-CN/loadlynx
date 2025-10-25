@@ -25,15 +25,15 @@ Fully qualified according to JEDEC for Industrial Applications
 
 # PG‑TO247‑3
 
-![](IRFP4468PBF_images/765f725b2d3a79e894f435ac94f09d62cd682f27ee991ca3b69218b01ea3c415.jpg)
+![](../assets/irfp4468pbf/765f725b2d3a79e894f435ac94f09d62cd682f27ee991ca3b69218b01ea3c415.jpg)
 
-![](IRFP4468PBF_images/bd2f4ba8eee63855dcbae192f868de253c357a67f4ba652750eeb47c65016059.jpg)
+![](../assets/irfp4468pbf/bd2f4ba8eee63855dcbae192f868de253c357a67f4ba652750eeb47c65016059.jpg)
 
 Table 1 Key per formance parame ters   
 
 <table><tr><td rowspan=1 colspan=1>Parameter</td><td rowspan=1 colspan=1>Value</td><td rowspan=1 colspan=1>Unit</td></tr><tr><td rowspan=1 colspan=1>V\Ds</td><td rowspan=1 colspan=1>100</td><td rowspan=1 colspan=1>V</td></tr><tr><td rowspan=1 colspan=1>RDS(on),max</td><td rowspan=1 colspan=1>2.6</td><td rowspan=1 colspan=1>mΩ</td></tr><tr><td rowspan=1 colspan=1>D</td><td rowspan=1 colspan=1>195</td><td rowspan=1 colspan=1>A</td></tr><tr><td rowspan=1 colspan=1>Coss</td><td rowspan=1 colspan=1>149</td><td rowspan=1 colspan=1>nc</td></tr><tr><td rowspan=1 colspan=1>QG (0V..10V)</td><td rowspan=1 colspan=1>363</td><td rowspan=1 colspan=1>nc</td></tr></table>
 
-![](IRFP4468PBF_images/1cb7ba843018955077d7ca5d56fd9b895a3a6cfc95a35eacf14991a93cf5e55f.jpg)
+![](../assets/irfp4468pbf/1cb7ba843018955077d7ca5d56fd9b895a3a6cfc95a35eacf14991a93cf5e55f.jpg)
 
 <table><tr><td rowspan=1 colspan=1>Part number</td><td rowspan=1 colspan=1>Package</td><td rowspan=1 colspan=1>Marking</td><td rowspan=1 colspan=1>Related links</td></tr><tr><td rowspan=1 colspan=1>IRFP4468PbF</td><td rowspan=1 colspan=1>PG-T0247-3</td><td rowspan=1 colspan=1>IRFP4468</td><td rowspan=1 colspan=1>-</td></tr></table>
 
@@ -101,25 +101,25 @@ Table 7      Reverse diode
 
 # 4   Electrical characteristics diagrams
 
-![](IRFP4468PBF_images/cc3fd53518cd7bea3d4bd5dbf925c5a4ebdea023e208bc7e2db46e62cae8e106.jpg)
+![](../assets/irfp4468pbf/cc3fd53518cd7bea3d4bd5dbf925c5a4ebdea023e208bc7e2db46e62cae8e106.jpg)
 
-![](IRFP4468PBF_images/67487dccd0025b8a86226423478b32b79ddb8488986aef49c1817e858d8add10.jpg)
+![](../assets/irfp4468pbf/67487dccd0025b8a86226423478b32b79ddb8488986aef49c1817e858d8add10.jpg)
 
-![](IRFP4468PBF_images/e9934be03e1c61ad17c19da6fae0c8cdeac2c49b7c22b4c5d9ec242d3b392065.jpg)
+![](../assets/irfp4468pbf/e9934be03e1c61ad17c19da6fae0c8cdeac2c49b7c22b4c5d9ec242d3b392065.jpg)
 
-![](IRFP4468PBF_images/dfd81d074c390535b1e1467105c3e081cb7dfbf4205b8cac91e3c4a8e3fa0b58.jpg)
+![](../assets/irfp4468pbf/dfd81d074c390535b1e1467105c3e081cb7dfbf4205b8cac91e3c4a8e3fa0b58.jpg)
 
-![](IRFP4468PBF_images/f386bc9b4b45fa60eb56815e0948944d04e4e7b0ddca285b13af2e7b28a3e53f.jpg)
+![](../assets/irfp4468pbf/f386bc9b4b45fa60eb56815e0948944d04e4e7b0ddca285b13af2e7b28a3e53f.jpg)
 
-![](IRFP4468PBF_images/43c7d612781732ef89b22053c1ccad58c4bd24b0dd341d03eb47b0c0a75fb130.jpg)
+![](../assets/irfp4468pbf/43c7d612781732ef89b22053c1ccad58c4bd24b0dd341d03eb47b0c0a75fb130.jpg)
 
-![](IRFP4468PBF_images/1893210b7501690df78cb60a7583c6e0eab05603ed7bdf36036e5e29d7ea7823.jpg)
+![](../assets/irfp4468pbf/1893210b7501690df78cb60a7583c6e0eab05603ed7bdf36036e5e29d7ea7823.jpg)
 
-![](IRFP4468PBF_images/cfadf3767b38ec97346994a0f0dc48e4886e5902f3c69a939703d15e91aa06a0.jpg)
+![](../assets/irfp4468pbf/cfadf3767b38ec97346994a0f0dc48e4886e5902f3c69a939703d15e91aa06a0.jpg)
 
 # 5   Package outlines
 
-![](IRFP4468PBF_images/86d4f248bf3495efc89a7beb43f93a4309a08c706ab9091e9cddf0ed873c2262.jpg)
+![](../assets/irfp4468pbf/86d4f248bf3495efc89a7beb43f93a4309a08c706ab9091e9cddf0ed873c2262.jpg)
 
 <table><tr><td rowspan=1 colspan=3>PACKAGE - GROUP PG-T0247-3-U03NUMBER:</td><td rowspan=1 colspan=3></td></tr><tr><td rowspan=2 colspan=1>DIMENSIONS</td><td rowspan=1 colspan=2>MILLIMETERS</td><td rowspan=2 colspan=1>DIMENSIONS</td><td rowspan=1 colspan=2>MILLIMETERS</td></tr><tr><td rowspan=1 colspan=1>MIN.</td><td rowspan=1 colspan=1>MAX.</td><td rowspan=1 colspan=1>MIN.</td><td rowspan=1 colspan=1>MAX.</td></tr><tr><td rowspan=1 colspan=1>A</td><td rowspan=1 colspan=1>4.83</td><td rowspan=1 colspan=1>5.13</td><td rowspan=1 colspan=1>E2</td><td rowspan=1 colspan=1>5.51</td><td rowspan=1 colspan=1></td></tr><tr><td rowspan=1 colspan=1>A1</td><td rowspan=1 colspan=1>2.21</td><td rowspan=1 colspan=1>2.59</td><td rowspan=1 colspan=1>E3</td><td rowspan=1 colspan=1>5.31</td><td rowspan=1 colspan=1>5.69</td></tr><tr><td rowspan=1 colspan=1>A2</td><td rowspan=1 colspan=1>1.50</td><td rowspan=1 colspan=1>2.50</td><td rowspan=1 colspan=1>E4</td><td rowspan=1 colspan=1>4.50</td><td rowspan=1 colspan=1>5.50</td></tr><tr><td rowspan=1 colspan=1>b</td><td rowspan=1 colspan=1>0.99</td><td rowspan=1 colspan=1>1.41</td><td rowspan=1 colspan=1>e</td><td rowspan=1 colspan=1>5.46</td><td rowspan=1 colspan=1></td></tr><tr><td rowspan=1 colspan=1>b1</td><td rowspan=1 colspan=1>1.65</td><td rowspan=1 colspan=1>2.39</td><td rowspan=1 colspan=1>L</td><td rowspan=1 colspan=1>14.20</td><td rowspan=1 colspan=1>16.10</td></tr><tr><td rowspan=1 colspan=1>b2</td><td rowspan=1 colspan=1>2.59</td><td rowspan=1 colspan=1>3.43</td><td rowspan=1 colspan=1>L1</td><td rowspan=1 colspan=1>3.71</td><td rowspan=1 colspan=1>4.29</td></tr><tr><td rowspan=1 colspan=1>c</td><td rowspan=1 colspan=1>0.38</td><td rowspan=1 colspan=1>0.89</td><td rowspan=1 colspan=1>N</td><td rowspan=1 colspan=1>3</td><td rowspan=1 colspan=1></td></tr><tr><td rowspan=1 colspan=1>D</td><td rowspan=1 colspan=1>15.29</td><td rowspan=1 colspan=1>15.87</td><td rowspan=1 colspan=1>ØP</td><td rowspan=1 colspan=1>3.56</td><td rowspan=1 colspan=1>3.66</td></tr><tr><td rowspan=1 colspan=1>D1</td><td rowspan=1 colspan=1>13.46</td><td rowspan=1 colspan=1>13.66</td><td rowspan=1 colspan=1>ØP1</td><td rowspan=1 colspan=1>7.19</td><td rowspan=1 colspan=1>7.39</td></tr><tr><td rowspan=1 colspan=1>D2</td><td rowspan=1 colspan=1>2.50</td><td rowspan=1 colspan=1></td><td rowspan=1 colspan=1>aaa</td><td rowspan=1 colspan=2>0.25</td></tr><tr><td rowspan=1 colspan=1>E</td><td rowspan=1 colspan=1>19.70</td><td rowspan=1 colspan=1>20.70</td><td rowspan=2 colspan=3></td></tr><tr><td rowspan=1 colspan=1>E1</td><td rowspan=1 colspan=1>13.08</td><td rowspan=1 colspan=1>13.28</td></tr></table>
 
@@ -127,7 +127,7 @@ NOTES: (1) DIMENSIONS DO NOT INCLUDE MOLD FLASH, PROTRUSION OR GATE BURRS (2) N 
 
 Figure 1   Ou tline PG ‑TO247 ‑3, dimensions in mm
 
-![](IRFP4468PBF_images/31a895983c110664f71ef2393bebfcf47a12ca2226baea1e7de14ed24b4326ee.jpg)
+![](../assets/irfp4468pbf/31a895983c110664f71ef2393bebfcf47a12ca2226baea1e7de14ed24b4326ee.jpg)
 
 All dimensions are in units mm The drawing is in compliance with ISO 128-30, Projection Method 1 [ $\circled { \phi }$ ]
 

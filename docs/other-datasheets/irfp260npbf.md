@@ -17,7 +17,7 @@ Ease of Paralleling
 Simple Drive Requirements   
 Lead-Free
 
-![](IRFP260NPBF_images/a0ce884f0aba1c5965d64e99f66873500abf2f011d4644bb97af2238636303b6.jpg)
+![](../assets/irfp260npbf/a0ce884f0aba1c5965d64e99f66873500abf2f011d4644bb97af2238636303b6.jpg)
 
 # Description
 
@@ -49,63 +49,63 @@ $\textcircled{1}$ Repetitive rating; pulse width limited by max. junction temper
 
 # Notes:
 
-![](IRFP260NPBF_images/88fe244ab74daa637d131d05a8c720fcade66f5a74f05c52eea28d4652045f46.jpg)  
+![](../assets/irfp260npbf/88fe244ab74daa637d131d05a8c720fcade66f5a74f05c52eea28d4652045f46.jpg)  
 Fig. 1 Typical Output Characteristics
 
-![](IRFP260NPBF_images/019ab82b0050dae4003fc403c8519a3e79c4e54c597df28bb65b81fa69a72e0b.jpg)  
+![](../assets/irfp260npbf/019ab82b0050dae4003fc403c8519a3e79c4e54c597df28bb65b81fa69a72e0b.jpg)  
 Fig. 2 Typical Output Characteristics
 
-![](IRFP260NPBF_images/d49e466f27ef857c2579b089a11835e5e742a28cded7b7cf00ec9c5fda9a12af.jpg)  
+![](../assets/irfp260npbf/d49e466f27ef857c2579b089a11835e5e742a28cded7b7cf00ec9c5fda9a12af.jpg)  
 Fig. 3 Typical Transfer Characteristics
 
-![](IRFP260NPBF_images/cf011c9574d087ee72a77a315ea3ef0b29349d1bb458d902eb66123abcb79863.jpg)  
+![](../assets/irfp260npbf/cf011c9574d087ee72a77a315ea3ef0b29349d1bb458d902eb66123abcb79863.jpg)  
 Fig. 4 Normalized On-Resistance vs. Temperature
 
-![](IRFP260NPBF_images/79ed194f32d6253aab61b286915ff63cd56869dcbd1ec2af9b4a32ad9ddf5998.jpg)  
+![](../assets/irfp260npbf/79ed194f32d6253aab61b286915ff63cd56869dcbd1ec2af9b4a32ad9ddf5998.jpg)  
 Fig 5. Typical Capacitance vs. Drain-to-Source Voltage
 
-![](IRFP260NPBF_images/95de11eef8464a105435872329f2bb2c85ef0bc7f5e274e48823f073bd406bff.jpg)  
+![](../assets/irfp260npbf/95de11eef8464a105435872329f2bb2c85ef0bc7f5e274e48823f073bd406bff.jpg)  
 Fig 6. Typical Gate Charge vs. Gate-to-Source Voltage
 
-![](IRFP260NPBF_images/c777de1450612c38232b19cbbef609c613192001303a9bbe41c041e1fa367f6b.jpg)  
+![](../assets/irfp260npbf/c777de1450612c38232b19cbbef609c613192001303a9bbe41c041e1fa367f6b.jpg)  
 Fig. 7 Typical Source-to-Drain Diode Forward Voltage
 
-![](IRFP260NPBF_images/695f0b9b3a505fcdfdf768b6bb19e11ce2ce56bc89651f10d5d3c0e9c1786390.jpg)  
+![](../assets/irfp260npbf/695f0b9b3a505fcdfdf768b6bb19e11ce2ce56bc89651f10d5d3c0e9c1786390.jpg)  
 Fig 8. Maximum Safe Operating Area
 
-![](IRFP260NPBF_images/94e47ccffc7850d16e78dbd654c3983329e287b4b0adeca00363847bb999f7d5.jpg)  
+![](../assets/irfp260npbf/94e47ccffc7850d16e78dbd654c3983329e287b4b0adeca00363847bb999f7d5.jpg)  
 Fig 9. Maximum Drain Current vs. Case Temperature
 
-![](IRFP260NPBF_images/5c8fc02cf9e6905212c4a1432d8dbdcfc676bceb0c63622a16757cc4976f3b1f.jpg)  
+![](../assets/irfp260npbf/5c8fc02cf9e6905212c4a1432d8dbdcfc676bceb0c63622a16757cc4976f3b1f.jpg)  
 Fig 10a. Switching Time Test Circuit
 
-![](IRFP260NPBF_images/ff9260e2b3907eb9921194151adb68cd8f952fd50db04574b01661f2dafb7a8d.jpg)  
+![](../assets/irfp260npbf/ff9260e2b3907eb9921194151adb68cd8f952fd50db04574b01661f2dafb7a8d.jpg)  
 Fig 10a. Switching Time Waveforms
 
-![](IRFP260NPBF_images/093fac0d2e428b70dc87af3e6d72bac182a8ca988e9d7c92d60dae9f3a646627.jpg)  
+![](../assets/irfp260npbf/093fac0d2e428b70dc87af3e6d72bac182a8ca988e9d7c92d60dae9f3a646627.jpg)  
 Fig 11. Maximum Effective Transient Thermal Impedance, Junction-to-Case
 
-![](IRFP260NPBF_images/94f65250c240bbe7754c951dcb7969d435e5ff66ef1cf93f43a0cdb8ab293c36.jpg)  
+![](../assets/irfp260npbf/94f65250c240bbe7754c951dcb7969d435e5ff66ef1cf93f43a0cdb8ab293c36.jpg)  
 Fig. 12a. Unclamped Inductive Test Circuit
 
-![](IRFP260NPBF_images/e63046df970fe1bb7da269fe9960236a21b8c31125904dee6229f5655933432e.jpg)  
+![](../assets/irfp260npbf/e63046df970fe1bb7da269fe9960236a21b8c31125904dee6229f5655933432e.jpg)  
 Fig 12c. Maximum Avalanche Energy vs. Drain Current
 
-![](IRFP260NPBF_images/c63c4395197eafbcbfd385dad3322e2dc04fb6c60c971d796b61aa39a211f189.jpg)  
+![](../assets/irfp260npbf/c63c4395197eafbcbfd385dad3322e2dc04fb6c60c971d796b61aa39a211f189.jpg)  
 Fig. 12b. Unclamped Inductive Waveforms
 
-![](IRFP260NPBF_images/4dee345a6a1dc1527c2fc71d00eaea096273e1ec0b9159b3c2b7931271662611.jpg)  
+![](../assets/irfp260npbf/4dee345a6a1dc1527c2fc71d00eaea096273e1ec0b9159b3c2b7931271662611.jpg)  
 Fig 13a. Basic Gate Charge Waveform
 
-![](IRFP260NPBF_images/2181491863c20dd5bb31b8bba9000f2ff89ac3f7fb9a334d334365b3bf99cc44.jpg)  
+![](../assets/irfp260npbf/2181491863c20dd5bb31b8bba9000f2ff89ac3f7fb9a334d334365b3bf99cc44.jpg)  
 Fig 13b. Gate Charge Test Circuit
 
-![](IRFP260NPBF_images/4f4980fca7fcbe8e57a4192392a437756f6482607c9797a23fd4d4e0ac961d5d.jpg)  
+![](../assets/irfp260npbf/4f4980fca7fcbe8e57a4192392a437756f6482607c9797a23fd4d4e0ac961d5d.jpg)  
 Fig 14. Peak Diode Recovery dv/dt Test Circuit for N-Channel HEXFET® Power MOSFETs
 
 # TO-247AC Package Outline (Dimensions are
 
-![](IRFP260NPBF_images/8ac556d225b1756fa6ab70230683427dedb394f303731cbdd02a01ed12fcce21.jpg)
+![](../assets/irfp260npbf/8ac556d225b1756fa6ab70230683427dedb394f303731cbdd02a01ed12fcce21.jpg)
 
 # NOTES:
 
@@ -138,7 +138,7 @@ DIODES
 
 # TO-247AC Part Marking Information
 
-![](IRFP260NPBF_images/4e3c4ee86fc961c08df2d229cc4888a2d32a3ff434663d8037aa4e5cb7bae6e7.jpg)
+![](../assets/irfp260npbf/4e3c4ee86fc961c08df2d229cc4888a2d32a3ff434663d8037aa4e5cb7bae6e7.jpg)
 
 TO-247AC package is not recommended for Surface Mount Application.
 

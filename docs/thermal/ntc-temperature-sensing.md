@@ -105,13 +105,13 @@ Layout and EMC
 
 Figure: Recommended RC Placement
 
-![ntc adc rc](assets/ntc_adc_rc.svg)
+![ntc adc rc](../assets/ntc_adc_rc.svg)
 
 Reference Schematic (User)
 --------------------------
 Equivalent schematic implementation (5.1 kΩ pull-up, 100 nF at ADC side, 100 Ω series resistor):
 
-![user ntc divider](assets/ntc_divider_user.png)
+![user ntc divider](../assets/ntc_divider_user.png)
 
 BOM (per channel)
 -----------------

@@ -14,11 +14,11 @@
 
 | 型号 | 价格 (¥) | V<sub>DS</sub> (V) | R<sub>DS(on)</sub> @10 V | g<sub>fs</sub> (typ) | Q<sub>g</sub> (typ) | R<sub>θJC</sub> (°C/W) | 10 A 掉压 | 备注 |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- |
-| **IRFP4468PBF** | 5.78 (`docs/load_mosfet_candidates.md:24`) | 100 | 2.6 mΩ (`docs/load-mosfets/IRFP4468PBF.md:82-90`) | 185–370 S (`docs/load-mosfets/IRFP4468PBF.md:82-90`) | 363 nC (`docs/load-mosfets/IRFP4468PBF.md:94-101`) | 0.29 (`docs/load-mosfets/IRFP4468PBF.md:72-74`) | 0.026 V | 主推，低掉压 & 大芯片 |
-| **IRFP4568PBF** | 8.62 (`docs/load_mosfet_candidates.md:23`) | 150 | 5.9 mΩ (`docs/load-mosfets/IRFP4568PBF.md:40-48`) | 162 S (`docs/load-mosfets/IRFP4568PBF.md:44-46`) | 151 nC (`docs/load-mosfets/IRFP4568PBF.md:44-54`) | 0.29 (`docs/load-mosfets/IRFP4568PBF.md:33-36`) | 0.059 V | 高耐压 150 V，SOA 裕度佳 |
-| **IRFP4668PBF** | 7.99 (`docs/load_mosfet_candidates.md:14`) | 200 | 9.7 mΩ (`docs/load-mosfets/IRFP4668PBF.md:40-46`) | 150 S (`docs/load-mosfets/IRFP4668PBF.md:40-46`) | 161 nC (`docs/load-mosfets/IRFP4668PBF.md:44-53`) | 0.29 (`docs/load-mosfets/IRFP4668PBF.md:30-37`) | 0.097 V | 200 V 方案，适合高压测试线 |
-| IRFP4227PBF | 6.86 (`docs/load_mosfet_candidates.md:13`) | 200 | 25 mΩ (`docs/load-mosfets/IRFP4227PBF.md:26-36`) | 49 S (`docs/load-mosfets/IRFP4227PBF.md:26-36`) | 70–98 nC (`docs/load-mosfets/IRFP4227PBF.md:26-36`) | 0.45 (`docs/load-mosfets/IRFP4227PBF.md:22-24`) | 0.25 V | 中压兼顾成本，适合降额应用 |
-| IRFP260NPBF | 3.19 (`docs/load_mosfet_candidates.md:20`) | 200 | 40 mΩ (`docs/load-mosfets/IRFP260NPBF.md:7-45`) | 27 S (`docs/load-mosfets/IRFP260NPBF.md:38-45`) | 234 nC (`docs/load-mosfets/IRFP260NPBF.md:42-48`) | 0.50 (`docs/load-mosfets/IRFP260NPBF.md:34-36`) | 0.40 V | 超低成本，但需在 1.8 V 端降额 |
+| **IRFP4468PBF** | 5.78 (`docs/load_mosfet_candidates.md:24`) | 100 | 2.6 mΩ (`[docs/other-datasheets/irfp4468pbf.md]:82-90`) | 185–370 S (`[docs/other-datasheets/irfp4468pbf.md]:82-90`) | 363 nC (`[docs/other-datasheets/irfp4468pbf.md]:94-101`) | 0.29 (`[docs/other-datasheets/irfp4468pbf.md]:72-74`) | 0.026 V | 主推，低掉压 & 大芯片 |
+| **IRFP4568PBF** | 8.62 (`docs/load_mosfet_candidates.md:23`) | 150 | 5.9 mΩ (`[docs/other-datasheets/irfp4568pbf.md]:40-48`) | 162 S (`[docs/other-datasheets/irfp4568pbf.md]:44-46`) | 151 nC (`[docs/other-datasheets/irfp4568pbf.md]:44-54`) | 0.29 (`[docs/other-datasheets/irfp4568pbf.md]:33-36`) | 0.059 V | 高耐压 150 V，SOA 裕度佳 |
+| **IRFP4668PBF** | 7.99 (`docs/load_mosfet_candidates.md:14`) | 200 | 9.7 mΩ (`[docs/other-datasheets/irfp4668pbf.md]:40-46`) | 150 S (`[docs/other-datasheets/irfp4668pbf.md]:40-46`) | 161 nC (`[docs/other-datasheets/irfp4668pbf.md]:44-53`) | 0.29 (`[docs/other-datasheets/irfp4668pbf.md]:30-37`) | 0.097 V | 200 V 方案，适合高压测试线 |
+| IRFP4227PBF | 6.86 (`docs/load_mosfet_candidates.md:13`) | 200 | 25 mΩ (`[docs/other-datasheets/irfp4227pbf.md]:26-36`) | 49 S (`[docs/other-datasheets/irfp4227pbf.md]:26-36`) | 70–98 nC (`[docs/other-datasheets/irfp4227pbf.md]:26-36`) | 0.45 (`[docs/other-datasheets/irfp4227pbf.md]:22-24`) | 0.25 V | 中压兼顾成本，适合降额应用 |
+| IRFP260NPBF | 3.19 (`docs/load_mosfet_candidates.md:20`) | 200 | 40 mΩ (`[docs/other-datasheets/irfp260npbf.md]:7-45`) | 27 S (`[docs/other-datasheets/irfp260npbf.md]:38-45`) | 234 nC (`[docs/other-datasheets/irfp260npbf.md]:42-48`) | 0.50 (`[docs/other-datasheets/irfp260npbf.md]:34-36`) | 0.40 V | 超低成本，但需在 1.8 V 端降额 |
 
 *10 A 掉压 = R<sub>DS(on,max)</sub> × 10 A，用于评估 1.8 V 输入时的电压余量。*
 
@@ -28,18 +28,18 @@
 
 - **低掉压**：10 A 仅损耗 26 mV，搭配 25 mΩ 采样电阻（0.25 V）+ 0.8 V 二极管 + ~0.15 V 保险丝，总压降仍 <1.3 V，1.8 V 输入下有 >0.5 V V<sub>DS</sub> 余量。  
 - **控制友好**：g<sub>fs</sub> ≥185 S。需注意：数据手册 R<sub>DS(on)</sub> 规格点在 V<sub>GS</sub>=10 V，5 V 栅驱属于“非完全增强”工况，低压大电流能力应以 5 V 驱动的台架实测为准（见“5 V 栅驱能力估算”节）。  
-- **散热优势**：R<sub>θJC</sub> 0.29 °C/W，有助于把热流导向散热器。SOA 图（`docs/load-mosfets/IRFP4468PBF_images/e9934be03e1c61ad17c19da6fae0c8cdeac2c49b7c22b4c5d9ec242d3b392065.jpg`）需配合散热器测试确认 200 W 脉冲时的安全时长。
+ - **散热优势**：R<sub>θJC</sub> 0.29 °C/W，有助于把热流导向散热器。SOA 图（`docs/assets/irfp4468pbf/e9934be03e1c61ad17c19da6fae0c8cdeac2c49b7c22b4c5d9ec242d3b392065.jpg`）需配合散热器测试确认 200 W 脉冲时的安全时长。
 
 #### **IRFP4568PBF** —— 更高耐压的平衡方案
 
 - 150 V 耐压对瞬态尖峰更稳健；R<sub>DS(on)</sub>≈5.9 mΩ，10 A 掉压 59 mV。  
-- R<sub>θJC</sub> 0.29 °C/W，SOA 在 48 V 直流段约 0.6 A，但 1 ms 脉冲可达 7 A（`docs/load-mosfets/IRFP4568PBF_images/352c84452941ad8deaafabe5a39e88bddf0423f40ae037963410c7827a43e639.jpg`）。配合 100 W 连续工作需实测验证散热。  
+ - R<sub>θJC</sub> 0.29 °C/W，SOA 在 48 V 直流段约 0.6 A，但 1 ms 脉冲可达 7 A（`docs/assets/irfp4568pbf/352c84452941ad8deaafabe5a39e88bddf0423f40ae037963410c7827a43e639.jpg`）。配合 100 W 连续工作需实测验证散热。  
 - Q<sub>g</sub> 仅 151 nC，驱动负担低，适合作为“高耐压 SKU”。
 
 #### **IRFP4668PBF** —— 200 V 高压冗余
 
 - 200 V / 130 A 能覆盖更宽的应用，但 R<sub>DS(on)</sub>≈9.7 mΩ，10 A 掉压提升到 0.097 V。  
-- g<sub>fs</sub> 约 150 S，OPA2365 仍可直接驱动；SOA 1 ms 曲线 ≈5 A（`docs/load-mosfets/IRFP4668PBF_images/5cd29ceb9f5cb0cdaa85477b063275f52590c2d7bfce4fd6e3dcdf3b86c8b31b.jpg`），适合在高压实验线中配合降额使用。  
+ - g<sub>fs</sub> 约 150 S，OPA2365 仍可直接驱动；SOA 1 ms 曲线 ≈5 A（`docs/assets/irfp4668pbf/5cd29ceb9f5cb0cdaa85477b063275f52590c2d7bfce4fd6e3dcdf3b86c8b31b.jpg`），适合在高压实验线中配合降额使用。  
 - 成本略高于 **IRFP4468PBF**，可作为“耐压冗余”选项。
 
 #### IRFP4227PBF —— 中等成本的 200 V 器件
@@ -70,7 +70,7 @@
 `R5 ≈ R10 × (10 − V_th) / (5 − V_th)`（当 `5 ≤ V_th` 时无解，视为无法可靠完全导通）。
 
 阈值电压区间来自各器件数据手册：
-- **IRFP4468PBF**：V<sub>GS(th)</sub>=2.0–4.0 V（`docs/load-mosfets/IRFP4468PBF.md:82-90`），且门极平台电压 V<sub>plateau</sub>≈4.8 V（`docs/load-mosfets/IRFP4468PBF.md:94-106`）。
+- **IRFP4468PBF**：V<sub>GS(th)</sub>=2.0–4.0 V（`[docs/other-datasheets/irfp4468pbf.md]:82-90`），且门极平台电压 V<sub>plateau</sub>≈4.8 V（`[docs/other-datasheets/irfp4468pbf.md]:94-106`）。
 - **IRFP4568PBF**：V<sub>GS(th)</sub>=3.0–5.0 V（Infineon 官方 DS）。
 - **IRFP4668PBF**：V<sub>GS(th)</sub>=3.0–5.0 V（Infineon 官方 DS）。
 - IRFP4227PBF：V<sub>GS(th)</sub>=3.0–5.0 V（Infineon 官方 DS）。

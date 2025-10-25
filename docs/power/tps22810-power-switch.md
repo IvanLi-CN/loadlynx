@@ -107,7 +107,7 @@ OPA2365 outputs -> IRFP4468 gates (each gate with 100kΩ to GND recommended)
 
 下图为当前原理图实现，与文字描述一致：
 
-![TPS22810 原理图片段](assets/tps22810/tps22810_schematic.png)
+![TPS22810 原理图片段](../assets/tps22810/tps22810_schematic.png)
 
 ## 8. 测试与验收要点
 
