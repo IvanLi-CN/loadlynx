@@ -78,7 +78,6 @@
 
 | Pin | 引脚名 | 网络 | 说明 |
 | --- | --- | --- | --- |
-| 43 | GPIO38 | FAN_EN | 风扇使能。 |
 | 44 | MTCK (GPIO39) | FAN_PWM | 风扇 PWM，默认 JTAG TCK，需禁用 PAD-JTAG。 |
 | 45 | MTDO (GPIO40) | FAN_TACH | 风扇转速反馈（脉冲输入），默认 JTAG TDO，需禁用 PAD-JTAG。 |
 
@@ -138,7 +137,7 @@
 | 40 | GPIO35 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 41 | GPIO36 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 42 | GPIO37 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
-| 43 | GPIO38 | FAN_EN | 已用 | 风扇使能。 |
+| 43 | GPIO38 | — | 空 | 可用 IO。 |
 | 44 | MTCK / GPIO39 | FAN_PWM | 已用 | 默认 JTAG TCK；需禁用 PAD-JTAG。 |
 | 45 | MTDO / GPIO40 | FAN_TACH | 已用 | 默认 JTAG TDO；需禁用 PAD-JTAG。 |
 | 46 | VDD3P3_CPU | 3V3 | 已用 | 数字核供电。 |
