@@ -17,7 +17,7 @@
 | USB DP/DM 引脚编号 | 文档写 “引脚 26 → GPIO19 (DM)、27 → GPIO20 (DP)” | Pin 25 = GPIO19、Pin 26 = GPIO20、Pin 27 = GPIO21 | **整体偏移一脚**；需确认焊盘 25/26/27 的接线。 |
 | JTAG 引脚复用 | `MTCK`/`MTDO` 驱动风扇 EN/PWM | 上电默认启用 PAD-JTAG（Table 3‑5） | 若保持 PAD-JTAG，风扇不会被固件接管。需在启动流程禁用 PAD-JTAG 或改用其它 GPIO。 |
 | GPIO0 处理 | 作为 “BOOT” 信号 | GPIO0 为启动模式 Strapping（Table 3‑1） | 允许重用，但必须保证上电时保持高电平以进入 SPI Boot；若由按钮拉低需配合 CHIP_PU 复位。 |
-| GPIO8/9/10/11/12/13/14 | 用作 I²C / SPI / LCD 控制 | 文档明确这些管脚在上电 60 µs 内会输出低脉冲（Table 2‑2）且属于 FSPI/SUBSPI 组 | 作为复位脚（CTP_RST/TFT_RST/RS 等）时，需确认外围能够容忍短暂低脉冲；如需避免，可加上电 RC 延时。 |
+| GPIO8/9/10/11/12/13/14 | 用作 I²C / SPI / LCD 控制 | 文档明确这些管脚在上电 60 µs 内会输出低脉冲（Table 2‑2）且属于 FSPI/SUBSPI 组 | 作为复位脚（如 CTP_RST/TFT_RST）时，需确认外围能够容忍短暂低脉冲；如需避免，可加上电 RC 延时。 |
 | GPIO19/20 (USB) | 直连 USB 差分 | Datasheet 提醒上电阶段出现两次 60 µs 高电平毛刺（Table 2‑2 注2） | 对外接的 Type-C PHY/开关一般安全，但若接到其它逻辑，需要确保毛刺不会误触发。 |
 
 其余描述与数据手册一致；下文在修订版中统一更正脚位编号。
@@ -62,7 +62,7 @@
 | 10 | GPIO5 | CTP_RST | 电容触摸控制器复位。 |
 | 11 | GPIO6 | TFT_RST | TFT 模块复位。 |
 | 15 | GPIO10 | DC | TFT Data/Command 选择。 |
-| 19 | GPIO14 | RS | 兼容 DC/寄存器选择信号，注意上电毛刺。 |
+
 | 27 | GPIO21 | BUZZER | 驱动蜂鸣器。 |
 | 39 | GPIO34 | ALG_EN | 电源开关使能输出（默认低，按所用器件要求配置上拉/下拉）。 |
 
@@ -114,7 +114,7 @@
 | 16 | GPIO11 | MOSI | 已用 | 同上。 |
 | 17 | GPIO12 | SCLK | 已用 | 同上。 |
 | 18 | GPIO13 | CS | 已用 | 同上。 |
-| 19 | GPIO14 | RS | 已用 | 显示寄存器选择。 |
+| 19 | GPIO14 | — | 空 | 可用 IO。 |
 | 20 | VDD3P3_RTC | 3V3 | 已用 | RTC 供电。 |
 | 21 | GPIO15 | BLK | 已用 | 背光使能/PWM。 |
 | 22 | GPIO16 | — | 空 | 预留 IO。 |
