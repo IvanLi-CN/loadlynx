@@ -55,7 +55,7 @@
 | 24 | GPIO18 | U1RXD | **与 STM32 通信的 STM32→ESP 串口 RX。** |
 | 26 | GPIO20 | ESP_DP | USB D+，串联 22 Ω。 |
 | 25 | GPIO19 | ESP_DM | USB D−，串联 22 Ω。 |
-| 27 | GPIO21 | USB2_PG | USB 电源良好检测/开关反馈。 |
+| 38 | GPIO33 | USB2_PG | USB 电源良好检测/开关反馈。 |
 
 ### 3.3 外设控制
 
@@ -69,7 +69,7 @@
 | 15 | GPIO10 | DC | TFT Data/Command 选择。 |
 | 19 | GPIO14 | RS | 兼容 DC/寄存器选择信号，注意上电毛刺。 |
 | 39 | GPIO34 | 5V_EN | 5 V 电源开关使能输出（默认低，需按电源芯片要求配置上拉/下拉）。 |
-| 43 | GPIO38 | BUZZER | 驱动蜂鸣器；需要禁用 PAD-JTAG 后可用。 |
+| 27 | GPIO21 | BUZZER | 驱动蜂鸣器。 |
 | 44 | MTCK (GPIO39) | FAN_EN | 风扇使能，默认为 JTAG TCK。 |
 | 45 | MTDO (GPIO40) | FAN_PWM | 风扇 PWM，默认为 JTAG TDO。 |
 | 47 | MTDI (GPIO41) | FAN_TACH | 风扇转速反馈（脉冲输入）；建议上拉，必要时做去抖/频率门限。 |
@@ -108,7 +108,7 @@
 | 24 | GPIO18 | U1RXD | 已用 | UART1 RX → STM32 TX。 |
 | 25 | GPIO19 | ESP_DM | 已用 | [USB] D−（串 22 Ω）。 |
 | 26 | GPIO20 | ESP_DP | 已用 | [USB] D+（串 22 Ω）。 |
-| 27 | GPIO21 | USB2_PG | 已用 | [USB] 电源良好检测/反馈。 |
+| 27 | GPIO21 | BUZZER | 已用 | 蜂鸣器控制。 |
 | 28 | SPICS1 | — | 保留 | [FLASH] 内置 PSRAM CS，不建议复用。 |
 | 29 | VDD_SPI | 3V3 | 已用 | Flash/PSRAM 供电。 |
 | 30 | SPIHD | — | 保留 | [FLASH]。 |
@@ -119,12 +119,12 @@
 | 35 | SPID | — | 保留 | [FLASH]。 |
 | 36 | SPICLK_N | — | 保留 | [FLASH] 差分。 |
 | 37 | SPICLK_P | — | 保留 | [FLASH] 差分。 |
-| 38 | GPIO33 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
+| 38 | GPIO33 | USB2_PG | 已用 | [USB] 电源良好检测/反馈。 |
 | 39 | GPIO34 | 5V_EN | 已用 | 5 V 电源开关使能；位于 29–42 范围内；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 40 | GPIO35 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 41 | GPIO36 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 42 | GPIO37 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
-| 43 | GPIO38 | BUZZER | 已用 | 需禁用 PAD-JTAG。 |
+| 43 | GPIO38 | — | 空 | 可用 IO。 |
 | 44 | MTCK / GPIO39 | FAN_EN | 已用 | 默认 JTAG TCK。 |
 | 45 | MTDO / GPIO40 | FAN_PWM | 已用 | 默认 JTAG TDO。 |
 | 46 | VDD3P3_CPU | 3V3 | 已用 | 数字核供电。 |
