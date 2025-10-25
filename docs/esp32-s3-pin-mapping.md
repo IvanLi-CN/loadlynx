@@ -30,7 +30,7 @@
 | --- | --- | --- | --- |
 | 1 | LNA_IN | LNA_IN | 射频低噪声放大器输入，仅供射频匹配。 |
 | 2, 3 | VDD3P3 | 3V3 | 数字 IO & RF 3.3 V 供电。 |
-| 4 | CHIP_PU | 5V_EN | 芯片主使能，高电平上电；与 5 V 使能逻辑共享。 |
+| 4 | CHIP_PU | ESP_EN | 芯片主使能，高电平上电。 |
 | 5 | GPIO0 | BOOT | Strapping 引脚，默认上拉=SPI Boot；下载模式需拉低 + 复位。 |
 | 20 | VDD3P3_RTC | 3V3 | RTC 域供电。 |
 | 29 | VDD_SPI | 3V3 | 内部 Flash/PSRAM 供电，保持 3.3 V。 |
@@ -61,10 +61,14 @@
 
 | Pin | 引脚名 | 网络 | 说明 |
 | --- | --- | --- | --- |
+| 5 | GPIO0 | ENC_SW | 编码器按键输入（低有效）；[STRAP] 上电需保持高电平避免进入下载模式。 |
+| 6 | GPIO1 | ENC_A | 旋转编码器相位 A（建议上拉/RC 去抖）。 |
+| 7 | GPIO2 | ENC_B | 旋转编码器相位 B（建议上拉/RC 去抖）。 |
 | 10 | GPIO5 | CTP_RST | 电容触摸控制器复位。 |
 | 11 | GPIO6 | TFT_RST | TFT 模块复位。 |
 | 15 | GPIO10 | DC | TFT Data/Command 选择。 |
 | 19 | GPIO14 | RS | 兼容 DC/寄存器选择信号，注意上电毛刺。 |
+| 39 | GPIO34 | 5V_EN | 5 V 电源开关使能输出（默认低，需按电源芯片要求配置上拉/下拉）。 |
 | 43 | GPIO38 | BUZZER | 驱动蜂鸣器；需要禁用 PAD-JTAG 后可用。 |
 | 44 | MTCK (GPIO39) | FAN_EN | 风扇使能，默认为 JTAG TCK。 |
 | 45 | MTDO (GPIO40) | FAN_PWM | 风扇 PWM，默认为 JTAG TDO。 |
@@ -80,10 +84,10 @@
 | 1 | LNA_IN | LNA_IN | 已用 | [RF] 天线前端，仅射频用途。 |
 | 2 | VDD3P3 | 3V3 | 已用 | 3.3 V 供电。 |
 | 3 | VDD3P3 | 3V3 | 已用 | 3.3 V 供电。 |
-| 4 | CHIP_PU | 5V_EN | 已用 | 带 100 nF 去耦。 |
-| 5 | GPIO0 | BOOT | 已用 | [STRAP] 默认上拉。 |
-| 6 | GPIO1 | — | 空 | 可作通用 IO；上电无毛刺。 |
-| 7 | GPIO2 | — | 空 | 可作通用 IO；注意 DFU 时勿悬浮于中间电平。 |
+| 4 | CHIP_PU | ESP_EN | 已用 | 芯片主使能脚，带 100 nF 去耦。 |
+| 5 | GPIO0 | ENC_SW | 已用 | [STRAP] 按键需确保上电未按（高电平）。 |
+| 6 | GPIO1 | ENC_A | 已用 | 编码器相位 A（建议上拉/RC 去抖）。 |
+| 7 | GPIO2 | ENC_B | 已用 | 编码器相位 B（建议上拉/RC 去抖）。 |
 | 8 | GPIO3 | — | 空 | [STRAP] (JTAG 选择)；保持浮空或固定电平。 |
 | 9 | GPIO4 | RESET# | 已用 | 外部复位输入。 |
 | 10 | GPIO5 | CTP_RST | 已用 | 上电会短暂低电平；外设需容忍。 |
@@ -95,32 +99,30 @@
 | 16 | GPIO11 | MOSI | 已用 | 同上。 |
 | 17 | GPIO12 | SCLK | 已用 | 同上。 |
 | 18 | GPIO13 | CS | 已用 | 同上。 |
-| 23 | GPIO17 | U1TXD | 已用 | **UART1 TX → STM32 RX。** |
-| 24 | GPIO18 | U1RXD | 已用 | **UART1 RX → STM32 TX。** |
-| 19 | GPIO14 | RS | 已用 | 同上。 |
+| 19 | GPIO14 | RS | 已用 | 显示寄存器选择。 |
 | 20 | VDD3P3_RTC | 3V3 | 已用 | RTC 供电。 |
 | 21 | GPIO15 | BLK | 已用 | 背光使能/PWM。 |
-| 22 | GPIO16 | — | 空 | 可预留 IO。 |
-| 23 | GPIO17 | — | 空 | 可预留 IO。 |
-| 24 | GPIO18 | — | 空 | 可预留 IO。 |
-| 25 | GPIO19 | ESP_DM | 已用 | [USB] 上电两次高脉冲。 |
-| 26 | GPIO20 | ESP_DP | 已用 | [USB] 同上。 |
-| 27 | GPIO21 | USB2_PG | 已用 | [USB] 电源指示输入。 |
+| 22 | GPIO16 | — | 空 | 预留 IO。 |
+| 23 | GPIO17 | U1TXD | 已用 | UART1 TX → STM32 RX。 |
+| 24 | GPIO18 | U1RXD | 已用 | UART1 RX → STM32 TX。 |
+| 25 | GPIO19 | ESP_DM | 已用 | [USB] D−（串 22 Ω）。 |
+| 26 | GPIO20 | ESP_DP | 已用 | [USB] D+（串 22 Ω）。 |
+| 27 | GPIO21 | USB2_PG | 已用 | [USB] 电源良好检测/反馈。 |
 | 28 | SPICS1 | — | 保留 | [FLASH] 内置 PSRAM CS，不建议复用。 |
 | 29 | VDD_SPI | 3V3 | 已用 | Flash/PSRAM 供电。 |
 | 30 | SPIHD | — | 保留 | [FLASH]。 |
 | 31 | SPIWP | — | 保留 | [FLASH]。 |
-| 32 | SPICSO | — | 保留 | [FLASH]。 |
+| 32 | SPICS0 | — | 保留 | [FLASH]。 |
 | 33 | SPICLK | — | 保留 | [FLASH]。 |
 | 34 | SPIQ | — | 保留 | [FLASH]。 |
 | 35 | SPID | — | 保留 | [FLASH]。 |
 | 36 | SPICLK_N | — | 保留 | [FLASH] 差分。 |
 | 37 | SPICLK_P | — | 保留 | [FLASH] 差分。 |
-| 38 | GPIO33 | — | 空 | 可用 IO；建议保留作扩展。 |
-| 39 | GPIO34 | — | 空 | 可用 IO。 |
-| 40 | GPIO35 | — | 空 | 可用 IO。 |
-| 41 | GPIO36 | — | 空 | 可用 IO。 |
-| 42 | GPIO37 | — | 空 | 可用 IO。 |
+| 38 | GPIO33 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
+| 39 | GPIO34 | 5V_EN | 已用 | 5 V 电源开关使能；位于 29–42 范围内；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
+| 40 | GPIO35 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
+| 41 | GPIO36 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
+| 42 | GPIO37 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 43 | GPIO38 | BUZZER | 已用 | 需禁用 PAD-JTAG。 |
 | 44 | MTCK / GPIO39 | FAN_EN | 已用 | 默认 JTAG TCK。 |
 | 45 | MTDO / GPIO40 | FAN_PWM | 已用 | 默认 JTAG TDO。 |
