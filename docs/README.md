@@ -1,9 +1,34 @@
-# 文档
+# 文档索引
 
-- 控制环路设计（CC/CV/CP）：采样频率、抗混叠、PID/限幅、防积分饱和
-- 热设计：功耗分配、散热器、风扇曲线、温度探头与报警门限
-- 通信协议：帧格式（建议 CBOR/SLIP）、指令/遥测字段、容错与版本
-- 标定流程：分流/放大器、ADC/DAC、温度补偿与存储布局
+- 板级总览（Boards）
+  - `boards/analog-board.md`
+  - `boards/control-board.md`
 
-占位文档，待硬件规格与接口确定后细化。
+- 接口（Interfaces）
+  - `interfaces/uart-link.md`
+  - `interfaces/pinmaps/esp32-s3.md`
 
+- 器件与选型（Components）
+  - MOSFET：`components/mosfets/selection.md`
+  - 运放：`components/opamps/selection.md`
+  - 运放速查：`components/opamps/ti/*`, `components/opamps/sgmicro/*`
+  - 二极管：`components/diodes/mbr30100ct.md`
+
+- 热设计（Thermal）
+  - NTC：`thermal/ntc-temperature-sensing.md`
+  - 风扇与散热片：`thermal/fans/*`, `thermal/heatsinks/*`
+
+- 电源与保护（Power）
+  - 负载开关：`power/tps22810-power-switch.md`
+
+- 外部数据手册（Other Datasheets，MinerU 转换）
+  - ESP32‑S3：`other-datasheets/esp32-s3.md`
+  - 触控：`other-datasheets/d-ft6336u-datasheet-v1-1.md`
+  - MOSFET：`other-datasheets/irfp*.md`
+  - 其他：`other-datasheets/*`
+
+图像资源按文档归档于 `assets/<document-name>/`，引用请使用相对路径，例如：
+
+```
+![](../assets/tps22810/figure.jpg)
+```
