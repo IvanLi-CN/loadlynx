@@ -84,6 +84,12 @@
 
 > **JTAG 复用提醒**：若要使用 MTCK/MTDO/MTDI/MTMS 作为普通 GPIO，需要在早期固件中调用 `esp_apptrace_jtag_disable()` 或烧录 `EFUSE_DIS_PAD_JTAG`；否则 PAD-JTAG 将占用这些引脚。
 
+#### 3.3.3 电压检测（VBUS）
+
+| Pin | 引脚名 | 网络 | 说明 |
+| --- | --- | --- | --- |
+| 9 | GPIO4 | VBUS_SENSE | ADC1 输入；分压 Rp=75 kΩ（上接 VBUS）、Rd=10 kΩ（下接 GND），Rd 上并联 C≈10 nF 抗噪。USB VBUS=5 V 时分压点约 0.588 V，ADC 衰减 0 dB 可用；其他量程按需调整衰减。 |
+
 ## 4. 全引脚索引（按编号排序）
 
 标记：`[STRAP]` Strapping 引脚、`[FLASH]` Flash/PSRAM 总线、`[USB]` USB 专用、`[RF]` 射频、`[RESV]` 官方不建议挪用。
@@ -98,7 +104,7 @@
 | 6 | GPIO1 | ENC_A | 已用 | 编码器相位 A（建议上拉/RC 去抖）。 |
 | 7 | GPIO2 | ENC_B | 已用 | 编码器相位 B（建议上拉/RC 去抖）。 |
 | 8 | GPIO3 | — | 空 | [STRAP] (JTAG 选择)；保持浮空或固定电平。 |
-| 9 | GPIO4 | RESET# | 已用 | 外部复位输入。 |
+| 9 | GPIO4 | VBUS_SENSE | 已用 | ADC1 输入；Rp=75 kΩ、Rd=10 kΩ，Rd 并 10 nF；USB VBUS=5 V 时 0 dB 衰减合适。 |
 | 10 | GPIO5 | CTP_RST | 已用 | 上电会短暂低电平；外设需容忍。 |
 | 11 | GPIO6 | TFT_RST | 已用 | 同上。 |
 | 12 | GPIO7 | INT | 已用 | 触摸/显示中断输入。 |
