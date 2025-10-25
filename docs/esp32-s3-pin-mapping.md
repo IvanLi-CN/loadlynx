@@ -72,8 +72,9 @@
 | 43 | GPIO38 | BUZZER | 驱动蜂鸣器；需要禁用 PAD-JTAG 后可用。 |
 | 44 | MTCK (GPIO39) | FAN_EN | 风扇使能，默认为 JTAG TCK。 |
 | 45 | MTDO (GPIO40) | FAN_PWM | 风扇 PWM，默认为 JTAG TDO。 |
+| 47 | MTDI (GPIO41) | FAN_TACH | 风扇转速反馈（脉冲输入）；建议上拉，必要时做去抖/频率门限。 |
 
-> **JTAG 复用提醒**：若要使用 MTCK/MTDO 作为普通 GPIO，需要在早期固件中调用 `esp_apptrace_jtag_disable()` 或烧录 `EFUSE_DIS_PAD_JTAG`；否则 PAD-JTAG 将占用这些引脚。
+> **JTAG 复用提醒**：若要使用 MTCK/MTDO/MTDI/MTMS 作为普通 GPIO，需要在早期固件中调用 `esp_apptrace_jtag_disable()` 或烧录 `EFUSE_DIS_PAD_JTAG`；否则 PAD-JTAG 将占用这些引脚。
 
 ## 4. 全引脚索引（按编号排序）
 
@@ -127,7 +128,7 @@
 | 44 | MTCK / GPIO39 | FAN_EN | 已用 | 默认 JTAG TCK。 |
 | 45 | MTDO / GPIO40 | FAN_PWM | 已用 | 默认 JTAG TDO。 |
 | 46 | VDD3P3_CPU | 3V3 | 已用 | 数字核供电。 |
-| 47 | MTDI / GPIO41 | — | 空 | 默认 JTAG TDI，可作 IO。 |
+| 47 | MTDI / GPIO41 | FAN_TACH | 已用 | 风扇转速反馈（脉冲输入）；默认 JTAG TDI，需禁用 PAD-JTAG。 |
 | 48 | MTMS / GPIO42 | — | 空 | 默认 JTAG TMS，可作 IO。 |
 | 49 | U0TXD / GPIO43 | TX1 | 已用 | UART0 TX。 |
 | 50 | U0RXD / GPIO44 | RX1 | 已用 | UART0 RX。 |
