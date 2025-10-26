@@ -16,6 +16,7 @@
 
 - 热设计（Thermal）
   - NTC：`thermal/ntc-temperature-sensing.md`
+  - 过温保护规范：`thermal/over-temperature-protection.md`
   - 风扇与散热片：`thermal/fans/*`, `thermal/heatsinks/*`
 
 - 电源与保护（Power）
