@@ -5,11 +5,7 @@ use core::convert::Infallible;
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
-use embedded_graphics::{
-    pixelcolor::Rgb565,
-    prelude::*,
-    primitives::{PrimitiveStyle, Rectangle},
-};
+use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
@@ -30,7 +26,10 @@ use esp_hal::{
     },
     time::Rate,
 };
-use lcd_async::{Builder, interface::SpiInterface, models::ST7789, raw_framebuf::RawFrameBuf};
+use lcd_async::{
+    Builder, interface::SpiInterface, models::ST7789, options::Orientation,
+    raw_framebuf::RawFrameBuf,
+};
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
@@ -39,8 +38,6 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
-const CHESSBOARD_COLS: usize = 8;
-const CHESSBOARD_ROWS: usize = 8;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 static FRAMEBUFFER: StaticCell<[u8; FRAMEBUFFER_LEN]> = StaticCell::new();
@@ -134,29 +131,36 @@ impl AsyncDelayNs for AsyncDelay {
     }
 }
 
-fn render_chessboard(buffer: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
-    const LIGHT: Rgb565 = Rgb565::new(29, 58, 25);
-    const DARK: Rgb565 = Rgb565::new(8, 24, 6);
+fn render_color_bars(buffer: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
+    const COLOR_BAR_COLORS: [Rgb565; 8] = [
+        Rgb565::new(31, 63, 31), // white
+        Rgb565::new(31, 63, 0),  // yellow
+        Rgb565::new(0, 63, 31),  // cyan
+        Rgb565::new(0, 63, 0),   // green
+        Rgb565::new(31, 0, 31),  // magenta
+        Rgb565::new(31, 0, 0),   // red
+        Rgb565::new(0, 0, 31),   // blue
+        Rgb565::new(0, 0, 0),    // black
+    ];
 
-    buffer.clear(LIGHT).unwrap();
+    let desired_width = DISPLAY_HEIGHT; // 320px when mounted horizontally
+    let desired_height = DISPLAY_WIDTH; // 240px
+    let bytes = buffer.as_mut_bytes();
 
-    let square_w = (DISPLAY_WIDTH / CHESSBOARD_COLS) as i32;
-    let square_h = (DISPLAY_HEIGHT / CHESSBOARD_ROWS) as i32;
+    for x in 0..desired_width {
+        let color_index = x * COLOR_BAR_COLORS.len() / desired_width;
+        let color = COLOR_BAR_COLORS[color_index];
+        let raw = color.into_storage();
+        let hi = (raw >> 8) as u8;
+        let lo = raw as u8;
 
-    for row in 0..CHESSBOARD_ROWS {
-        for col in 0..CHESSBOARD_COLS {
-            if (row + col) % 2 == 0 {
-                continue;
-            }
+        for y in 0..desired_height {
+            let actual_x = y as usize;
+            let actual_y = x;
 
-            let rect = Rectangle::new(
-                Point::new((col as i32) * square_w, (row as i32) * square_h),
-                Size::new(square_w as u32, square_h as u32),
-            );
-
-            rect.into_styled(PrimitiveStyle::with_fill(DARK))
-                .draw(buffer)
-                .unwrap();
+            let byte_index = (actual_y * DISPLAY_WIDTH + actual_x) * 2;
+            bytes[byte_index] = hi;
+            bytes[byte_index + 1] = lo;
         }
     }
 }
@@ -175,6 +179,7 @@ async fn display_task(ctx: &'static mut DisplayResources) {
 
     let mut display = Builder::new(ST7789, interface)
         .display_size(DISPLAY_WIDTH as u16, DISPLAY_HEIGHT as u16)
+        .orientation(Orientation::new())
         .reset_pin(rst)
         .init(&mut delay)
         .await
@@ -183,7 +188,7 @@ async fn display_task(ctx: &'static mut DisplayResources) {
     {
         let mut frame =
             RawFrameBuf::<Rgb565, _>::new(&mut ctx.framebuffer[..], DISPLAY_WIDTH, DISPLAY_HEIGHT);
-        render_chessboard(&mut frame);
+        render_color_bars(&mut frame);
     }
 
     display
@@ -197,7 +202,7 @@ async fn display_task(ctx: &'static mut DisplayResources) {
         .await
         .expect("frame push");
 
-    info!("Chessboard drawn");
+    info!("Color bars rendered");
 
     loop {
         yield_now().await;
