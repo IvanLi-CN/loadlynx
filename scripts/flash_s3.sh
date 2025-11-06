@@ -1,23 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# flash ESP32-S3 Rust (esp-hal) using espflash via cargo runner
-# Usage: scripts/flash_s3.sh [--release] [--port /dev/tty.usbserial-xxxx]
+# Flash ESP32-S3 firmware via make digital-run helper
+# Usage: scripts/flash_s3.sh [--release] [--port /dev/tty.*] [additional make vars]
 
-set -euo pipefail
+PROFILE=dev
+EXTRA_ARGS=()
 
-PORT_ARG=
-PROFILE=
-while [[ $# -gt 0 ]]; do
+while [ $# -gt 0 ]; do
   case "$1" in
-    --port)
-      PORT_ARG="--port $2"; shift 2;;
     --release)
-      PROFILE=--release; shift;;
-    *) echo "Unknown arg: $1" >&2; exit 1;;
+      PROFILE=release; shift ;;
+    --port)
+      if [ $# -lt 2 ]; then
+        echo "Missing value for --port" >&2
+        exit 2
+      fi
+      PORT_VALUE=$2
+      EXTRA_ARGS+=("PORT=$PORT_VALUE")
+      shift 2 ;;
+    *)
+      EXTRA_ARGS+=("$1")
+      shift ;;
   esac
 done
 
-cd firmware/digital
-# Runner in .cargo/config.toml uses espflash; allow overriding port via env
-ESPFLASH_OPTS=${PORT_ARG} cargo +esp run ${PROFILE}
+PROFILE=$PROFILE make d-run "${EXTRA_ARGS[@]}"

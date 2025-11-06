@@ -1,16 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# flash G431 using probe-rs directly
-# Usage: scripts/flash_g431.sh [build-profile]
-# Default profile: debug
+# Flash STM32G431 via make a-run helper
+# Usage: scripts/flash_g431.sh [profile]
+# Default profile: release
 
-PROFILE=${1:-debug}
-FW=firmware/analog/target/thumbv7em-none-eabihf/${PROFILE}/analog
+PROFILE=${1:-release}
 
-if [ ! -f "$FW" ]; then
-  echo "Firmware not found: $FW\nTry: (cd firmware/analog && cargo build --profile ${PROFILE})" >&2
-  exit 1
-fi
+shift || true
 
-probe-rs run --chip STM32G431CB --protocol swd --speed 4000 --firmware "$FW"
+PROFILE=$PROFILE make a-run "$@"
