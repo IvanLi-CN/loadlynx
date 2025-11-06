@@ -17,7 +17,12 @@ use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
 use esp_hal::{
     self as hal, Async,
     delay::Delay,
-    gpio::{Level, NoPin, Output, OutputConfig},
+    gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
+    ledc::{
+        LSGlobalClkSource, Ledc, LowSpeed,
+        channel::{self as ledc_channel, ChannelIFace as _},
+        timer::{self as ledc_timer, TimerIFace as _},
+    },
     main,
     spi::{
         Mode,
@@ -40,6 +45,8 @@ const CHESSBOARD_ROWS: usize = 8;
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 static FRAMEBUFFER: StaticCell<[u8; FRAMEBUFFER_LEN]> = StaticCell::new();
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
+static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
+static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 
 // 简单异步任务（未启用时间驱动，使用合作式让出）
 #[embassy_executor::task]
@@ -57,7 +64,6 @@ struct DisplayResources {
     cs: Option<Output<'static>>,
     dc: Option<Output<'static>>,
     rst: Option<Output<'static>>,
-    backlight: Option<Output<'static>>,
     framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
 }
 
@@ -163,8 +169,6 @@ async fn display_task(ctx: &'static mut DisplayResources) {
     let cs = ctx.cs.take().expect("CS pin unavailable");
     let dc = ctx.dc.take().expect("DC pin unavailable");
     let rst = ctx.rst.take().expect("RST pin unavailable");
-    let mut backlight = ctx.backlight.take().expect("BL pin unavailable");
-
     let spi_device = SimpleSpiDevice::new(spi, cs);
     let interface = SpiInterface::new(spi_device, dc);
     let mut delay = AsyncDelay::new();
@@ -175,9 +179,6 @@ async fn display_task(ctx: &'static mut DisplayResources) {
         .init(&mut delay)
         .await
         .expect("display init");
-
-    // Enable backlight once the panel is configured.
-    let _ = backlight.set_high();
 
     {
         let mut frame =
@@ -217,6 +218,7 @@ fn main() -> ! {
     let dc_pin = peripherals.GPIO10;
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
+    let ledc_peripheral = peripherals.LEDC;
 
     let spi = Spi::new(
         spi_peripheral,
@@ -233,7 +235,31 @@ fn main() -> ! {
     let cs = Output::new(cs_pin, Level::High, OutputConfig::default());
     let dc = Output::new(dc_pin, Level::High, OutputConfig::default());
     let rst = Output::new(rst_pin, Level::High, OutputConfig::default());
-    let backlight = Output::new(backlight_pin, Level::Low, OutputConfig::default());
+
+    let mut ledc = Ledc::new(ledc_peripheral);
+    ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
+
+    let mut backlight_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer0);
+    backlight_timer
+        .configure(ledc_timer::config::Config {
+            duty: ledc_timer::config::Duty::Duty10Bit,
+            clock_source: ledc_timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(20),
+        })
+        .expect("backlight timer");
+    let backlight_timer = BACKLIGHT_TIMER.init(backlight_timer);
+
+    let mut backlight_channel =
+        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel0, backlight_pin);
+    backlight_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*backlight_timer,
+            duty_pct: 20,
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("backlight channel");
+    let backlight_channel = BACKLIGHT_CHANNEL.init(backlight_channel);
+    backlight_channel.set_duty(20).expect("backlight duty set");
 
     let framebuffer = FRAMEBUFFER.init([0; FRAMEBUFFER_LEN]);
 
@@ -242,7 +268,6 @@ fn main() -> ! {
         cs: Some(cs),
         dc: Some(dc),
         rst: Some(rst),
-        backlight: Some(backlight),
         framebuffer,
     });
 
