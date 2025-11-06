@@ -7,7 +7,7 @@
   - MCU：ESP32‑S3（UI/桥接/网络；对应 `firmware/digital/`）。
   - 板间通信：与 G431 通过 UART 帧通信（详见 `docs/uart-link.md`）。
 - 人机接口（HMI）：
-  - 显示：屏幕（类型未定，为可选/待定）。
+- 显示：P024C128-CTP TFT（ST7789，2.4" 240×RGB×320，SPI）；资料参见 [datasheet 目录](https://webdav-syncthing.ivanli.cc/Ivan-Personal/Datasheets/Display/P024C128-CTP/)。
   - 输入：编码器、按钮。
   - 蜂鸣器：提示音。
 - 供电与隔离：
