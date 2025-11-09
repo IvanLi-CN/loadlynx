@@ -41,3 +41,42 @@
 4. 同时测量 FPC Pin 14/`ALG_EN`，确认延时后由 0 V 拉至 3.3 V，并验证模拟板 5 V 轨启动顺序。
 
 以上流程为当前 ESP32-S3 固件的权威初始化记录；若固件或硬件改版，请同步修订本笔记。
+
+## 4. 串口通信（最小验证）
+
+目标：实现 ESP32‑S3 与 STM32G431 之间最小可用的 UART 链路，用于“可达性”验证（非最终协议）。
+
+### ESP32‑S3 侧（UART1）
+
+- 实例与引脚：`UART1`，TX=`GPIO17`，RX=`GPIO18`（见 `docs/interfaces/pinmaps/esp32-s3.md:120-121`）。
+- 配置：`460800` baud，8N1，无流控。
+- 代码位置：`firmware/digital/src/main.rs` 中 `uart_link_task`。
+- 行为：周期发送 `"PING\n"`，非阻塞读取并打印接收字节计数（defmt）。
+
+构建/烧录：
+- 构建：`(cd firmware/digital && cargo +esp build)`
+- 烧录：`scripts/flash_s3.sh [--port /dev/tty.*]`
+
+### STM32G431 侧（USART1）
+
+- 实例与引脚：`USART1`，TX=`PA9`，RX=`PA10`（如与硬件不符，请在源码中按板图调整）。
+- 配置：`460800` baud，8N1。
+- 代码位置：`firmware/analog/src/main.rs`（`Uart::new(...)` + 简单回环）。
+- 行为：按字节回显（echo），收到什么回什么。
+
+构建/烧录：
+- 构建：`(cd firmware/analog && cargo build)` 或 `make g431-build`
+- 烧录运行：`make g431-run`（基于 `probe-rs`）
+
+### 联调与期望日志
+
+1. 先刷写 STM32 固件，后刷写 ESP32‑S3 固件并打开监视串口。
+2. 在 ESP32‑S3 监视窗口中应看到：
+   - `LoadLynx digital alive...`（本地外设初始化）
+   - `UART link task starting`（串口任务启动）
+   - 周期 `PING` 后收到的 `uart rx N bytes`（来自 STM32 的回显），表示链路可达。
+3. 如无回显，请检查：
+   - 板间隔离器与引脚方向（见 `docs/interfaces/uart-link.md`）。
+   - 双端波特率/引脚是否一致；必要时在固件中调整。
+
+备注：当前为“功能验证”最小实现，未实现 SLIP/CBOR/CRC 等正式协议与可靠性控制，后续将按 `docs/interfaces/uart-link.md` 逐步演进。

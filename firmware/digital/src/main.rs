@@ -10,6 +10,7 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
+use esp_hal::uart::{Config as UartConfig, DataBits, Parity, StopBits, Uart};
 use esp_hal::{
     self as hal, Async,
     delay::Delay,
@@ -26,6 +27,8 @@ use esp_hal::{
     },
     time::Rate,
 };
+// Async is already in scope via `use esp_hal::{ self as hal, Async, ... }`
+// non-blocking读取通过 `uart.read_ready()` + `uart.read()` 实现
 use lcd_async::{
     Builder, interface::SpiInterface, models::ST7789, options::Orientation,
     raw_framebuf::RawFrameBuf,
@@ -45,12 +48,14 @@ static FRAMEBUFFER: StaticCell<[u8; FRAMEBUFFER_LEN]> = StaticCell::new();
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 
 // 简单异步任务（未启用时间驱动，使用合作式让出）
 #[embassy_executor::task]
 async fn ticker() {
     loop {
-        info!("LoadLynx digital tick");
+        // suppress noisy periodic tick log on ESP
+        // trace!("LoadLynx digital tick");
         for _ in 0..1000 {
             yield_now().await;
         }
@@ -210,6 +215,29 @@ async fn display_task(ctx: &'static mut DisplayResources) {
     }
 }
 
+#[embassy_executor::task]
+async fn uart_link_task(uart: &'static mut Uart<'static, Async>) {
+    info!("UART link task starting");
+    let mut rx_count: u32 = 0;
+    let mut byte = [0u8; 1];
+
+    loop {
+        while uart.read_ready() {
+            if let Ok(n) = uart.read(&mut byte) {
+                if n > 0 {
+                    rx_count = rx_count.wrapping_add(n as u32);
+                    if byte[0] == b'\n' {
+                        info!("uart rx {} bytes (newline)", rx_count);
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+        yield_now().await;
+    }
+}
+
 #[main]
 fn main() -> ! {
     let peripherals = hal::init(hal::Config::default());
@@ -281,15 +309,40 @@ fn main() -> ! {
         framebuffer,
     });
 
-    info!("Digital peripherals ready; enabling TPS82130 5V rail after delay");
-    let startup_delay = Delay::new();
-    startup_delay.delay_millis(TPS82130_ENABLE_DELAY_MS);
-    alg_en.set_high();
-    info!("TPS82130 enabled; analog +5V rail requested");
+    const ENABLE_ANALOG_5V_ON_BOOT: bool = cfg!(feature = "enable_analog_5v_on_boot");
+    if ENABLE_ANALOG_5V_ON_BOOT {
+        info!("Digital peripherals ready; enabling TPS82130 5V rail after delay");
+        let startup_delay = Delay::new();
+        startup_delay.delay_millis(TPS82130_ENABLE_DELAY_MS);
+        alg_en.set_high();
+        info!("TPS82130 enabled; analog +5V rail requested");
+    } else {
+        info!(
+            "Digital peripherals ready; SKIP enabling TPS82130 5V (debug mode). Build with feature 'enable_analog_5v_on_boot' to enable."
+        );
+    }
+
+    // UART1 cross-link on GPIO17 (TX) / GPIO18 (RX)
+    let uart_cfg = UartConfig::default()
+        .with_baudrate(115_200)
+        .with_data_bits(DataBits::_8)
+        .with_parity(Parity::None)
+        .with_stop_bits(StopBits::_1);
+
+    info!("UART1 cross-link: GPIO17=TX / GPIO18=RX");
+
+    let uart = Uart::new(peripherals.UART1, uart_cfg)
+        .expect("uart1 init")
+        .with_tx(peripherals.GPIO17)
+        .with_rx(peripherals.GPIO18)
+        .into_async();
+
+    let uart1 = UART1_CELL.init(uart);
 
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
         spawner.spawn(ticker()).ok();
         spawner.spawn(display_task(resources)).ok();
+        spawner.spawn(uart_link_task(uart1)).ok();
     })
 }

@@ -18,11 +18,10 @@
   - 模拟板（FPC 侧）命名：`ESP_RX` / `ESP_TX`（经隔离后转为本板 `RX` / `TX`）。
   - 固件引脚：
     - ESP32‑S3：`GPIO17=U1TXD`、`GPIO18=U1RXD`（`firmware/digital/src/main.rs:333`, `:342`, `:343`）。
-    - STM32G431：`USART1` → `PA9=TX`、`PA10=RX`（`firmware/analog/src/main.rs:28`, `:31`, `:32`）。
+    - STM32G431：`USART3` → `PC10=TX`、`PC11=RX`（`loadlynx.ioc:204-206`，`firmware/analog/src/main.rs:34-45`）。
   - 参考：
-    - 模拟板网表隔离器 U13：`docs/power/netlists/analog-board-netlist.enet:5032`（`ESP_RX`）、`:5033`（`ESP_TX`）。
-    - 模拟板网表 FPC1：`docs/power/netlists/analog-board-netlist.enet:5093`（`ESP_TX`）、`:5094`（`ESP_RX`）。
-    - 数字板网表 FPC1：`docs/power/netlists/digital-board-netlist.enet:1640` 附近（`RX`/`TX`）。
+    - 模拟板网表示例：隔离器 U13 `pins 6/7 → ESP_RX/ESP_TX`，FPC1 `pins 15/16 → ESP_TX/ESP_RX`（`docs/power/netlists/analog-board-netlist.enet:5032-5094`）。
+    - 数字板网表 FPC1：`docs/power/netlists/digital-board-netlist.enet:1640-1687`（`RX`/`TX`）。
 
 > 提示：FPC 连接器在两板上的朝向不同，针脚编号不对号（例：数字侧 `3=ALG_EN`，模拟侧 `14=5V_EN`）。以“网络名”对齐连线，不以“针号”映射。
 
@@ -57,4 +56,3 @@
   - 跨板：ESP 发送 `PING\n`，应在 ESP 端周期看到 `uart rx … bytes`；STM32 侧当前仅 Echo，不打印统计属正常。
 
 —— 若本文与原理图/网表有出入，以最新原理图/网表为准，并在此处同步更正。
-

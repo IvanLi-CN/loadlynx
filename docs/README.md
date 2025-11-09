@@ -24,6 +24,7 @@
 
 - 软件开发笔记
   - ESP32-S3 启动流程：`dev-notes/software.md`
+  - 硬件设计约定与易混点：`dev-notes/hardware-quirks.md`
 
 - 外部数据手册（Other Datasheets，MinerU 转换）
   - ESP32‑S3：`other-datasheets/esp32-s3.md`

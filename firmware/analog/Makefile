@@ -65,14 +65,14 @@ build:
 	fi
 
 run: build
-	@echo "[run] chip=$(CHIP) probe=$(PROBE)"
+	@echo "[run] (flash+run) chip=$(CHIP) probe=$(PROBE)"
 	$(PROBE_RS) run $(PROBE_FLAG) $(PROTOCOL_FLAG) $(SPEED_FLAG) --chip $(CHIP) "$(ELF)"
 
 run-force: clean run
 
 attach: build
 	@echo "[attach] chip=$(CHIP) probe=$(PROBE)"
-	$(PROBE_RS) attach $(PROBE_FLAG) $(PROTOCOL_FLAG) --chip $(CHIP) --elf "$(ELF)"
+	$(PROBE_RS) attach $(PROBE_FLAG) $(PROTOCOL_FLAG) $(SPEED_FLAG) --chip $(CHIP) "$(ELF)"
 
 reset:
 	@echo "[reset] chip=$(CHIP) probe=$(PROBE)"

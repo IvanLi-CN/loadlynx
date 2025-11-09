@@ -37,7 +37,7 @@ panic = 'abort'
 
 [profile.release]
 codegen-units = 1
-debug = false
+debug = 2
 debug-assertions = false
 incremental = false
 lto = 'fat'

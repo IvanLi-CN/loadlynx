@@ -10,6 +10,8 @@
 
 一、硬件链路（来自仓库现有文档 + 确认信息）
 - 物理接口：UART（仓库现有说明明确 MCU ↔ ESP 默认 UART）。
+  - STM32G431 端：USART3，`PC10=TX`、`PC11=RX`（见 `loadlynx.ioc:204-206`）。
+  - ESP32‑S3 端：UART1，`GPIO17=TX`、`GPIO18=RX`（`docs/interfaces/pinmaps/esp32-s3.md:52-53`）。
 - 逻辑电平：3.3 V，8N1（最终以原理图为准）。
 - 数字隔离器（已确认）：TI ISO7721DR（8‑pin SOIC‑D，默认输出高）
   - 通道方向：1 发 / 1 收；建议映射：`S3_TXD → ISO_INA/OUTA → G431_RXD`，`G431_TXD → ISO_INB/OUTB → S3_RXD`。
