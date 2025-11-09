@@ -28,7 +28,7 @@ PROBE_FLAG     := $(if $(PROBE),--probe $(PROBE),)
 PROTOCOL_FLAG  := $(if $(PROTOCOL),--protocol $(PROTOCOL),)
 SPEED_FLAG     := $(if $(SPEED),--speed $(SPEED),)
 
-.PHONY: help build run run-force attach reset reset-attach size info clean
+.PHONY: help build run run-force attach reset reset-attach size info clean list-probes probe-info
 
 help:
 	@echo "Analog (STM32G431) firmware make targets"
@@ -40,6 +40,14 @@ help:
 	@echo "  reset-attach Reset then attach"
 	@echo "  size         Show binary size (requires cargo-binutils)"
 	@echo "  info         Path + hash info"
+	@echo "  list-probes  List connected debug probes"
+	@echo "  probe-info   Show info for selected probe (use PROBE=...)"
+	@echo ""
+	@echo "Usage: make run PROBE=... [SPEED=4000] [PROTOCOL=swd]"
+	@echo "  PROBE selector examples:"
+	@echo "    PROBE=0483:3748                 (VID:PID)"
+	@echo "    PROBE=0483:3748:SERIALNUMBER    (VID:PID:SERIAL)"
+	@echo "    PROBE=SERIALNUMBER              (by serial only)"
 	@echo "  clean        Clean target artifacts"
 
 build:
@@ -88,6 +96,13 @@ info:
 	else \
 	  echo "[info] ELF not built"; \
 	fi
+
+list-probes:
+	$(PROBE_RS) list
+
+probe-info:
+	@echo "[probe-info] probe=$(PROBE)"
+	$(PROBE_RS) info $(PROBE_FLAG)
 
 clean:
 	@echo "[clean] target=$(TARGET_TRIPLE) profile=$(PROFILE)"
