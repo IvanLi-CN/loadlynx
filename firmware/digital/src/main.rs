@@ -38,6 +38,7 @@ esp_bootloader_esp_idf::esp_app_desc!();
 const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
+const TPS82130_ENABLE_DELAY_MS: u32 = 10;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 static FRAMEBUFFER: StaticCell<[u8; FRAMEBUFFER_LEN]> = StaticCell::new();
@@ -213,7 +214,11 @@ async fn display_task(ctx: &'static mut DisplayResources) {
 fn main() -> ! {
     let peripherals = hal::init(hal::Config::default());
 
-    info!("LoadLynx digital alive");
+    info!("LoadLynx digital alive; initializing local peripherals");
+
+    // GPIO34 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
+    let alg_en_pin = peripherals.GPIO34;
+    let mut alg_en = Output::new(alg_en_pin, Level::Low, OutputConfig::default());
 
     // SPI2 provides the high-speed channel for the TFT.
     let spi_peripheral = peripherals.SPI2;
@@ -275,6 +280,12 @@ fn main() -> ! {
         rst: Some(rst),
         framebuffer,
     });
+
+    info!("Digital peripherals ready; enabling TPS82130 5V rail after delay");
+    let startup_delay = Delay::new();
+    startup_delay.delay_millis(TPS82130_ENABLE_DELAY_MS);
+    alg_en.set_high();
+    info!("TPS82130 enabled; analog +5V rail requested");
 
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {

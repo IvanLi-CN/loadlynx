@@ -22,6 +22,9 @@
 - 电源与保护（Power）
   - 负载开关：`power/tps22810-power-switch.md`
 
+- 软件开发笔记
+  - ESP32-S3 启动流程：`dev-notes/software.md`
+
 - 外部数据手册（Other Datasheets，MinerU 转换）
   - ESP32‑S3：`other-datasheets/esp32-s3.md`
   - 触控：`other-datasheets/d-ft6336u-datasheet-v1-1.md`
