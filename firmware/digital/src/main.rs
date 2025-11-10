@@ -5,7 +5,7 @@ use core::convert::Infallible;
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
-use embedded_graphics::{pixelcolor::Rgb565, prelude::*};
+use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
@@ -35,6 +35,8 @@ use lcd_async::{
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
+
+mod ui;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -137,40 +139,6 @@ impl AsyncDelayNs for AsyncDelay {
     }
 }
 
-fn render_color_bars(buffer: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
-    const COLOR_BAR_COLORS: [Rgb565; 8] = [
-        Rgb565::new(31, 63, 31), // white
-        Rgb565::new(31, 63, 0),  // yellow
-        Rgb565::new(0, 63, 31),  // cyan
-        Rgb565::new(0, 63, 0),   // green
-        Rgb565::new(31, 0, 31),  // magenta
-        Rgb565::new(31, 0, 0),   // red
-        Rgb565::new(0, 0, 31),   // blue
-        Rgb565::new(0, 0, 0),    // black
-    ];
-
-    let desired_width = DISPLAY_HEIGHT; // 320px when mounted horizontally
-    let desired_height = DISPLAY_WIDTH; // 240px
-    let bytes = buffer.as_mut_bytes();
-
-    for x in 0..desired_width {
-        let color_index = x * COLOR_BAR_COLORS.len() / desired_width;
-        let color = COLOR_BAR_COLORS[color_index];
-        let raw = color.into_storage();
-        let hi = (raw >> 8) as u8;
-        let lo = raw as u8;
-
-        for y in 0..desired_height {
-            let actual_x = y as usize;
-            let actual_y = x;
-
-            let byte_index = (actual_y * DISPLAY_WIDTH + actual_x) * 2;
-            bytes[byte_index] = hi;
-            bytes[byte_index + 1] = lo;
-        }
-    }
-}
-
 #[embassy_executor::task]
 async fn display_task(ctx: &'static mut DisplayResources) {
     info!("Display task starting");
@@ -183,7 +151,19 @@ async fn display_task(ctx: &'static mut DisplayResources) {
     let interface = SpiInterface::new(spi_device, dc);
     let mut delay = AsyncDelay::new();
 
+    // ST7789 color tuning:
+    // Many ST7789-based IPS panels ship with RGB subpixel order and require
+    // color inversion enabled for correct appearance. The previous configuration
+    // used BGR without inversion which produced incorrect hues on this module
+    // (e.g. cyan rendered as deep blue, dark backgrounds appeared too bright).
+    //
+    // If colors still look off on other panels, try toggling these options
+    // per lcd-async's troubleshooting guide:
+    //   - .color_order(lcd_async::options::ColorOrder::Bgr)
+    //   - .invert_colors(lcd_async::options::ColorInversion::Normal)
     let mut display = Builder::new(ST7789, interface)
+        .invert_colors(lcd_async::options::ColorInversion::Inverted)
+        .color_order(lcd_async::options::ColorOrder::Rgb)
         .display_size(DISPLAY_WIDTH as u16, DISPLAY_HEIGHT as u16)
         .orientation(Orientation::new())
         .reset_pin(rst)
@@ -194,7 +174,7 @@ async fn display_task(ctx: &'static mut DisplayResources) {
     {
         let mut frame =
             RawFrameBuf::<Rgb565, _>::new(&mut ctx.framebuffer[..], DISPLAY_WIDTH, DISPLAY_HEIGHT);
-        render_color_bars(&mut frame);
+        ui::render_default(&mut frame);
     }
 
     display
