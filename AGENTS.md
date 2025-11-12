@@ -8,10 +8,11 @@
 - `scripts/` — flash/build helpers.
 
 ## Build, Test, and Development Commands
-- G431 build: `make g431-build` or `(cd firmware/analog && cargo build)`.
-- G431 run/flash (defmt RTT): `make g431-run` or `scripts/flash_g431.sh` after build.
-- S3 build: `make s3-build` or `(cd firmware/digital && cargo +esp build)`.
-- S3 flash/monitor: `scripts/flash_s3.sh [--release] [--port /dev/tty.*]`.
+- G431 build: `make g431-build` or `(cd firmware/analog && cargo build --release)`.
+- G431 run/flash (defmt RTT): `make g431-run` or `scripts/flash_g431.sh` after **release** build.
+- S3 build: `make s3-build` or `(cd firmware/digital && cargo +esp build --release)`.
+- S3 flash/monitor: `scripts/flash_s3.sh --release [--port /dev/tty.*]` (release binaries are expected).
+> All firmware builds must use `--release`; debug artifacts are neither produced nor supported.
 - Format: `make fmt` or `cargo fmt --all`.
 
 Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for ESP32‑S3, `espup` toolchain and `espflash` via `cargo +esp`.

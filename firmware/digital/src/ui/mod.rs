@@ -6,7 +6,6 @@ use embedded_graphics::pixelcolor::{
 };
 use heapless::String;
 use lcd_async::raw_framebuf::RawFrameBuf;
-use micromath::F32Ext;
 
 use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
@@ -146,21 +145,11 @@ fn draw_mirror_bar(canvas: &mut Canvas, top: i32, left_ratio: f32, right_ratio: 
 }
 
 fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
-    let mut baseline = 200;
-    for line in [
-        data.run_time.as_str(),
-        data.temperature_display().as_str(),
-        data.energy_display().as_str(),
-    ] {
-        draw_small_text(
-            canvas,
-            line,
-            198,
-            baseline - SMALL_FONT.height() as i32,
-            rgb(0xdfe7ff),
-            0,
-        );
-        baseline += 14;
+    let lines = data.status_lines();
+    let mut baseline = 180;
+    for line in lines.iter() {
+        draw_small_text(canvas, line.as_str(), 198, baseline, rgb(0xdfe7ff), 0);
+        baseline += 12;
     }
 }
 
@@ -357,7 +346,7 @@ impl<'a> Canvas<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UiSnapshot {
     pub main_voltage: f32,
     pub main_current: f32,
@@ -367,7 +356,9 @@ pub struct UiSnapshot {
     pub ch1_current: f32,
     pub ch2_current: f32,
     pub run_time: String<16>,
-    pub temperature_c: f32,
+    pub sink_core_temp: f32,
+    pub sink_exhaust_temp: f32,
+    pub mcu_temp: f32,
     pub energy_wh: f32,
 }
 
@@ -384,25 +375,39 @@ impl UiSnapshot {
             ch1_current: 4.20,
             ch2_current: 3.50,
             run_time,
-            temperature_c: 37.8,
+            sink_core_temp: 42.3,
+            sink_exhaust_temp: 38.1,
+            mcu_temp: 35.0,
             energy_wh: 125.4,
         }
     }
 
-    fn temperature_display(&self) -> String<16> {
-        let mut s = String::<16>::new();
-        if self.temperature_c.fract().abs() < 0.05 {
-            let _ = core::fmt::write(&mut s, format_args!("TEMP {:02.0}C", self.temperature_c));
-        } else {
-            let _ = core::fmt::write(&mut s, format_args!("TEMP {:02.1}C", self.temperature_c));
-        }
-        s
-    }
+    pub fn status_lines(&self) -> [String<20>; 5] {
+        let mut run = String::<20>::new();
+        let _ = core::fmt::write(&mut run, format_args!("RUN {}", self.run_time));
 
-    fn energy_display(&self) -> String<16> {
-        let mut s = String::<16>::new();
-        let _ = core::fmt::write(&mut s, format_args!("ENERGY {:04.1}Wh", self.energy_wh));
-        s
+        let mut core = String::<20>::new();
+        let _ = core::fmt::write(
+            &mut core,
+            format_args!("CORE {:05.1}C", self.sink_core_temp),
+        );
+
+        let mut exhaust = String::<20>::new();
+        let _ = core::fmt::write(
+            &mut exhaust,
+            format_args!("SINK {:05.1}C", self.sink_exhaust_temp),
+        );
+
+        let mut mcu = String::<20>::new();
+        let _ = core::fmt::write(&mut mcu, format_args!("MCU  {:05.1}C", self.mcu_temp));
+
+        let mut energy = String::<20>::new();
+        let _ = core::fmt::write(
+            &mut energy,
+            format_args!("ENERGY {:05.1}Wh", self.energy_wh),
+        );
+
+        [run, core, exhaust, mcu, energy]
     }
 }
 

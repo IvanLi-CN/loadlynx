@@ -5,12 +5,14 @@ use core::convert::Infallible;
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
-use esp_hal::uart::{Config as UartConfig, DataBits, Parity, StopBits, Uart};
+use esp_hal::time::Instant as HalInstant;
+use esp_hal::uart::{Config as UartConfig, DataBits, Parity, RxConfig, StopBits, Uart};
 use esp_hal::{
     self as hal, Async,
     delay::Delay,
@@ -33,10 +35,12 @@ use lcd_async::{
     Builder, interface::SpiInterface, models::ST7789, options::Orientation,
     raw_framebuf::RawFrameBuf,
 };
+use loadlynx_protocol::{FastStatus, SlipDecoder, decode_fast_status_frame};
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
 mod ui;
+use ui::UiSnapshot;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -51,6 +55,14 @@ static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
+type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
+static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
+
+fn timestamp_ms() -> u64 {
+    HalInstant::now().duration_since_epoch().as_millis() as u64
+}
+
+defmt::timestamp!("{=u64:ms}", timestamp_ms());
 
 // 简单异步任务（未启用时间驱动，使用合作式让出）
 #[embassy_executor::task]
@@ -70,6 +82,86 @@ struct DisplayResources {
     dc: Option<Output<'static>>,
     rst: Option<Output<'static>>,
     framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
+}
+
+struct TelemetryModel {
+    snapshot: UiSnapshot,
+    last_uptime_ms: Option<u32>,
+}
+
+impl TelemetryModel {
+    fn new() -> Self {
+        Self {
+            snapshot: UiSnapshot::demo(),
+            last_uptime_ms: None,
+        }
+    }
+
+    fn update_from_status(&mut self, status: &FastStatus) {
+        let main_voltage = status.v_remote_mv as f32 / 1000.0;
+        let remote_voltage = status.v_remote_mv as f32 / 1000.0;
+        let local_voltage = status.v_local_mv as f32 / 1000.0;
+        let i_local = status.i_local_ma as f32 / 1000.0;
+        let i_remote = status.i_remote_ma as f32 / 1000.0;
+        let power_w = status.calc_p_mw as f32 / 1000.0;
+
+        self.snapshot.main_voltage = main_voltage;
+        self.snapshot.remote_voltage = remote_voltage;
+        self.snapshot.local_voltage = local_voltage;
+        self.snapshot.main_current = i_local;
+        self.snapshot.ch1_current = i_local;
+        self.snapshot.ch2_current = i_remote;
+        self.snapshot.main_power = power_w;
+        self.snapshot.sink_core_temp = status.sink_core_temp_mc as f32 / 1000.0;
+        self.snapshot.sink_exhaust_temp = status.sink_exhaust_temp_mc as f32 / 1000.0;
+        self.snapshot.mcu_temp = status.mcu_temp_mc as f32 / 1000.0;
+
+        write_runtime(&mut self.snapshot.run_time, status.uptime_ms);
+
+        if let Some(prev) = self.last_uptime_ms {
+            let delta_ms = status.uptime_ms.wrapping_sub(prev);
+            if delta_ms < 60_000 {
+                let delta_hours = delta_ms as f32 / 3_600_000.0;
+                self.snapshot.energy_wh += power_w * delta_hours;
+            }
+        }
+        self.last_uptime_ms = Some(status.uptime_ms);
+    }
+
+    fn snapshot(&self) -> UiSnapshot {
+        self.snapshot.clone()
+    }
+}
+
+fn write_runtime(target: &mut heapless::String<16>, uptime_ms: u32) {
+    target.clear();
+    let total_seconds = uptime_ms / 1000;
+    let hours = total_seconds / 3600;
+    let minutes = (total_seconds % 3600) / 60;
+    let seconds = total_seconds % 60;
+    let _ = core::fmt::write(target, format_args!("{hours:02}:{minutes:02}:{seconds:02}"));
+}
+
+async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
+    let mut guard = telemetry.lock().await;
+    guard.update_from_status(status);
+}
+
+fn protocol_error_str(err: &loadlynx_protocol::Error) -> &'static str {
+    use loadlynx_protocol::Error::*;
+    match err {
+        BufferTooSmall => "buffer too small",
+        PayloadTooLarge => "payload too large",
+        InvalidVersion(_) => "invalid version",
+        LengthMismatch => "length mismatch",
+        InvalidPayloadLength => "payload length mismatch",
+        UnsupportedMessage(_) => "unsupported message",
+        CborEncode => "cbor encode",
+        CborDecode => "cbor decode",
+        InvalidCrc => "crc mismatch",
+        SlipFrameTooLarge => "slip frame too large",
+        SlipInvalidEscape(_) => "slip invalid escape",
+    }
 }
 
 struct SimpleSpiDevice<BUS, CS> {
@@ -140,7 +232,7 @@ impl AsyncDelayNs for AsyncDelay {
 }
 
 #[embassy_executor::task]
-async fn display_task(ctx: &'static mut DisplayResources) {
+async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static TelemetryMutex) {
     info!("Display task starting");
 
     let spi = ctx.spi.take().expect("SPI bus unavailable");
@@ -189,32 +281,95 @@ async fn display_task(ctx: &'static mut DisplayResources) {
         .expect("frame push");
 
     info!("Color bars rendered");
-
     loop {
-        yield_now().await;
+        let snapshot = {
+            let guard = telemetry.lock().await;
+            guard.snapshot()
+        };
+
+        {
+            let mut frame = RawFrameBuf::<Rgb565, _>::new(
+                &mut ctx.framebuffer[..],
+                DISPLAY_WIDTH,
+                DISPLAY_HEIGHT,
+            );
+            ui::render(&mut frame, &snapshot);
+        }
+
+        display
+            .show_raw_data(
+                0,
+                0,
+                DISPLAY_WIDTH as u16,
+                DISPLAY_HEIGHT as u16,
+                &ctx.framebuffer[..],
+            )
+            .await
+            .expect("frame push");
+
+        for _ in 0..2000 {
+            yield_now().await;
+        }
     }
 }
 
 #[embassy_executor::task]
-async fn uart_link_task(uart: &'static mut Uart<'static, Async>) {
+async fn uart_link_task(
+    uart: &'static mut Uart<'static, Async>,
+    telemetry: &'static TelemetryMutex,
+) {
     info!("UART link task starting");
-    let mut rx_count: u32 = 0;
-    let mut byte = [0u8; 1];
+    let mut decoder: SlipDecoder<512> = SlipDecoder::new();
+    let mut chunk = [0u8; 64];
 
     loop {
-        while uart.read_ready() {
-            if let Ok(n) = uart.read(&mut byte) {
-                if n > 0 {
-                    rx_count = rx_count.wrapping_add(n as u32);
-                    if byte[0] == b'\n' {
-                        info!("uart rx {} bytes (newline)", rx_count);
-                    }
+        let count = match uart.read_async(&mut chunk).await {
+            Ok(n) if n > 0 => n,
+            Ok(_) => continue,
+            Err(err) => {
+                warn!("UART RX error ({:?}); resetting decoder", err);
+                decoder.reset();
+                continue;
+            }
+        };
+
+        feed_decoder(&chunk[..count], &mut decoder, telemetry).await;
+        // 让出执行，避免长时间占用导致其他外设任务饿死
+        for _ in 0..64 {
+            yield_now().await;
+        }
+    }
+}
+
+async fn feed_decoder(
+    bytes: &[u8],
+    decoder: &mut SlipDecoder<512>,
+    telemetry: &'static TelemetryMutex,
+) {
+    for &byte in bytes {
+        match decoder.push(byte) {
+            Ok(Some(frame)) => match decode_fast_status_frame(&frame) {
+                Ok((_header, status)) => {
+                    apply_fast_status(telemetry, &status).await;
                 }
-            } else {
-                break;
+                Err(err) => {
+                    warn!(
+                        "fast_status decode error ({}), len={}; resetting",
+                        protocol_error_str(&err),
+                        frame.len()
+                    );
+                    decoder.reset();
+                }
+            },
+            Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    "slip decoder error ({}); resetting",
+                    protocol_error_str(&err)
+                );
+                decoder.reset();
             }
         }
-        yield_now().await;
     }
 }
 
@@ -289,6 +444,8 @@ fn main() -> ! {
         framebuffer,
     });
 
+    let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
+
     const ENABLE_ANALOG_5V_ON_BOOT: bool = cfg!(feature = "enable_analog_5v_on_boot");
     if ENABLE_ANALOG_5V_ON_BOOT {
         info!("Digital peripherals ready; enabling TPS82130 5V rail after delay");
@@ -304,10 +461,15 @@ fn main() -> ! {
 
     // UART1 cross-link on GPIO17 (TX) / GPIO18 (RX)
     let uart_cfg = UartConfig::default()
-        .with_baudrate(115_200)
+        .with_baudrate(57_600)
         .with_data_bits(DataBits::_8)
         .with_parity(Parity::None)
-        .with_stop_bits(StopBits::_1);
+        .with_stop_bits(StopBits::_1)
+        .with_rx(
+            RxConfig::default()
+                .with_fifo_full_threshold(32)
+                .with_timeout(2),
+        );
 
     info!("UART1 cross-link: GPIO17=TX / GPIO18=RX");
 
@@ -322,7 +484,7 @@ fn main() -> ! {
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
         spawner.spawn(ticker()).ok();
-        spawner.spawn(display_task(resources)).ok();
-        spawner.spawn(uart_link_task(uart1)).ok();
+        spawner.spawn(display_task(resources, telemetry)).ok();
+        spawner.spawn(uart_link_task(uart1, telemetry)).ok();
     })
 }
