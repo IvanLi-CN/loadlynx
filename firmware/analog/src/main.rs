@@ -33,7 +33,7 @@ async fn main(_spawner: Spawner) -> ! {
     info!("LoadLynx analog alive; streaming mock FAST_STATUS frames");
 
     let mut uart_cfg = UartConfig::default();
-    uart_cfg.baudrate = 57_600;
+    uart_cfg.baudrate = 230_400;
 
     let mut uart = Uart::new(
         p.USART3, p.PC11, p.PC10, Irqs, p.DMA1_CH1, p.DMA1_CH2, uart_cfg,

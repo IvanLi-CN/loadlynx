@@ -523,7 +523,7 @@ fn main() -> ! {
 
     // UART1 cross-link on GPIO17 (TX) / GPIO18 (RX)
     let uart_cfg = UartConfig::default()
-        .with_baudrate(57_600)
+        .with_baudrate(230_400)
         .with_data_bits(DataBits::_8)
         .with_parity(Parity::None)
         .with_stop_bits(StopBits::_1)
