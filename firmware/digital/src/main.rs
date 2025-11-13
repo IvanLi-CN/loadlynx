@@ -6,6 +6,7 @@ use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use core::sync::atomic::{AtomicU32, Ordering};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
@@ -48,6 +49,7 @@ const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
+const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33; // ~30 FPS 上限，避免占满执行器
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 static FRAMEBUFFER: StaticCell<[u8; FRAMEBUFFER_LEN]> = StaticCell::new();
@@ -57,6 +59,16 @@ static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
+
+// --- Telemetry & diagnostics -------------------------------------------------
+static UART_RX_ERR_TOTAL: AtomicU32 = AtomicU32::new(0);
+static PROTO_DECODE_ERRS: AtomicU32 = AtomicU32::new(0);
+static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
+static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
+
+#[inline]
+fn now_ms32() -> u32 { (timestamp_ms() as u32) }
 
 fn timestamp_ms() -> u64 {
     HalInstant::now().duration_since_epoch().as_millis() as u64
@@ -281,33 +293,40 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
         .expect("frame push");
 
     info!("Color bars rendered");
+    let mut last_push_ms = timestamp_ms() as u32;
     loop {
-        let snapshot = {
-            let guard = telemetry.lock().await;
-            guard.snapshot()
-        };
+        let now = timestamp_ms() as u32;
+        if now.wrapping_sub(last_push_ms) >= DISPLAY_MIN_FRAME_INTERVAL_MS {
+            let snapshot = {
+                let guard = telemetry.lock().await;
+                guard.snapshot()
+            };
 
-        {
-            let mut frame = RawFrameBuf::<Rgb565, _>::new(
-                &mut ctx.framebuffer[..],
-                DISPLAY_WIDTH,
-                DISPLAY_HEIGHT,
-            );
-            ui::render(&mut frame, &snapshot);
+            {
+                let mut frame = RawFrameBuf::<Rgb565, _>::new(
+                    &mut ctx.framebuffer[..],
+                    DISPLAY_WIDTH,
+                    DISPLAY_HEIGHT,
+                );
+                ui::render(&mut frame, &snapshot);
+            }
+
+            display
+                .show_raw_data(
+                    0,
+                    0,
+                    DISPLAY_WIDTH as u16,
+                    DISPLAY_HEIGHT as u16,
+                    &ctx.framebuffer[..],
+                )
+                .await
+                .expect("frame push");
+
+            last_push_ms = now;
         }
 
-        display
-            .show_raw_data(
-                0,
-                0,
-                DISPLAY_WIDTH as u16,
-                DISPLAY_HEIGHT as u16,
-                &ctx.framebuffer[..],
-            )
-            .await
-            .expect("frame push");
-
-        for _ in 0..2000 {
+        // 主动让出，避免占用执行器
+        for _ in 0..200 {
             yield_now().await;
         }
     }
@@ -320,22 +339,36 @@ async fn uart_link_task(
 ) {
     info!("UART link task starting");
     let mut decoder: SlipDecoder<512> = SlipDecoder::new();
-    let mut chunk = [0u8; 64];
+    let mut chunk = [0u8; 512];
 
     loop {
-        let count = match uart.read_async(&mut chunk).await {
-            Ok(n) if n > 0 => n,
-            Ok(_) => continue,
-            Err(err) => {
-                warn!("UART RX error ({:?}); resetting decoder", err);
-                decoder.reset();
-                continue;
+        // 尝试尽可能多地拉取数据以避免 FIFO 堆积；仅在空闲/超时时短暂让出。
+        let mut drained_once = false;
+        loop {
+            match uart.read_async(&mut chunk).await {
+                Ok(n) if n > 0 => {
+                    drained_once = true;
+                    feed_decoder(&chunk[..n], &mut decoder, telemetry).await;
+                    // 继续下一次 read_async 以尽快清空 FIFO
+                    continue;
+                }
+                Ok(_) => {
+                    // 没有新数据（可能因超时），跳出去让出调度
+                    break;
+                }
+                Err(err) => {
+                    // 计数并限频打印，重置解码器以丢弃半帧
+                    record_uart_error();
+                    rate_limited_uart_warn(&err);
+                    decoder.reset();
+                    break;
+                }
             }
-        };
+        }
 
-        feed_decoder(&chunk[..count], &mut decoder, telemetry).await;
-        // 让出执行，避免长时间占用导致其他外设任务饿死
-        for _ in 0..64 {
+        // 若刚刚处理过数据，轻微让出；否则更快地再次尝试以降低端到端延迟。
+        let yield_iters = if drained_once { 1 } else { 0 };
+        for _ in 0..yield_iters {
             yield_now().await;
         }
     }
@@ -349,27 +382,56 @@ async fn feed_decoder(
     for &byte in bytes {
         match decoder.push(byte) {
             Ok(Some(frame)) => match decode_fast_status_frame(&frame) {
-                Ok((_header, status)) => {
+                Ok((header, status)) => {
                     apply_fast_status(telemetry, &status).await;
+                    let total = FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                    // 默认每 32 帧打印一次成功节奏，用于长时间验收
+                    if total % 32 == 0 {
+                        info!("fast_status ok (count={})", total);
+                    }
+                    // 严格只在完整 SLIP 帧结束符后才解码，上述分支已满足
+                    let _ = header; // keep header verified even if unused further
                 }
                 Err(err) => {
-                    warn!(
-                        "fast_status decode error ({}), len={}; resetting",
-                        protocol_error_str(&err),
-                        frame.len()
-                    );
+                    PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                    rate_limited_proto_warn(protocol_error_str(&err), frame.len());
                     decoder.reset();
                 }
             },
             Ok(None) => {}
             Err(err) => {
-                warn!(
-                    "slip decoder error ({}); resetting",
-                    protocol_error_str(&err)
-                );
+                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                rate_limited_proto_warn(protocol_error_str(&err), 0);
                 decoder.reset();
             }
         }
+    }
+}
+
+fn record_uart_error() {
+    UART_RX_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn rate_limited_uart_warn<E: defmt::Format>(err: &E) {
+    let now = now_ms32();
+    let last = LAST_UART_WARN_MS.load(Ordering::Relaxed);
+    if now.wrapping_sub(last) >= 2000 {
+        LAST_UART_WARN_MS.store(now, Ordering::Relaxed);
+        let total = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
+        warn!("UART RX error: {:?} (total={})", err, total);
+    }
+}
+
+fn rate_limited_proto_warn(kind: &str, len: usize) {
+    let now = now_ms32();
+    let last = LAST_PROTO_WARN_MS.load(Ordering::Relaxed);
+    if now.wrapping_sub(last) >= 2000 {
+        LAST_PROTO_WARN_MS.store(now, Ordering::Relaxed);
+        let cnt = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
+        warn!(
+            "protocol decode error ({}), frame_len={} [total={}]; resetting",
+            kind, len, cnt
+        );
     }
 }
 
@@ -396,7 +458,7 @@ fn main() -> ! {
     let spi = Spi::new(
         spi_peripheral,
         SpiConfig::default()
-            .with_frequency(Rate::from_mhz(40))
+            .with_frequency(Rate::from_mhz(60))
             .with_mode(Mode::_0),
     )
     .expect("spi init")
@@ -466,9 +528,10 @@ fn main() -> ! {
         .with_parity(Parity::None)
         .with_stop_bits(StopBits::_1)
         .with_rx(
+            // 更低的 FIFO 满阈值与更短的超时以更快触发 RX 事件，避免积压
             RxConfig::default()
-                .with_fifo_full_threshold(32)
-                .with_timeout(2),
+                .with_fifo_full_threshold(1)
+                .with_timeout(1),
         );
 
     info!("UART1 cross-link: GPIO17=TX / GPIO18=RX");
@@ -486,5 +549,28 @@ fn main() -> ! {
         spawner.spawn(ticker()).ok();
         spawner.spawn(display_task(resources, telemetry)).ok();
         spawner.spawn(uart_link_task(uart1, telemetry)).ok();
+        spawner.spawn(stats_task()).ok();
     })
+}
+
+// 周期性聚合统计，启动后每 60 秒打印一次
+#[embassy_executor::task]
+async fn stats_task() {
+    let mut last_ms = timestamp_ms();
+    loop {
+        for _ in 0..4000 {
+            yield_now().await;
+        }
+        let now = timestamp_ms();
+        if now.saturating_sub(last_ms) >= 60_000 {
+            last_ms = now;
+            let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
+            let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
+            let ut = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
+            info!(
+                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}",
+                ok, de, ut
+            );
+        }
+    }
 }
