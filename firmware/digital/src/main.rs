@@ -2,11 +2,11 @@
 #![no_main]
 
 use core::convert::Infallible;
+use core::sync::atomic::{AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
-use core::sync::atomic::{AtomicU32, Ordering};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
@@ -50,9 +50,16 @@ const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
 const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33; // ~30 FPS 上限，避免占满执行器
+// 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
+// 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
+const DISPLAY_CHUNK_ROWS: usize = 32; // 320/32=10 块；可在 16..64 之间权衡
+const DISPLAY_CHUNK_YIELD_LOOPS: usize = 2; // 每块之间短暂让出，改善调度公平性
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
-static FRAMEBUFFER: StaticCell<[u8; FRAMEBUFFER_LEN]> = StaticCell::new();
+#[repr(align(32))]
+struct Align32<T>(T);
+
+static FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
@@ -68,7 +75,9 @@ static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
-fn now_ms32() -> u32 { (timestamp_ms() as u32) }
+fn now_ms32() -> u32 {
+    (timestamp_ms() as u32)
+}
 
 fn timestamp_ms() -> u64 {
     HalInstant::now().duration_since_epoch().as_millis() as u64
@@ -281,16 +290,31 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
         ui::render_default(&mut frame);
     }
 
-    display
-        .show_raw_data(
-            0,
-            0,
-            DISPLAY_WIDTH as u16,
-            DISPLAY_HEIGHT as u16,
-            &ctx.framebuffer[..],
-        )
-        .await
-        .expect("frame push");
+    // 首帧采用分块推送，降低长事务对调度的影响
+    {
+        let bytes_per_row = DISPLAY_WIDTH * 2;
+        let mut y = 0usize;
+        while y < DISPLAY_HEIGHT {
+            let rows = core::cmp::min(DISPLAY_CHUNK_ROWS, DISPLAY_HEIGHT - y);
+            let start = y * bytes_per_row;
+            let end = start + rows * bytes_per_row;
+            display
+                .show_raw_data(
+                    0,
+                    y as u16,
+                    DISPLAY_WIDTH as u16,
+                    rows as u16,
+                    &ctx.framebuffer[start..end],
+                )
+                .await
+                .expect("frame push (chunked init)");
+
+            for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
+                yield_now().await;
+            }
+            y += rows;
+        }
+    }
 
     info!("Color bars rendered");
     let mut last_push_ms = timestamp_ms() as u32;
@@ -311,16 +335,29 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                 ui::render(&mut frame, &snapshot);
             }
 
-            display
-                .show_raw_data(
-                    0,
-                    0,
-                    DISPLAY_WIDTH as u16,
-                    DISPLAY_HEIGHT as u16,
-                    &ctx.framebuffer[..],
-                )
-                .await
-                .expect("frame push");
+            // 分块推送整帧：按行切片，块间短暂让出，提升 UART 读取机会
+            let bytes_per_row = DISPLAY_WIDTH * 2;
+            let mut y = 0usize;
+            while y < DISPLAY_HEIGHT {
+                let rows = core::cmp::min(DISPLAY_CHUNK_ROWS, DISPLAY_HEIGHT - y);
+                let start = y * bytes_per_row;
+                let end = start + rows * bytes_per_row;
+                display
+                    .show_raw_data(
+                        0,
+                        y as u16,
+                        DISPLAY_WIDTH as u16,
+                        rows as u16,
+                        &ctx.framebuffer[start..end],
+                    )
+                    .await
+                    .expect("frame push (chunked)");
+
+                for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
+                    yield_now().await;
+                }
+                y += rows;
+            }
 
             last_push_ms = now;
         }
@@ -465,6 +502,9 @@ fn main() -> ! {
     .with_sck(sck)
     .with_mosi(mosi)
     .with_cs(NoPin)
+    // 启用 SPI DMA，降低 CPU 占用；配合 32B 对齐的 framebuffer 与 32 行/块的分片，
+    // 能满足 ESP32-S3 对 PSRAM 访问的对齐要求（若 framebuffer 驻留于 PSRAM）。
+    .with_dma(peripherals.DMA_CH0)
     .into_async();
 
     let cs = Output::new(cs_pin, Level::High, OutputConfig::default());
@@ -496,7 +536,7 @@ fn main() -> ! {
     let backlight_channel = BACKLIGHT_CHANNEL.init(backlight_channel);
     backlight_channel.set_duty(20).expect("backlight duty set");
 
-    let framebuffer = FRAMEBUFFER.init([0; FRAMEBUFFER_LEN]);
+    let framebuffer = &mut FRAMEBUFFER.init(Align32([0; FRAMEBUFFER_LEN])).0;
 
     let resources = DISPLAY_RESOURCES.init(DisplayResources {
         spi: Some(spi),
