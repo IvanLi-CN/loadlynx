@@ -23,13 +23,13 @@ mkdir -p "$LOG_DIR"
 
 PROFILE="${PROFILE:-release}"
 TIME_LIMIT_SECONDS=20
-PHASE_HARD_LIMIT_SECONDS=30
 # Hard cap for any non-build phase (flash, reset-attach); build time is unbounded.
 PHASE_HARD_LIMIT_SECONDS=30
+DO_LOG=1
 
 usage() {
     cat <<EOF
-Usage: scripts/agent_verify_digital.sh [--timeout SECONDS] [--profile {release|dev}] [EXTRA_MAKE_VARS...]
+Usage: scripts/agent_verify_digital.sh [--timeout SECONDS] [--profile {release|dev}] [--no-log] [EXTRA_MAKE_VARS...]
 
 Environment:
   PORT            Optional explicit serial port (e.g. /dev/cu.usbmodemXXXX).
@@ -40,8 +40,10 @@ Behavior:
   - Reads tmp/digital-fw-version.txt to detect the current build identity.
   - If this differs from tmp/digital-fw-last-flashed.txt, performs a flash
     via 'make -C firmware/digital flash' and updates the last-flashed marker.
-  - Always performs 'make -C firmware/digital reset-attach' afterwards,
+  - By default performs 'make -C firmware/digital reset-attach' afterwards,
     capturing logs for up to --timeout seconds into tmp/agent-logs/.
+  - When --no-log is passed, only build/flash are performed; no reset-attach
+    session is started.
 EOF
 }
 
@@ -49,6 +51,10 @@ EXTRA_MAKE_VARS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --no-log)
+            DO_LOG=0
+            shift
+            ;;
         --timeout)
             if [ $# -lt 2 ]; then
                 echo "[agent-digital] missing value for --timeout" >&2
@@ -203,6 +209,11 @@ if [ "$NEED_FLASH" = "1" ]; then
                  $EXTRA_MAKE_VARS
     )
     echo "$BUILD_VERSION" > "$DIGITAL_LAST_FLASHED_FILE"
+fi
+
+if [ "$DO_LOG" != "1" ]; then
+    echo "[agent-digital] no-log mode: skipping reset-attach logging phase" >&2
+    exit 0
 fi
 
 timestamp=$(date +"%Y%m%d-%H%M%S")

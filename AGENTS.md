@@ -111,6 +111,7 @@ This section defines a non‑interactive workflow for agents to build, flash (on
   - Recommended:
     - `scripts/agent_verify_analog.sh` (assumes a unique probe or pre‑selected `.stm32-probe`).
     - `PROBE=<VID:PID[:SER]> scripts/agent_verify_analog.sh --timeout 30` for explicit selection.
+    - `scripts/agent_verify_analog.sh --no-log` when only build/flash are desired (e.g. before a dual-board monitor session).
   - Inputs:
     - `--timeout SECONDS` (optional; default 20).
     - `--profile {release|dev}` (optional; default `release`).
@@ -142,6 +143,7 @@ This section defines a non‑interactive workflow for agents to build, flash (on
   - Recommended:
     - `PORT=/dev/cu.usbmodemXXXX scripts/agent_verify_digital.sh`
     - `scripts/agent_verify_digital.sh --timeout 30` if there is a single suitable port and auto‑detection works.
+    - `scripts/agent_verify_digital.sh --no-log` when只想做 build/flash，不启动监控（例如在双板监控前的准备阶段）。
   - Inputs:
     - `--timeout SECONDS` (optional; default 20).
     - `--profile {release|dev}` (optional; default `release`).
@@ -150,6 +152,33 @@ This section defines a non‑interactive workflow for agents to build, flash (on
     - Non‑interactive, bounded `espflash monitor` session with defmt logs in `tmp/agent-logs/digital-*.log`, including:
       - Version line (`LoadLynx digital firmware version: ...`).
       - Alive line and subsequent UART/link status logs (e.g. `fast_status ok (count=...)`).
+
+### Dual-board agent workflow (analog + digital)
+
+For scenarios where both boards need to run concurrently and their interactions are important, agents should:
+
+- Preparation phase (can be sequential; build time is not bounded):
+  - First update and, if needed, flash the digital firmware **without** starting a logging session:
+    - `scripts/agent_verify_digital.sh --no-log`
+  - Then update/flash the analog firmware, also without logging:
+    - `scripts/agent_verify_analog.sh --no-log`
+- Dual reset-attach phase (both boards monitored concurrently):
+  - Use `scripts/agent_dual_monitor.sh` to start simultaneous reset-attach sessions:
+    - `scripts/agent_dual_monitor.sh --timeout 60`
+  - Behavior:
+    - Selects the ESP32‑S3 serial port non‑interactively (or uses `PORT` env if set).
+    - Selects the STM32G431 probe non‑interactively (or uses `PROBE` / `.stm32-probe` if set).
+    - Starts **digital** reset-attach first (`make -C firmware/digital reset-attach ...`), then **analog** reset-attach (`make -C firmware/analog reset-attach ...`).
+    - Each session is bounded by `--timeout` seconds.
+    - Returns immediately after spawning both sessions.
+    - Writes logs and PID files to:
+      - `tmp/agent-logs/digital-dual-<timestamp>.log` / `.pid`
+      - `tmp/agent-logs/analog-dual-<timestamp>.log` / `.pid`
+- Log analysis:
+  - Agents should:
+    - Sleep for an appropriate duration (e.g. `sleep 60`) according to `--timeout`.
+    - Read both logs and correlate behavior (e.g. digital waiting for analog to come up, link establishment, `fast_status ok` cadence).
+    - Optionally, use the `.pid` files to terminate remaining sessions early if necessary.
 
 ### Agent expectations
 

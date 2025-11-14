@@ -27,10 +27,11 @@ PROFILE="${PROFILE:-release}"
 TIME_LIMIT_SECONDS=20
 # Hard cap for any non-build phase (flash, reset-attach); build time is unbounded.
 PHASE_HARD_LIMIT_SECONDS=30
+DO_LOG=1
 
 usage() {
     cat <<EOF
-Usage: scripts/agent_verify_analog.sh [--timeout SECONDS] [--profile {release|dev}] [EXTRA_MAKE_VARS...]
+Usage: scripts/agent_verify_analog.sh [--timeout SECONDS] [--profile {release|dev}] [--no-log] [EXTRA_MAKE_VARS...]
 
 Environment:
   PROBE           Optional explicit probe selector (VID:PID[:SER] or serial).
@@ -41,8 +42,10 @@ Behavior:
   - Reads tmp/analog-fw-version.txt to detect the current build identity.
   - If this differs from tmp/analog-fw-last-flashed.txt, performs a flash
     via 'make -C firmware/analog flash' and updates the last-flashed marker.
-  - Always performs 'make -C firmware/analog reset-attach' afterwards,
+  - By default performs 'make -C firmware/analog reset-attach' afterwards,
     capturing logs for up to --timeout seconds into tmp/agent-logs/.
+  - When --no-log is passed, only build/flash are performed; no reset-attach
+    session is started.
 EOF
 }
 
@@ -50,6 +53,10 @@ EXTRA_MAKE_VARS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
+        --no-log)
+            DO_LOG=0
+            shift
+            ;;
         --timeout)
             if [ $# -lt 2 ]; then
                 echo "[agent-analog] missing value for --timeout" >&2
@@ -227,6 +234,11 @@ if [ "$NEED_FLASH" = "1" ]; then
             make flash PROFILE="$PROFILE" PROBE="$PROBE_SEL" $EXTRA_MAKE_VARS
     )
     echo "$BUILD_VERSION" > "$ANALOG_LAST_FLASHED_FILE"
+fi
+
+if [ "$DO_LOG" != "1" ]; then
+    echo "[agent-analog] no-log mode: skipping reset-attach logging phase" >&2
+    exit 0
 fi
 
 timestamp=$(date +"%Y%m%d-%H%M%S")
