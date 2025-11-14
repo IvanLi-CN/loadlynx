@@ -52,7 +52,7 @@
 
 - 5V 轨：ESP 上电日志应出现“enabling TPS82130… enabled”字样；万用表确认 +5 V 存在。
 - UART 回环：
-  - 快速本地：短接 ESP `GPIO17↔GPIO18`、或 STM32 `PA9↔PA10`，观察回环计数。
-  - 跨板：ESP 发送 `PING\n`，应在 ESP 端周期看到 `uart rx … bytes`；STM32 侧当前仅 Echo，不打印统计属正常。
+  - 快速本地：短接 ESP `GPIO17↔GPIO18`、或 STM32 `USART3 TX/RX (PC10↔PC11)`，在相应固件中启用简单回环逻辑后观察计数。
+  - 跨板：刷写当前 FAST_STATUS 固件后，在 ESP 端串口日志中应周期看到 `fast_status ok (count=...)`，表示链路可达；如长时间仅见协议/UART 错误计数增加，则需检查布线与波特率配置。
 
 —— 若本文与原理图/网表有出入，以最新原理图/网表为准，并在此处同步更正。
