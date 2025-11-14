@@ -25,6 +25,8 @@ mkdir -p "$LOG_DIR"
 
 PROFILE="${PROFILE:-release}"
 TIME_LIMIT_SECONDS=20
+# Hard cap for any non-build phase (flash, reset-attach); build time is unbounded.
+PHASE_HARD_LIMIT_SECONDS=30
 
 usage() {
     cat <<EOF
@@ -44,7 +46,7 @@ Behavior:
 EOF
 }
 
-EXTRA_MAKE_VARS=()
+EXTRA_MAKE_VARS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -69,7 +71,7 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         *)
-            EXTRA_MAKE_VARS+=("$1")
+            EXTRA_MAKE_VARS="$EXTRA_MAKE_VARS $1"
             shift
             ;;
     esac
@@ -82,15 +84,20 @@ select_probe() {
     fi
 
     local all_output
-    all_output=$(probe-rs list || true)
+    # probe-rs list may emit ANSI color codes; strip them to simplify parsing.
+    all_output=$(probe-rs list 2>/dev/null | sed 's/\x1b\[[0-9;]*m//g' || true)
 
     # Helper: filter lines that represent indexed probes
     index_lines() {
-        echo "$all_output" | grep -E '^[[:space:]]*[0-9]+:|^\[[0-9]+\]:' || true
+        echo "$all_output" | grep -E '^\[[0-9]+\]:' || true
     }
 
     # Extract tokens (selector strings after '-- ')
-    tokens() { echo "$all_output" | sed -n 's/.*-- \([^ ]\+\).*/\1/p'; }
+    tokens() {
+        echo "$all_output" \
+          | awk -F'-- ' '/--/{print $2}' \
+          | awk '{print $1}'
+    }
     has_token() { tokens | grep -Fxq "$1"; }
 
     local repo_cache="$REPO_ROOT/.stm32-probe"
@@ -160,7 +167,8 @@ run_with_timeout() {
         return $?
     fi
 
-    # Fallback: manual timeout implementation.
+    # Fallback: manual timeout implementation. Kill the whole process group to
+    # ensure probe-rs children do not keep the session alive.
     "${cmd[@]}" &
     local cmd_pid=$!
 
@@ -168,7 +176,7 @@ run_with_timeout() {
         sleep "$seconds"
         if kill -0 "$cmd_pid" 2>/dev/null; then
             echo "[agent-analog] timeout ${seconds}s reached; stopping logging session (SIGINT)..." >&2
-            kill -INT "$cmd_pid" 2>/dev/null || kill "$cmd_pid" 2>/dev/null || true
+            kill -INT "-$cmd_pid" 2>/dev/null || kill "-$cmd_pid" 2>/dev/null || kill -KILL "-$cmd_pid" 2>/dev/null || true
         fi
     ) &
     local watcher_pid=$!
@@ -183,7 +191,7 @@ ANALOG_LAST_FLASHED_FILE="$REPO_ROOT/tmp/analog-fw-last-flashed.txt"
 echo "[agent-analog] building firmware (PROFILE=${PROFILE})..."
 (
     cd "$REPO_ROOT/firmware/analog"
-    PROFILE="$PROFILE" DEFMT_LOG="${DEFMT_LOG:-info}" make build "${EXTRA_MAKE_VARS[@]}"
+    PROFILE="$PROFILE" DEFMT_LOG="${DEFMT_LOG:-info}" make build $EXTRA_MAKE_VARS
 )
 
 BUILD_VERSION="unknown"
@@ -214,7 +222,9 @@ echo "[agent-analog] using probe selector: ${PROBE_SEL}"
 if [ "$NEED_FLASH" = "1" ]; then
     (
         cd "$REPO_ROOT/firmware/analog"
-        PROFILE="$PROFILE" PROBE="$PROBE_SEL" make flash "${EXTRA_MAKE_VARS[@]}"
+        # Limit flash phase to a hard 30s wall-clock; build time is uncapped.
+        run_with_timeout "$PHASE_HARD_LIMIT_SECONDS" \
+            make flash PROFILE="$PROFILE" PROBE="$PROBE_SEL" $EXTRA_MAKE_VARS
     )
     echo "$BUILD_VERSION" > "$ANALOG_LAST_FLASHED_FILE"
 fi
@@ -224,10 +234,16 @@ log_file="$LOG_DIR/analog-${timestamp}.log"
 echo "[agent-analog] starting reset-attach logging for up to ${TIME_LIMIT_SECONDS}s..."
 echo "[agent-analog] log file: $log_file"
 
+# Logging window is controlled by --timeout, but never exceeds the per-phase hard cap.
+LOG_TIMEOUT="$TIME_LIMIT_SECONDS"
+if [ "$LOG_TIMEOUT" -gt "$PHASE_HARD_LIMIT_SECONDS" ]; then
+    LOG_TIMEOUT="$PHASE_HARD_LIMIT_SECONDS"
+fi
+
 (
     cd "$REPO_ROOT/firmware/analog"
-    run_with_timeout "$TIME_LIMIT_SECONDS" \
-        make reset-attach PROFILE="$PROFILE" PROBE="$PROBE_SEL" "${EXTRA_MAKE_VARS[@]}"
+    run_with_timeout "$LOG_TIMEOUT" \
+        make reset-attach PROFILE="$PROFILE" PROBE="$PROBE_SEL" $EXTRA_MAKE_VARS
 ) | tee "$log_file"
 
 echo "[agent-analog] done. Logs captured in: $log_file"

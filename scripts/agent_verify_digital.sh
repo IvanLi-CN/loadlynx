@@ -23,6 +23,9 @@ mkdir -p "$LOG_DIR"
 
 PROFILE="${PROFILE:-release}"
 TIME_LIMIT_SECONDS=20
+PHASE_HARD_LIMIT_SECONDS=30
+# Hard cap for any non-build phase (flash, reset-attach); build time is unbounded.
+PHASE_HARD_LIMIT_SECONDS=30
 
 usage() {
     cat <<EOF
@@ -42,7 +45,7 @@ Behavior:
 EOF
 }
 
-EXTRA_MAKE_VARS=()
+EXTRA_MAKE_VARS=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -67,7 +70,7 @@ while [ $# -gt 0 ]; do
             exit 0
             ;;
         *)
-            EXTRA_MAKE_VARS+=("$1")
+            EXTRA_MAKE_VARS="$EXTRA_MAKE_VARS $1"
             shift
             ;;
     esac
@@ -137,7 +140,8 @@ run_with_timeout() {
         return $?
     fi
 
-    # Fallback: manual timeout implementation.
+    # Fallback: manual timeout implementation. Kill the whole process group to
+    # ensure espflash/probe-rs children do not keep the session alive.
     "${cmd[@]}" &
     local cmd_pid=$!
 
@@ -145,7 +149,8 @@ run_with_timeout() {
         sleep "$seconds"
         if kill -0 "$cmd_pid" 2>/dev/null; then
             echo "[agent-digital] timeout ${seconds}s reached; stopping logging session (SIGINT)..." >&2
-            kill -INT "$cmd_pid" 2>/dev/null || kill "$cmd_pid" 2>/dev/null || true
+            # Negative PID = process group
+            kill -INT "-$cmd_pid" 2>/dev/null || kill "-$cmd_pid" 2>/dev/null || kill -KILL "-$cmd_pid" 2>/dev/null || true
         fi
     ) &
     local watcher_pid=$!
@@ -160,7 +165,7 @@ DIGITAL_LAST_FLASHED_FILE="$REPO_ROOT/tmp/digital-fw-last-flashed.txt"
 echo "[agent-digital] building firmware (PROFILE=${PROFILE})..."
 (
     cd "$REPO_ROOT/firmware/digital"
-    PROFILE="$PROFILE" make build "${EXTRA_MAKE_VARS[@]}"
+    PROFILE="$PROFILE" make build $EXTRA_MAKE_VARS
 )
 
 BUILD_VERSION="unknown"
@@ -191,7 +196,11 @@ echo "[agent-digital] using serial port: ${PORT_VALUE}"
 if [ "$NEED_FLASH" = "1" ]; then
     (
         cd "$REPO_ROOT/firmware/digital"
-        PROFILE="$PROFILE" PORT="$PORT_VALUE" make flash "${EXTRA_MAKE_VARS[@]}"
+        # Limit flash phase to a hard 30s wall-clock; build time is uncapped.
+        run_with_timeout "$PHASE_HARD_LIMIT_SECONDS" \
+            make flash PROFILE="$PROFILE" PORT="$PORT_VALUE" \
+                 ESPFLASH_ARGS="--ignore_app_descriptor --non-interactive --skip-update-check" \
+                 $EXTRA_MAKE_VARS
     )
     echo "$BUILD_VERSION" > "$DIGITAL_LAST_FLASHED_FILE"
 fi
@@ -201,11 +210,18 @@ log_file="$LOG_DIR/digital-${timestamp}.log"
 echo "[agent-digital] starting reset-attach logging for up to ${TIME_LIMIT_SECONDS}s..."
 echo "[agent-digital] log file: $log_file"
 
+# Logging window is controlled by --timeout, but never exceeds the per-phase hard cap.
+LOG_TIMEOUT="$TIME_LIMIT_SECONDS"
+if [ "$LOG_TIMEOUT" -gt "$PHASE_HARD_LIMIT_SECONDS" ]; then
+    LOG_TIMEOUT="$PHASE_HARD_LIMIT_SECONDS"
+fi
+
 (
     cd "$REPO_ROOT/firmware/digital"
-    run_with_timeout "$TIME_LIMIT_SECONDS" \
-        make reset-attach PROFILE="$PROFILE" PORT="$PORT_VALUE" "${EXTRA_MAKE_VARS[@]}"
+    run_with_timeout "$LOG_TIMEOUT" \
+        make reset-attach PROFILE="$PROFILE" PORT="$PORT_VALUE" \
+             ESPFLASH_ARGS="--non-interactive --skip-update-check" \
+             $EXTRA_MAKE_VARS
 ) | tee "$log_file"
 
 echo "[agent-digital] done. Logs captured in: $log_file"
-

@@ -103,14 +103,14 @@ This section defines a non‑interactive workflow for agents to build, flash (on
   - Selects a debug probe non‑interactively:
     - Prefers `PROBE` env, then `PORT` env alias, then cached `.stm32-probe`, then:
       - unique ST‑Link, else unique probe overall.
-    - If still ambiguous → exits with an error and asks for an explicit `PROBE` or an interactive `scripts/select_stm32_probe.sh` run.
+    - If still ambiguous → exits with an error and asks for an explicit `PROBE` or for the user to run `scripts/select_stm32_probe.sh` once interactively (agents themselves must not call interactive selectors).
   - Runs `make -C firmware/analog reset-attach` with the chosen probe and captures logs for a bounded window.
   - Uses a timeout (default 20s) implemented via `gtimeout`/`timeout` if available, otherwise a manual `sleep+kill` wrapper.
   - Logs are streamed to the console and simultaneously written to `tmp/agent-logs/analog-*.log`.
 - Usage for agents:
   - Recommended:
     - `scripts/agent_verify_analog.sh` (assumes a unique probe or pre‑selected `.stm32-probe`).
-    - `PROBE=0483:3748 scripts/agent_verify_analog.sh --timeout 30` for explicit selection.
+    - `PROBE=<VID:PID[:SER]> scripts/agent_verify_analog.sh --timeout 30` for explicit selection.
   - Inputs:
     - `--timeout SECONDS` (optional; default 20).
     - `--profile {release|dev}` (optional; default `release`).
@@ -154,12 +154,14 @@ This section defines a non‑interactive workflow for agents to build, flash (on
 ### Agent expectations
 
 - Agents should:
+  - Run `scripts/agent_verify_analog.sh` / `scripts/agent_verify_digital.sh` **直接在 Codex 环境中**执行，不要把“跑脚本”这一步转交给用户；只有在脚本明确失败时，才向用户请求额外信息（如 `PROBE` / `PORT`）。
   - Prefer `scripts/agent_verify_analog.sh` / `scripts/agent_verify_digital.sh` over raw `make a-run` / `make d-run` to:
     - Avoid unnecessary flashes.
     - Ensure bounded runtime and stable log capture.
     - Get explicit firmware version information for correlation with local builds.
-  - Fall back to manual `make a-reset-attach` / `make d-reset-attach` only when custom, ad‑hoc debugging is required.
+  - Fall back to manual `make a-reset-attach` / `make d-reset-attach` only when自定义、一次性的调试需求无法通过 agent 脚本覆盖时，由用户显式要求时再使用。
   - When analyzing logs, always confirm that the reported `LOADLYNX_FW_VERSION` matches the expected one from `tmp/{analog|digital}-fw-version.txt` before trusting behavior as belonging to the latest build.
+  - When `probe-rs` / `espflash` 等工具因配置或镜像格式报错（如芯片不匹配、app descriptor 检查等）导致 `flash` / `reset-attach` 失败时，优先视为**需要修改本仓库配置的工程问题**：查阅官方文档、调整 `Makefile` / `ESPFLASH_ARGS` / 构建脚本等，使 `scripts/agent_verify_*.sh` 在当前工具链版本下可以自动跑通，而不是简单把执行责任推回给用户。
 
 ## Commit & Pull Request Guidelines
 
