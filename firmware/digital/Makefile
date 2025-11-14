@@ -25,17 +25,20 @@ CHIP_FLAG   := --chip $(CHIP)
 LOGFMT_FLAG := $(if $(LOGFMT),--log-format $(LOGFMT),)
 ESPFLASH_ARGS ?=
 
-.PHONY: help env ports build clean run attach monitor
+.PHONY: help env ports build clean run flash attach reset reset-attach monitor
 
 help:
 	@echo "Digital (ESP32-S3) firmware make targets"
-	@echo "  build      Build $(PROFILE) firmware with cargo +esp"
-	@echo "  run        Flash + monitor via espflash"
-	@echo "  attach     Monitor existing firmware"
-	@echo "  monitor    Alias for attach"
-	@echo "  ports      List available serial ports"
-	@echo "  env        Show computed paths"
-	@echo "  clean      Clean target artifacts"
+	@echo "  build        Build $(PROFILE) firmware with cargo +esp"
+	@echo "  run          Flash + monitor via espflash"
+	@echo "  flash        Flash firmware only (no monitor)"
+	@echo "  attach       Monitor existing firmware"
+	@echo "  reset        Reset device via espflash"
+	@echo "  reset-attach Reset device then attach monitor"
+	@echo "  monitor      Alias for attach"
+	@echo "  ports        List available serial ports"
+	@echo "  env          Show computed paths"
+	@echo "  clean        Clean target artifacts"
 
 env:
 	@echo TARGET=$(TARGET)
@@ -59,7 +62,15 @@ clean:
 run: build
 	$(ESPFLASH) flash "$(ELF)" --monitor $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(ESPFLASH_ARGS)
 
+flash: build
+	$(ESPFLASH) flash "$(ELF)" $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(ESPFLASH_ARGS)
+
 attach: build
 	$(ESPFLASH) monitor $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) --elf "$(ELF)" $(ESPFLASH_ARGS)
+
+reset:
+	$(ESPFLASH) reset $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(ESPFLASH_ARGS)
+
+reset-attach: reset attach
 
 monitor: attach

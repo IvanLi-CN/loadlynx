@@ -22,7 +22,7 @@ fn main() {
     let pkg_ver = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
     let git_info = git_describe().unwrap_or_else(|| "git unknown".to_string());
-    let src_hash = source_digest()
+     let src_hash = source_digest()
         .map(|h| format!("src 0x{h:016x}"))
         .unwrap_or_else(|| "src unknown".to_string());
 
@@ -122,4 +122,3 @@ fn source_digest() -> Option<u64> {
         None
     }
 }
-

@@ -34,6 +34,133 @@ Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for 
 - Firmware verification relies on on‑device logs: look for `info!("LoadLynx analog alive; ...")` on G431, `info!("LoadLynx digital alive; ...")` on S3, and periodic `info!("fast_status ok (count=...)")` once the UART link is running.
 - Provide a short test plan in PRs (build, flash, logs, basic behavior observed).
 
+## Agent Firmware Verification Workflow
+
+This section defines a non‑interactive workflow for agents to build, flash (only when needed), and verify firmware on real hardware, with bounded log collection suitable for automated analysis.
+
+### Build‑time versioning and on‑device logs
+
+- Both firmware crates embed a build identifier via `build.rs`:
+  - `firmware/analog/build.rs` writes `LOADLYNX_FW_VERSION` and a copy to `tmp/analog-fw-version.txt`.
+  - `firmware/digital/build.rs` writes `LOADLYNX_FW_VERSION` and a copy to `tmp/digital-fw-version.txt`.
+- The version string has the form:
+  - `"<crate> <semver> (profile <profile>, <git describe|unknown>, src 0xXXXXXXXXXXXXXXX)"`.
+  - It changes whenever:
+    - Git commit or dirty state changes (via `git describe --tags --dirty --always`), or
+    - Any `src/*.rs` file in the crate changes (via a simple source hash).
+- On startup, firmware logs the current version as early as possible:
+  - Analog (`firmware/analog/src/main.rs`):
+    - `info!("LoadLynx analog firmware version: {}", FW_VERSION);`
+    - Followed by the existing `info!("LoadLynx analog alive; streaming mock FAST_STATUS frames ...")`.
+  - Digital (`firmware/digital/src/main.rs`):
+    - `info!("LoadLynx digital firmware version: {}", FW_VERSION);`
+    - Followed by the existing `info!("LoadLynx digital alive; initializing local peripherals");`
+- Agents should treat the version line as the authoritative runtime identity and cross‑check it against `tmp/{analog|digital}-fw-version.txt` when deciding whether the board is running the latest build.
+
+### New Make targets (digital reset/attach/flash)
+
+- Analog (`firmware/analog/Makefile`):
+  - Adds `flash` target:
+    - `make flash [PROBE=...] [PROFILE=...]` → `probe-rs download` of the ELF only (no logging session).
+  - Existing `reset-attach` remains:
+    - `make reset-attach [PROBE=...] [PROFILE=...]` → `probe-rs reset` + `attach` (defmt RTT logging).
+- Digital (`firmware/digital/Makefile`):
+  - New targets:
+    - `make flash [PORT=...] [PROFILE=...]` → `espflash flash` of the ELF only (no monitor).
+    - `make reset` → `espflash reset` (no monitor).
+    - `make reset-attach [PORT=...] [PROFILE=...]` → `reset` + `monitor --elf ...` (defmt logging).
+- Root `Makefile`:
+  - Adds:
+    - `make d-reset [PORT=...] [PROFILE=...]`
+    - `make d-reset-attach [PORT=...] [PROFILE=...]`
+  - These wrap the digital `reset` / `reset-attach` targets and are convenient for manual use; the agent scripts below call the per‑crate Makefiles directly.
+
+### Log capture and flash minimization for agents
+
+- Logs for automated analysis are written under:
+  - `tmp/agent-logs/analog-YYYYmmdd-HHMMSS.log`
+  - `tmp/agent-logs/digital-YYYYmmdd-HHMMSS.log`
+- High‑level behavior:
+  - Always build first (to ensure the version metadata is current).
+  - Decide whether to flash by comparing:
+    - `tmp/{analog|digital}-fw-version.txt` (current build) vs
+    - `tmp/{analog|digital}-fw-last-flashed.txt` (last version that this workflow successfully flashed).
+  - If the version changed or is unknown:
+    - Flash once using a `flash` target (`probe-rs download` / `espflash flash`), without starting a long‑running log session.
+    - Update `tmp/{analog|digital}-fw-last-flashed.txt`.
+  - In all cases, perform a `reset-attach` session to capture logs from a fresh boot.
+  - The logging session is bounded in time to avoid indefinitely stuck probes/serial monitors.
+
+### Analog agent workflow (STM32G431)
+
+- Script: `scripts/agent_verify_analog.sh`
+- Default behavior:
+  - Builds `firmware/analog` via `make build` with `PROFILE=${PROFILE:-release}` and `DEFMT_LOG=${DEFMT_LOG:-info}`.
+  - Reads the current build identity from `tmp/analog-fw-version.txt`.
+  - Compares against `tmp/analog-fw-last-flashed.txt`:
+    - If different or missing → flash via `make -C firmware/analog flash`.
+    - If identical → skip flashing to preserve flash endurance.
+  - Selects a debug probe non‑interactively:
+    - Prefers `PROBE` env, then `PORT` env alias, then cached `.stm32-probe`, then:
+      - unique ST‑Link, else unique probe overall.
+    - If still ambiguous → exits with an error and asks for an explicit `PROBE` or an interactive `scripts/select_stm32_probe.sh` run.
+  - Runs `make -C firmware/analog reset-attach` with the chosen probe and captures logs for a bounded window.
+  - Uses a timeout (default 20s) implemented via `gtimeout`/`timeout` if available, otherwise a manual `sleep+kill` wrapper.
+  - Logs are streamed to the console and simultaneously written to `tmp/agent-logs/analog-*.log`.
+- Usage for agents:
+  - Recommended:
+    - `scripts/agent_verify_analog.sh` (assumes a unique probe or pre‑selected `.stm32-probe`).
+    - `PROBE=0483:3748 scripts/agent_verify_analog.sh --timeout 30` for explicit selection.
+  - Inputs:
+    - `--timeout SECONDS` (optional; default 20).
+    - `--profile {release|dev}` (optional; default `release`).
+    - Any extra arguments are forwarded as `make` variables to the `build`, `flash`, and `reset-attach` targets.
+  - Output:
+    - Non‑interactive, bounded run with defmt logs in `tmp/agent-logs/analog-*.log`, including:
+      - Version line (`LoadLynx analog firmware version: ...`).
+      - Alive line and subsequent FAST_STATUS streaming logs.
+
+### Digital agent workflow (ESP32‑S3)
+
+- Script: `scripts/agent_verify_digital.sh`
+- Default behavior:
+  - Builds `firmware/digital` via `make build` with `PROFILE=${PROFILE:-release}`.
+  - Reads the current build identity from `tmp/digital-fw-version.txt`.
+  - Compares against `tmp/digital-fw-last-flashed.txt`:
+    - If different or missing → flash via `make -C firmware/digital flash`.
+    - If identical → skip flashing and only reset+attach.
+  - Selects a serial port non‑interactively:
+    - If `PORT` is set → use it directly.
+    - Else, runs `espflash list-ports` and:
+      - If exactly one `/dev/cu.*` entry → use it.
+      - Else, if exactly one `/dev/*` entry overall → use it.
+      - Else → error and ask for an explicit `PORT` (agent should surface this to the user).
+  - Runs `make -C firmware/digital reset-attach` with the chosen port and captures logs for a bounded window.
+  - Uses the same timeout strategy as the analog script (default 20s).
+  - Logs are streamed to the console and written to `tmp/agent-logs/digital-*.log`.
+- Usage for agents:
+  - Recommended:
+    - `PORT=/dev/cu.usbmodemXXXX scripts/agent_verify_digital.sh`
+    - `scripts/agent_verify_digital.sh --timeout 30` if there is a single suitable port and auto‑detection works.
+  - Inputs:
+    - `--timeout SECONDS` (optional; default 20).
+    - `--profile {release|dev}` (optional; default `release`).
+    - Any extra arguments are forwarded as `make` variables to the `build`, `flash`, and `reset-attach` targets (e.g. `BAUD=921600 LOGFMT=defmt`).
+  - Output:
+    - Non‑interactive, bounded `espflash monitor` session with defmt logs in `tmp/agent-logs/digital-*.log`, including:
+      - Version line (`LoadLynx digital firmware version: ...`).
+      - Alive line and subsequent UART/link status logs (e.g. `fast_status ok (count=...)`).
+
+### Agent expectations
+
+- Agents should:
+  - Prefer `scripts/agent_verify_analog.sh` / `scripts/agent_verify_digital.sh` over raw `make a-run` / `make d-run` to:
+    - Avoid unnecessary flashes.
+    - Ensure bounded runtime and stable log capture.
+    - Get explicit firmware version information for correlation with local builds.
+  - Fall back to manual `make a-reset-attach` / `make d-reset-attach` only when custom, ad‑hoc debugging is required.
+  - When analyzing logs, always confirm that the reported `LOADLYNX_FW_VERSION` matches the expected one from `tmp/{analog|digital}-fw-version.txt` before trusting behavior as belonging to the latest build.
+
 ## Commit & Pull Request Guidelines
 
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`, etc. Examples from history: `feat: scaffold ...`, `docs: add Markdown datasheets ...`.
