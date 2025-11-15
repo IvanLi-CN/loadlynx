@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::convert::Infallible;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
@@ -17,6 +17,7 @@ use esp_hal::uart::{Config as UartConfig, DataBits, Parity, RxConfig, StopBits, 
 use esp_hal::{
     self as hal, Async,
     delay::Delay,
+    dma::{DmaRxBuf, DmaTxBuf},
     gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
@@ -26,7 +27,7 @@ use esp_hal::{
     main,
     spi::{
         Mode,
-        master::{Config as SpiConfig, Spi},
+        master::{Config as SpiConfig, Spi, SpiDma, SpiDmaBus},
     },
     time::Rate,
 };
@@ -45,21 +46,43 @@ use ui::UiSnapshot;
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
+const FW_VERSION: &str = env!("LOADLYNX_FW_VERSION");
+
 const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
-const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33; // ~30 FPS 上限，避免占满执行器
+const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 25; // 进一步压缩帧间隔，改善体验
 // 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
 // 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
-const DISPLAY_CHUNK_ROWS: usize = 32; // 320/32=10 块；可在 16..64 之间权衡
-const DISPLAY_CHUNK_YIELD_LOOPS: usize = 2; // 每块之间短暂让出，改善调度公平性
+const DISPLAY_CHUNK_ROWS: usize = 24; // 320/24≈14 块；兼顾串口公平性与刷新速度
+const DISPLAY_CHUNK_YIELD_LOOPS: usize = 0; // 默认不在块间让出，防止刷新被打断
+const DISPLAY_DIRTY_MERGE_GAP_ROWS: usize = 8; // 适度扩大合并间隙，减少 SPI 往返
+const DISPLAY_DIRTY_SPAN_FALLBACK: usize = 12; // 脏区 span 过多时退回整帧推送
+const FRAME_SAMPLE_FRAMES: u32 = 3; // 仅记录前几帧像素统计，避免日志过多
+const FRAME_LOG_POINTS: [(usize, usize); 3] = [
+    (0, 0),
+    (DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2),
+    (DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1),
+];
+// 控制是否实际通过 SPI 推送到 LCD：正常运行应为 true，A/B 调试串口时可临时关闭。
+const ENABLE_DISPLAY_SPI_UPDATES: bool = true;
+// 调试开关：正常运行应为 true，仅在单独验证 UI 或其它外设时才临时关闭 UART 链路任务。
+const ENABLE_UART_LINK_TASK: bool = true;
+
+// UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
+const UART_BAUD: u32 = 230_400;
+const UART_RX_FIFO_FULL_THRESHOLD: u16 = 120;
+const UART_RX_TIMEOUT_SYMS: u8 = 10;
+const UART_MAX_CHUNKS_PER_BATCH: usize = 4; // 进一步降低单批搬运量，让 display 有机会插队
+const FAST_STATUS_SLIP_CAPACITY: usize = 1024;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 #[repr(align(32))]
 struct Align32<T>(T);
 
 static FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
+static PREVIOUS_FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
@@ -73,6 +96,8 @@ static PROTO_DECODE_ERRS: AtomicU32 = AtomicU32::new(0);
 static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn now_ms32() -> u32 {
@@ -97,12 +122,23 @@ async fn ticker() {
     }
 }
 
+#[embassy_executor::task]
+async fn diag_task() {
+    info!("Display diag task alive");
+    loop {
+        for _ in 0..2000 {
+            yield_now().await;
+        }
+    }
+}
+
 struct DisplayResources {
-    spi: Option<Spi<'static, Async>>,
+    spi: Option<SpiDmaBus<'static, Async>>,
     cs: Option<Output<'static>>,
     dc: Option<Output<'static>>,
     rst: Option<Output<'static>>,
     framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
+    previous_framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
 }
 
 struct TelemetryModel {
@@ -254,6 +290,7 @@ impl AsyncDelayNs for AsyncDelay {
 
 #[embassy_executor::task]
 async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static TelemetryMutex) {
+    DISPLAY_TASK_RUNNING.store(true, Ordering::Relaxed);
     info!("Display task starting");
 
     let spi = ctx.spi.take().expect("SPI bus unavailable");
@@ -287,17 +324,26 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
     {
         let mut frame =
             RawFrameBuf::<Rgb565, _>::new(&mut ctx.framebuffer[..], DISPLAY_WIDTH, DISPLAY_HEIGHT);
-        ui::render_default(&mut frame);
+        // 首帧改为整屏高亮测试图，便于快速确认 LCD/背光是否工作正常。
+        let bytes = frame.as_mut_bytes();
+        for chunk in bytes.chunks_mut(2) {
+            chunk[0] = 0xFF;
+            chunk[1] = 0xFF;
+        }
     }
 
-    // 首帧采用分块推送，降低长事务对调度的影响
-    {
+    log_framebuffer_span("color-bars-fill", &ctx.framebuffer[..]);
+    log_framebuffer_samples("color-bars-fill", &ctx.framebuffer[..]);
+
+    // 首帧采用分块推送，降低长事务对调度的影响；可在调试时整体禁止 SPI 更新，以隔离 UART 问题。
+    if ENABLE_DISPLAY_SPI_UPDATES {
         let bytes_per_row = DISPLAY_WIDTH * 2;
         let mut y = 0usize;
         while y < DISPLAY_HEIGHT {
             let rows = core::cmp::min(DISPLAY_CHUNK_ROWS, DISPLAY_HEIGHT - y);
             let start = y * bytes_per_row;
             let end = start + rows * bytes_per_row;
+            info!("display: init chunk y={} rows={}", y, rows);
             display
                 .show_raw_data(
                     0,
@@ -308,19 +354,33 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                 )
                 .await
                 .expect("frame push (chunked init)");
+            info!("display: init chunk done y={} rows={}", y, rows);
 
             for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
                 yield_now().await;
             }
             y += rows;
         }
+        info!("Color bars rendered");
+        ctx.previous_framebuffer
+            .copy_from_slice(&ctx.framebuffer[..]);
+    } else {
+        info!("Color bars rendering skipped: display SPI updates disabled for UART A/B test");
     }
-
-    info!("Color bars rendered");
     let mut last_push_ms = timestamp_ms() as u32;
     loop {
         let now = timestamp_ms() as u32;
         if now.wrapping_sub(last_push_ms) >= DISPLAY_MIN_FRAME_INTERVAL_MS {
+            let frame_idx = DISPLAY_FRAME_COUNT
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            // 为了确认渲染 loop 的活跃情况，短期内每帧打印；后续可以按需降采样。
+            info!(
+                "display: rendering frame {} (dt_ms={})",
+                frame_idx,
+                now.wrapping_sub(last_push_ms)
+            );
+
             let snapshot = {
                 let guard = telemetry.lock().await;
                 guard.snapshot()
@@ -335,37 +395,145 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                 ui::render(&mut frame, &snapshot);
             }
 
-            // 分块推送整帧：按行切片，块间短暂让出，提升 UART 读取机会
-            let bytes_per_row = DISPLAY_WIDTH * 2;
-            let mut y = 0usize;
-            while y < DISPLAY_HEIGHT {
-                let rows = core::cmp::min(DISPLAY_CHUNK_ROWS, DISPLAY_HEIGHT - y);
-                let start = y * bytes_per_row;
-                let end = start + rows * bytes_per_row;
-                display
-                    .show_raw_data(
-                        0,
-                        y as u16,
-                        DISPLAY_WIDTH as u16,
-                        rows as u16,
-                        &ctx.framebuffer[start..end],
-                    )
-                    .await
-                    .expect("frame push (chunked)");
-
-                for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
-                    yield_now().await;
-                }
-                y += rows;
+            if frame_idx <= FRAME_SAMPLE_FRAMES {
+                log_framebuffer_span("rendered-frame", &ctx.framebuffer[..]);
+                log_framebuffer_samples("rendered-frame", &ctx.framebuffer[..]);
             }
+
+            let mut dirty_rows = 0usize;
+            let mut dirty_spans = 0usize;
+
+            if ENABLE_DISPLAY_SPI_UPDATES {
+                let bytes_per_row = DISPLAY_WIDTH * 2;
+                let mut change_map = [false; DISPLAY_HEIGHT];
+                for row in 0..DISPLAY_HEIGHT {
+                    let offset = row * bytes_per_row;
+                    change_map[row] = ctx.framebuffer[offset..offset + bytes_per_row]
+                        != ctx.previous_framebuffer[offset..offset + bytes_per_row];
+                }
+
+                let mut row = 0usize;
+                while row < DISPLAY_HEIGHT {
+                    if !change_map[row] {
+                        row += 1;
+                        continue;
+                    }
+
+                    let start_row = row;
+                    row += 1;
+                    let mut gap_rows = 0usize;
+                    while row < DISPLAY_HEIGHT {
+                        if change_map[row] {
+                            gap_rows = 0;
+                            row += 1;
+                        } else if gap_rows < DISPLAY_DIRTY_MERGE_GAP_ROWS {
+                            gap_rows += 1;
+                            row += 1;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    let rows_changed = row - start_row;
+                    let start_idx = start_row * bytes_per_row;
+                    let end_idx = start_idx + rows_changed * bytes_per_row;
+                    display
+                        .show_raw_data(
+                            0,
+                            start_row as u16,
+                            DISPLAY_WIDTH as u16,
+                            rows_changed as u16,
+                            &ctx.framebuffer[start_idx..end_idx],
+                        )
+                        .await
+                        .expect("frame push (dirty)");
+                    ctx.previous_framebuffer[start_idx..end_idx]
+                        .copy_from_slice(&ctx.framebuffer[start_idx..end_idx]);
+                    dirty_rows += rows_changed;
+                    dirty_spans += 1;
+                }
+
+                if dirty_spans == 0 || dirty_spans >= DISPLAY_DIRTY_SPAN_FALLBACK {
+                    display
+                        .show_raw_data(
+                            0,
+                            0,
+                            DISPLAY_WIDTH as u16,
+                            DISPLAY_HEIGHT as u16,
+                            &ctx.framebuffer[..],
+                        )
+                        .await
+                        .expect("frame push (full fallback)");
+                    ctx.previous_framebuffer
+                        .copy_from_slice(&ctx.framebuffer[..]);
+                    dirty_rows = DISPLAY_HEIGHT;
+                    dirty_spans = 1;
+                }
+            } else {
+                dirty_rows = 0;
+                dirty_spans = 0;
+            }
+
+            info!(
+                "display: frame {} push complete (dirty_rows={} dirty_spans={})",
+                frame_idx, dirty_rows, dirty_spans
+            );
 
             last_push_ms = now;
         }
 
         // 主动让出，避免占用执行器
-        for _ in 0..200 {
+        for _ in 0..20 {
             yield_now().await;
         }
+    }
+}
+
+fn log_framebuffer_span(label: &'static str, framebuffer: &[u8]) {
+    if framebuffer.len() < 2 {
+        return;
+    }
+
+    let mut min = u16::MAX;
+    let mut max = 0u16;
+    let mut checksum = 0u32;
+
+    for chunk in framebuffer.chunks_exact(2) {
+        let px = u16::from_be_bytes([chunk[0], chunk[1]]);
+        if px < min {
+            min = px;
+        }
+        if px > max {
+            max = px;
+        }
+        checksum = checksum.wrapping_add(px as u32);
+    }
+
+    info!(
+        "display framebuffer stats {}: min_pixel={} max_pixel={} checksum={}",
+        label, min, max, checksum
+    );
+}
+
+fn log_framebuffer_samples(label: &'static str, framebuffer: &[u8]) {
+    for &(x, y) in FRAME_LOG_POINTS.iter() {
+        if x >= DISPLAY_WIDTH || y >= DISPLAY_HEIGHT {
+            continue;
+        }
+        let idx = (y * DISPLAY_WIDTH + x) * 2;
+        if idx + 1 >= framebuffer.len() {
+            continue;
+        }
+        let px = u16::from_be_bytes([framebuffer[idx], framebuffer[idx + 1]]);
+        info!(
+            "display framebuffer sample {} idx=({}, {} ) pixel={} (hi={}, lo={})",
+            label,
+            x,
+            y,
+            px,
+            framebuffer[idx],
+            framebuffer[idx + 1]
+        );
     }
 }
 
@@ -374,23 +542,41 @@ async fn uart_link_task(
     uart: &'static mut Uart<'static, Async>,
     telemetry: &'static TelemetryMutex,
 ) {
-    info!("UART link task starting");
-    let mut decoder: SlipDecoder<512> = SlipDecoder::new();
+    info!(
+        "UART link task starting (polling read): baud={} rx_fifo_thresh={} rx_timeout_syms={} slip_cap={} display_min_frame_interval_ms={} display_chunk_rows={} display_chunk_yield_loops={} display_spi_updates={}",
+        UART_BAUD,
+        UART_RX_FIFO_FULL_THRESHOLD,
+        UART_RX_TIMEOUT_SYMS,
+        FAST_STATUS_SLIP_CAPACITY,
+        DISPLAY_MIN_FRAME_INTERVAL_MS,
+        DISPLAY_CHUNK_ROWS,
+        DISPLAY_CHUNK_YIELD_LOOPS,
+        ENABLE_DISPLAY_SPI_UPDATES,
+    );
+
+    let mut decoder: SlipDecoder<FAST_STATUS_SLIP_CAPACITY> = SlipDecoder::new();
     let mut chunk = [0u8; 512];
 
     loop {
-        // 尝试尽可能多地拉取数据以避免 FIFO 堆积；仅在空闲/超时时短暂让出。
-        let mut drained_once = false;
+        // 采用非阻塞的轮询式读取：尽可能快速抽干 RX FIFO，避免完全依赖中断/超时唤醒。
+        // read() 在 FIFO 中有数据时立即返回本次搬运的字节数；在无数据时返回 0。
+        let mut drained_any = false;
+        let mut chunk_reads = 0usize;
         loop {
-            match uart.read_async(&mut chunk).await {
+            match uart.read(&mut chunk) {
                 Ok(n) if n > 0 => {
-                    drained_once = true;
+                    drained_any = true;
+                    chunk_reads += 1;
                     feed_decoder(&chunk[..n], &mut decoder, telemetry).await;
-                    // 继续下一次 read_async 以尽快清空 FIFO
+                    // 继续下一次 read 以尽快清空 FIFO
+                    if chunk_reads >= UART_MAX_CHUNKS_PER_BATCH {
+                        // 大量连续数据时主动让出，让显示/UI 任务获得执行机会。
+                        break;
+                    }
                     continue;
                 }
                 Ok(_) => {
-                    // 没有新数据（可能因超时），跳出去让出调度
+                    // 没有新数据，结束本轮轮询
                     break;
                 }
                 Err(err) => {
@@ -403,17 +589,20 @@ async fn uart_link_task(
             }
         }
 
-        // 若刚刚处理过数据，轻微让出；否则更快地再次尝试以降低端到端延迟。
-        let yield_iters = if drained_once { 1 } else { 0 };
-        for _ in 0..yield_iters {
+        // 若刚刚处理过数据，轻微让出；否则多让出几次避免过度占用 CPU。
+        if drained_any {
             yield_now().await;
+        } else {
+            for _ in 0..8 {
+                yield_now().await;
+            }
         }
     }
 }
 
 async fn feed_decoder(
     bytes: &[u8],
-    decoder: &mut SlipDecoder<512>,
+    decoder: &mut SlipDecoder<FAST_STATUS_SLIP_CAPACITY>,
     telemetry: &'static TelemetryMutex,
 ) {
     for &byte in bytes {
@@ -424,7 +613,11 @@ async fn feed_decoder(
                     let total = FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                     // 默认每 32 帧打印一次成功节奏，用于长时间验收
                     if total % 32 == 0 {
-                        info!("fast_status ok (count={})", total);
+                        let display_running = DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
+                        info!(
+                            "fast_status ok (count={}, display_running={})",
+                            total, display_running
+                        );
                     }
                     // 严格只在完整 SLIP 帧结束符后才解码，上述分支已满足
                     let _ = header; // keep header verified even if unused further
@@ -476,6 +669,7 @@ fn rate_limited_proto_warn(kind: &str, len: usize) {
 fn main() -> ! {
     let peripherals = hal::init(hal::Config::default());
 
+    info!("LoadLynx digital firmware version: {}", FW_VERSION);
     info!("LoadLynx digital alive; initializing local peripherals");
 
     // GPIO34 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
@@ -492,19 +686,27 @@ fn main() -> ! {
     let backlight_pin = peripherals.GPIO15;
     let ledc_peripheral = peripherals.LEDC;
 
+    // 配置 SPI2 并启用 DMA：使用固定大小的 DMA 缓冲区，HAL 会在内部按片段搬运。
+    // 单块显示数据约 15KB（32 行 × 480B/行），远小于 HAL 支持的 ~32KB 限制。
+    // 为降低内存占用与复杂度，使用较小的 DMA 缓冲（4KB 级别）。
+    // HAL 会根据描述符自动分段搬运更大的显示块。
+    let (rx_buf, rx_desc, tx_buf, tx_desc) = esp_hal::dma_buffers!(8190);
+    let dma_rx_buf = DmaRxBuf::new(rx_desc, rx_buf).expect("dma rx buf");
+    let dma_tx_buf = DmaTxBuf::new(tx_desc, tx_buf).expect("dma tx buf");
+
     let spi = Spi::new(
         spi_peripheral,
         SpiConfig::default()
-            .with_frequency(Rate::from_mhz(60))
+            .with_frequency(Rate::from_mhz(80))
             .with_mode(Mode::_0),
     )
     .expect("spi init")
     .with_sck(sck)
     .with_mosi(mosi)
     .with_cs(NoPin)
-    // 启用 SPI DMA，降低 CPU 占用；配合 32B 对齐的 framebuffer 与 32 行/块的分片，
-    // 能满足 ESP32-S3 对 PSRAM 访问的对齐要求（若 framebuffer 驻留于 PSRAM）。
+    // 启用 SPI DMA 并绑定 DMA 缓冲区，然后切换到异步总线
     .with_dma(peripherals.DMA_CH0)
+    .with_buffers(dma_rx_buf, dma_tx_buf)
     .into_async();
 
     let cs = Output::new(cs_pin, Level::High, OutputConfig::default());
@@ -529,14 +731,18 @@ fn main() -> ! {
     backlight_channel
         .configure(ledc_channel::config::Config {
             timer: &*backlight_timer,
-            duty_pct: 20,
+            // 调试阶段提升背光亮度，避免“有画面但看起来近似黑屏”。
+            duty_pct: 80,
             drive_mode: DriveMode::PushPull,
         })
         .expect("backlight channel");
     let backlight_channel = BACKLIGHT_CHANNEL.init(backlight_channel);
-    backlight_channel.set_duty(20).expect("backlight duty set");
+    backlight_channel.set_duty(80).expect("backlight duty set");
 
-    let framebuffer = &mut FRAMEBUFFER.init(Align32([0; FRAMEBUFFER_LEN])).0;
+    let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
+    let prev_framebuffer = &mut PREVIOUS_FRAMEBUFFER
+        .init_with(|| Align32([0; FRAMEBUFFER_LEN]))
+        .0;
 
     let resources = DISPLAY_RESOURCES.init(DisplayResources {
         spi: Some(spi),
@@ -544,6 +750,7 @@ fn main() -> ! {
         dc: Some(dc),
         rst: Some(rst),
         framebuffer,
+        previous_framebuffer: prev_framebuffer,
     });
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
@@ -562,16 +769,19 @@ fn main() -> ! {
     }
 
     // UART1 cross-link on GPIO17 (TX) / GPIO18 (RX)
+    // NOTE: esp-hal 默认的 RxConfig 在大多数场景下更稳定：
+    //   fifo_full_threshold ≈ 120, timeout ≈ 10 符号。
+    // 之前我们调得太敏感（16 / 2），会放大中断压力；这里先回到接近默认的安全值。
     let uart_cfg = UartConfig::default()
-        .with_baudrate(230_400)
+        // Match analog MCU; 230400 baud is required for 60 Hz FAST_STATUS traffic with SLIP overhead.
+        .with_baudrate(UART_BAUD)
         .with_data_bits(DataBits::_8)
         .with_parity(Parity::None)
         .with_stop_bits(StopBits::_1)
         .with_rx(
-            // 更低的 FIFO 满阈值与更短的超时以更快触发 RX 事件，避免积压
             RxConfig::default()
-                .with_fifo_full_threshold(1)
-                .with_timeout(1),
+                .with_fifo_full_threshold(UART_RX_FIFO_FULL_THRESHOLD)
+                .with_timeout(UART_RX_TIMEOUT_SYMS),
         );
 
     info!("UART1 cross-link: GPIO17=TX / GPIO18=RX");
@@ -586,10 +796,24 @@ fn main() -> ! {
 
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
-        spawner.spawn(ticker()).ok();
-        spawner.spawn(display_task(resources, telemetry)).ok();
-        spawner.spawn(uart_link_task(uart1, telemetry)).ok();
-        spawner.spawn(stats_task()).ok();
+        info!("spawning ticker task");
+        spawner.spawn(ticker()).expect("ticker spawn");
+        info!("spawning diag task");
+        spawner.spawn(diag_task()).expect("diag_task spawn");
+        info!("spawning display task");
+        spawner
+            .spawn(display_task(resources, telemetry))
+            .expect("display_task spawn");
+        if ENABLE_UART_LINK_TASK {
+            info!("spawning uart link task");
+            spawner
+                .spawn(uart_link_task(uart1, telemetry))
+                .expect("uart_link_task spawn");
+        } else {
+            info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
+        }
+        info!("spawning stats task");
+        spawner.spawn(stats_task()).expect("stats_task spawn");
     })
 }
 
