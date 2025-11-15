@@ -5,10 +5,18 @@ BIN      ?= digital
 PROFILE  ?= release
 PORT     ?=
 BAUD     ?= 921600
+MONITOR_BAUD ?= $(BAUD)
 CHIP     ?= esp32s3
 LOGFMT   ?= defmt
 ESPFLASH ?= espflash
 CARGO    ?= cargo +esp
+ENSURE_ESP32_PORT ?= $(abspath ../../scripts/ensure_esp32_port.sh)
+
+ifeq ($(PORT),)
+  ifneq ($(wildcard $(ENSURE_ESP32_PORT)),)
+    PORT := $(shell $(ENSURE_ESP32_PORT))
+  endif
+endif
 
 ifeq ($(PROFILE),release)
   CARGO_FLAGS := --release
@@ -21,6 +29,7 @@ ELF    := $(BINDIR)/$(BIN)
 
 PORT_FLAG   := $(if $(PORT),--port $(PORT),)
 BAUD_FLAG   := $(if $(BAUD),-B $(BAUD),)
+MONITOR_BAUD_FLAG := $(if $(MONITOR_BAUD),-r $(MONITOR_BAUD),)
 CHIP_FLAG   := --chip $(CHIP)
 LOGFMT_FLAG := $(if $(LOGFMT),--log-format $(LOGFMT),)
 ESPFLASH_ARGS ?=
@@ -60,13 +69,13 @@ clean:
 	cargo clean
 
 run: build
-	$(ESPFLASH) flash "$(ELF)" --monitor $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(ESPFLASH_ARGS)
+	$(ESPFLASH) flash "$(ELF)" --monitor $(PORT_FLAG) $(BAUD_FLAG) $(MONITOR_BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(ESPFLASH_ARGS)
 
 flash: build
 	$(ESPFLASH) flash "$(ELF)" $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(ESPFLASH_ARGS)
 
 attach: build
-	$(ESPFLASH) monitor $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) --elf "$(ELF)" $(ESPFLASH_ARGS)
+	$(ESPFLASH) monitor $(PORT_FLAG) $(BAUD_FLAG) $(MONITOR_BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) --elf "$(ELF)" $(ESPFLASH_ARGS)
 
 reset:
 	$(ESPFLASH) reset $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(ESPFLASH_ARGS)

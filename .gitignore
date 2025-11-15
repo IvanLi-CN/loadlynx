@@ -8,3 +8,4 @@ tmp/
 .serena/memories/suggested_commands.md
 .serena/memories/task_completion.md
 .stm32-probe
+.esp32-port
