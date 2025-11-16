@@ -121,6 +121,26 @@
   - 目标：在 230400 波特率下，于“显示关闭”→“显示限速”→“正常显示”三个阶段验证 `Rx(FifoOverflowed)` ≈ 0，并确认 `decode_errs` 收敛。  
   - 条件：保留 SPI DMA、FAST_STATUS_HZ=30 起步，必要时测 60Hz；记录 DMA buffer 大小、阈值、环形读策略和日志路径。  
   - 状态：第一阶段（显示关闭）已在 2025-11-16 13:57 实验完成；下一步是恢复显示推屏与 60Hz 发送端并观察 decode_errs。
+- **后续计划：完整 UI + 渲染性能优化**  
+  - 目标：在保持当前 UART UHCI DMA 稳定性的前提下，直接针对“现有完整 UI”做性能优化和局部刷新设计，避免依赖任何“简化界面”变体。  
+  - 步骤：  
+    1. 以当前完整界面（`ui::render`）和现有帧率配置为基线，短时运行观察栈守卫、`dt_ms` 分布和 SPI 事务情况，确认瓶颈集中在渲染而非 UART/SPI 带宽。  
+    2. 若需要 profile，可引入仅用于调试的 feature（例如 `feature = "ui_profile"`），在不改变界面内容的前提下插桩记录每帧渲染耗时、格式化调用次数和绘制面积，用于指导后续优化。  
+    3. 在数据层缓存“上一帧 UI 状态”，基于新旧数值对比驱动局部渲染（完整界面不变）：  
+       - 在 `TelemetryModel` 中维护 `last_rendered: Option<UiSnapshot>`，提供 `diff_for_render() -> (UiSnapshot, UiChangeMask)` 接口，用数值阈值/字符串不等来决定哪些组件需要更新。  
+       - `UiChangeMask` 按功能块拆分，例如：`main_metrics`（左侧 V/I/P 数码管）、`voltage_pair`、`current_pair`、`telemetry_lines`（底部 5 行）、`bars`（mirror bar/条形图等）。  
+    4. 在视图层实现按组件的局部刷新，而不是每帧全屏重绘：  
+       - 保留现有 `ui::render` 作为整帧重绘函数，仅用于首帧或调试。  
+       - 新增 `ui::render_partial(frame, snapshot, mask)`，内部根据 `UiChangeMask` 只调用对应的 `draw_*` 函数，重绘受影响的矩形区域，背景和其它静态元素保持不动。  
+       - 在 `display_task` 主循环中，先调用 `diff_for_render()` 获取 `(snapshot, mask)`，若 `mask` 全 false 则跳过本帧 UI 绘制；否则调用 `render_partial`。  
+    5. 将“值驱动的局部渲染”与现有 SPI 行级 diff 结合：  
+       - 每个 `draw_*` 函数（如 `draw_main_metric`、`draw_mirror_bar`、`draw_telemetry` 等）本身就有明确的屏幕矩形区域，可在 `render_partial` 内累积一个 `dirty_rows[DISPLAY_HEIGHT]` 数组，按这些区域的 `top/bottom` 落座标设置行标记。  
+       - 后续的行合并与 `show_raw_data` 发送逻辑沿用当前实现，只是行脏信息直接来自组件级 diff，而不再依赖逐行 `memcmp(framebuffer, previous_framebuffer)`。  
+    6. 在此基础上做全局级别的性能优化，而不改变 UI 设计：  
+       - 将所有显示用字符串（主数值、电压/电流对、状态行等）的格式化逻辑，从 `ui::render` 挪到 `TelemetryModel::update_from_status`，只在数据变化时重算文案；`UiSnapshot` 持有这些预格式化的 `String`，渲染层只读。  
+       - 将背景块、卡片、轴线等真正静态的元素在首帧渲染到 framebuffer 中，并在后续帧中仅更新数码管、条形图和文本区域。  
+       - 在 `display_task` 中区分“采样频率”和“重绘频率”：保持 80ms 周期采样/更新快照，但只有当关键字段变化超过阈值（例如电压/电流/温度或运行时间秒数变动）时才触发重绘，否则降低重绘频率以平滑 CPU/栈压力。  
+    7. 如需 A/B，对比方案应以“完整 UI + 不同渲染策略/阈值”为主，而不是切换到另一套简化界面；默认构建始终使用原设计界面，仅通过 feature 控制调试插桩与优化路径。
 - **2025-11-16 12:00 digital UART UHCI DMA 尝试（结果：日志解码失败）**  
   - 版本：digital `digital 0.1.0 (profile release, 539f0f8-dirty, src 0xc0cce3b455259210)`；analog 未变。  
   - 配置：UART 230400；FAST_STATUS_HZ=30；DISPLAY_MIN_FRAME_INTERVAL_MS=25；DISPLAY_CHUNK_YIELD_LOOPS=0；SPI DMA on；UART RX via UHCI DMA（DMA_CH1，chunk_limit=4092，缓冲=~4KB）；LOGFMT=defmt。  
@@ -147,8 +167,21 @@
   - 配置：UART 230400；FAST_STATUS_HZ=30；DISPLAY_MIN_FRAME_INTERVAL_MS=50；DISPLAY_CHUNK_ROWS=12；DISPLAY_CHUNK_YIELD_LOOPS=3；SPI DMA on；UART RX via UHCI DMA（DMA_CH1，buf=2048，chunk_limit=2048）；UART RX 阈值=32，超时=2。  
   - 结果：~10.9s 时出现多次 panic（`Breakpoint on ProCpu / Cp0Disabled`），任务崩溃；未记录到 UART 溢出或 fast_status 行（崩溃前主要是显示日志）。日志：`tmp/agent-logs/digital-20251116-133427.log`。  
   - 结论：当前 UHCI DMA 实施不稳定（可能 chunk_limit/配置或 DMA 使用方式触发异常）；需最小化示例重测或进一步调试 UHCI 配置。
-
   - 追踪：崩溃前 DMA chunk 列表已经跑满（`chunk_limit=buf_len=2048`），怀疑是 ISR/任务共享的缓冲在高负载下未及时 recycle；下一次实验计划将 `chunk_limit` 降到 1024 并加上故障计数。
+
+- **2025-11-16 20:39 digital UART UHCI DMA 基线（display task 关闭，仅串口验证）**  
+  - 版本：digital `digital 0.1.0 (profile release, 5cd4e45-dirty, src 0x83890fa979237bbd)`；analog `analog 0.1.0 (profile release, 5ccb582-dirty, src 0x8c5c13041e8576aa)`。  
+  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/60；DISPLAY_MIN_FRAME_INTERVAL_MS=80；`ENABLE_DISPLAY_TASK=false`；`ENABLE_DISPLAY_SPI_UPDATES=false`；UART RX via UHCI DMA（DMA_CH1，buf=1024，chunk_limit=1024）；UART 阈值=32，超时=2。  
+  - 时长：~22 s（`scripts/agent_verify_digital.sh --timeout 25`，日志：`tmp/agent-logs/digital-20251116-203944.log`）。  
+  - 指标：`uart_rx_err_total=0` 全程无溢出；`fast_status_ok` 0→1156（约 52 次/秒，对应 analog mock ~60Hz）；`decode_errs=0`，显示任务完全关闭。  
+  - 结论：在关闭显示任务的前提下，UHCI DMA 路径在 230400 波特率 + 60Hz FAST_STATUS 下已长期稳定运行，串口本身不再是性能瓶颈；后续问题集中在显示任务与 Core0 栈/调度。
+
+- **2025-11-16 21:37 digital UART UHCI DMA + 简化 UI（SPI 推屏开启）**  
+  - 版本：digital `digital 0.1.0 (profile release, 9accc66-dirty, src 0x????????????????)`；analog 同上。  
+  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/60；DISPLAY_MIN_FRAME_INTERVAL_MS=80；DISPLAY_CHUNK_ROWS=8；DISPLAY_CHUNK_YIELD_LOOPS=6；`ENABLE_DISPLAY_TASK=true`；`SIMPLE_DISPLAY_MODE=true`（简化条形图 UI）；`ENABLE_DISPLAY_SPI_UPDATES=true`；UART RX via UHCI DMA（DMA_CH1，buf=1024，chunk_limit=1024）；UART 阈值=32，超时=2。  
+  - 时长：~22 s（`scripts/agent_verify_digital.sh --timeout 25`，日志：`tmp/agent-logs/digital-20251116-213713.log`）。  
+  - 指标：`uart_rx_err_total=0`；`fast_status_ok` 0→1134（约 51 次/秒）持续线性增长；`decode_errs` 初始有少量（6 次）后停止增加；display 帧间隔稳定在 ~80ms，dirty_rows 多数为小块，偶尔整帧 fallback。  
+  - 结论：在启用“简化 UI + SPI DMA 推屏”的前提下，数字板可以同时维持稳定的显示刷新和 UART UHCI DMA 链路；串口不再因显示负载而溢出或大量解码错误。现有冲突集中在“完整 UI + 栈守卫”这一组合上，而非 UART/SPI 本身的带宽或配置。
 
 ## UHCI DMA 配置与注意事项
 
