@@ -67,17 +67,18 @@ const FRAME_LOG_POINTS: [(usize, usize); 3] = [
     (DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2),
     (DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1),
 ];
-// 控制是否实际通过 SPI 推送到 LCD：DMA 验证阶段恢复开启以评估串口影响。
-const ENABLE_DISPLAY_SPI_UPDATES: bool = true;
+// 控制是否实际通过 SPI 推送到 LCD：当前优先稳定 UART 链路，先关闭显示推屏。
+const ENABLE_DISPLAY_SPI_UPDATES: bool = false;
 // 调试开关：正常运行应为 true，仅在单独验证 UI 或其它外设时才临时关闭 UART 链路任务。
 const ENABLE_UART_LINK_TASK: bool = true;
 
 // UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
 const UART_BAUD: u32 = 230_400;
-const UART_RX_FIFO_FULL_THRESHOLD: u16 = 120;
-const UART_RX_TIMEOUT_SYMS: u8 = 10;
-const FAST_STATUS_SLIP_CAPACITY: usize = 1024; // revert to previous stable capacity
-const UART_DMA_BUF_LEN: usize = 512; // 测试更小 chunk，减少栈压力
+// 回到更积极的阈值/超时组合，并放大奖励 DMA 吞吐的缓冲。
+const UART_RX_FIFO_FULL_THRESHOLD: u16 = 32;
+const UART_RX_TIMEOUT_SYMS: u8 = 2;
+const FAST_STATUS_SLIP_CAPACITY: usize = 1024;
+const UART_DMA_BUF_LEN: usize = 1024;
 const ENABLE_UART_UHCI_DMA: bool = true;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
