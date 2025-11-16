@@ -12,7 +12,9 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
+use embedded_io_async::Read as AsyncRead;
 use esp_hal::time::Instant as HalInstant;
+use esp_hal::uart::uhci::{self, RxConfig as UhciRxConfig, TxConfig as UhciTxConfig, Uhci};
 use esp_hal::uart::{Config as UartConfig, DataBits, Parity, RxConfig, StopBits, Uart};
 use esp_hal::{
     self as hal, Async,
@@ -32,7 +34,7 @@ use esp_hal::{
     time::Rate,
 };
 // Async is already in scope via `use esp_hal::{ self as hal, Async, ... }`
-// non-blocking读取通过 `uart.read_ready()` + `uart.read()` 实现
+// UART async API (`embedded-io`) provides awaitable reads; leveraged below
 use lcd_async::{
     Builder, interface::SpiInterface, models::ST7789, options::Orientation,
     raw_framebuf::RawFrameBuf,
@@ -52,11 +54,11 @@ const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
-const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 25; // 进一步压缩帧间隔，改善体验
+const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 80; // 测试降载，把显示对执行器的占用降到最低
 // 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
 // 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
-const DISPLAY_CHUNK_ROWS: usize = 24; // 320/24≈14 块；兼顾串口公平性与刷新速度
-const DISPLAY_CHUNK_YIELD_LOOPS: usize = 0; // 默认不在块间让出，防止刷新被打断
+const DISPLAY_CHUNK_ROWS: usize = 8; // 再缩短单事务
+const DISPLAY_CHUNK_YIELD_LOOPS: usize = 6; // 增大让出次数
 const DISPLAY_DIRTY_MERGE_GAP_ROWS: usize = 8; // 适度扩大合并间隙，减少 SPI 往返
 const DISPLAY_DIRTY_SPAN_FALLBACK: usize = 12; // 脏区 span 过多时退回整帧推送
 const FRAME_SAMPLE_FRAMES: u32 = 3; // 仅记录前几帧像素统计，避免日志过多
@@ -65,7 +67,7 @@ const FRAME_LOG_POINTS: [(usize, usize); 3] = [
     (DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2),
     (DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1),
 ];
-// 控制是否实际通过 SPI 推送到 LCD：正常运行应为 true，A/B 调试串口时可临时关闭。
+// 控制是否实际通过 SPI 推送到 LCD：DMA 验证阶段恢复开启以评估串口影响。
 const ENABLE_DISPLAY_SPI_UPDATES: bool = true;
 // 调试开关：正常运行应为 true，仅在单独验证 UI 或其它外设时才临时关闭 UART 链路任务。
 const ENABLE_UART_LINK_TASK: bool = true;
@@ -74,8 +76,9 @@ const ENABLE_UART_LINK_TASK: bool = true;
 const UART_BAUD: u32 = 230_400;
 const UART_RX_FIFO_FULL_THRESHOLD: u16 = 120;
 const UART_RX_TIMEOUT_SYMS: u8 = 10;
-const UART_MAX_CHUNKS_PER_BATCH: usize = 4; // 进一步降低单批搬运量，让 display 有机会插队
-const FAST_STATUS_SLIP_CAPACITY: usize = 1024;
+const FAST_STATUS_SLIP_CAPACITY: usize = 1024; // revert to previous stable capacity
+const UART_DMA_BUF_LEN: usize = 512; // 测试更小 chunk，减少栈压力
+const ENABLE_UART_UHCI_DMA: bool = true;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 #[repr(align(32))]
@@ -87,6 +90,7 @@ static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
+static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
 
@@ -543,7 +547,7 @@ async fn uart_link_task(
     telemetry: &'static TelemetryMutex,
 ) {
     info!(
-        "UART link task starting (polling read): baud={} rx_fifo_thresh={} rx_timeout_syms={} slip_cap={} display_min_frame_interval_ms={} display_chunk_rows={} display_chunk_yield_loops={} display_spi_updates={}",
+        "UART link task starting (await read, no DMA): baud={} rx_fifo_thresh={} rx_timeout_syms={} slip_cap={} display_min_frame_interval_ms={} display_chunk_rows={} display_chunk_yield_loops={} display_spi_updates={}",
         UART_BAUD,
         UART_RX_FIFO_FULL_THRESHOLD,
         UART_RX_TIMEOUT_SYMS,
@@ -558,45 +562,78 @@ async fn uart_link_task(
     let mut chunk = [0u8; 512];
 
     loop {
-        // 采用非阻塞的轮询式读取：尽可能快速抽干 RX FIFO，避免完全依赖中断/超时唤醒。
-        // read() 在 FIFO 中有数据时立即返回本次搬运的字节数；在无数据时返回 0。
-        let mut drained_any = false;
-        let mut chunk_reads = 0usize;
-        loop {
-            match uart.read(&mut chunk) {
-                Ok(n) if n > 0 => {
-                    drained_any = true;
-                    chunk_reads += 1;
-                    feed_decoder(&chunk[..n], &mut decoder, telemetry).await;
-                    // 继续下一次 read 以尽快清空 FIFO
-                    if chunk_reads >= UART_MAX_CHUNKS_PER_BATCH {
-                        // 大量连续数据时主动让出，让显示/UI 任务获得执行机会。
-                        break;
-                    }
-                    continue;
-                }
-                Ok(_) => {
-                    // 没有新数据，结束本轮轮询
-                    break;
-                }
-                Err(err) => {
-                    // 计数并限频打印，重置解码器以丢弃半帧
-                    record_uart_error();
-                    rate_limited_uart_warn(&err);
-                    decoder.reset();
-                    break;
-                }
+        match AsyncRead::read(uart, &mut chunk).await {
+            Ok(n) if n > 0 => {
+                feed_decoder(&chunk[..n], &mut decoder, telemetry).await;
+            }
+            Ok(_) => {
+                continue;
+            }
+            Err(err) => {
+                record_uart_error();
+                rate_limited_uart_warn(&err);
+                decoder.reset();
+                continue;
             }
         }
 
-        // 若刚刚处理过数据，轻微让出；否则多让出几次避免过度占用 CPU。
-        if drained_any {
-            yield_now().await;
-        } else {
-            for _ in 0..8 {
-                yield_now().await;
+        yield_now().await;
+    }
+}
+
+#[embassy_executor::task]
+async fn uart_link_task_dma(
+    mut uhci_rx: uhci::UhciRx<'static, Async>,
+    mut dma_rx: DmaRxBuf,
+    telemetry: &'static TelemetryMutex,
+) {
+    info!(
+        "UART link task starting (UHCI DMA): baud={} rx_fifo_thresh={} rx_timeout_syms={} dma_buf={} slip_cap={} display_min_frame_interval_ms={} display_chunk_rows={} display_chunk_yield_loops={} display_spi_updates={}",
+        UART_BAUD,
+        UART_RX_FIFO_FULL_THRESHOLD,
+        UART_RX_TIMEOUT_SYMS,
+        UART_DMA_BUF_LEN,
+        FAST_STATUS_SLIP_CAPACITY,
+        DISPLAY_MIN_FRAME_INTERVAL_MS,
+        DISPLAY_CHUNK_ROWS,
+        DISPLAY_CHUNK_YIELD_LOOPS,
+        ENABLE_DISPLAY_SPI_UPDATES,
+    );
+
+    let decoder = UART_DMA_DECODER.init(SlipDecoder::new());
+
+    loop {
+        let mut transfer = match uhci_rx.read(dma_rx) {
+            Ok(t) => t,
+            Err((err, rx, buf)) => {
+                record_uart_error();
+                rate_limited_uart_warn(&err);
+                uhci_rx = rx;
+                dma_rx = buf;
+                continue;
+            }
+        };
+
+        transfer.wait_for_done().await;
+        let (res, rx_back, buf_back) = transfer.wait();
+        uhci_rx = rx_back;
+        match res {
+            Ok(()) => {
+                let received = buf_back.number_of_received_bytes();
+                let slice_len = received.min(buf_back.as_slice().len());
+                feed_decoder(&buf_back.as_slice()[..slice_len], decoder, telemetry).await;
+                dma_rx = buf_back;
+            }
+            Err(err) => {
+                dma_rx = buf_back;
+                record_uart_error();
+                rate_limited_uart_warn(&err);
+                decoder.reset();
+                continue;
             }
         }
+
+        yield_now().await;
     }
 }
 
@@ -786,13 +823,43 @@ fn main() -> ! {
 
     info!("UART1 cross-link: GPIO17=TX / GPIO18=RX");
 
-    let uart = Uart::new(peripherals.UART1, uart_cfg)
-        .expect("uart1 init")
-        .with_tx(peripherals.GPIO17)
-        .with_rx(peripherals.GPIO18)
-        .into_async();
+    // 选择 UART 接收模式：默认启用 UHCI DMA 环形搬运，A/B 时可切换为 async no-DMA。
+    let mut uart_async: Option<Uart<'static, Async>> = None;
+    let mut uhci_rx_opt: Option<uhci::UhciRx<'static, Async>> = None;
+    let mut uhci_dma_buf_opt: Option<DmaRxBuf> = None;
 
-    let uart1 = UART1_CELL.init(uart);
+    if ENABLE_UART_UHCI_DMA {
+        let uart_blocking = Uart::new(peripherals.UART1, uart_cfg)
+            .expect("uart1 init")
+            .with_tx(peripherals.GPIO17)
+            .with_rx(peripherals.GPIO18);
+
+        // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
+        let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
+            esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
+        let dma_rx = DmaRxBuf::new(uhci_rx_desc, uhci_rx_buf).expect("uhci dma rx buf");
+
+        let mut uhci =
+            Uhci::new(uart_blocking, peripherals.UHCI0, peripherals.DMA_CH1).into_async();
+        uhci.apply_rx_config(&UhciRxConfig::default().with_chunk_limit(UART_DMA_BUF_LEN as u16))
+            .expect("uhci rx cfg");
+        uhci.apply_tx_config(&UhciTxConfig::default())
+            .expect("uhci tx cfg");
+        uhci.set_uart_config(&uart_cfg).expect("uhci set cfg");
+
+        let (uhci_rx, _uhci_tx) = uhci.split();
+        uhci_rx_opt = Some(uhci_rx);
+        uhci_dma_buf_opt = Some(dma_rx);
+    } else {
+        let uart = Uart::new(peripherals.UART1, uart_cfg)
+            .expect("uart1 init")
+            .with_tx(peripherals.GPIO17)
+            .with_rx(peripherals.GPIO18)
+            .into_async();
+        uart_async = Some(uart);
+    }
+
+    let uart1 = uart_async.map(|u| UART1_CELL.init(u));
 
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
@@ -805,10 +872,20 @@ fn main() -> ! {
             .spawn(display_task(resources, telemetry))
             .expect("display_task spawn");
         if ENABLE_UART_LINK_TASK {
-            info!("spawning uart link task");
-            spawner
-                .spawn(uart_link_task(uart1, telemetry))
-                .expect("uart_link_task spawn");
+            if ENABLE_UART_UHCI_DMA {
+                let uhci_rx = uhci_rx_opt.take().expect("uhci rx missing");
+                let dma_rx = uhci_dma_buf_opt.take().expect("uhci dma buf missing");
+                info!("spawning uart link task (UHCI DMA)");
+                spawner
+                    .spawn(uart_link_task_dma(uhci_rx, dma_rx, telemetry))
+                    .expect("uart_link_task_dma spawn");
+            } else {
+                let uart1 = uart1.expect("uart1 missing");
+                info!("spawning uart link task (async no-DMA)");
+                spawner
+                    .spawn(uart_link_task(uart1, telemetry))
+                    .expect("uart_link_task spawn");
+            }
         } else {
             info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
         }
@@ -817,16 +894,14 @@ fn main() -> ! {
     })
 }
 
-// 周期性聚合统计，启动后每 60 秒打印一次
+// 周期性聚合统计，启动后每 5 秒打印一次（便于 DMA 验证阶段观察计数）
 #[embassy_executor::task]
 async fn stats_task() {
     let mut last_ms = timestamp_ms();
     loop {
-        for _ in 0..4000 {
-            yield_now().await;
-        }
+        yield_now().await;
         let now = timestamp_ms();
-        if now.saturating_sub(last_ms) >= 60_000 {
+        if now.saturating_sub(last_ms) >= 1_000 {
             last_ms = now;
             let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);

@@ -69,10 +69,10 @@ clean:
 	cargo clean
 
 run: build
-	$(ESPFLASH) flash "$(ELF)" --monitor $(PORT_FLAG) $(BAUD_FLAG) $(MONITOR_BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(ESPFLASH_ARGS)
+	$(ESPFLASH) flash "$(ELF)" --monitor $(PORT_FLAG) $(BAUD_FLAG) $(MONITOR_BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(if $(filter defmt,$(LOGFMT)),--elf "$(ELF)",) $(ESPFLASH_ARGS)
 
 flash: build
-	$(ESPFLASH) flash "$(ELF)" $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(ESPFLASH_ARGS)
+	$(ESPFLASH) flash "$(ELF)" $(PORT_FLAG) $(BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) $(if $(filter defmt,$(LOGFMT)),--elf "$(ELF)",) $(ESPFLASH_ARGS)
 
 attach: build
 	$(ESPFLASH) monitor $(PORT_FLAG) $(BAUD_FLAG) $(MONITOR_BAUD_FLAG) $(CHIP_FLAG) $(LOGFMT_FLAG) --elf "$(ELF)" $(ESPFLASH_ARGS)
