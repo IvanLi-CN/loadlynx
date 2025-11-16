@@ -67,10 +67,7 @@ const FRAME_LOG_POINTS: [(usize, usize); 3] = [
     (DISPLAY_WIDTH / 2, DISPLAY_HEIGHT / 2),
     (DISPLAY_WIDTH - 1, DISPLAY_HEIGHT - 1),
 ];
-// 控制显示任务运行：当前默认关闭，优先保证 UART + UHCI DMA 稳定。
-// 如需调试 UI，可临时改为 true，但要注意 Core0 栈守卫限制。
-const ENABLE_DISPLAY_TASK: bool = false;
-// SPI 推屏默认为关闭；只有在确认显示任务稳定后再开启。
+// 控制是否实际通过 SPI 推送到 LCD：当前优先稳定 UART 链路，先关闭显示推屏。
 const ENABLE_DISPLAY_SPI_UPDATES: bool = false;
 // 调试开关：正常运行应为 true，仅在单独验证 UI 或其它外设时才临时关闭 UART 链路任务。
 const ENABLE_UART_LINK_TASK: bool = true;
@@ -91,7 +88,6 @@ struct Align32<T>(T);
 static FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
 static PREVIOUS_FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
-static DISPLAY_CHANGE_MAP: StaticCell<[bool; DISPLAY_HEIGHT]> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
@@ -376,7 +372,6 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
     } else {
         info!("Color bars rendering skipped: display SPI updates disabled for UART A/B test");
     }
-    let change_map = DISPLAY_CHANGE_MAP.init([false; DISPLAY_HEIGHT]);
     let mut last_push_ms = timestamp_ms() as u32;
     loop {
         let now = timestamp_ms() as u32;
@@ -415,6 +410,7 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
 
             if ENABLE_DISPLAY_SPI_UPDATES {
                 let bytes_per_row = DISPLAY_WIDTH * 2;
+                let mut change_map = [false; DISPLAY_HEIGHT];
                 for row in 0..DISPLAY_HEIGHT {
                     let offset = row * bytes_per_row;
                     change_map[row] = ctx.framebuffer[offset..offset + bytes_per_row]
@@ -872,14 +868,10 @@ fn main() -> ! {
         spawner.spawn(ticker()).expect("ticker spawn");
         info!("spawning diag task");
         spawner.spawn(diag_task()).expect("diag_task spawn");
-        if ENABLE_DISPLAY_TASK {
-            info!("spawning display task");
-            spawner
-                .spawn(display_task(resources, telemetry))
-                .expect("display_task spawn");
-        } else {
-            info!("display task disabled (ENABLE_DISPLAY_TASK=false)");
-        }
+        info!("spawning display task");
+        spawner
+            .spawn(display_task(resources, telemetry))
+            .expect("display_task spawn");
         if ENABLE_UART_LINK_TASK {
             if ENABLE_UART_UHCI_DMA {
                 let uhci_rx = uhci_rx_opt.take().expect("uhci rx missing");
