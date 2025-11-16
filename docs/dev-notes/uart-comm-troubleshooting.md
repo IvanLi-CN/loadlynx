@@ -32,34 +32,36 @@
 
 ## 排查与优化步骤（按优先级）
 
-### 推荐优化路径（按优先级刷新）
+### 推荐优化路径（按阶段刷新）
 
-1) **显示让出优先**  
-   - 目标：降低 UI 对执行器的占用，让 UART task 及时运行。  
-   - 建议起始参数：`DISPLAY_MIN_FRAME_INTERVAL_MS=40–50`、`DISPLAY_CHUNK_ROWS=8–12`、`DISPLAY_CHUNK_YIELD_LOOPS=2–4`，保持 SPI DMA on。  
-   - 观察：`uart_rx_err_total` 增长率、`fast_status ok` 节奏、画面是否可接受。
+1) **UART UHCI DMA（现行主方案）**  
+   - 状态：单板（显示关闭）场景已验证 0 溢出，下一步是逐步恢复显示 DMA + 正常帧率。  
+   - 基线设置：`DMA_CH1`、`rx_buf=1024–2048`、`chunk_limit=buf_len`、`UART_RX_FIFO_FULL_THRESHOLD=32`、`UART_RX_TIMEOUT_SYMS=2`，日志统计周期 1s。  
+   - 行动：优先确保 UHCI DMA 版本为默认构建；保留旧的轮询实现备用，便于快速 A/B。  
+   - 观察：`uart_rx_err_total`、`fast_status ok`、`decode_errs`，以及 DMA 回调/任务栈占用。
 
-2) **UART 阈值/超时调参**（可与 1 并行）  
-   - 目标：降低中断风暴、单次搬运更多数据。  
-   - 建议起始：`UART_RX_FIFO_FULL_THRESHOLD=16 或 32`，`UART_RX_TIMEOUT_SYMS=2 或 3`。  
-   - 观察：`Rx(FifoOverflowed)` 速率变化。
+2) **显示让出 + 帧率限制**  
+   - 目标：在 UHCI DMA 运行时减轻 UI 对 CPU 的竞争，避免任务饿死。  
+   - 建议重新扫描：`DISPLAY_MIN_FRAME_INTERVAL_MS=40–80`、`DISPLAY_CHUNK_ROWS=8–12`、`DISPLAY_CHUNK_YIELD_LOOPS=2–6`；每个组合记录 UI 体感与 UART 指标。  
+   - 若需要对照，可暂时关闭 `ENABLE_DISPLAY_SPI_UPDATES` 以验证串口单独表现。
 
-3) **A/B：波特率或显示帧率回退**  
-   - 临时降波特率到 `115200`，或将显示帧率降到 ≈20FPS，对比溢出速率；验证出“真正卡口”后再回到 230400。
+3) **UART 阈值/超时调参**（与 2 并行）  
+   - UHCI DMA 状态下仍需调参以兼顾中断频率与每次搬运量。  
+   - 建议区间：`UART_RX_FIFO_FULL_THRESHOLD=16–64`、`UART_RX_TIMEOUT_SYMS=2–4`，观察 DMA 中断节奏与任务加载。
 
-4) **A/B：SPI 事务形态**  
-   - 关闭 SPI DMA（保留分块 + 让出），看溢出是否下降；若无改善再回 DMA。
+4) **A/B：波特率、FAST_STATUS、显示帧率回退**  
+   - 若仍存在 decode_errs 过高或 DMA 崩溃，可降至 `115200`、降低 `FAST_STATUS_HZ` 至 20Hz、或将帧率压到 ≈20FPS，以定位瓶颈。
 
-5) **接收缓冲冗余与观测**  
-   - SLIP 解码容量调大（例：`SlipDecoder<1024>`）；若协议有 seq，记录缺口估丢帧。
-
-6) **更强方案（如仍不达标）**  
-   - UART UHCI DMA 环形接收；改动较大，但已列为必测项（见“待执行实验”）；在上述手段无效时立即推进。
+5) **SPI 事务形态与接收缓冲冗余**  
+   - 关闭 SPI DMA / 调整双缓冲，或将 `SlipDecoder` 扩大到 `1024+` 并启用 seq 统计，用于观察是否仍有破帧。  
+   - 需要时继续深挖 DMA chunk/描述符参数，或探查 UHCI DMA 与 `esp-hal` 的交互问题。
 
 ## 记录规范（每次实验务必填写）
 
 - **基础信息**
   - `build version`（analog/digital 各自的 fw version 日志行；确保与本地 tmp/{analog|digital}-fw-version.txt 一致）
+    - analog 侧即便未改动也要写明版本字符串与 `tmp/analog-fw-version.txt` 来源；缺失时实验视为无效。
+    - 记录本次日志文件路径（`tmp/agent-logs/...`），方便后续对照。
   - `test duration (s)`
   - `baud` / `FAST_STATUS_HZ`（发送侧频率）
   - `DISPLAY_MIN_FRAME_INTERVAL_MS`、`DISPLAY_CHUNK_ROWS`、`DISPLAY_CHUNK_YIELD_LOOPS`
@@ -81,20 +83,26 @@
 
 ## 验收标准（A/B 验证 60s）
 
-- `uart_rx_err_total` 增长率 < 1 次/秒（理想为 0）。
-- `decode_errs` 不增长或仅偶发（≪ 0.1 次/秒）。
-- `fast_status ok` 节奏符合目标帧率，UI 正常刷新。
+- UHCI DMA 版本：
+  - `uart_rx_err_total` 维持 0；DMA 回调线程无 panic/timeout。  
+  - 在 `DISPLAY_MIN_FRAME_INTERVAL_MS<=50`、`DISPLAY_CHUNK_ROWS<=12`、`DISPLAY_CHUNK_YIELD_LOOPS<=4` 的正常 UI 负载下，`fast_status ok` 节奏与发送端一致。
+- 轮询 fallback（若用于对照）：
+  - `uart_rx_err_total` 增长率 < 1 次/秒（理想为 0）。  
+  - `decode_errs` 不增长或仅偶发（≪ 0.1 次/秒）。
+- 所有实验需附 analog/digital 版本、日志路径，并确认 UI 帧率仍满足体验要求（无明显卡顿）。
 
 ## 复现实验与日志观测
 
-- 构建（release）：
-  - `make d-build`
-- 烧录 + 监听：
-  - `make d-run PORT=/dev/tty.*`
-- 关注日志：
-  - UART：`UART RX error: FifoOverflowed (total=...)` 的增长速率。
-  - 协议：`protocol decode error (...)` 的出现频次与类型。
-  - 节奏：`fast_status ok (count=...)` 的稳定性。
+- 构建：
+  - `scripts/agent_verify_digital.sh --no-log`（必要时 `--profile dev`）；analog 若也升级，先运行 `scripts/agent_verify_analog.sh --no-log`。
+- 日志采集：
+  - `scripts/agent_verify_digital.sh --timeout 25`（可加 `PORT=/dev/tty.*`）；只看日志时用 `scripts/agent_verify_digital.sh --no-flash --timeout 15`。  
+  - 需要双板同时观察时，按指南运行 `scripts/agent_dual_monitor.sh --timeout 60`。
+- 关注要点：
+  - 先读取 `tmp/digital-fw-version.txt` / `tmp/analog-fw-version.txt`，与日志开头的 version 行比对，确认一致再评估。  
+  - UART：`UART RX error: FifoOverflowed (total=...)`、DMA panic/nmi、`uhci_dma_rx_chunk...` 之类统计。  
+  - 协议：`protocol decode error (...)` 或 `decode_errs` 的速率。  
+  - 节奏：`fast_status ok (count=...)`、UI 帧日志、`DISPLAY dt_ms`。
 
 ## 近期实验记录（持续补充）
 
@@ -109,10 +117,10 @@
   - UI：帧日志 dt_ms ~100–113 ms，卡顿不明显；显示刷新正常。
   - 结论：UART 溢出仍严重，需进一步调参（建议提升帧间隔/块间让出或提高 UART FIFO 阈值）。
 
-- **待执行实验：UART RX DMA（UHCI）基线**  
-  - 目标：验证在相同显示负载与 230400 波特率下，使用 esp-hal UHCI DMA 环形缓冲能否把 `Rx(FifoOverflowed)` 降到 <1 次/分钟。  
-  - 条件：保留 SPI DMA on、FAST_STATUS_HZ=30/60 两档各测 1 次；记录 DMA buffer 大小、触发阈值、环形读策略。  
-  - 状态：尚未实施；需实现 DMA 版本 `uart_link_task` 并纳入记录模板。
+- **实验计划：UART RX DMA（UHCI）回归**  
+  - 目标：在 230400 波特率下，于“显示关闭”→“显示限速”→“正常显示”三个阶段验证 `Rx(FifoOverflowed)` ≈ 0，并确认 `decode_errs` 收敛。  
+  - 条件：保留 SPI DMA、FAST_STATUS_HZ=30 起步，必要时测 60Hz；记录 DMA buffer 大小、阈值、环形读策略和日志路径。  
+  - 状态：第一阶段（显示关闭）已在 2025-11-16 13:57 实验完成；下一步是恢复显示推屏与 60Hz 发送端并观察 decode_errs。
 - **2025-11-16 12:00 digital UART UHCI DMA 尝试（结果：日志解码失败）**  
   - 版本：digital `digital 0.1.0 (profile release, 539f0f8-dirty, src 0xc0cce3b455259210)`；analog 未变。  
   - 配置：UART 230400；FAST_STATUS_HZ=30；DISPLAY_MIN_FRAME_INTERVAL_MS=25；DISPLAY_CHUNK_YIELD_LOOPS=0；SPI DMA on；UART RX via UHCI DMA（DMA_CH1，chunk_limit=4092，缓冲=~4KB）；LOGFMT=defmt。  
@@ -130,18 +138,38 @@
   - 配置：UART 230400；FAST_STATUS_HZ=30；DISPLAY_MIN_FRAME_INTERVAL_MS=80；DISPLAY_CHUNK_ROWS=8；DISPLAY_CHUNK_YIELD_LOOPS=6；`ENABLE_DISPLAY_SPI_UPDATES=false`；UART RX via UHCI DMA（DMA_CH1，buf=1024，chunk_limit=1024）；UART 阈值=32，超时=2；stats 每 1s；解码仅计数（不打印）。  
   - 时长：~22 s（`agent_verify_digital --timeout 25`，日志：`tmp/agent-logs/digital-20251116-135727.log`）。  
   - 指标：`uart_rx_err_total=0` 全程无溢出；`fast_status_ok` 0→113（~31s 对应 113，约 6/s）；`decode_errs` 0→478（约 21.4/s），显示未推屏。  
-  - 结论：UHCI DMA 在关闭显示且简化解码输出的情况下稳定运行且无溢出，但协议解码错误计数较高，需继续分析错误来源或调节 chunk/处理方式；下一步可逐步恢复显示负载并监控溢出与解码错误。
+  - 结论：UHCI DMA 在关闭显示且简化解码输出的情况下稳定运行且无溢出，但协议解码错误计数较高；判断更多是 SLIP 层/发送端噪声而不是 DMA 溢出。下一步：
+    - 将 `SlipDecoder` 扩大到 1024 并记录 `decoder_bytes`、`drop_bytes`；
+    - 在 analog 端打出 seq gap（或记录 FAST_STATUS 序号）以确认 decode_errs 是否真实丢帧；
+    - 维持 `FAST_STATUS_HZ=30`，逐步恢复显示负载前先验证低帧率（10Hz）下 decode_errs 是否下降，若不降则集中排查 SLIP/协议解析。
 - **2025-11-16 13:34 digital UART UHCI DMA 再次尝试（崩溃）**  
   - 版本：digital `digital 0.1.0 (profile release, 539f0f8-dirty, src 0xcc6dc52a46acf4d1)`；analog 未变。  
   - 配置：UART 230400；FAST_STATUS_HZ=30；DISPLAY_MIN_FRAME_INTERVAL_MS=50；DISPLAY_CHUNK_ROWS=12；DISPLAY_CHUNK_YIELD_LOOPS=3；SPI DMA on；UART RX via UHCI DMA（DMA_CH1，buf=2048，chunk_limit=2048）；UART RX 阈值=32，超时=2。  
   - 结果：~10.9s 时出现多次 panic（`Breakpoint on ProCpu / Cp0Disabled`），任务崩溃；未记录到 UART 溢出或 fast_status 行（崩溃前主要是显示日志）。日志：`tmp/agent-logs/digital-20251116-133427.log`。  
   - 结论：当前 UHCI DMA 实施不稳定（可能 chunk_limit/配置或 DMA 使用方式触发异常）；需最小化示例重测或进一步调试 UHCI 配置。
 
+  - 追踪：崩溃前 DMA chunk 列表已经跑满（`chunk_limit=buf_len=2048`），怀疑是 ISR/任务共享的缓冲在高负载下未及时 recycle；下一次实验计划将 `chunk_limit` 降到 1024 并加上故障计数。
+
+## UHCI DMA 配置与注意事项
+
+- 编译期开关：`ENABLE_UART_UHCI_DMA=true`（`firmware/digital/src/main.rs:81`）。禁用后将回到 async 轮询版本，用于快速对照。
+- DMA 管线：`Uhci::new(UART1, UHCI0, DMA_CH1)`（同文件 831-879 行）并启用 `esp_hal::dma_buffers!(UART_DMA_BUF_LEN)`；推荐 `UART_DMA_BUF_LEN=1024` 首测，必要时扩到 2048 但需同步调整 `chunk_limit`。
+- 配置要点：
+  - `with_fifo_full_threshold(UART_RX_FIFO_FULL_THRESHOLD)` 与 `with_timeout(UART_RX_TIMEOUT_SYMS)` 仍生效；默认 32 / 2。
+  - `uhci.apply_rx_config(...chunk_limit)` 必须 ≤ buffer 长度且 ≤4095。过大时会导致 `Breakpoint on ProCpu / Cp0Disabled`。
+  - `DmaRxBuf` 由 `uart_link_task_dma` 独占，ISR 将数据放入 slip 解码器后及时 `recycle_desc`，否则 UHCI 报 chunk 枯竭。
+  - `stats_task` 每秒报告 `fast_status_ok/decode_errs/uart_rx_err_total`，用于观察 DMA 稳定性。
+- 调参流程：
+  1. 在 `ENABLE_DISPLAY_SPI_UPDATES=false` 时确认 DMA 稳定（0 溢出 + 0 panic）。
+  2. 逐步恢复显示分块、帧率，再观察 decode_errs；若 decode_errs 仍高，优先扩大 `SlipDecoder` 或在 analog 端 dump 原始 seq 以定位。
+  3. 若需 A/B，切换 `ENABLE_UART_UHCI_DMA=false` 并重新运行日志脚本以确认问题随模式变化。
+
 ## 附：当前实现的关键点
 
-- UART 接收路径存在两种实现形态：
-  - 早期版本：使用 `read_async()`，在本项目负载下会频繁出现 `FifoOverflowed` 与协议解码错误；
-  - 当前版本：使用轮询式 `uart.read()` 抽干 FIFO，在 `230400` 波特率 + 60Hz FAST_STATUS 下已验证稳定。
+- UART 接收路径现包含三个形态：
+  - 首选：`ENABLE_UART_UHCI_DMA=true` 时通过 UHCI DMA 环形搬运，由 `uart_link_task_dma` 处理（详见上节）。
+  - 备用：`ENABLE_UART_UHCI_DMA=false` 时走轮询式 `uart.read()`（无 DMA），在 `230400` + 60Hz 下可维持 0 溢出但 CPU 占用高。
+  - Legacy：`read_async()` 版本已知在本项目负载下会频繁 `FifoOverflowed` 与协议解码错误，仅用于对照或问题回溯。
 - 分块渲染 + 块间 `yield_now()` 已启用；
 - SPI DMA 已启用且 framebuffer 32B 对齐；调试阶段可通过 `ENABLE_DISPLAY_SPI_UPDATES=false` 禁用所有 SPI 推屏，以单独验证串口链路。
 - 仍建议优先通过“更细分块、更高让出频率、适度降帧”和“降低 UART 中断压力”两方向收敛；必要时采用 UART UHCI DMA。
