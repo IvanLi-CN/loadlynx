@@ -223,6 +223,32 @@ pub fn render_partial(
     }
 }
 
+/// 在左上角叠加显示 FPS 信息。这里使用简单的整数 FPS 估计：
+/// fps ≈ 1000 / dt_ms，当 dt_ms==0 时显示为 0。
+pub fn render_fps_overlay(
+    frame: &mut RawFrameBuf<Rgb565, &mut [u8]>,
+    dt_ms: u32,
+) {
+    let fps = if dt_ms > 0 {
+        // 四舍五入到最近的整数 FPS。
+        (1000 + dt_ms / 2) / dt_ms
+    } else {
+        0
+    };
+
+    let bytes = frame.as_mut_bytes();
+    let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+    let mut text = String::<12>::new();
+    let _ = text.push_str("FPS ");
+    append_u32(&mut text, fps);
+
+    // 清理左上角一小块区域，使用与左侧背景一致的底色。
+    canvas.fill_rect(Rect::new(0, 0, 80, 16), rgb(0x101829));
+    // 叠加白色小字体文本。
+    draw_small_text(&mut canvas, text.as_str(), 4, 4, rgb(0xFFFFFF), 0);
+}
+
 fn draw_main_metric(
     canvas: &mut Canvas,
     label: &str,

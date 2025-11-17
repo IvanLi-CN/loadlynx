@@ -12,7 +12,8 @@ if ! command -v espflash >/dev/null 2>&1; then
   exit 127
 fi
 
-PORT_LIST=$(espflash list-ports 2>/dev/null | awk '/^\/?dev\// {print $1}')
+# espflash list-ports 会在设备名前面带空格，这里允许行首存在任意空白后再匹配 /dev/...
+PORT_LIST=$(espflash list-ports 2>/dev/null | awk '/^[[:space:]]*\/dev\// {print $1}')
 if [ -z "$PORT_LIST" ]; then
   err "[esp32-port] 未检测到任何 ESP32 串口；请插入板子或通过 PORT=/dev/... 指定。"
   exit 1

@@ -161,7 +161,9 @@ impl TelemetryModel {
     }
 
     fn update_from_status(&mut self, status: &FastStatus) {
-        let main_voltage = status.v_remote_mv as f32 / 1000.0;
+        // 主电压使用本地 sense（v_local_mv），右侧列则分别显示 remote/local，
+        // 以避免左侧大卡片和右侧“REMOTE”列完全重复。
+        let main_voltage = status.v_local_mv as f32 / 1000.0;
         let remote_voltage = status.v_remote_mv as f32 / 1000.0;
         let local_voltage = status.v_local_mv as f32 / 1000.0;
         let i_local = status.i_local_ma as f32 / 1000.0;
@@ -432,19 +434,20 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
     } else {
         info!("Color bars rendering skipped: display SPI updates disabled for UART A/B test");
     }
-    let mut last_push_ms = timestamp_ms() as u32;
-    loop {
-        let now = timestamp_ms() as u32;
-        if now.wrapping_sub(last_push_ms) >= DISPLAY_MIN_FRAME_INTERVAL_MS {
-            let frame_idx = DISPLAY_FRAME_COUNT
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            // 为了确认渲染 loop 的活跃情况，短期内每帧打印；后续可以按需降采样。
-            info!(
-                "display: rendering frame {} (dt_ms={})",
-                frame_idx,
-                now.wrapping_sub(last_push_ms)
-            );
+        let mut last_push_ms = timestamp_ms() as u32;
+        loop {
+            let now = timestamp_ms() as u32;
+            let dt_ms = now.wrapping_sub(last_push_ms);
+            if dt_ms >= DISPLAY_MIN_FRAME_INTERVAL_MS {
+                let frame_idx = DISPLAY_FRAME_COUNT
+                    .fetch_add(1, Ordering::Relaxed)
+                    .wrapping_add(1);
+                // 为了确认渲染 loop 的活跃情况，短期内每帧打印；后续可以按需降采样。
+                info!(
+                    "display: rendering frame {} (dt_ms={})",
+                    frame_idx,
+                    dt_ms
+                );
 
             let (snapshot, mask) = {
                 let mut guard = telemetry.lock().await;
@@ -471,6 +474,8 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                         // 后续帧：仅按掩码重绘受影响区域。
                         ui::render_partial(&mut frame, &snapshot, &mask);
                     }
+                    // 在左上角叠加 FPS 信息，方便现场观测渲染节奏。
+                    ui::render_fps_overlay(&mut frame, dt_ms);
                 }
 
                 if frame_idx <= FRAME_SAMPLE_FRAMES {
@@ -532,7 +537,8 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                     dirty_spans += 1;
                 }
 
-                if dirty_spans == 0 || dirty_spans >= DISPLAY_DIRTY_SPAN_FALLBACK {
+                if dirty_spans >= DISPLAY_DIRTY_SPAN_FALLBACK {
+                    // 如果脏区 span 过多，则退回整帧推送；否则保持行级增量更新。
                     display
                         .show_raw_data(
                             0,
