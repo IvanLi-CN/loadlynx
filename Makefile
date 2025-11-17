@@ -6,7 +6,7 @@ SHELL := /bin/sh
 
 .PHONY: help fmt FORCE \
         a-build a-run a-run-force a-attach a-reset a-reset-attach a-info a-clean a-size \
-        d-build d-run d-attach d-monitor d-ports d-env d-clean
+        d-build d-run d-reset d-reset-attach d-attach d-monitor d-ports d-env d-clean
 
 help:
 	@echo "LoadLynx Makefile"
@@ -23,6 +23,8 @@ help:
 	@echo "  a-probes               List STM32 debug probes (VID:PID[:SER])"
 	@echo "  d-build                 Build ESP32-S3 firmware (cargo +esp)"
 	@echo "  d-run                   Flash + monitor ESP32-S3 (espflash)"
+	@echo "  d-reset                 Reset ESP32-S3 via espflash"
+	@echo "  d-reset-attach          Reset then attach ESP32-S3 monitor"
 	@echo "  d-attach                Monitor ESP32-S3 using existing ELF"
 	@echo "  d-monitor               Alias for d-attach"
 	@echo "  d-ports                 List ESP32-S3 serial ports"
@@ -130,6 +132,22 @@ d-build:
 
 d-run:
 	$(MAKE) -C firmware/digital run \
+	  $(if $(PROFILE),PROFILE=$(PROFILE),) \
+	  $(if $(PORT),PORT=$(PORT),) \
+	  $(if $(BAUD),BAUD=$(BAUD),) \
+	  $(if $(LOGFMT),LOGFMT=$(LOGFMT),) \
+	  $(if $(ESPFLASH_ARGS),ESPFLASH_ARGS="$(ESPFLASH_ARGS)",)
+
+d-reset:
+	$(MAKE) -C firmware/digital reset \
+	  $(if $(PROFILE),PROFILE=$(PROFILE),) \
+	  $(if $(PORT),PORT=$(PORT),) \
+	  $(if $(BAUD),BAUD=$(BAUD),) \
+	  $(if $(LOGFMT),LOGFMT=$(LOGFMT),) \
+	  $(if $(ESPFLASH_ARGS),ESPFLASH_ARGS="$(ESPFLASH_ARGS)",)
+
+d-reset-attach:
+	$(MAKE) -C firmware/digital reset-attach \
 	  $(if $(PROFILE),PROFILE=$(PROFILE),) \
 	  $(if $(PORT),PORT=$(PORT),) \
 	  $(if $(BAUD),BAUD=$(BAUD),) \

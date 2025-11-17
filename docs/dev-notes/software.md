@@ -42,41 +42,49 @@
 
 以上流程为当前 ESP32-S3 固件的权威初始化记录；若固件或硬件改版，请同步修订本笔记。
 
-## 4. 串口通信（最小验证）
+## 4. 串口通信（最小验证 → FAST_STATUS 流）
 
-目标：实现 ESP32‑S3 与 STM32G431 之间最小可用的 UART 链路，用于“可达性”验证（非最终协议）。
+目标：在 ESP32‑S3 与 STM32G431 之间建立稳定的 UART 链路，并基于共享协议 crate（`loadlynx-protocol`）持续传输 FAST_STATUS 遥测帧。
 
 ### ESP32‑S3 侧（UART1）
 
 - 实例与引脚：`UART1`，TX=`GPIO17`，RX=`GPIO18`（见 `docs/interfaces/pinmaps/esp32-s3.md:120-121`）。
-- 配置：`460800` baud，8N1，无流控。
-- 代码位置：`firmware/digital/src/main.rs` 中 `uart_link_task`。
-- 行为：周期发送 `"PING\n"`，非阻塞读取并打印接收字节计数（defmt）。
+- 配置：`115200` baud，8N1，无流控；RX 侧使用较高 FIFO 满阈值与适度超时配置（见 `firmware/digital/src/main.rs` 中 `UartConfig`）。
+- 代码位置：`firmware/digital/src/main.rs` 中 `uart_link_task` + `feed_decoder`。
+- 行为：
+  - 持续从 UART1 读取字节流并送入 `SlipDecoder`，以 SLIP 帧边界拆分完整帧。
+  - 对每个完整帧调用 `decode_fast_status_frame`，解析出 `FastStatus`。
+  - 将解析结果写入 UI 模型（`TelemetryModel::update_from_status`），并周期打印 `fast_status ok (count=...)`（默认每 32 帧一次）。
+  - UART/协议错误通过限频日志计数：`UART RX error: ...`、`protocol decode error (...)` 等。
 
 构建/烧录：
-- 构建：`(cd firmware/digital && cargo +esp build)`
-- 烧录：`scripts/flash_s3.sh [--port /dev/tty.*]`
+- 构建：`(cd firmware/digital && cargo +esp build --release)` 或 `make d-build`
+- 烧录：`scripts/flash_s3.sh --release [--port /dev/tty.*]` 或 `make d-run PORT=/dev/tty.*`
 
-### STM32G431 侧（USART1）
+### STM32G431 侧（USART3）
 
-- 实例与引脚：`USART1`，TX=`PA9`，RX=`PA10`（如与硬件不符，请在源码中按板图调整）。
-- 配置：`460800` baud，8N1。
-- 代码位置：`firmware/analog/src/main.rs`（`Uart::new(...)` + 简单回环）。
-- 行为：按字节回显（echo），收到什么回什么。
+- 实例与引脚：`USART3`，TX=`PC10`，RX=`PC11`（见 `docs/interfaces/uart-link.md` 与 `loadlynx.ioc`）。
+- 配置：`115200` baud，8N1。
+- 代码位置：`firmware/analog/src/main.rs` 中 `Uart::new(...)` 与主循环。
+- 行为：
+  - 以约 60 Hz 周期构造 `FastStatus` 模拟数据（电压、电流、功率、温度等字段）。
+  - 使用 `encode_fast_status_frame` 生成带 CRC 的帧，再通过 `slip_encode` 封装为 SLIP 流。
+  - 通过 USART3 发送整帧；若 UART 写入失败，会打印 `uart tx error; dropping frame` 但继续重试。
 
 构建/烧录：
-- 构建：`(cd firmware/analog && cargo build)` 或 `make g431-build`
-- 烧录运行：`make g431-run`（基于 `probe-rs`）
+- 构建：`(cd firmware/analog && cargo build --release)` 或 `make a-build`
+- 烧录运行：`make a-run PROBE=<VID:PID[:SER]>` 或 `scripts/flash_g431.sh release PROBE=<...>`
 
 ### 联调与期望日志
 
-1. 先刷写 STM32 固件，后刷写 ESP32‑S3 固件并打开监视串口。
+1. 先刷写 STM32 固件（analog），确认 probe 与供电正常；再刷写 ESP32‑S3 固件并打开监视串口。
 2. 在 ESP32‑S3 监视窗口中应看到：
-   - `LoadLynx digital alive...`（本地外设初始化）
+   - `LoadLynx digital alive; initializing local peripherals`（本地外设初始化）
    - `UART link task starting`（串口任务启动）
-   - 周期 `PING` 后收到的 `uart rx N bytes`（来自 STM32 的回显），表示链路可达。
-3. 如无回显，请检查：
+   - 随着链路稳定，周期出现 `fast_status ok (count=...)` 以及周期性的 UI 刷新日志（如有）。
+3. 如无 `fast_status ok` 日志或 UART/协议错误计数持续增加，请检查：
    - 板间隔离器与引脚方向（见 `docs/interfaces/uart-link.md`）。
-   - 双端波特率/引脚是否一致；必要时在固件中调整。
+   - 双端波特率/引脚是否一致（G431 使用 USART3 PC10/PC11；S3 使用 UART1 GPIO17/18）。
+   - G431 侧是否正常启动并打印 `LoadLynx analog alive; streaming mock FAST_STATUS frames`。
 
-备注：当前为“功能验证”最小实现，未实现 SLIP/CBOR/CRC 等正式协议与可靠性控制，后续将按 `docs/interfaces/uart-link.md` 逐步演进。
+当前链路已经实现 SLIP/CBOR/CRC 的最小可用版本，后续消息集与可靠性（ACK/重试/心跳）将按 `docs/interfaces/uart-link.md` 中的协议规划逐步扩展。
