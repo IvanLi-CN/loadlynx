@@ -44,10 +44,6 @@ impl UiChangeMask {
     }
 }
 
-pub fn render_default(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
-    render(frame, &UiSnapshot::demo());
-}
-
 pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
     let bytes = frame.as_mut_bytes();
     let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);

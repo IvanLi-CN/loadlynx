@@ -27,10 +27,7 @@ use esp_hal::{
         timer::{self as ledc_timer, TimerIFace as _},
     },
     main,
-    spi::{
-        Mode,
-        master::{Config as SpiConfig, Spi, SpiDma, SpiDmaBus},
-    },
+    spi::{Mode, master::{Config as SpiConfig, Spi, SpiDmaBus}},
     time::Rate,
 };
 // Async is already in scope via `use esp_hal::{ self as hal, Async, ... }`
@@ -106,7 +103,7 @@ static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn now_ms32() -> u32 {
-    (timestamp_ms() as u32)
+    timestamp_ms() as u32
 }
 
 fn timestamp_ms() -> u64 {
@@ -192,10 +189,6 @@ impl TelemetryModel {
             }
         }
         self.last_uptime_ms = Some(status.uptime_ms);
-    }
-
-    fn snapshot(&self) -> UiSnapshot {
-        self.snapshot.clone()
     }
 
     /// Compute a change mask between the last rendered snapshot and the current
