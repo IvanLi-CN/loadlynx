@@ -54,7 +54,8 @@ const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
-const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 80; // 测试降载，把显示对执行器的占用降到最低
+// 显示最小帧间隔（毫秒）：16ms ≈ 62.5FPS，接近 analog 侧 FAST_STATUS≈60Hz 的节奏。
+const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 16;
 // 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
 // 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
 const DISPLAY_CHUNK_ROWS: usize = 8; // 再缩短单事务
