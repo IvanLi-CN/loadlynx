@@ -16,7 +16,8 @@ bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
 });
 
-const FAST_STATUS_PERIOD_MS: u64 = 1000 / 60; // ≈60 Hz
+// 模拟板 FAST_STATUS 发送周期：1000/30 ms ≈ 33.3ms（≈30 Hz）
+const FAST_STATUS_PERIOD_MS: u64 = 1000 / 30;
 const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 

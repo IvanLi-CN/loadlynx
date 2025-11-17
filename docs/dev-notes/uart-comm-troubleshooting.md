@@ -21,14 +21,16 @@
 
 ## 当前实现快照（关键代码位置）
 
-- 帧率上限：`DISPLAY_MIN_FRAME_INTERVAL_MS`（默认 33ms ≈ 30FPS）
-  - `firmware/digital/src/main.rs:53`
-- 分块参数：`DISPLAY_CHUNK_ROWS`（默认 32 行/块），`DISPLAY_CHUNK_YIELD_LOOPS`（默认 2）
-  - `firmware/digital/src/main.rs:56, 57`
-- UART RX 阈值/超时：`with_fifo_full_threshold(1)`，`with_timeout(1)`
-  - `firmware/digital/src/main.rs:582, 583`
-- SLIP 解码器容量：`SlipDecoder<512>`
-  - 初始化：`firmware/digital/src/main.rs:379`（推入：`417`）
+- 帧率上限：`DISPLAY_MIN_FRAME_INTERVAL_MS`（当前 33ms ≈ 30FPS，与 analog 侧 30Hz FAST_STATUS 对齐）
+  - `firmware/digital/src/main.rs:57–58`
+- 分块参数：`DISPLAY_CHUNK_ROWS`（默认 8 行/块），`DISPLAY_CHUNK_YIELD_LOOPS`（默认 6）
+  - `firmware/digital/src/main.rs:61–62`
+- UART RX 阈值/超时：`with_fifo_full_threshold(120)`，`with_timeout(10)`
+  - `firmware/digital/src/main.rs:900–908`
+- SLIP 解码器容量：`SlipDecoder<FAST_STATUS_SLIP_CAPACITY>`（默认 1024）
+  - 初始化与使用：`firmware/digital/src/main.rs:94, 648, 729`
+- 模拟板 FAST_STATUS 周期：`FAST_STATUS_PERIOD_MS = 1000 / 30`（≈30Hz）
+  - `firmware/analog/src/main.rs:20`
 
 ## 排查与优化步骤（按优先级）
 
@@ -185,6 +187,36 @@
   - 初步结论：  
     - 手写浮点格式化成功规避了之前由 `core::fmt` 引入的 ProCpu `Cp0Disabled` 异常，UI + UART + UHCI DMA 组合在 230400 波特率 + 60Hz FAST_STATUS 下可以稳定运行 ≥20 s；  
     - 在数值变化“普通”的阶段，区域级局部刷新明显降低了每帧 `dirty_rows`，但在高变化、接近“全屏都变”的场景下仍会退化为整屏推送；后续可以在 `UiChangeMask` 的粒度和行合并策略上继续优化，以便在更多负载模式下保持 SPI 事务稀疏。  
+- **2025-11-17 12:20 digital UART UHCI DMA + 区域级局部刷新 + 16ms 帧间隔（UI 更流畅，但 decode_errs 偏高）**  
+  - 版本：digital `digital 0.1.0 (profile release, 9ed3fce-dirty, src 0x40a3cd3b26db9ab5)`；analog `analog 0.1.0 (profile release, 5ccb582-dirty, src 0x8c5c13041e8576aa)`（来自 `tmp/analog-fw-version.txt`）。  
+  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/60（当次实验使用的模拟板配置，现已改为 1000/30）；`DISPLAY_MIN_FRAME_INTERVAL_MS=16`；`DISPLAY_CHUNK_ROWS=8`；`DISPLAY_CHUNK_YIELD_LOOPS=6`；`ENABLE_DISPLAY_SPI_UPDATES=true`；`UART_RX_FIFO_FULL_THRESHOLD=120`；`UART_RX_TIMEOUT_SYMS=10`；`FAST_STATUS_SLIP_CAPACITY=1024`；`UART_DMA_BUF_LEN=512`；`ENABLE_UART_UHCI_DMA=true`。  
+  - 结果（`scripts/agent_verify_digital.sh --timeout 20`，日志：`tmp/agent-logs/digital-20251117-122018.log`）：  
+    - 稳定性：整个 ~18 s 窗口内未见 `UART RX error`、`Detected a write to the stack guard value` 或 `Cp0Disabled` 类 panic。  
+    - UART / 协议：`uart_rx_err_total=0`；`PROTO_DECODE_ERRS` 从 0 增至 ~544（约 30 次/s），`fast_status ok` 从 ~1.25 s 时的 17 增至 ~17.6 s 时的 329，折算约 18–20 帧/s，有效 FAST_STATUS 解码率明显低于发送端 ~60Hz。  
+    - 显示：  
+      - 帧间隔：采样帧中的 `dt_ms` 在稳定阶段多为 16ms 或 64–70ms；在 UI 无变更时大量帧被 `mask.is_empty()` 跳过绘制，仅保留行级 diff 与 SPI 推屏；  
+      - UI 层左上角 FPS 叠加基于 `dt_ms` 估算，理论上稳定阶段接近 60FPS，主观观感相较 80ms 配置明显更顺滑；  
+      - `display: frame N push complete` 中 `dirty_rows` 在 UI 平稳时经常为 0 或几十行，说明区域级局部刷新 + 行级 diff 仍然在起作用。  
+  - 初步结论：16ms 帧间隔配置在 UI 与 DMA/SPI 侧表现稳定，也未引入新的 UART 硬件溢出，但在当前 UART 配置下显著抬高了协议层 `decode_errs`，有效 `fast_status ok` 帧率远低于发送端。若后续需要“显示帧率≈60Hz 且有效状态帧率也接近 60Hz”，需要在 UART 参数 / SLIP 解码 / 帧率上进一步折中和优化。  
+- **2025-11-17 12:40 digital UART UHCI DMA + 区域级局部刷新 + analog 30Hz（新默认，负载减轻）**  
+  - 版本：digital `digital 0.1.0 (profile release, 9ed3fce-dirty, src 0x40a3cd3b26db9ab5)`；analog `analog 0.1.0 (profile release, 1105f33-dirty, src 0x5f542375efe5ff0f)`（来自最新 `tmp/{digital,analog}-fw-version.txt`）。  
+  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/30；`DISPLAY_MIN_FRAME_INTERVAL_MS=16`；`DISPLAY_CHUNK_ROWS=8`；`DISPLAY_CHUNK_YIELD_LOOPS=6`；`ENABLE_DISPLAY_SPI_UPDATES=true`；`UART_RX_FIFO_FULL_THRESHOLD=120`；`UART_RX_TIMEOUT_SYMS=10`；`FAST_STATUS_SLIP_CAPACITY=1024`；`UART_DMA_BUF_LEN=512`；`ENABLE_UART_UHCI_DMA=true`。  
+  - 结果（`scripts/agent_verify_analog.sh --timeout 20` + `scripts/agent_verify_digital.sh --timeout 20`，日志：`tmp/agent-logs/analog-20251117-123013.log`、`tmp/agent-logs/digital-20251117-124025.log`）：  
+    - analog：版本行打印为 `LoadLynx analog alive; streaming mock FAST_STATUS frames`，新构建版本 `analog 0.1.0 (profile release, 1105f33-dirty, src 0x5f542375efe5ff0f)` 成功刷写并运行；脚本未观察到异常或重启。  
+    - digital UART：`uart_rx_err_total=0`；`fast_status ok` 在 ~18 s 窗口内从 13 增至 361，折算约 18–20 帧/s；`decode_errs` 从 0 增至 ~144（约 8 次/s），明显低于前一轮 analog≈60Hz 时约 30 次/s 的水平。  
+    - 显示：`display: rendering frame N (dt_ms=16/63–74)` 持续出现，说明显示任务仍以 16ms 最小帧间隔运行；局部刷新生效，`dirty_rows` 多数在 90–150 行之间，部分帧在无 UI 变化时 `dirty_rows=0`。  
+  - 初步结论：将模拟板 FAST_STATUS 周期从 1000/60 调整为 1000/30 后，整体链路的数据压力明显下降，`decode_errs` 速率从约 30 次/s 降至约 8 次/s，`fast_status ok` 保持在 18–20 帧/s 量级；显示任务仍以 16ms 间隔高帧率运行，UI 流畅度未受影响。后续若需要进一步提升有效状态帧率，可在保持 30Hz 发送端的前提下继续针对 UART/SLIP 解码与日志采样策略做优化。  
+- **2025-11-17 13:06 digital UART UHCI DMA + 区域级局部刷新 + analog/digital 均 30Hz 目标（DISPLAY_MIN_FRAME_INTERVAL_MS=33）**  
+  - 版本：digital `digital 0.1.0 (profile release, 9ed3fce-dirty, src 0x40a3cd3b26db9ab5)`；analog `analog 0.1.0 (profile release, 1105f33-dirty, src 0x5f542375efe5ff0f)`。  
+  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/30；`DISPLAY_MIN_FRAME_INTERVAL_MS=33`；`DISPLAY_CHUNK_ROWS=8`；`DISPLAY_CHUNK_YIELD_LOOPS=6`；`ENABLE_DISPLAY_SPI_UPDATES=true`；`UART_RX_FIFO_FULL_THRESHOLD=120`；`UART_RX_TIMEOUT_SYMS=10`；`FAST_STATUS_SLIP_CAPACITY=1024`；`UART_DMA_BUF_LEN=512`；`ENABLE_UART_UHCI_DMA=true`。  
+  - FPS 统计实现：在 `display_task` 中维护 500ms 以上的时间窗口，窗口内按帧计数，结束时计算 `fps = frames * 1000 / window_ms`，并：  
+    - 将得到的 `last_fps` 传给 `ui::render_fps_overlay`，在左上角覆盖显示 `FPS <整数>`；  
+    - 通过日志周期性打印：`display: fps window_ms=... frames=... fps=...`，用于对照 UI 观感与实际帧率。  
+  - 结果（`scripts/agent_verify_digital.sh --timeout 20`，日志：`tmp/agent-logs/digital-20251117-130608.log`）：  
+    - `uart_rx_err_total=0`；`fast_status ok` 在 18s 左右窗口内从 24 增至约 218（`stats` 行），折算约 10–12 帧/s；  
+    - `display: fps ...` 日志中的 FPS 多数在 17–20 之间（典型窗口：`window_ms≈500–560ms, frames≈9–11`），短期内 UI 实际帧率略低于理论 30FPS 上限；  
+    - `decode_errs` 继续累计（约 10 次/s 量级），说明在当前 UART/SLIP 配置与完整 UI 负载下，30Hz FAST_STATUS + 33ms 显示目标仍然偏紧，后续需要结合 UART 阈值、日志采样和 SLIP 解码策略进一步调优。  
+  - 初步结论：analog 与 digital 均以 30Hz 作为设计目标（发送端 1000/30ms，显示端 33ms 间隔）后，UI 侧 FPS 统计与日志已统一，但在实际硬件上受到任务调度与协议开销影响，稳定 FPS 仍停留在 17–20 区间；这验证了新的 FPS 统计路径正确工作，同时暴露出后续需要针对“30Hz link + 完整 UI”的系统级调优空间。  
 - **2025-11-16 12:00 digital UART UHCI DMA 尝试（结果：日志解码失败）**  
   - 版本：digital `digital 0.1.0 (profile release, 539f0f8-dirty, src 0xc0cce3b455259210)`；analog 未变。  
   - 配置：UART 230400；FAST_STATUS_HZ=30；DISPLAY_MIN_FRAME_INTERVAL_MS=25；DISPLAY_CHUNK_YIELD_LOOPS=0；SPI DMA on；UART RX via UHCI DMA（DMA_CH1，chunk_limit=4092，缓冲=~4KB）；LOGFMT=defmt。  
@@ -215,14 +247,14 @@
 
 - **2025-11-16 20:39 digital UART UHCI DMA 基线（display task 关闭，仅串口验证）**  
   - 版本：digital `digital 0.1.0 (profile release, 5cd4e45-dirty, src 0x83890fa979237bbd)`；analog `analog 0.1.0 (profile release, 5ccb582-dirty, src 0x8c5c13041e8576aa)`。  
-  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/60；DISPLAY_MIN_FRAME_INTERVAL_MS=80；`ENABLE_DISPLAY_TASK=false`；`ENABLE_DISPLAY_SPI_UPDATES=false`；UART RX via UHCI DMA（DMA_CH1，buf=1024，chunk_limit=1024）；UART 阈值=32，超时=2。  
+  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/60（当次实验使用的模拟板配置，现已改为 1000/30）；DISPLAY_MIN_FRAME_INTERVAL_MS=80；`ENABLE_DISPLAY_TASK=false`；`ENABLE_DISPLAY_SPI_UPDATES=false`；UART RX via UHCI DMA（DMA_CH1，buf=1024，chunk_limit=1024）；UART 阈值=32，超时=2。  
   - 时长：~22 s（`scripts/agent_verify_digital.sh --timeout 25`，日志：`tmp/agent-logs/digital-20251116-203944.log`）。  
   - 指标：`uart_rx_err_total=0` 全程无溢出；`fast_status_ok` 0→1156（约 52 次/秒，对应 analog mock ~60Hz）；`decode_errs=0`，显示任务完全关闭。  
   - 结论：在关闭显示任务的前提下，UHCI DMA 路径在 230400 波特率 + 60Hz FAST_STATUS 下已长期稳定运行，串口本身不再是性能瓶颈；后续问题集中在显示任务与 Core0 栈/调度。
 
 - **2025-11-16 21:37 digital UART UHCI DMA + 简化 UI（SPI 推屏开启）**  
   - 版本：digital `digital 0.1.0 (profile release, 9accc66-dirty, src 0x????????????????)`；analog 同上。  
-  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/60；DISPLAY_MIN_FRAME_INTERVAL_MS=80；DISPLAY_CHUNK_ROWS=8；DISPLAY_CHUNK_YIELD_LOOPS=6；`ENABLE_DISPLAY_TASK=true`；`SIMPLE_DISPLAY_MODE=true`（简化条形图 UI）；`ENABLE_DISPLAY_SPI_UPDATES=true`；UART RX via UHCI DMA（DMA_CH1，buf=1024，chunk_limit=1024）；UART 阈值=32，超时=2。  
+  - 配置：UART 230400；FAST_STATUS_PERIOD_MS≈1000/60（当次实验使用的模拟板配置，现已改为 1000/30）；DISPLAY_MIN_FRAME_INTERVAL_MS=80；DISPLAY_CHUNK_ROWS=8；DISPLAY_CHUNK_YIELD_LOOPS=6；`ENABLE_DISPLAY_TASK=true`；`SIMPLE_DISPLAY_MODE=true`（简化条形图 UI）；`ENABLE_DISPLAY_SPI_UPDATES=true`；UART RX via UHCI DMA（DMA_CH1，buf=1024，chunk_limit=1024）；UART 阈值=32，超时=2。  
   - 时长：~22 s（`scripts/agent_verify_digital.sh --timeout 25`，日志：`tmp/agent-logs/digital-20251116-213713.log`）。  
   - 指标：`uart_rx_err_total=0`；`fast_status_ok` 0→1134（约 51 次/秒）持续线性增长；`decode_errs` 初始有少量（6 次）后停止增加；display 帧间隔稳定在 ~80ms，dirty_rows 多数为小块，偶尔整帧 fallback。  
   - 结论：在启用“简化 UI + SPI DMA 推屏”的前提下，数字板可以同时维持稳定的显示刷新和 UART UHCI DMA 链路；串口不再因显示负载而溢出或大量解码错误。现有冲突集中在“完整 UI + 栈守卫”这一组合上，而非 UART/SPI 本身的带宽或配置。

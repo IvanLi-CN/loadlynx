@@ -223,19 +223,12 @@ pub fn render_partial(
     }
 }
 
-/// 在左上角叠加显示 FPS 信息。这里使用简单的整数 FPS 估计：
-/// fps ≈ 1000 / dt_ms，当 dt_ms==0 时显示为 0。
+/// 在左上角叠加显示 FPS 信息。
+/// 参数 `fps` 通常来自 display_task 中按 500ms 窗口统计得到的整数 FPS。
 pub fn render_fps_overlay(
     frame: &mut RawFrameBuf<Rgb565, &mut [u8]>,
-    dt_ms: u32,
+    fps: u32,
 ) {
-    let fps = if dt_ms > 0 {
-        // 四舍五入到最近的整数 FPS。
-        (1000 + dt_ms / 2) / dt_ms
-    } else {
-        0
-    };
-
     let bytes = frame.as_mut_bytes();
     let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 

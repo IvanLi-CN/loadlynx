@@ -54,8 +54,8 @@ const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
 const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
-// 显示最小帧间隔（毫秒）：16ms ≈ 62.5FPS，接近 analog 侧 FAST_STATUS≈60Hz 的节奏。
-const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 16;
+// 显示最小帧间隔（毫秒）：33ms ≈ 30FPS，与 analog 侧 30Hz FAST_STATUS 节奏对齐。
+const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33;
 // 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
 // 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
 const DISPLAY_CHUNK_ROWS: usize = 8; // 再缩短单事务
@@ -437,6 +437,10 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
     }
 
     let mut last_push_ms = timestamp_ms() as u32;
+    // 为 FPS 统计维护一个滑动窗口：每个窗口至少 500ms，统计窗口内的帧数并据此估算 FPS。
+    let mut fps_window_start_ms = last_push_ms;
+    let mut fps_window_frames: u32 = 0;
+    let mut last_fps: u32 = 0;
     loop {
         let now = timestamp_ms() as u32;
         let dt_ms = now.wrapping_sub(last_push_ms);
@@ -453,6 +457,9 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                     frame_idx, dt_ms
                 );
             }
+
+            // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
+            fps_window_frames = fps_window_frames.wrapping_add(1);
 
             let (snapshot, mask) = {
                 let mut guard = telemetry.lock().await;
@@ -480,8 +487,8 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                         // 后续帧：仅按掩码重绘受影响区域。
                         ui::render_partial(&mut frame, &snapshot, &mask);
                     }
-                    // 在左上角叠加 FPS 信息，方便现场观测渲染节奏。
-                    ui::render_fps_overlay(&mut frame, dt_ms);
+                    // 在左上角叠加 FPS 信息，使用上一统计窗口得到的整数 FPS。
+                    ui::render_fps_overlay(&mut frame, last_fps);
                 }
 
                 if frame_idx <= FRAME_SAMPLE_FRAMES {
@@ -570,6 +577,23 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                     "display: frame {} push complete (dirty_rows={} dirty_spans={})",
                     frame_idx, dirty_rows, dirty_spans
                 );
+            }
+
+            // 每当统计窗口达到 ≥500ms 时，计算一次 FPS 并打印日志。
+            let window_elapsed = now.wrapping_sub(fps_window_start_ms);
+            if window_elapsed >= 500 {
+                let fps = if window_elapsed > 0 {
+                    (fps_window_frames.saturating_mul(1000)) / window_elapsed
+                } else {
+                    0
+                };
+                last_fps = fps;
+                info!(
+                    "display: fps window_ms={} frames={} fps={}",
+                    window_elapsed, fps_window_frames, fps
+                );
+                fps_window_frames = 0;
+                fps_window_start_ms = now;
             }
 
             last_push_ms = now;
@@ -897,7 +921,8 @@ fn main() -> ! {
     //   fifo_full_threshold ≈ 120, timeout ≈ 10 符号。
     // 之前我们调得太敏感（16 / 2），会放大中断压力；这里先回到接近默认的安全值。
     let uart_cfg = UartConfig::default()
-        // Match analog MCU; 230400 baud is required for 60 Hz FAST_STATUS traffic with SLIP overhead.
+        // Match analog MCU; 230400 baud is sufficient for 30 Hz FAST_STATUS traffic with SLIP overhead,
+        // and keeps headroom if we later move the sender back towards 60 Hz.
         .with_baudrate(UART_BAUD)
         .with_data_bits(DataBits::_8)
         .with_parity(Parity::None)
