@@ -434,20 +434,24 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
     } else {
         info!("Color bars rendering skipped: display SPI updates disabled for UART A/B test");
     }
-        let mut last_push_ms = timestamp_ms() as u32;
-        loop {
-            let now = timestamp_ms() as u32;
-            let dt_ms = now.wrapping_sub(last_push_ms);
-            if dt_ms >= DISPLAY_MIN_FRAME_INTERVAL_MS {
-                let frame_idx = DISPLAY_FRAME_COUNT
-                    .fetch_add(1, Ordering::Relaxed)
-                    .wrapping_add(1);
-                // 为了确认渲染 loop 的活跃情况，短期内每帧打印；后续可以按需降采样。
+
+    let mut last_push_ms = timestamp_ms() as u32;
+    loop {
+        let now = timestamp_ms() as u32;
+        let dt_ms = now.wrapping_sub(last_push_ms);
+        if dt_ms >= DISPLAY_MIN_FRAME_INTERVAL_MS {
+            let frame_idx = DISPLAY_FRAME_COUNT
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            let log_this_frame =
+                frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
+            if log_this_frame {
+                // 短期内每帧打印，之后按固定间隔抽样。
                 info!(
                     "display: rendering frame {} (dt_ms={})",
-                    frame_idx,
-                    dt_ms
+                    frame_idx, dt_ms
                 );
+            }
 
             let (snapshot, mask) = {
                 let mut guard = telemetry.lock().await;
@@ -455,11 +459,12 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
             };
 
             if mask.is_empty() {
-                info!(
-                    "display: frame {} skipped (no UI changes, dt_ms={})",
-                    frame_idx,
-                    now.wrapping_sub(last_push_ms)
-                );
+                if log_this_frame {
+                    info!(
+                        "display: frame {} skipped (no UI changes, dt_ms={})",
+                        frame_idx, dt_ms
+                    );
+                }
             } else {
                 {
                     let mut frame = RawFrameBuf::<Rgb565, _>::new(
@@ -559,16 +564,16 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                 dirty_spans = 0;
             }
 
-            info!(
-                "display: frame {} push complete (dirty_rows={} dirty_spans={})",
-                frame_idx, dirty_rows, dirty_spans
-            );
+            if log_this_frame {
+                info!(
+                    "display: frame {} push complete (dirty_rows={} dirty_spans={})",
+                    frame_idx, dirty_rows, dirty_spans
+                );
+            }
 
             last_push_ms = now;
-        }
-
-        // 主动让出，避免占用执行器
-        for _ in 0..20 {
+        } else {
+            // 未到下一帧的最小间隔，主动让出避免忙等占用整个 Core。
             yield_now().await;
         }
     }
