@@ -15,6 +15,35 @@ const LOGICAL_WIDTH: i32 = 320;
 const LOGICAL_HEIGHT: i32 = 240;
 const DEBUG_OVERLAY: bool = false;
 
+// 左侧三张主卡片的布局参数，便于在全帧/局部渲染中保持一致。
+const CARD_TOPS: [i32; 3] = [0, 80, 160];
+const CARD_BG_LEFT: i32 = 8;
+const CARD_BG_RIGHT: i32 = 182;
+// 背景在 Y 方向的偏移：与原设计保持上边距 6px，同时向下扩展到 +80，
+// 以完全覆盖 32x50 的七段字体（area.top = top+28，高度 50 → bottom=top+78）。
+const CARD_BG_TOP_OFFSET: i32 = 6;
+const CARD_BG_BOTTOM_OFFSET: i32 = 80;
+
+/// Bitmask describing which logical UI regions need to be updated for a frame.
+#[derive(Copy, Clone, Default)]
+pub struct UiChangeMask {
+    pub main_metrics: bool,
+    pub voltage_pair: bool,
+    pub current_pair: bool,
+    pub telemetry_lines: bool,
+    pub bars: bool,
+}
+
+impl UiChangeMask {
+    pub fn is_empty(&self) -> bool {
+        !(self.main_metrics
+            || self.voltage_pair
+            || self.current_pair
+            || self.telemetry_lines
+            || self.bars)
+    }
+}
+
 pub fn render_default(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
     render(frame, &UiSnapshot::demo());
 }
@@ -31,18 +60,23 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
     );
 
     let card_colors = [rgb(0x171f33), rgb(0x141d2f), rgb(0x111828)];
-    for (idx, &top) in [0, 80, 160].iter().enumerate() {
-        canvas.fill_rect(Rect::new(8, top + 6, 182, top + 74), card_colors[idx]);
+    for (idx, &top) in CARD_TOPS.iter().enumerate() {
+        canvas.fill_rect(
+            Rect::new(
+                CARD_BG_LEFT,
+                top + CARD_BG_TOP_OFFSET,
+                CARD_BG_RIGHT,
+                top + CARD_BG_BOTTOM_OFFSET,
+            ),
+            card_colors[idx],
+        );
     }
 
-    let voltage_text = format_value(data.main_voltage, 2);
-    let current_text = format_value(data.main_current, 2);
-    let power_text = format_value(data.main_power, 1);
     // Digits colors per design palette
     draw_main_metric(
         &mut canvas,
         "VOLTAGE",
-        voltage_text.as_str(),
+        data.main_voltage_text.as_str(),
         "V",
         0,
         rgb(0xFFB347),
@@ -50,7 +84,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
     draw_main_metric(
         &mut canvas,
         "CURRENT",
-        current_text.as_str(),
+        data.main_current_text.as_str(),
         "A",
         80,
         rgb(0xFF5252),
@@ -58,23 +92,134 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
     draw_main_metric(
         &mut canvas,
         "POWER",
-        power_text.as_str(),
+        data.main_power_text.as_str(),
         "W",
         160,
         rgb(0x6EF58C),
     );
 
-    let remote_text = format_pair_value(data.remote_voltage, 'V');
-    let local_text = format_pair_value(data.local_voltage, 'V');
-    draw_voltage_pair(&mut canvas, data, remote_text.as_str(), local_text.as_str());
+    draw_voltage_pair(
+        &mut canvas,
+        data,
+        data.remote_voltage_text.as_str(),
+        data.local_voltage_text.as_str(),
+    );
 
-    let ch1_text = format_pair_value(data.ch1_current, 'A');
-    let ch2_text = format_pair_value(data.ch2_current, 'A');
-    draw_current_pair(&mut canvas, data, ch1_text.as_str(), ch2_text.as_str());
+    draw_current_pair(
+        &mut canvas,
+        data,
+        data.ch1_current_text.as_str(),
+        data.ch2_current_text.as_str(),
+    );
     draw_telemetry(&mut canvas, data);
 
     if DEBUG_OVERLAY {
         draw_debug_overlay(&mut canvas);
+    }
+}
+
+/// Partially update the framebuffer based on a change mask and the current UI
+/// snapshot. 静态布局（背景、标签、单位等）假定已经通过首帧 `render()` 绘制。
+pub fn render_partial(
+    frame: &mut RawFrameBuf<Rgb565, &mut [u8]>,
+    curr: &UiSnapshot,
+    mask: &UiChangeMask,
+) {
+    if mask.is_empty() {
+        return;
+    }
+
+    let bytes = frame.as_mut_bytes();
+    let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+    if mask.main_metrics {
+        // 先恢复三张卡片的背景色，再重绘大数码管和标签，避免数字形态变化时残影堆叠。
+        let card_colors = [rgb(0x171f33), rgb(0x141d2f), rgb(0x111828)];
+        for (idx, &top) in CARD_TOPS.iter().enumerate() {
+            canvas.fill_rect(
+                Rect::new(
+                    CARD_BG_LEFT,
+                    top + CARD_BG_TOP_OFFSET,
+                    CARD_BG_RIGHT,
+                    top + CARD_BG_BOTTOM_OFFSET,
+                ),
+                card_colors[idx],
+            );
+        }
+
+        // 左侧主数值区域：按需整体重绘各自区域（相比整屏已经大幅减载）。
+        draw_main_metric(
+            &mut canvas,
+            "VOLTAGE",
+            curr.main_voltage_text.as_str(),
+            "V",
+            0,
+            rgb(0xFFB347),
+        );
+        draw_main_metric(
+            &mut canvas,
+            "CURRENT",
+            curr.main_current_text.as_str(),
+            "A",
+            80,
+            rgb(0xFF5252),
+        );
+        draw_main_metric(
+            &mut canvas,
+            "POWER",
+            curr.main_power_text.as_str(),
+            "W",
+            160,
+            rgb(0x6EF58C),
+        );
+    }
+
+    if mask.voltage_pair {
+        // 清理右侧电压对所占区域的背景，再重绘标题和条形图。
+        canvas.fill_rect(
+            Rect::new(190, 8, LOGICAL_WIDTH, 96),
+            rgb(0x080f19),
+        );
+        let remote_text = curr.remote_voltage_text.as_str();
+        let local_text = curr.local_voltage_text.as_str();
+        draw_voltage_pair(&mut canvas, curr, remote_text, local_text);
+    }
+
+    if mask.current_pair {
+        // 清理右侧电流对所占区域的背景，再重绘标题和条形图。
+        canvas.fill_rect(
+            Rect::new(190, 96, LOGICAL_WIDTH, 180),
+            rgb(0x080f19),
+        );
+        let ch1_text = curr.ch1_current_text.as_str();
+        let ch2_text = curr.ch2_current_text.as_str();
+        draw_current_pair(&mut canvas, curr, ch1_text, ch2_text);
+    }
+
+    if mask.telemetry_lines {
+        // 底部 5 行状态文本：先擦除对应背景行，再写新文本，避免字符串长度变化时残影。
+        canvas.fill_rect(
+            Rect::new(190, 180, LOGICAL_WIDTH, LOGICAL_HEIGHT),
+            rgb(0x080f19),
+        );
+        draw_telemetry(&mut canvas, curr);
+    }
+
+    if mask.bars {
+        // Bars are driven from remote/local voltage and currents; reuse the
+        // existing helpers to redraw the bars over the existing background.
+        draw_mirror_bar(
+            &mut canvas,
+            8 + 34,
+            curr.remote_voltage / 40.0,
+            curr.local_voltage / 40.0,
+        );
+        draw_mirror_bar(
+            &mut canvas,
+            96 + 34,
+            curr.ch1_current / 5.0,
+            curr.ch2_current / 5.0,
+        );
     }
 }
 
@@ -245,12 +390,50 @@ fn draw_small_text(
 }
 
 fn format_value(value: f32, decimals: usize) -> String<8> {
+    // 手写一个小型格式化器，避免依赖核心库的浮点 fmt 路径（会拉入大整数算法）。
+    // 约定：总宽度最多 5 个字符（含符号和小数点），不足左侧不强制补空格。
     let mut s = String::<8>::new();
-    let _ = match decimals {
-        0 => core::fmt::write(&mut s, format_args!("{value:5.0}")),
-        1 => core::fmt::write(&mut s, format_args!("{value:5.1}")),
-        _ => core::fmt::write(&mut s, format_args!("{value:5.2}")),
+
+    // 处理符号
+    let mut v = value;
+    if v.is_nan() {
+        let _ = s.push_str("NaN");
+        return s;
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            let _ = s.push_str("-Inf");
+        } else {
+            let _ = s.push_str("Inf");
+        }
+        return s;
+    }
+    if v < 0.0 {
+        let _ = s.push('-');
+        v = -v;
+    }
+
+    let scale = match decimals {
+        0 => 1.0,
+        1 => 10.0,
+        _ => 100.0,
     };
+    let scaled = (v * scale + 0.5) as u32;
+    let int_part = scaled / (scale as u32);
+    let frac_part = scaled % (scale as u32);
+
+    append_u32(&mut s, int_part);
+
+    if decimals > 0 {
+        let _ = s.push('.');
+        let frac_digits = match decimals {
+            0 => 0,
+            1 => 1,
+            _ => 2,
+        };
+        append_frac(&mut s, frac_part, frac_digits);
+    }
+
     s
 }
 
@@ -263,19 +446,79 @@ fn format_pair_value(value: f32, unit: char) -> String<6> {
 }
 
 fn format_four_digits(value: f32) -> String<5> {
+    // 生成恰好 4 个字符的“整数+小数”数字，不使用核心库浮点 fmt。
     let mut s = String::<5>::new();
-    let abs = value.abs();
-    if abs >= 100.0 {
-        let _ = core::fmt::write(&mut s, format_args!("{value:04.0}"));
-    } else if abs >= 10.0 {
-        let _ = core::fmt::write(&mut s, format_args!("{value:04.1}"));
+
+    let mut v = value;
+    if v.is_nan() {
+        let _ = s.push_str("----");
+        return s;
+    }
+    if v < 0.0 {
+        v = -v;
+    }
+
+    let (scale, frac_digits) = if v >= 100.0 {
+        (1.0, 0)
+    } else if v >= 10.0 {
+        (10.0, 1)
     } else {
-        let _ = core::fmt::write(&mut s, format_args!("{value:04.2}"));
+        (100.0, 2)
+    };
+
+    let scaled = (v * scale + 0.5) as u32;
+    let int_part = scaled / (scale as u32);
+    let frac_part = scaled % (scale as u32);
+
+    // 暂存在临时 buffer 中，再根据总宽度裁剪到 4 个字符。
+    let mut tmp = String::<8>::new();
+    append_u32(&mut tmp, int_part);
+    if frac_digits > 0 {
+        let _ = tmp.push('.');
+        append_frac(&mut tmp, frac_part, frac_digits);
     }
-    if s.len() > 4 {
-        s.truncate(4);
+
+    // 若超过 4 字符，截断右侧多余部分；不足则左侧不补空格（UI 仍使用等宽字体保障稳定）。
+    if tmp.len() > 4 {
+        s.push_str(&tmp.as_str()[0..4]).ok();
+    } else {
+        s.push_str(tmp.as_str()).ok();
     }
+
     s
+}
+
+fn append_u32<const N: usize>(buf: &mut String<N>, mut value: u32) {
+    // 把无符号整数按十进制追加到 buf（不做左侧补零）。
+    let mut tmp = [0u8; 10];
+    let mut i = 0;
+    if value == 0 {
+        let _ = buf.push('0');
+        return;
+    }
+    while value > 0 && i < tmp.len() {
+        tmp[i] = b'0' + (value % 10) as u8;
+        value /= 10;
+        i += 1;
+    }
+    while i > 0 {
+        i -= 1;
+        let _ = buf.push(tmp[i] as char);
+    }
+}
+
+fn append_frac<const N: usize>(buf: &mut String<N>, mut value: u32, digits: u8) {
+    // 以固定位数输出小数部分，必要时左侧补零。
+    let mut tmp = [b'0'; 4];
+    let mut i = digits as usize;
+    while i > 0 {
+        i -= 1;
+        tmp[i] = b'0' + (value % 10) as u8;
+        value /= 10;
+    }
+    for i in 0..(digits as usize) {
+        let _ = buf.push(tmp[i] as char);
+    }
 }
 
 fn rgb(hex: u32) -> Rgb565 {
@@ -360,6 +603,15 @@ pub struct UiSnapshot {
     pub sink_exhaust_temp: f32,
     pub mcu_temp: f32,
     pub energy_wh: f32,
+    // Preformatted strings for on-demand, character-aware updates.
+    pub main_voltage_text: String<8>,
+    pub main_current_text: String<8>,
+    pub main_power_text: String<8>,
+    pub remote_voltage_text: String<6>,
+    pub local_voltage_text: String<6>,
+    pub ch1_current_text: String<6>,
+    pub ch2_current_text: String<6>,
+    pub status_lines: [String<20>; 5],
 }
 
 impl UiSnapshot {
@@ -379,36 +631,89 @@ impl UiSnapshot {
             sink_exhaust_temp: 38.1,
             mcu_temp: 35.0,
             energy_wh: 125.4,
+            main_voltage_text: String::new(),
+            main_current_text: String::new(),
+            main_power_text: String::new(),
+            remote_voltage_text: String::new(),
+            local_voltage_text: String::new(),
+            ch1_current_text: String::new(),
+            ch2_current_text: String::new(),
+            status_lines: Default::default(),
         }
     }
 
-    pub fn status_lines(&self) -> [String<20>; 5] {
+    /// Recompute all preformatted strings from the current numeric snapshot.
+    pub fn update_strings(&mut self) {
+        self.main_voltage_text = format_value(self.main_voltage, 2);
+        self.main_current_text = format_value(self.main_current, 2);
+        self.main_power_text = format_value(self.main_power, 1);
+
+        self.remote_voltage_text = format_pair_value(self.remote_voltage, 'V');
+        self.local_voltage_text = format_pair_value(self.local_voltage, 'V');
+        self.ch1_current_text = format_pair_value(self.ch1_current, 'A');
+        self.ch2_current_text = format_pair_value(self.ch2_current, 'A');
+
+        self.status_lines = self.compute_status_lines();
+    }
+
+    fn compute_status_lines(&self) -> [String<20>; 5] {
         let mut run = String::<20>::new();
-        let _ = core::fmt::write(&mut run, format_args!("RUN {}", self.run_time));
+        let _ = run.push_str("RUN ");
+        let _ = run.push_str(self.run_time.as_str());
 
         let mut core = String::<20>::new();
-        let _ = core::fmt::write(
-            &mut core,
-            format_args!("CORE {:05.1}C", self.sink_core_temp),
-        );
+        let _ = core.push_str("CORE ");
+        append_temp_1dp(&mut core, self.sink_core_temp);
+        let _ = core.push('C');
 
         let mut exhaust = String::<20>::new();
-        let _ = core::fmt::write(
-            &mut exhaust,
-            format_args!("SINK {:05.1}C", self.sink_exhaust_temp),
-        );
+        let _ = exhaust.push_str("SINK ");
+        append_temp_1dp(&mut exhaust, self.sink_exhaust_temp);
+        let _ = exhaust.push('C');
 
         let mut mcu = String::<20>::new();
-        let _ = core::fmt::write(&mut mcu, format_args!("MCU  {:05.1}C", self.mcu_temp));
+        let _ = mcu.push_str("MCU  ");
+        append_temp_1dp(&mut mcu, self.mcu_temp);
+        let _ = mcu.push('C');
 
         let mut energy = String::<20>::new();
-        let _ = core::fmt::write(
-            &mut energy,
-            format_args!("ENERGY {:05.1}Wh", self.energy_wh),
-        );
+        let _ = energy.push_str("ENERGY ");
+        append_temp_1dp(&mut energy, self.energy_wh);
+        let _ = energy.push_str("Wh");
 
         [run, core, exhaust, mcu, energy]
     }
+
+    pub fn status_lines(&self) -> [String<20>; 5] {
+        self.status_lines.clone()
+    }
+}
+
+fn append_temp_1dp<const N: usize>(buf: &mut String<N>, value: f32) {
+    // 简单 1 位小数格式化（不做宽度对齐），与 format_value 使用同样的缩放策略。
+    let mut v = value;
+    if v.is_nan() {
+        let _ = buf.push_str("NaN");
+        return;
+    }
+    if v.is_infinite() {
+        if v.is_sign_negative() {
+            let _ = buf.push_str("-Inf");
+        } else {
+            let _ = buf.push_str("Inf");
+        }
+        return;
+    }
+    if v < 0.0 {
+        let _ = buf.push('-');
+        v = -v;
+    }
+    let scaled = (v * 10.0 + 0.5) as u32;
+    let int_part = scaled / 10;
+    let frac_part = scaled % 10;
+    append_u32(buf, int_part);
+    let _ = buf.push('.');
+    append_frac(buf, frac_part, 1);
 }
 
 #[derive(Copy, Clone)]

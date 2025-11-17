@@ -141,6 +141,50 @@
        - 将背景块、卡片、轴线等真正静态的元素在首帧渲染到 framebuffer 中，并在后续帧中仅更新数码管、条形图和文本区域。  
        - 在 `display_task` 中区分“采样频率”和“重绘频率”：保持 80ms 周期采样/更新快照，但只有当关键字段变化超过阈值（例如电压/电流/温度或运行时间秒数变动）时才触发重绘，否则降低重绘频率以平滑 CPU/栈压力。  
     7. 如需 A/B，对比方案应以“完整 UI + 不同渲染策略/阈值”为主，而不是切换到另一套简化界面；默认构建始终使用原设计界面，仅通过 feature 控制调试插桩与优化路径。
+- **2025-11-17 00:56 digital UART UHCI DMA + 完整 UI 局部刷新实现（崩溃，未能评估性能）**  
+  - 版本：digital `digital 0.1.0 (profile release, 39a1460-dirty, src 0x63d9331e91d947e0)`；analog `analog 0.1.0 (profile release, 5ccb582-dirty, src 0x8c5c13041e8576aa)`。  
+  - 配置：UART 230400；FAST_STATUS≈60Hz（analog mock）；`DISPLAY_MIN_FRAME_INTERVAL_MS=80`；`DISPLAY_CHUNK_ROWS=8`；`DISPLAY_CHUNK_YIELD_LOOPS=6`；`ENABLE_DISPLAY_SPI_UPDATES=true`；`UART_RX_FIFO_FULL_THRESHOLD=120`；`UART_RX_TIMEOUT_SYMS=10`；`FAST_STATUS_SLIP_CAPACITY=1024`；`UART_DMA_BUF_LEN=512`；`ENABLE_UART_UHCI_DMA=true`。  
+  - UI 实现：根据前文计划落地了完整 UI 的按需刷新路径：  
+    - 数据层：在 `UiSnapshot` 中增加预格式化字符串字段（左侧大数值、右侧电压/电流、底部 5 行状态文本），由 `update_from_status` 统一更新；`TelemetryModel` 维护 `last_rendered: Option<UiSnapshot>` 并提供 `diff_for_render() -> (Option<UiSnapshot>, UiSnapshot, UiChangeMask)`。  
+    - 视图层：保留 `ui::render` 作为首帧整屏渲染；新增 `UiChangeMask`（`main_metrics`/`voltage_pair`/`current_pair`/`telemetry_lines`/`bars`）与 `ui::render_partial(frame, prev, curr, mask)`，其中：  
+      - 左侧大数字区域按字符 diff：对每位数码管/小数点做字符级比较，仅在字符变化时清除并重绘该 glyph 所在矩形（利用等宽字体与固定格式化宽度保证布局稳定）。  
+      - 右侧数值及条形图按值整体刷新：对应掩码为真时重绘该功能块所在区域。  
+      - 底部 5 行状态文本按行整体刷新。  
+    - `display_task` 主循环中，先调用 `diff_for_render()` 获取 `(prev, curr, mask)`：若 `mask` 为空则跳过本帧 UI 绘制；首帧调用 `ui::render`，后续帧调用 `ui::render_partial`，再复用现有 framebuffer 行级 diff + `show_raw_data` SPI 传输逻辑。  
+  - 结果：`scripts/agent_verify_digital.sh --timeout 25` 下，设备启动并输出版本与任务启动日志（含 `spawning display task` / `spawning uart link task (UHCI DMA)`），随后在 ~0.20 s 左右反复出现 `Exception occurred on ProCpu 'Cp0Disabled'` 与 `Breakpoint on ProCpu` 形式的 panic（由 `esp-backtrace` 打印），会话期间未见 `uart_rx_err_total`/`PROTO_DECODE_ERRS`/`fast_status ok`/`display: frame ...` 等常规运行日志。日志：`tmp/agent-logs/digital-20251117-005623.log`。  
+  - 结论：在当前 UHCI DMA 配置 + 完整 UI 局部刷新实现下，数字板在早期初始化阶段即发生 ProCpu 异常，尚无法采集 UART 溢出或 UI 帧/脏行统计；该 crash 疑似与现有 DMA/任务栈问题同源，需要单独排查（可考虑以 `debug=2` 重新构建并使用 `xtensa-esp32s3-elf-addr2line` 精确定位 PC）。  
+- **2025-11-17 00:59 digital async no-DMA + 完整 UI 局部刷新实现（同样崩溃）**  
+  - 版本：digital `digital 0.1.0 (profile release, 39a1460-dirty, src 0x9d186a2b6b3337fb)`；analog 同上。  
+  - 配置：与上一实验基本一致，但编译期配置为 `ENABLE_UART_UHCI_DMA=false`，运行路径为 `UART link task starting (await read, no DMA)`（无 UHCI DMA，仅基于 `AsyncRead::read` 抽干 FIFO）。  
+  - 结果：`scripts/agent_verify_digital.sh --timeout 25` 下，设备在 ~0.21 s 左右同样出现 `Exception occurred on ProCpu 'Cp0Disabled'` / `Breakpoint on ProCpu` 交替的 panic，日志模式与上一实验高度一致；同样未能看到 `fast_status ok` 或 UI 帧日志。日志：`tmp/agent-logs/digital-20251117-005935.log`。  
+  - 结论：崩溃在关闭 UART UHCI DMA 后依然存在，说明问题并非仅限 DMA 代码路径，更可能与最近引入的 UI/Telemetry 变更、任务栈或其它共享资源有关。当前仍缺乏足够调试信息来确认根因，后续需要在不启用 `espflash --log-format defmt` 或提高调试信息等级的前提下进一步缩小问题范围；在 crash 未解决前，尚无法在实际硬件上量化“按需更新”对 UART 溢出和 UI 性能的改善程度。
+- **2025-11-17 02:38 digital UART UHCI DMA + 手写浮点格式化 + 区域级局部刷新（稳定，可量化性能）**  
+  - 版本：digital `digital 0.1.0 (profile release, 39a1460-dirty, src 0x3a421e9ff094b829)`；analog `analog 0.1.0 (profile release, 5ccb582-dirty, src 0x8c5c13041e8576aa)`。  
+  - 配置：UART 230400；FAST_STATUS≈60Hz；`DISPLAY_MIN_FRAME_INTERVAL_MS=80`；`DISPLAY_CHUNK_ROWS=8`；`DISPLAY_CHUNK_YIELD_LOOPS=6`；`ENABLE_DISPLAY_SPI_UPDATES=true`；`UART_RX_FIFO_FULL_THRESHOLD=120`；`UART_RX_TIMEOUT_SYMS=10`；`FAST_STATUS_SLIP_CAPACITY=1024`；`UART_DMA_BUF_LEN=512`；`ENABLE_UART_UHCI_DMA=true`。  
+  - UI 实现（修正前述崩溃原因）：  
+    - 移除所有基于 `core::fmt::write` 的浮点格式化（`{:5.2}` / `{:04.1}` / `{:05.1}C` 等），改为手写的定点整数格式化：  
+      - `format_value` / `format_four_digits` / `compute_status_lines` 统一使用 `scaled = (value * scale + 0.5) as u32` + 十进制整型输出，仅依赖基本 `f32` 乘加，不再触发 `core::num::bignum::Big32x40::*` 路径，从而避免 ProCpu 上的 `Cp0Disabled`。  
+    - `TelemetryModel::diff_for_render()` 改为只返回 `(UiSnapshot, UiChangeMask)`，内部仅在 UI 线程（`display_task`）中调用 `snapshot.update_strings()` 并在 `last_rendered: Option<UiSnapshot>` 上做字符串级比较；不再把完整 `UiSnapshot` 的克隆返回给调用者，避免在栈上同时持有多份大对象。  
+    - `ui::render_partial` 降级为“区域级”局部刷新：  
+      - 左侧三块大数码管在 `mask.main_metrics` 为真时通过重复调用 `draw_main_metric(...)` 整块重绘，而不是 per-char diff；  
+      - 右侧电压/电流对与条形图在对应掩码为真时按组件整体重绘；  
+      - 底部 5 行状态文本按行整体重绘。  
+    - `display_task` 在首帧（`frame_idx==1`）仍调用 `ui::render` 整屏绘制布局，后续帧根据 `UiChangeMask` 决定是否调用 `render_partial` 或跳过绘制；最终的 SPI 推屏仍由逐行 `memcmp(framebuffer, previous_framebuffer)` + 行合并逻辑驱动。  
+  - 结果（`scripts/agent_verify_digital.sh --timeout 25`，日志：`tmp/agent-logs/digital-20251117-023808.log`）：  
+    - 稳定性：全程未再出现 `Detected a write to the stack guard value` 或 `Exception occurred on ProCpu 'Cp0Disabled'`；系统在单次 run 内连续输出到 ~22 s。  
+    - UART：`uart_rx_err_total=0`，`UART RX error` 未见；`fast_status ok` 自 0.192 s 左右开始，每约 1 s 增加 ~51–52 次，与预期 60Hz mock 接近（典型：`20.184 [INFO ] fast_status ok (count=992, display_running=true)`，`21.401 ... (count=1056, ...)`）。  
+    - 协议：`decode_errs` 在完整 22 s 窗口内从 0 增至 ~40（约 1.8 次/s），明显低于先前无显示/简化 UI 场景下的 20+ 次/s；尚未做更细致的错误类型统计。  
+    - 显示帧率与脏行统计：  
+      - 帧间隔：`display: rendering frame N (dt_ms=80)` 基本稳定在 80 ms 附近，少数首帧为 ~138 ms（初始化阶段）；  
+      - 前几帧典型日志：  
+        - `display: frame 1 push complete (dirty_rows=320 dirty_spans=1)`（完整首帧）；  
+        - `display: frame 2 push complete (dirty_rows=108 dirty_spans=5)`；  
+        - `display: frame 3 push complete (dirty_rows=62 dirty_spans=5)`；  
+        - 后续多数帧 `dirty_rows` 在 10–50 行之间，`dirty_spans` 1–3（区域级局部刷新 + 行级 diff 联合作用）。  
+      - 在 20–22 s 的窗口末尾，当数据持续变化且局部刷新触发频繁时，观察到部分帧退化为 `dirty_rows=320 dirty_spans=1` 的整屏推送（例如 `frame 243–269`），说明在高 churn 场景下当前区域/掩码策略仍需进一步调优才能长期维持行级局部更新的优势。  
+  - 初步结论：  
+    - 手写浮点格式化成功规避了之前由 `core::fmt` 引入的 ProCpu `Cp0Disabled` 异常，UI + UART + UHCI DMA 组合在 230400 波特率 + 60Hz FAST_STATUS 下可以稳定运行 ≥20 s；  
+    - 在数值变化“普通”的阶段，区域级局部刷新明显降低了每帧 `dirty_rows`，但在高变化、接近“全屏都变”的场景下仍会退化为整屏推送；后续可以在 `UiChangeMask` 的粒度和行合并策略上继续优化，以便在更多负载模式下保持 SPI 事务稀疏。  
 - **2025-11-16 12:00 digital UART UHCI DMA 尝试（结果：日志解码失败）**  
   - 版本：digital `digital 0.1.0 (profile release, 539f0f8-dirty, src 0xc0cce3b455259210)`；analog 未变。  
   - 配置：UART 230400；FAST_STATUS_HZ=30；DISPLAY_MIN_FRAME_INTERVAL_MS=25；DISPLAY_CHUNK_YIELD_LOOPS=0；SPI DMA on；UART RX via UHCI DMA（DMA_CH1，chunk_limit=4092，缓冲=~4KB）；LOGFMT=defmt。  

@@ -148,6 +148,7 @@ struct DisplayResources {
 struct TelemetryModel {
     snapshot: UiSnapshot,
     last_uptime_ms: Option<u32>,
+    last_rendered: Option<UiSnapshot>,
 }
 
 impl TelemetryModel {
@@ -155,6 +156,7 @@ impl TelemetryModel {
         Self {
             snapshot: UiSnapshot::demo(),
             last_uptime_ms: None,
+            last_rendered: None,
         }
     }
 
@@ -191,6 +193,65 @@ impl TelemetryModel {
 
     fn snapshot(&self) -> UiSnapshot {
         self.snapshot.clone()
+    }
+
+    /// Compute a change mask between the last rendered snapshot and the current
+    /// one,返回当前快照副本与变化掩码。
+    ///
+    /// This is used by the display task to drive partial, character-aware
+    /// updates on top of the existing framebuffer diff logic.
+    fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask) {
+        // Keep all display strings in sync with the latest numeric values so
+        // the UI layer can render based purely on preformatted text. This is
+        // intentionally called from the display task (UI context), not from the
+        // UART link task, to avoid doing floating-point formatting work in the
+        // UART path on ProCpu.
+        self.snapshot.update_strings();
+
+        let prev_snapshot = self.last_rendered.as_ref();
+        let current = &self.snapshot;
+        let mut mask = ui::UiChangeMask::default();
+
+        if let Some(prev) = prev_snapshot {
+            if prev.main_voltage_text != current.main_voltage_text
+                || prev.main_current_text != current.main_current_text
+                || prev.main_power_text != current.main_power_text
+            {
+                mask.main_metrics = true;
+            }
+
+            if prev.remote_voltage_text != current.remote_voltage_text
+                || prev.local_voltage_text != current.local_voltage_text
+            {
+                mask.voltage_pair = true;
+            }
+
+            if prev.ch1_current_text != current.ch1_current_text
+                || prev.ch2_current_text != current.ch2_current_text
+            {
+                mask.current_pair = true;
+            }
+
+            if prev.status_lines != current.status_lines {
+                mask.telemetry_lines = true;
+            }
+
+            if mask.voltage_pair || mask.current_pair {
+                mask.bars = true;
+            }
+        } else {
+            // First-frame render: everything is considered dirty so that the
+            // initial layout is fully drawn.
+            mask.main_metrics = true;
+            mask.voltage_pair = true;
+            mask.current_pair = true;
+            mask.telemetry_lines = true;
+            mask.bars = true;
+        }
+
+        // 记录当前快照用于下一次 diff；只在这里 clone 一次，避免在栈上持有多份大对象。
+        self.last_rendered = Some(self.snapshot.clone());
+        (self.snapshot.clone(), mask)
     }
 }
 
@@ -385,23 +446,37 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                 now.wrapping_sub(last_push_ms)
             );
 
-            let snapshot = {
-                let guard = telemetry.lock().await;
-                guard.snapshot()
+            let (snapshot, mask) = {
+                let mut guard = telemetry.lock().await;
+                guard.diff_for_render()
             };
 
-            {
-                let mut frame = RawFrameBuf::<Rgb565, _>::new(
-                    &mut ctx.framebuffer[..],
-                    DISPLAY_WIDTH,
-                    DISPLAY_HEIGHT,
+            if mask.is_empty() {
+                info!(
+                    "display: frame {} skipped (no UI changes, dt_ms={})",
+                    frame_idx,
+                    now.wrapping_sub(last_push_ms)
                 );
-                ui::render(&mut frame, &snapshot);
-            }
+            } else {
+                {
+                    let mut frame = RawFrameBuf::<Rgb565, _>::new(
+                        &mut ctx.framebuffer[..],
+                        DISPLAY_WIDTH,
+                        DISPLAY_HEIGHT,
+                    );
+                    if frame_idx == 1 {
+                        // 首帧：完整绘制静态布局 + 动态内容。
+                        ui::render(&mut frame, &snapshot);
+                    } else {
+                        // 后续帧：仅按掩码重绘受影响区域。
+                        ui::render_partial(&mut frame, &snapshot, &mask);
+                    }
+                }
 
-            if frame_idx <= FRAME_SAMPLE_FRAMES {
-                log_framebuffer_span("rendered-frame", &ctx.framebuffer[..]);
-                log_framebuffer_samples("rendered-frame", &ctx.framebuffer[..]);
+                if frame_idx <= FRAME_SAMPLE_FRAMES {
+                    log_framebuffer_span("rendered-frame", &ctx.framebuffer[..]);
+                    log_framebuffer_samples("rendered-frame", &ctx.framebuffer[..]);
+                }
             }
 
             let mut dirty_rows = 0usize;
