@@ -124,8 +124,8 @@ BOM (per channel)
 Quick Test Plan
 ---------------
 1) Build both firmware targets.  
-   - G431: `make g431-build`  
-   - S3: `make s3-build`
+   - G431: `make a-build`  
+   - S3: `make d-build`
 2) Flash and enable periodic logging of the four channels (temperature plus raw ADC).  
 3) Verify cold (0 °C), ambient, hot (≥90 °C) points; compare against an external thermometer.  
 4) Confirm that at 0 °C node voltage < 2.9 V (scope or ADC count) and that ADC counts decrease monotonically with temperature.

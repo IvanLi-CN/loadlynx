@@ -28,13 +28,14 @@ PROBE_FLAG     := $(if $(PROBE),--probe $(PROBE),)
 PROTOCOL_FLAG  := $(if $(PROTOCOL),--protocol $(PROTOCOL),)
 SPEED_FLAG     := $(if $(SPEED),--speed $(SPEED),)
 
-.PHONY: help build run run-force attach reset reset-attach size info clean list-probes probe-info
+.PHONY: help build run run-force flash attach reset reset-attach size info clean list-probes probe-info
 
 help:
 	@echo "Analog (STM32G431) firmware make targets"
 	@echo "  build        Build $(PROFILE) firmware"
 	@echo "  run          Flash + run via probe-rs" 
 	@echo "  run-force    Clean then flash"
+	@echo "  flash        Flash firmware only (no logging session)"
 	@echo "  attach       Attach with symbols"
 	@echo "  reset        Hardware reset via probe-rs"
 	@echo "  reset-attach Reset then attach"
@@ -69,6 +70,10 @@ run: build
 	$(PROBE_RS) run $(PROBE_FLAG) $(PROTOCOL_FLAG) $(SPEED_FLAG) --chip $(CHIP) "$(ELF)"
 
 run-force: clean run
+
+flash: build
+	@echo "[flash] (download only) chip=$(CHIP) probe=$(PROBE)"
+	$(PROBE_RS) download $(PROBE_FLAG) $(PROTOCOL_FLAG) $(SPEED_FLAG) --chip $(CHIP) "$(ELF)"
 
 attach: build
 	@echo "[attach] chip=$(CHIP) probe=$(PROBE)"
