@@ -11,85 +11,62 @@ use embassy_stm32::adc::{Adc, AdcChannel, SampleTime};
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dac::{Dac, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
-use stm32_metapac::vrefbuf::vals::{Hiz, Vrs};
-use stm32_metapac::VREFBUF;
 use embassy_stm32::usart::{Config as UartConfig, Uart};
-use embassy_time::{Duration, Ticker};
-use heapless::Vec;
-
-// UART link protocol constants (see docs/interfaces/uart-link.md).
-const PROTO_VER: u8 = 0x01;
-const MSG_STATUS: u8 = 0x10;
+use embassy_time::{Instant, Timer};
+use loadlynx_protocol::{FastStatus, encode_fast_status_frame, slip_encode};
+use stm32_metapac::VREFBUF;
+use stm32_metapac::vrefbuf::vals::{Hiz, Vrs};
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
 });
 
-// The current monitor path is: I_load -> R_SHUNT=25 mΩ -> INA193 (gain=20 V/V),
-// so V_CUR_SENSE = 20 * 0.025 Ω * I = 0.5 * I [V/A]. The CC error amp (U18)
-// compares this sense voltage against the DAC setpoint at its + input
-// (via R10=100 Ω), with the inverting input fed from CUR1_SP via R9=100 Ω.
-// At DC the large 100 kΩ feedback (R31) mainly provides bias/stability, so
-// the loop approximately enforces V_DAC ≈ V_CUR_SENSE.
+// 模拟板 FAST_STATUS 发送周期：1000/30 ms ≈ 33.3ms（≈30 Hz）
+const FAST_STATUS_PERIOD_MS: u64 = 1000 / 30;
+const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
+const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
+
+// DAC1 → CC1 环路：0.5 A 设计值对应的 DAC 码。
+// 物理链路（来自网表与 INA193/OPA2365 手册）：
+//   I_load → R_SHUNT=25 mΩ → INA193 (G=20 V/V) → V_CUR1_SP
+//   V_CUR1_SP = 20 * 0.025 Ω * I = 0.5 * I [V/A]
+//   CC 运放比较 V_CUR1_SP 与 DAC_CH1，经 100 Ω/100 kΩ 网络，直流近似 V_DAC ≈ V_CUR1_SP。
 //
-// For I = 0.5 A:
-//   V_CUR_SENSE ≈ 0.5 * 0.5 A = 0.25 V
-// DAC is 12-bit referenced to VREF+ driven by VREFBUF. For STM32G431 with
-// VREFBUF configured to 2.9 V (Vrs::VREF2):
-//   CODE_0p5A ≈ 0.25 / 2.9 * (2^12 - 1) ≈ 353.
-//
-// This is a first-order design value; final accuracy still depends on shunt
-// tolerance, INA193 gain error, and loop compensation, and should be trimmed
-// in firmware if tighter than a few percent is required.
+// VREFBUF 设为 2.9 V (Vrs::VREF2)，DAC 12bit 满量程 4095：
+//   I = 0.5 A → V_CUR1_SP ≈ 0.25 V
+//   CODE_0p5A ≈ 0.25 / 2.9 * 4095 ≈ 353
 const CC_0P5A_DAC_CODE_CH1: u16 = 353;
 
-fn crc16_ccitt_false(data: &[u8]) -> u16 {
-    // poly 0x1021, init 0xFFFF, no reflection, no xorout
-    let mut crc: u16 = 0xFFFF;
-    for &b in data {
-        crc ^= (b as u16) << 8;
-        for _ in 0..8 {
-            if (crc & 0x8000) != 0 {
-                crc = (crc << 1) ^ 0x1021;
-            } else {
-                crc <<= 1;
-            }
-        }
-    }
-    crc
+// ADC 公共参数（G431 12bit ADC，以 VREFBUF 2.9 V 作为参考）。
+const ADC_VREF_MV: u32 = 2900;
+const ADC_FULL_SCALE: u32 = 4095;
+
+// 近端 / 远端电压测量的缩放关系来自网表中 OPA2365 差分放大器：
+//
+// 远端（V_RMT_P / V_RMT_N）：
+//   - 正端分压：R16=124k, R19=10k → V+ = V_RMT_P * 10 / (124 + 10)
+//   - 反相端网络：R15=124k (到 V_RMT_N), R14=10k (到 V_RMT_SP)
+//   - 令 V+ = V-，写节点方程可得：
+//       V_RMT_SP = (10 / 124) * (V_RMT_P - V_RMT_N)
+//     即 MCU 侧 V_RMT_SP 正比于负载差分电压，比例 10/124。
+//
+// 近端（V_NR_P / V_NR_N）使用完全对称的网络（R23/R24/R21/R22），得到同样关系：
+//       V_NR_SP = (10 / 124) * (V_NR_P - V_NR_N)
+//
+// 因此反推负载端差分电压：
+//   V_load = (124 / 10) * V_SP ≈ 12.4 * V_SP
+const SENSE_GAIN_NUM: u32 = 124;
+const SENSE_GAIN_DEN: u32 = 10;
+
+fn timestamp_ms() -> u64 {
+    Instant::now().as_millis() as u64
 }
 
-fn slip_encode(src: &[u8], dst: &mut Vec<u8, 256>) {
-    const END: u8 = 0xC0;
-    const ESC: u8 = 0xDB;
-    const ESC_END: u8 = 0xDC;
-    const ESC_ESC: u8 = 0xDD;
-
-    dst.clear();
-    let _ = dst.push(END);
-    for &b in src {
-        match b {
-            END => {
-                let _ = dst.push(ESC);
-                let _ = dst.push(ESC_END);
-            }
-            ESC => {
-                let _ = dst.push(ESC);
-                let _ = dst.push(ESC_ESC);
-            }
-            _ => {
-                let _ = dst.push(b);
-            }
-        }
-    }
-    let _ = dst.push(END);
-}
+defmt::timestamp!("{=u64:ms}", timestamp_ms());
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
-    // Use Embassy's default clock tree, but make sure ADC1/2 get a valid clock
-    // source via the ADC12 mux. This avoids time-driver panics while still
-    // providing sufficient performance for slow ADC sampling / CC bring-up.
+    // 为 ADC1/ADC2 选择稳定的时钟源，避免后续 ADC 初始化触发时钟相关异常。
     let mut config = stm32::Config::default();
     {
         use embassy_stm32::rcc::mux;
@@ -97,14 +74,9 @@ async fn main(_spawner: Spawner) -> ! {
     }
     let p = stm32::init(config);
 
-    info!("LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC bring-up)");
+    info!("LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)");
 
-    // Configure the internal voltage reference buffer (VREFBUF) to drive
-    // VREF+ at approximately 2.9 V (VRS=VREF2) with low output impedance.
-    // This VREF+ is used as reference for both ADC and DAC.
-    //
-    // Per RM0440 / AN5093 and stm32-metapac `vrefbuf_v2b`:
-    //   VREF0 ≈ 2.048 V, VREF1 ≈ 2.5 V, VREF2 ≈ 2.9 V.
+    // 配置内部基准缓冲（VREFBUF），使 VREF+ ≈ 2.9 V，供 ADC/DAC 共用。
     let vrefbuf = VREFBUF;
     vrefbuf.csr().modify(|csr| {
         csr.set_hiz(Hiz::CONNECTED);
@@ -112,54 +84,39 @@ async fn main(_spawner: Spawner) -> ! {
         csr.set_envr(true);
     });
     while !vrefbuf.csr().read().vrr() {
-        // wait for voltage reference buffer to become ready
+        // 等待基准缓冲稳定
     }
 
-    // Temporary bring-up: force LOAD_EN high by driving both LOAD_EN_CTL (PB13)
-    // and LOAD_EN_TS (PB14) high as plain GPIO outputs. This bypasses the COMP4
-    // over-temperature gating and is only intended for lab testing of the CC
-    // path (TPS22810 → OVCC → op-amps → MOSFETs).
-    //
-    // Hardware mapping (see docs/thermal/over-temperature-protection.md):
-    // - PB13 = LOAD_EN_CTL (MCU intent)
-    // - PB14 = LOAD_EN_TS / COMP4_OUT (COMP_OK)
-    // - LOAD_EN = LOAD_EN_CTL AND LOAD_EN_TS → TPS22810 EN/UVLO
-    //
-    // For now we set both high so LOAD_EN = 1.
+    // 暂时直接闭合 TPS22810 负载开关：PB13=LOAD_EN_CTL，PB14=LOAD_EN_TS。
+    // 逻辑：LOAD_EN = LOAD_EN_CTL AND LOAD_EN_TS。为简单起见，两路都拉高，
+    // 只启用硬件恒流通道 1（DAC_CH1 设为 0.5A 目标，DAC_CH2=0）。
     let mut load_en_ctl = Output::new(p.PB13, Level::High, Speed::Low);
     let mut load_en_ts = Output::new(p.PB14, Level::High, Speed::Low);
     load_en_ctl.set_high();
     load_en_ts.set_high();
 
-    // UART3: keep a minimal TX channel for debug/telemetry.
+    // UART3：与数字板交互的链路，230400 8N1。
     let mut uart_cfg = UartConfig::default();
-    uart_cfg.baudrate = 115_200;
+    uart_cfg.baudrate = 230_400;
 
     let mut uart = Uart::new(
-        p.USART3,
-        p.PC11, // RX
-        p.PC10, // TX
-        Irqs,
-        p.DMA1_CH1,
-        p.DMA1_CH2,
-        uart_cfg,
+        p.USART3, p.PC11, p.PC10, Irqs, p.DMA1_CH1, p.DMA1_CH2, uart_cfg,
     )
     .unwrap();
 
-    // ADC1/ADC2 setup (blocking read, no DMA): we only need modest sample rate.
+    // ADC1/ADC2：阻塞读取即可满足 30Hz 遥测。
     let mut adc1 = Adc::new(p.ADC1);
     let mut adc2 = Adc::new(p.ADC2);
-
     adc1.set_sample_time(SampleTime::CYCLES247_5);
     adc2.set_sample_time(SampleTime::CYCLES247_5);
 
-    // Channel mapping based on loadlynx.ioc labels:
-    // - PA0/PA1: V_RMT_SP / V_RMT_SN (remote voltage sense)
-    // - PA2/PA3: V_NR_SP / V_NR_SN (near voltage sense)
-    // - PA6/PA7: CUR1_SP / CUR1_SN (channel 1 current sense, differential pair)
-    // - PB11/PB15: CUR2_SP / CUR2_SN (channel 2 current sense, differential pair)
-    // - PB12: _5V_SNS (5 V rail sense)
-    // - PB0/PB1: TS1 / TS2 (temperature sensors)
+    // 通道映射（参考 loadlynx.ioc 与网表）：
+    // - PA0/PA1:  V_RMT_SP / V_RMT_SN  → 远端电压差分放大后输出
+    // - PA2/PA3:  V_NR_SP  / V_NR_SN   → 近端电压差分放大后输出
+    // - PA6/PA7:  CUR1_SP  / CUR1_SN   → CH1 电流检测（INA193 输出）
+    // - PB11/PB15:CUR2_SP  / CUR2_SN   → CH2 电流检测
+    // - PB12:     _5V_SNS              → 模拟板 5V 轨电压分压
+    // - PB0/PB1:  TS1 / TS2            → 温度传感器（暂不参与控制，仅打包）
     let mut v_rmt_sp = p.PA0.degrade_adc();
     let mut v_rmt_sn = p.PA1.degrade_adc();
     let mut v_nr_sp = p.PA2.degrade_adc();
@@ -174,26 +131,23 @@ async fn main(_spawner: Spawner) -> ! {
     let mut ts1 = p.PB0.degrade_adc();
     let mut ts2 = p.PB1.degrade_adc();
 
-    // DAC1: use CH1 (PA4) for channel 1 CC setpoint, explicitly force CH2 to 0
-    // so only one load channel is active during bring-up. This avoids pushing
-    // the bench supply into current limit when both channels try to pull 0.5 A.
+    // DAC1：PA4/PA5 → CH1/CH2，当前仅启用 CH1 恒流 0.5A，CH2 置零。
     let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
     dac.ch1().set(DacValue::Bit12Right(CC_0P5A_DAC_CODE_CH1));
     dac.ch2().set(DacValue::Bit12Right(0));
 
     info!(
-        "CC setpoint CH1: target 0.5 A (DAC code = {}) – requires hardware calibration",
+        "CC setpoint CH1: target 0.5 A (DAC code = {})",
         CC_0P5A_DAC_CODE_CH1
     );
 
-    // Periodic sampler: log raw ADC codes locally, and send derived voltages
-    // and currents over UART3 to the digital board using the CBOR/SLIP-based
-    // Status frame defined in docs/interfaces/uart-link.md.
-    let mut ticker = Ticker::every(Duration::from_millis(200));
     let mut seq: u8 = 0;
-    let mut ts_ms: u32 = 0;
+    let mut uptime_ms: u32 = 0;
+    let mut raw_frame = [0u8; 192];
+    let mut slip_frame = [0u8; 384];
 
     loop {
+        // --- 采样所有相关 ADC 通道（阻塞读取） ---
         let v_rmt_sp_code = adc1.blocking_read(&mut v_rmt_sp);
         let v_rmt_sn_code = adc1.blocking_read(&mut v_rmt_sn);
         let v_nr_sp_code = adc1.blocking_read(&mut v_nr_sp);
@@ -208,119 +162,87 @@ async fn main(_spawner: Spawner) -> ! {
         let ts1_code = adc1.blocking_read(&mut ts1);
         let ts2_code = adc1.blocking_read(&mut ts2);
 
-        info!(
-            "ADC raw: VRMT+={} VRMT-={} VNR+={} VNR-={} I1+={} I1-={} I2+={} I2-={} 5V={} TS1={} TS2={}",
-            v_rmt_sp_code,
-            v_rmt_sn_code,
-            v_nr_sp_code,
-            v_nr_sn_code,
-            cur1_sp_code,
-            cur1_sn_code,
-            cur2_sp_code,
-            cur2_sn_code,
-            sns_5v_code,
-            ts1_code,
-            ts2_code
-        );
+        // 节点电压（基于 VREF=2.9 V 的原始 ADC 电压，单位 mV）
+        let adc_to_mv = |code: u16| -> u32 { (code as u32) * ADC_VREF_MV / ADC_FULL_SCALE };
 
-        // --- Derived quantities (purely from netlist + datasheet formulas) ---
-        //
-        // ADC reference: VREF = 2.9 V (VREFBUF VRS=VREF2).
-        // 12-bit ADC: code ∈ [0, 4095], V = code/4095 * VREF.
-        //
-        // Current sense (per channel, INA193 + 25 mΩ shunt):
-        //   V_shunt = I * R = I * 25 mΩ
-        //   V_out   = G * V_shunt = 20 * 25 mΩ * I = 0.5 * I
-        //   I       = 2 * V_out
-        //
-        // We express voltages in millivolts and currents in milliamps.
-
-        const VREF_MV: u32 = 2900;
-        const ADC_FULL_SCALE: u32 = 4095;
-
-        // Helper closures for fixed-point conversions.
-        let adc_to_mv = |code: u16| -> u32 {
-            (code as u32) * VREF_MV / ADC_FULL_SCALE
-        };
-        let sense_code_to_shunt_mv = |code: u16| -> u32 {
-            // V_shunt = V_out / 20, with V_out from ADC.
-            adc_to_mv(code) / 20
-        };
-        let sense_code_to_ma = |code: u16| -> u32 {
-            // I = 2 * V_out, V_out in volts. In mV/mA: I[mA] = 2 * V_out[mV].
-            2 * adc_to_mv(code)
-        };
-
-        // Channel 1 load current and shunt voltage.
-        let cur1_sp_mv = adc_to_mv(cur1_sp_code);
-        let cur1_shunt_mv = sense_code_to_shunt_mv(cur1_sp_code);
-        let cur1_ma = sense_code_to_ma(cur1_sp_code);
-
-        // Channel 2 load current and shunt voltage.
-        let cur2_sp_mv = adc_to_mv(cur2_sp_code);
-        let cur2_shunt_mv = sense_code_to_shunt_mv(cur2_sp_code);
-        let cur2_ma = sense_code_to_ma(cur2_sp_code);
-
-        // Near / remote sense node voltages at ADC pins.
-        let v_nr_sp_mv = adc_to_mv(v_nr_sp_code);
-        let v_nr_sn_mv = adc_to_mv(v_nr_sn_code);
         let v_rmt_sp_mv = adc_to_mv(v_rmt_sp_code);
-        let v_rmt_sn_mv = adc_to_mv(v_rmt_sn_code);
+        let v_nr_sp_mv = adc_to_mv(v_nr_sp_code);
+        let _v_rmt_sn_mv = adc_to_mv(v_rmt_sn_code);
+        let _v_nr_sn_mv = adc_to_mv(v_nr_sn_code);
 
-        // 5V rail monitor node.
+        let cur1_sp_mv = adc_to_mv(cur1_sp_code);
+        let _cur1_sn_mv = adc_to_mv(cur1_sn_code);
+        let cur2_sp_mv = adc_to_mv(cur2_sp_code);
+        let _cur2_sn_mv = adc_to_mv(cur2_sn_code);
+
         let v_5v_sns_mv = adc_to_mv(sns_5v_code);
+        let _ts1_mv = adc_to_mv(ts1_code);
+        let _ts2_mv = adc_to_mv(ts2_code);
 
-        // Build CBOR payload for Status message:
-        // array[6]: [ts_ms, ch1_i_mA, ch2_i_mA, vnr_sp_mV, vrmt_sp_mV, v5sns_mV]
-        let mut payload: Vec<u8, 64> = Vec::new();
-        // CBOR array(6) = 0x86
-        let _ = payload.push(0x86);
-        let mut push_u32 = |buf: &mut Vec<u8, 64>, val: u32| {
-            // positive int, 32-bit: major type 0, additional 26 (0x1A), big-endian
-            let _ = buf.push(0x1A);
-            let _ = buf.push((val >> 24) as u8);
-            let _ = buf.push((val >> 16) as u8);
-            let _ = buf.push((val >> 8) as u8);
-            let _ = buf.push(val as u8);
+        // 负载端电压（近端 / 远端），由差分放大器缩放关系反推：
+        //   V_SP = (10/124) * V_load  →  V_load = (124/10) * V_SP
+        let v_local_mv = (v_nr_sp_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        let v_remote_mv = (v_rmt_sp_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+
+        // 模拟板 5V 轨电压：R25=75k (5V→5V_SNS)，R26=10k (5V_SNS→GND)
+        //   V_5V_SNS = 5V * 10 / (75+10) = 5V * 10/85
+        //   V_5V     = V_5V_SNS * (75+10)/10 = V_5V_SNS * 8.5
+        let _v_5v_mv = (v_5v_sns_mv * 85 / 10) as i32;
+
+        // 电流检测：INA193 + 25 mΩ
+        //   V_shunt = I * 0.025 Ω
+        //   V_out   = 20 * V_shunt = 0.5 * I
+        //   I       = 2 * V_out
+        let i_local_ma = (2 * cur1_sp_mv) as i32;
+        let i_remote_ma = (2 * cur2_sp_mv) as i32;
+
+        let calc_p_mw =
+            ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
+
+        // DAC 头间裕度：VREF - V_DAC（便于检查 CC 裁剪空间）
+        let dac_v_mv = (CC_0P5A_DAC_CODE_CH1 as u32) * ADC_VREF_MV / ADC_FULL_SCALE;
+        let dac_headroom_mv = (ADC_VREF_MV.saturating_sub(dac_v_mv)) as u16;
+
+        // 目标恒流（设计值 0.5 A），用于 loop_error 与 UI 显示。
+        let target_i_local_ma: i32 = 500;
+        let loop_error = target_i_local_ma - i_local_ma;
+
+        // 温度字段暂用固定占位（单位 m°C），后续可接入真实温度通道。
+        let sink_core_temp_mc: i32 = 40_000;
+        let sink_exhaust_temp_mc: i32 = 38_000;
+        let mcu_temp_mc: i32 = 35_000;
+
+        // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
+        let status = FastStatus {
+            uptime_ms,
+            mode: 1, // 简单视为 CC 模式
+            state_flags: STATE_FLAG_REMOTE_ACTIVE | STATE_FLAG_LINK_GOOD,
+            enable: true,
+            target_value: target_i_local_ma,
+            i_local_ma,
+            i_remote_ma,
+            v_local_mv,
+            v_remote_mv,
+            calc_p_mw,
+            dac_headroom_mv,
+            loop_error,
+            sink_core_temp_mc,
+            sink_exhaust_temp_mc,
+            mcu_temp_mc,
+            fault_flags: 0,
         };
-        push_u32(&mut payload, ts_ms);
-        push_u32(&mut payload, cur1_ma);
-        push_u32(&mut payload, cur2_ma);
-        push_u32(&mut payload, v_nr_sp_mv);
-        push_u32(&mut payload, v_rmt_sp_mv);
-        push_u32(&mut payload, v_5v_sns_mv);
 
-        // Frame header (5 bytes) + payload + CRC16 (2 bytes)
-        let mut frame: Vec<u8, 80> = Vec::new();
-        let flags: u8 = 0; // Status: no ACK/RESP
-        let msg: u8 = MSG_STATUS;
-        let len: u16 = (payload.len() as u16) + 2; // payload + CRC16
-
-        let _ = frame.push(PROTO_VER);
-        let _ = frame.push(flags);
-        let _ = frame.push(seq);
-        let _ = frame.push(msg);
-        let _ = frame.push((len & 0xFF) as u8);
-        let _ = frame.push((len >> 8) as u8);
-        // CBOR payload
-        for b in payload.iter() {
-            let _ = frame.push(*b);
+        let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
+            .expect("encode fast_status frame");
+        let slip_len = slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
+        if let Err(_err) = uart.write(&slip_frame[..slip_len]).await {
+            warn!("uart tx error; dropping frame");
         }
-        // CRC16 over header + payload
-        let crc = crc16_ccitt_false(&frame[..]);
-        // Append CRC16 little-endian
-        let _ = frame.push((crc & 0xFF) as u8);
-        let _ = frame.push((crc >> 8) as u8);
 
-        // SLIP-encode and send over UART3.
-        let mut slip_buf: Vec<u8, 256> = Vec::new();
-        slip_encode(&frame[..], &mut slip_buf);
-        let _ = uart.write(&slip_buf[..]).await;
-
-        // Advance sequence & timestamp.
         seq = seq.wrapping_add(1);
-        ts_ms = ts_ms.wrapping_add(200);
-
-        ticker.next().await;
+        uptime_ms = uptime_ms.wrapping_add(FAST_STATUS_PERIOD_MS as u32);
+        Timer::after_millis(FAST_STATUS_PERIOD_MS).await;
     }
 }
+
+// 旧版 mock FAST_STATUS 生成逻辑已被真实采样逻辑替代，保留占位以防回滚时需要参考。
