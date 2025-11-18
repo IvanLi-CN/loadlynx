@@ -7,15 +7,16 @@ use panic_probe as _;
 
 use embassy_executor::Spawner;
 use embassy_stm32 as stm32;
-use embassy_stm32::adc::{Adc, AdcChannel, SampleTime};
+use embassy_stm32::adc::{Adc, AdcChannel, SampleTime, Temperature as AdcTemperature};
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dac::{Dac, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::usart::{Config as UartConfig, Uart};
 use embassy_time::{Instant, Timer};
-use loadlynx_protocol::{FastStatus, encode_fast_status_frame, slip_encode};
-use stm32_metapac::VREFBUF;
+use loadlynx_protocol::{encode_fast_status_frame, slip_encode, FastStatus};
 use stm32_metapac::vrefbuf::vals::{Hiz, Vrs};
+use stm32_metapac::VREFBUF;
+use libm::logf;
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
@@ -64,6 +65,57 @@ fn timestamp_ms() -> u64 {
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
 
+fn ntc_mv_to_mc(node_mv: u32) -> i32 {
+    // NTC channels TS1/TS2: 10 kΩ @25 °C, B=3950 K, 5.11 kΩ pull-up to 3.3 V.
+    // See docs/thermal/ntc-temperature-sensing.md for details.
+    const VSUP_MV: f32 = 3300.0;
+    const RPULL_OHM: f32 = 5_110.0;
+    const R0_OHM: f32 = 10_000.0;
+    const B: f32 = 3950.0;
+    const T0_K: f32 = 273.15 + 25.0;
+
+    let v_mv = node_mv as f32;
+    if v_mv <= 0.0 || v_mv >= VSUP_MV {
+        return 0;
+    }
+
+    let v_ratio = v_mv / VSUP_MV;
+    let r_ntc = RPULL_OHM * v_ratio / (1.0 - v_ratio);
+
+    let ln_ratio = logf(r_ntc / R0_OHM);
+    let inv_t = 1.0 / T0_K + (1.0 / B) * ln_ratio;
+    let t_k = 1.0 / inv_t;
+    let t_c = t_k - 273.15;
+    let t_mc = (t_c * 1000.0) as i32;
+
+    t_mc.clamp(0, 150_000)
+}
+
+fn g4_internal_mcu_temp_to_mc(adc_code: u16) -> i32 {
+    // STM32G4 internal temperature sensor calibration points (see RM0440 + DS13122):
+    // - TS_CAL1: 30 °C  factory calibration, address 0x1FFF_75A8 (16-bit)
+    // - TS_CAL2: 110 °C factory calibration, address 0x1FFF_75CA (16-bit)
+    const TS_CAL1_ADDR: *const u16 = 0x1FFF_75A8 as *const u16;
+    const TS_CAL2_ADDR: *const u16 = 0x1FFF_75CA as *const u16;
+    const TS_CAL1_TEMP_C: i32 = 30;
+    const TS_CAL2_TEMP_C: i32 = 110;
+
+    let ts_cal1 = unsafe { core::ptr::read(TS_CAL1_ADDR) as i32 };
+    let ts_cal2 = unsafe { core::ptr::read(TS_CAL2_ADDR) as i32 };
+    let adc = adc_code as i32;
+
+    if ts_cal2 <= ts_cal1 {
+        return 0;
+    }
+
+    let temp_c = (TS_CAL2_TEMP_C - TS_CAL1_TEMP_C)
+        .saturating_mul(adc - ts_cal1)
+        / (ts_cal2 - ts_cal1)
+        + TS_CAL1_TEMP_C;
+
+    (temp_c * 1_000).clamp(0, 150_000)
+}
+
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
     // 为 ADC1/ADC2 选择稳定的时钟源，避免后续 ADC 初始化触发时钟相关异常。
@@ -109,6 +161,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut adc2 = Adc::new(p.ADC2);
     adc1.set_sample_time(SampleTime::CYCLES247_5);
     adc2.set_sample_time(SampleTime::CYCLES247_5);
+
+    // 片内温度传感器（连接到 ADC1_IN16），用于 MCU die 温度遥测。
+    let mut mcu_temp_ch: AdcTemperature = adc1.enable_temperature();
 
     // 通道映射（参考 loadlynx.ioc 与网表）：
     // - PA0/PA1:  V_RMT_SP / V_RMT_SN  → 远端电压差分放大后输出
@@ -161,6 +216,7 @@ async fn main(_spawner: Spawner) -> ! {
         let sns_5v_code = adc1.blocking_read(&mut sns_5v);
         let ts1_code = adc1.blocking_read(&mut ts1);
         let ts2_code = adc1.blocking_read(&mut ts2);
+        let mcu_temp_code = adc1.blocking_read(&mut mcu_temp_ch);
 
         // 节点电压（基于 VREF=2.9 V 的原始 ADC 电压，单位 mV）
         let adc_to_mv = |code: u16| -> u32 { (code as u32) * ADC_VREF_MV / ADC_FULL_SCALE };
@@ -176,8 +232,8 @@ async fn main(_spawner: Spawner) -> ! {
         let _cur2_sn_mv = adc_to_mv(cur2_sn_code);
 
         let v_5v_sns_mv = adc_to_mv(sns_5v_code);
-        let _ts1_mv = adc_to_mv(ts1_code);
-        let _ts2_mv = adc_to_mv(ts2_code);
+        let ts1_mv = adc_to_mv(ts1_code);
+        let ts2_mv = adc_to_mv(ts2_code);
 
         // 负载端电压（近端 / 远端），由差分放大器缩放关系反推：
         //   V_SP = (10/124) * V_load  →  V_load = (124/10) * V_SP
@@ -207,10 +263,11 @@ async fn main(_spawner: Spawner) -> ! {
         let target_i_local_ma: i32 = 500;
         let loop_error = target_i_local_ma - i_local_ma;
 
-        // 温度字段暂用固定占位（单位 m°C），后续可接入真实温度通道。
-        let sink_core_temp_mc: i32 = 40_000;
-        let sink_exhaust_temp_mc: i32 = 38_000;
-        let mcu_temp_mc: i32 = 35_000;
+        // TS1: NTC on heatsink core between MOSFETs → MOS/sink core temperature.
+        // TS2: NTC near heatsink exhaust/side wall → exhaust/case temperature.
+        let sink_core_temp_mc: i32 = ntc_mv_to_mc(ts1_mv);
+        let sink_exhaust_temp_mc: i32 = ntc_mv_to_mc(ts2_mv);
+        let mcu_temp_mc: i32 = g4_internal_mcu_temp_to_mc(mcu_temp_code);
 
         // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
         let status = FastStatus {
