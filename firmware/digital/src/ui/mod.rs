@@ -372,21 +372,46 @@ pub struct UiSnapshot {
 }
 
 impl UiSnapshot {
-    pub fn demo() -> Self {
-        let mut run_time = String::<16>::new();
-        let _ = run_time.push_str("01:32:10");
+    pub const fn demo_const() -> Self {
         Self {
-            main_voltage: 24.50,
-            main_current: 12.00,
-            main_power: 294.0,
-            remote_voltage: 24.52,
-            local_voltage: 24.47,
-            ch1_current: 4.20,
-            ch2_current: 3.50,
-            run_time,
-            temperature_c: 37.8,
-            energy_wh: 125.4,
+            main_voltage: 5.0,
+            main_current: 0.0,
+            main_power: 0.0,
+            remote_voltage: 0.0,
+            local_voltage: 0.0,
+            ch1_current: 0.0,
+            ch2_current: 0.0,
+            run_time: String::new(),
+            temperature_c: 25.0,
+            energy_wh: 0.0,
         }
+    }
+
+    pub fn demo() -> Self {
+        Self::demo_const()
+    }
+
+    pub fn update_from_status(
+        &mut self,
+        ch1_i_mA: u32,
+        ch2_i_mA: u32,
+        vnr_sp_mV: u32,
+        vrmt_sp_mV: u32,
+        v5sns_mV: u32,
+    ) {
+        // 电流：mA → A
+        self.ch1_current = ch1_i_mA as f32 / 1000.0;
+        self.ch2_current = ch2_i_mA as f32 / 1000.0;
+
+        // 近端/远端 ADC 节点电压：mV → V（不在此处还原分压，只显示 ADC 电压）
+        self.local_voltage = vnr_sp_mV as f32 / 1000.0;
+        self.remote_voltage = vrmt_sp_mV as f32 / 1000.0;
+
+        // 主电压：这里简单用 5V 监测节点推导近似总线电压（分压：75k/10k）
+        let v5 = v5sns_mV as f32 * (85.0 / 10.0) / 1000.0;
+        self.main_voltage = v5;
+        self.main_current = self.ch1_current; // 当前只启用 CH1
+        self.main_power = self.main_voltage * self.main_current;
     }
 
     fn temperature_display(&self) -> String<16> {

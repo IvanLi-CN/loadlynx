@@ -34,6 +34,7 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use static_cell::StaticCell;
+use embassy_sync::blocking_mutex::CriticalSectionMutex;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
 mod ui;
@@ -51,6 +52,110 @@ static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
+
+fn crc16_ccitt_false(data: &[u8]) -> u16 {
+    let mut crc: u16 = 0xFFFF;
+    for &b in data {
+        crc ^= (b as u16) << 8;
+        for _ in 0..8 {
+            if (crc & 0x8000) != 0 {
+                crc = (crc << 1) ^ 0x1021;
+            } else {
+                crc <<= 1;
+            }
+        }
+    }
+    crc
+}
+
+fn process_frame(frame: &[u8], ui_state: &CriticalSectionMutex<ui::UiSnapshot>) {
+    // Minimal implementation of docs/interfaces/uart-link.md:
+    // ver:u8, flags:u8, seq:u8, msg:u8, len:u16LE, payload[len-2], crc16
+    if frame.len() < 8 {
+        return;
+    }
+    let ver = frame[0];
+    let _flags = frame[1];
+    let _seq = frame[2];
+    let msg = frame[3];
+    let len = (frame[4] as u16) | ((frame[5] as u16) << 8);
+    if ver != 0x01 {
+        return;
+    }
+    if msg != 0x10 {
+        // Only Status for now
+        return;
+    }
+    if frame.len() != 6 + len as usize {
+        return;
+    }
+    if len < 2 {
+        return;
+    }
+
+    let (hdr_and_payload, crc_bytes) = frame.split_at(frame.len() - 2);
+    let crc_expected = (crc_bytes[0] as u16) | ((crc_bytes[1] as u16) << 8);
+    let crc_calc = crc16_ccitt_false(hdr_and_payload);
+    if crc_calc != crc_expected {
+        warn!("uart-link: CRC mismatch (calc={} expected={})", crc_calc, crc_expected);
+        return;
+    }
+
+    let payload = &frame[6..frame.len() - 2];
+    if payload.is_empty() || payload[0] != 0x86 {
+        // Expect CBOR array(6)
+        return;
+    }
+    let mut idx = 1usize;
+    let mut read_u32 = |buf: &[u8], idx: &mut usize| -> Option<u32> {
+        if *idx >= buf.len() {
+            return None;
+        }
+        if buf[*idx] != 0x1A {
+            return None;
+        }
+        if *idx + 5 > buf.len() {
+            return None;
+        }
+        let b0 = buf[*idx + 1] as u32;
+        let b1 = buf[*idx + 2] as u32;
+        let b2 = buf[*idx + 3] as u32;
+        let b3 = buf[*idx + 4] as u32;
+        *idx += 5;
+        Some((b0 << 24) | (b1 << 16) | (b2 << 8) | b3)
+    };
+
+    let _ts_ms = match read_u32(payload, &mut idx) {
+        Some(v) => v,
+        None => return,
+    };
+    let ch1_i_mA = match read_u32(payload, &mut idx) {
+        Some(v) => v,
+        None => return,
+    };
+    let ch2_i_mA = match read_u32(payload, &mut idx) {
+        Some(v) => v,
+        None => return,
+    };
+    let vnr_sp_mV = match read_u32(payload, &mut idx) {
+        Some(v) => v,
+        None => return,
+    };
+    let vrmt_sp_mV = match read_u32(payload, &mut idx) {
+        Some(v) => v,
+        None => return,
+    };
+    let v5sns_mV = match read_u32(payload, &mut idx) {
+        Some(v) => v,
+        None => return,
+    };
+
+    unsafe {
+        ui_state.lock_mut(|state| {
+            state.update_from_status(ch1_i_mA, ch2_i_mA, vnr_sp_mV, vrmt_sp_mV, v5sns_mV);
+        });
+    }
+}
 
 // 简单异步任务（未启用时间驱动，使用合作式让出）
 #[embassy_executor::task]
@@ -140,7 +245,10 @@ impl AsyncDelayNs for AsyncDelay {
 }
 
 #[embassy_executor::task]
-async fn display_task(ctx: &'static mut DisplayResources) {
+async fn display_task(
+    ctx: &'static mut DisplayResources,
+    ui_state: &'static CriticalSectionMutex<ui::UiSnapshot>,
+) {
     info!("Display task starting");
 
     let spi = ctx.spi.take().expect("SPI bus unavailable");
@@ -171,47 +279,101 @@ async fn display_task(ctx: &'static mut DisplayResources) {
         .await
         .expect("display init");
 
-    {
-        let mut frame =
-            RawFrameBuf::<Rgb565, _>::new(&mut ctx.framebuffer[..], DISPLAY_WIDTH, DISPLAY_HEIGHT);
-        ui::render_default(&mut frame);
-    }
-
-    display
-        .show_raw_data(
-            0,
-            0,
-            DISPLAY_WIDTH as u16,
-            DISPLAY_HEIGHT as u16,
-            &ctx.framebuffer[..],
-        )
-        .await
-        .expect("frame push");
-
-    info!("Color bars rendered");
-
     loop {
-        yield_now().await;
+        {
+            let mut frame = RawFrameBuf::<Rgb565, _>::new(
+                &mut ctx.framebuffer[..],
+                DISPLAY_WIDTH,
+                DISPLAY_HEIGHT,
+            );
+            ui_state.lock(|snapshot| {
+                ui::render(&mut frame, snapshot);
+            });
+        }
+
+        display
+            .show_raw_data(
+                0,
+                0,
+                DISPLAY_WIDTH as u16,
+                DISPLAY_HEIGHT as u16,
+                &ctx.framebuffer[..],
+            )
+            .await
+            .expect("frame push");
+
+        // 简单节流：约 10 Hz 重绘
+        for _ in 0..500 {
+            yield_now().await;
+        }
     }
 }
 
 #[embassy_executor::task]
-async fn uart_link_task(uart: &'static mut Uart<'static, Async>) {
+async fn uart_link_task(
+    uart: &'static mut Uart<'static, Async>,
+    ui_state: &'static CriticalSectionMutex<ui::UiSnapshot>,
+) {
     info!("UART link task starting");
-    let mut rx_count: u32 = 0;
+
+    const END: u8 = 0xC0;
+    const ESC: u8 = 0xDB;
+    const ESC_END: u8 = 0xDC;
+    const ESC_ESC: u8 = 0xDD;
+
+    let mut buf = [0u8; 256];
+    let mut len = 0usize;
+    let mut in_frame = false;
+    let mut esc_next = false;
     let mut byte = [0u8; 1];
 
     loop {
         while uart.read_ready() {
-            if let Ok(n) = uart.read(&mut byte) {
-                if n > 0 {
-                    rx_count = rx_count.wrapping_add(n as u32);
-                    if byte[0] == b'\n' {
-                        info!("uart rx {} bytes (newline)", rx_count);
+            if uart.read(&mut byte).is_err() {
+                break;
+            }
+            let b = byte[0];
+
+            if !in_frame {
+                if b == END {
+                    in_frame = true;
+                    len = 0;
+                    esc_next = false;
+                }
+                continue;
+            }
+
+            if esc_next {
+                let decoded = match b {
+                    ESC_END => END,
+                    ESC_ESC => ESC,
+                    _ => b,
+                };
+                esc_next = false;
+                if len < buf.len() {
+                    buf[len] = decoded;
+                    len += 1;
+                }
+                continue;
+            }
+
+            match b {
+                END => {
+                    if len >= 8 {
+                        process_frame(&buf[..len], ui_state);
+                    }
+                    in_frame = false;
+                    len = 0;
+                }
+                ESC => {
+                    esc_next = true;
+                }
+                _ => {
+                    if len < buf.len() {
+                        buf[len] = b;
+                        len += 1;
                     }
                 }
-            } else {
-                break;
             }
         }
         yield_now().await;
@@ -318,11 +480,13 @@ fn main() -> ! {
         .into_async();
 
     let uart1 = UART1_CELL.init(uart);
+    static UI_STATE_CELL: StaticCell<CriticalSectionMutex<ui::UiSnapshot>> = StaticCell::new();
+    let ui_state = UI_STATE_CELL.init(CriticalSectionMutex::new(ui::UiSnapshot::demo_const()));
 
     let executor = EXECUTOR.init(Executor::new());
     executor.run(|spawner| {
         spawner.spawn(ticker()).ok();
-        spawner.spawn(display_task(resources)).ok();
-        spawner.spawn(uart_link_task(uart1)).ok();
+        spawner.spawn(display_task(resources, ui_state)).ok();
+        spawner.spawn(uart_link_task(uart1, ui_state)).ok();
     })
 }
