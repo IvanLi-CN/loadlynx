@@ -14,12 +14,11 @@ embedded-graphics = "0.8"
 lcd-async = "0.1.1"
 esp-bootloader-esp-idf = { version = "0.4", features = ["esp32s3"] }
 embedded-io = "0.6"
-embedded-io-async = "0.6"
 embedded-hal-nb = "1.0"
 nb = "1.1"
 heapless = "0.8"
-embassy-sync = { version = "0.5" }
-loadlynx-protocol = { path = "../../libs/protocol" }
+micromath = "2.1"
+embassy-sync = "0.7"
 
 # HAL + Embassy integration for ESP32-S3
 esp-hal = { version = "=1.0.0-rc.1", features = ["esp32s3", "rt", "unstable", "defmt"] }
@@ -49,6 +48,5 @@ lto = "fat"
 panic = "abort"
 
 [features]
-default = ["enable_analog_5v_on_boot", "esp32s3"]
+default = ["enable_analog_5v_on_boot"]
 enable_analog_5v_on_boot = []
-esp32s3 = []

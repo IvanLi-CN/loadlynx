@@ -24,7 +24,8 @@ embassy-stm32 = { version = "0.4", features = [
 ] }
 embassy-embedded-hal = { version = "0.5" }
 embassy-futures = { version = "0.1" }
-loadlynx-protocol = { path = "../../libs/protocol" }
+stm32-metapac = { version = "18.0.0", features = ["stm32g431cb"] }
+heapless = { version = "0.8", default-features = false, features = ["serde"] }
 
 [profile.dev]
 codegen-units = 1
