@@ -28,6 +28,7 @@ dependencies = [
  "loadlynx-protocol",
  "panic-probe",
  "static_cell",
+ "stm32-metapac",
 ]
 
 [[package]]

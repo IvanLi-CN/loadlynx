@@ -7,10 +7,15 @@ use panic_probe as _;
 
 use embassy_executor::Spawner;
 use embassy_stm32 as stm32;
+use embassy_stm32::adc::{Adc, AdcChannel, SampleTime};
 use embassy_stm32::bind_interrupts;
+use embassy_stm32::dac::{Dac, Value as DacValue};
+use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::usart::{Config as UartConfig, Uart};
 use embassy_time::{Instant, Timer};
 use loadlynx_protocol::{FastStatus, encode_fast_status_frame, slip_encode};
+use stm32_metapac::VREFBUF;
+use stm32_metapac::vrefbuf::vals::{Hiz, Vrs};
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
@@ -21,6 +26,38 @@ const FAST_STATUS_PERIOD_MS: u64 = 1000 / 30;
 const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 
+// DAC1 → CC1 环路：0.5 A 设计值对应的 DAC 码。
+// 物理链路（来自网表与 INA193/OPA2365 手册）：
+//   I_load → R_SHUNT=25 mΩ → INA193 (G=20 V/V) → V_CUR1_SP
+//   V_CUR1_SP = 20 * 0.025 Ω * I = 0.5 * I [V/A]
+//   CC 运放比较 V_CUR1_SP 与 DAC_CH1，经 100 Ω/100 kΩ 网络，直流近似 V_DAC ≈ V_CUR1_SP。
+//
+// VREFBUF 设为 2.9 V (Vrs::VREF2)，DAC 12bit 满量程 4095：
+//   I = 0.5 A → V_CUR1_SP ≈ 0.25 V
+//   CODE_0p5A ≈ 0.25 / 2.9 * 4095 ≈ 353
+const CC_0P5A_DAC_CODE_CH1: u16 = 353;
+
+// ADC 公共参数（G431 12bit ADC，以 VREFBUF 2.9 V 作为参考）。
+const ADC_VREF_MV: u32 = 2900;
+const ADC_FULL_SCALE: u32 = 4095;
+
+// 近端 / 远端电压测量的缩放关系来自网表中 OPA2365 差分放大器：
+//
+// 远端（V_RMT_P / V_RMT_N）：
+//   - 正端分压：R16=124k, R19=10k → V+ = V_RMT_P * 10 / (124 + 10)
+//   - 反相端网络：R15=124k (到 V_RMT_N), R14=10k (到 V_RMT_SP)
+//   - 令 V+ = V-，写节点方程可得：
+//       V_RMT_SP = (10 / 124) * (V_RMT_P - V_RMT_N)
+//     即 MCU 侧 V_RMT_SP 正比于负载差分电压，比例 10/124。
+//
+// 近端（V_NR_P / V_NR_N）使用完全对称的网络（R23/R24/R21/R22），得到同样关系：
+//       V_NR_SP = (10 / 124) * (V_NR_P - V_NR_N)
+//
+// 因此反推负载端差分电压：
+//   V_load = (124 / 10) * V_SP ≈ 12.4 * V_SP
+const SENSE_GAIN_NUM: u32 = 124;
+const SENSE_GAIN_DEN: u32 = 10;
+
 fn timestamp_ms() -> u64 {
     Instant::now().as_millis() as u64
 }
@@ -29,10 +66,36 @@ defmt::timestamp!("{=u64:ms}", timestamp_ms());
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
-    let p = stm32::init(Default::default());
+    // 为 ADC1/ADC2 选择稳定的时钟源，避免后续 ADC 初始化触发时钟相关异常。
+    let mut config = stm32::Config::default();
+    {
+        use embassy_stm32::rcc::mux;
+        config.rcc.mux.adc12sel = mux::Adcsel::SYS;
+    }
+    let p = stm32::init(config);
 
-    info!("LoadLynx analog alive; streaming mock FAST_STATUS frames");
+    info!("LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)");
 
+    // 配置内部基准缓冲（VREFBUF），使 VREF+ ≈ 2.9 V，供 ADC/DAC 共用。
+    let vrefbuf = VREFBUF;
+    vrefbuf.csr().modify(|csr| {
+        csr.set_hiz(Hiz::CONNECTED);
+        csr.set_vrs(Vrs::VREF2);
+        csr.set_envr(true);
+    });
+    while !vrefbuf.csr().read().vrr() {
+        // 等待基准缓冲稳定
+    }
+
+    // 暂时直接闭合 TPS22810 负载开关：PB13=LOAD_EN_CTL，PB14=LOAD_EN_TS。
+    // 逻辑：LOAD_EN = LOAD_EN_CTL AND LOAD_EN_TS。为简单起见，两路都拉高，
+    // 只启用硬件恒流通道 1（DAC_CH1 设为 0.5A 目标，DAC_CH2=0）。
+    let mut load_en_ctl = Output::new(p.PB13, Level::High, Speed::Low);
+    let mut load_en_ts = Output::new(p.PB14, Level::High, Speed::Low);
+    load_en_ctl.set_high();
+    load_en_ts.set_high();
+
+    // UART3：与数字板交互的链路，230400 8N1。
     let mut uart_cfg = UartConfig::default();
     uart_cfg.baudrate = 230_400;
 
@@ -41,13 +104,134 @@ async fn main(_spawner: Spawner) -> ! {
     )
     .unwrap();
 
+    // ADC1/ADC2：阻塞读取即可满足 30Hz 遥测。
+    let mut adc1 = Adc::new(p.ADC1);
+    let mut adc2 = Adc::new(p.ADC2);
+    adc1.set_sample_time(SampleTime::CYCLES247_5);
+    adc2.set_sample_time(SampleTime::CYCLES247_5);
+
+    // 通道映射（参考 loadlynx.ioc 与网表）：
+    // - PA0/PA1:  V_RMT_SP / V_RMT_SN  → 远端电压差分放大后输出
+    // - PA2/PA3:  V_NR_SP  / V_NR_SN   → 近端电压差分放大后输出
+    // - PA6/PA7:  CUR1_SP  / CUR1_SN   → CH1 电流检测（INA193 输出）
+    // - PB11/PB15:CUR2_SP  / CUR2_SN   → CH2 电流检测
+    // - PB12:     _5V_SNS              → 模拟板 5V 轨电压分压
+    // - PB0/PB1:  TS1 / TS2            → 温度传感器（暂不参与控制，仅打包）
+    let mut v_rmt_sp = p.PA0.degrade_adc();
+    let mut v_rmt_sn = p.PA1.degrade_adc();
+    let mut v_nr_sp = p.PA2.degrade_adc();
+    let mut v_nr_sn = p.PA3.degrade_adc();
+
+    let mut cur1_sp = p.PA6.degrade_adc();
+    let mut cur1_sn = p.PA7.degrade_adc();
+    let mut cur2_sp = p.PB11.degrade_adc();
+    let mut cur2_sn = p.PB15.degrade_adc();
+
+    let mut sns_5v = p.PB12.degrade_adc();
+    let mut ts1 = p.PB0.degrade_adc();
+    let mut ts2 = p.PB1.degrade_adc();
+
+    // DAC1：PA4/PA5 → CH1/CH2，当前仅启用 CH1 恒流 0.5A，CH2 置零。
+    let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
+    dac.ch1().set(DacValue::Bit12Right(CC_0P5A_DAC_CODE_CH1));
+    dac.ch2().set(DacValue::Bit12Right(0));
+
+    info!(
+        "CC setpoint CH1: target 0.5 A (DAC code = {})",
+        CC_0P5A_DAC_CODE_CH1
+    );
+
     let mut seq: u8 = 0;
     let mut uptime_ms: u32 = 0;
     let mut raw_frame = [0u8; 192];
     let mut slip_frame = [0u8; 384];
 
     loop {
-        let status = build_mock_status(uptime_ms, seq);
+        // --- 采样所有相关 ADC 通道（阻塞读取） ---
+        let v_rmt_sp_code = adc1.blocking_read(&mut v_rmt_sp);
+        let v_rmt_sn_code = adc1.blocking_read(&mut v_rmt_sn);
+        let v_nr_sp_code = adc1.blocking_read(&mut v_nr_sp);
+        let v_nr_sn_code = adc1.blocking_read(&mut v_nr_sn);
+
+        let cur1_sp_code = adc2.blocking_read(&mut cur1_sp);
+        let cur1_sn_code = adc2.blocking_read(&mut cur1_sn);
+        let cur2_sp_code = adc2.blocking_read(&mut cur2_sp);
+        let cur2_sn_code = adc2.blocking_read(&mut cur2_sn);
+
+        let sns_5v_code = adc1.blocking_read(&mut sns_5v);
+        let ts1_code = adc1.blocking_read(&mut ts1);
+        let ts2_code = adc1.blocking_read(&mut ts2);
+
+        // 节点电压（基于 VREF=2.9 V 的原始 ADC 电压，单位 mV）
+        let adc_to_mv = |code: u16| -> u32 { (code as u32) * ADC_VREF_MV / ADC_FULL_SCALE };
+
+        let v_rmt_sp_mv = adc_to_mv(v_rmt_sp_code);
+        let v_nr_sp_mv = adc_to_mv(v_nr_sp_code);
+        let _v_rmt_sn_mv = adc_to_mv(v_rmt_sn_code);
+        let _v_nr_sn_mv = adc_to_mv(v_nr_sn_code);
+
+        let cur1_sp_mv = adc_to_mv(cur1_sp_code);
+        let _cur1_sn_mv = adc_to_mv(cur1_sn_code);
+        let cur2_sp_mv = adc_to_mv(cur2_sp_code);
+        let _cur2_sn_mv = adc_to_mv(cur2_sn_code);
+
+        let v_5v_sns_mv = adc_to_mv(sns_5v_code);
+        let _ts1_mv = adc_to_mv(ts1_code);
+        let _ts2_mv = adc_to_mv(ts2_code);
+
+        // 负载端电压（近端 / 远端），由差分放大器缩放关系反推：
+        //   V_SP = (10/124) * V_load  →  V_load = (124/10) * V_SP
+        let v_local_mv = (v_nr_sp_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        let v_remote_mv = (v_rmt_sp_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+
+        // 模拟板 5V 轨电压：R25=75k (5V→5V_SNS)，R26=10k (5V_SNS→GND)
+        //   V_5V_SNS = 5V * 10 / (75+10) = 5V * 10/85
+        //   V_5V     = V_5V_SNS * (75+10)/10 = V_5V_SNS * 8.5
+        let _v_5v_mv = (v_5v_sns_mv * 85 / 10) as i32;
+
+        // 电流检测：INA193 + 25 mΩ
+        //   V_shunt = I * 0.025 Ω
+        //   V_out   = 20 * V_shunt = 0.5 * I
+        //   I       = 2 * V_out
+        let i_local_ma = (2 * cur1_sp_mv) as i32;
+        let i_remote_ma = (2 * cur2_sp_mv) as i32;
+
+        let calc_p_mw =
+            ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
+
+        // DAC 头间裕度：VREF - V_DAC（便于检查 CC 裁剪空间）
+        let dac_v_mv = (CC_0P5A_DAC_CODE_CH1 as u32) * ADC_VREF_MV / ADC_FULL_SCALE;
+        let dac_headroom_mv = (ADC_VREF_MV.saturating_sub(dac_v_mv)) as u16;
+
+        // 目标恒流（设计值 0.5 A），用于 loop_error 与 UI 显示。
+        let target_i_local_ma: i32 = 500;
+        let loop_error = target_i_local_ma - i_local_ma;
+
+        // 温度字段暂用固定占位（单位 m°C），后续可接入真实温度通道。
+        let sink_core_temp_mc: i32 = 40_000;
+        let sink_exhaust_temp_mc: i32 = 38_000;
+        let mcu_temp_mc: i32 = 35_000;
+
+        // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
+        let status = FastStatus {
+            uptime_ms,
+            mode: 1, // 简单视为 CC 模式
+            state_flags: STATE_FLAG_REMOTE_ACTIVE | STATE_FLAG_LINK_GOOD,
+            enable: true,
+            target_value: target_i_local_ma,
+            i_local_ma,
+            i_remote_ma,
+            v_local_mv,
+            v_remote_mv,
+            calc_p_mw,
+            dac_headroom_mv,
+            loop_error,
+            sink_core_temp_mc,
+            sink_exhaust_temp_mc,
+            mcu_temp_mc,
+            fault_flags: 0,
+        };
+
         let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
             .expect("encode fast_status frame");
         let slip_len = slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
@@ -61,41 +245,4 @@ async fn main(_spawner: Spawner) -> ! {
     }
 }
 
-fn build_mock_status(uptime_ms: u32, seq: u8) -> FastStatus {
-    let ramp = triangle_wave(uptime_ms);
-    let v_local_mv = 24_500 + ramp * 8;
-    let v_remote_mv = v_local_mv + 18;
-    let i_local_ma = 8_000 + ramp * 20;
-    let i_remote_ma = 7_500 + ramp * 18;
-    let calc_p_mw =
-        ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
-    let sink_core_temp_mc = 40_000 + ramp * 120;
-    let sink_exhaust_temp_mc = 37_000 + ramp * 60;
-    let mcu_temp_mc = 34_000 + ramp * 45;
-    let target_value = i_local_ma + 200;
-    let loop_error = target_value - i_local_ma;
-
-    FastStatus {
-        uptime_ms,
-        mode: 1,
-        state_flags: STATE_FLAG_REMOTE_ACTIVE | STATE_FLAG_LINK_GOOD,
-        enable: true,
-        target_value,
-        i_local_ma,
-        i_remote_ma,
-        v_local_mv,
-        v_remote_mv,
-        calc_p_mw,
-        dac_headroom_mv: 180,
-        loop_error,
-        sink_core_temp_mc,
-        sink_exhaust_temp_mc,
-        mcu_temp_mc,
-        fault_flags: if seq % 240 == 0 { 0x1 } else { 0 },
-    }
-}
-
-fn triangle_wave(uptime_ms: u32) -> i32 {
-    let phase = ((uptime_ms / 50) % 200) as i32;
-    if phase < 100 { phase - 50 } else { 150 - phase }
-}
+// 旧版 mock FAST_STATUS 生成逻辑已被真实采样逻辑替代，保留占位以防回滚时需要参考。
