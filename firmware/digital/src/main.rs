@@ -995,13 +995,15 @@ fn main() -> ! {
             info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
         }
         info!("spawning stats task");
-        spawner.spawn(stats_task()).expect("stats_task spawn");
+        spawner
+            .spawn(stats_task(telemetry))
+            .expect("stats_task spawn");
     })
 }
 
 // 周期性聚合统计，启动后每 5 秒打印一次（便于 DMA 验证阶段观察计数）
 #[embassy_executor::task]
-async fn stats_task() {
+async fn stats_task(telemetry: &'static TelemetryMutex) {
     let mut last_ms = timestamp_ms();
     loop {
         yield_now().await;
@@ -1011,9 +1013,18 @@ async fn stats_task() {
             let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
             let ut = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
+            let snapshot = {
+                let guard = telemetry.lock().await;
+                guard.snapshot.clone()
+            };
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}",
-                ok, de, ut
+                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}, core_temp_c={}, sink_temp_c={}, mcu_temp_c={}",
+                ok,
+                de,
+                ut,
+                snapshot.sink_core_temp,
+                snapshot.sink_exhaust_temp,
+                snapshot.mcu_temp
             );
         }
     }
