@@ -36,7 +36,10 @@ use lcd_async::{
     Builder, interface::SpiInterface, models::ST7789, options::Orientation,
     raw_framebuf::RawFrameBuf,
 };
-use loadlynx_protocol::{FastStatus, SlipDecoder, decode_fast_status_frame};
+use loadlynx_protocol::{
+    FastStatus, SetPoint, SlipDecoder, decode_fast_status_frame, encode_set_point_frame,
+    slip_encode, MSG_SET_POINT,
+};
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
@@ -752,15 +755,15 @@ async fn feed_decoder(
                 Ok((header, status)) => {
                     apply_fast_status(telemetry, &status).await;
                     let total = FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                    // 默认每 32 帧打印一次成功节奏，用于长时间验收
+                    // 默认每 32 帧打印一次成功节奏，用于长时间验收；
+                    // 同时打印关键测量值，方便观察电流/电压是否在变化。
                     if total % 32 == 0 {
                         let display_running = DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
                         info!(
-                            "fast_status ok (count={}, display_running={})",
-                            total, display_running
+                            "fast_status ok (count={}, display_running={}, i_local_ma={} mA, target_value={} mA)",
+                            total, display_running, status.i_local_ma, status.target_value
                         );
                     }
-                    // 严格只在完整 SLIP 帧结束符后才解码，上述分支已满足
                     let _ = header; // keep header verified even if unused further
                 }
                 Err(err) => {
@@ -934,10 +937,70 @@ fn main() -> ! {
     let mut uhci_dma_buf_opt: Option<DmaRxBuf> = None;
 
     if ENABLE_UART_UHCI_DMA {
-        let uart_blocking = Uart::new(peripherals.UART1, uart_cfg)
+        let mut uart_blocking = Uart::new(peripherals.UART1, uart_cfg)
             .expect("uart1 init")
             .with_tx(peripherals.GPIO17)
             .with_rx(peripherals.GPIO18);
+
+        // Fixed SetPoint burst to exercise the analog control path without
+        // adding any long-lived async tasks. This runs before we hand the UART
+        // over to UHCI, and repeats a few times so the analog RX task has time
+        // to come up.
+        {
+            use embedded_io::Write as _;
+
+            const FIXED_TARGET_I_MA: i32 = 1000;
+            let sp = SetPoint {
+                target_i_ma: FIXED_TARGET_I_MA,
+            };
+            let mut raw = [0u8; 64];
+            let mut slip = [0u8; 128];
+            let mut send_delay = Delay::new();
+
+            for burst in 0..8 {
+                match encode_set_point_frame(burst as u8, &sp, &mut raw) {
+                    Ok(frame_len) => {
+                        info!(
+                            "SetPoint raw frame burst {}: len={} head={=[u8]:#04x}",
+                            burst,
+                            frame_len,
+                            &raw[..frame_len.min(16)]
+                        );
+
+                        match slip_encode(&raw[..frame_len], &mut slip) {
+                            Ok(slip_len) => {
+                                info!(
+                                    "SetPoint SLIP frame burst {}: len={} head={=[u8]:#04x}",
+                                    burst,
+                                    slip_len,
+                                    &slip[..slip_len.min(16)]
+                                );
+
+                                match uart_blocking.write(&slip[..slip_len]) {
+                                    Ok(written) => info!(
+                                        "SetPoint fixed burst {}: target_i_ma={} mA (len={}, written={}, msg_id=0x{:02x})",
+                                        burst, FIXED_TARGET_I_MA, slip_len, written, MSG_SET_POINT
+                                    ),
+                                    Err(_e) => {
+                                        warn!("SetPoint fixed burst {}: UART write error", burst);
+                                    }
+                                }
+                            }
+                            Err(_e) => {
+                                warn!("SetPoint fixed burst {}: slip_encode error", burst);
+                            }
+                        }
+                    }
+                    Err(_e) => {
+                        warn!("SetPoint fixed burst {}: encode_set_point_frame error", burst);
+                    }
+                }
+
+                // Delay between bursts so the analog RX task has multiple chances
+                // to see a well-formed SetPoint frame even if startup is skewed.
+                send_delay.delay_millis(2_000);
+            }
+        }
 
         // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
         let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
@@ -995,15 +1058,13 @@ fn main() -> ! {
             info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
         }
         info!("spawning stats task");
-        spawner
-            .spawn(stats_task(telemetry))
-            .expect("stats_task spawn");
+        spawner.spawn(stats_task()).expect("stats_task spawn");
     })
 }
 
 // 周期性聚合统计，启动后每 5 秒打印一次（便于 DMA 验证阶段观察计数）
 #[embassy_executor::task]
-async fn stats_task(telemetry: &'static TelemetryMutex) {
+async fn stats_task() {
     let mut last_ms = timestamp_ms();
     loop {
         yield_now().await;
@@ -1013,18 +1074,9 @@ async fn stats_task(telemetry: &'static TelemetryMutex) {
             let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
             let ut = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
-            let snapshot = {
-                let guard = telemetry.lock().await;
-                guard.snapshot.clone()
-            };
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}, core_temp_c={}, sink_temp_c={}, mcu_temp_c={}",
-                ok,
-                de,
-                ut,
-                snapshot.sink_core_temp,
-                snapshot.sink_exhaust_temp,
-                snapshot.mcu_temp
+                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}",
+                ok, de, ut
             );
         }
     }

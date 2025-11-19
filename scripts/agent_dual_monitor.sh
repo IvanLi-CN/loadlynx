@@ -221,6 +221,50 @@ run_with_timeout_bg() {
             gtimeout "$seconds" "${cmd[@]}"
         elif command -v timeout >/dev/null 2>&1; then
             timeout "$seconds" "${cmd[@]}"
+        elif command -v python3 >/dev/null 2>&1; then
+            # Use python3 to enforce a real wall-clock timeout and kill the
+            # entire process group (esp. espflash / probe-rs monitors) if it
+            # overruns.
+            python3 - "$seconds" "${cmd[@]}" <<'PY'
+import os
+import signal
+import subprocess
+import sys
+
+if len(sys.argv) < 3:
+    sys.exit(2)
+
+timeout = int(sys.argv[1])
+cmd = sys.argv[2:]
+
+try:
+    # Start the command in a new process group so we can terminate all children.
+    proc = subprocess.Popen(cmd, preexec_fn=os.setsid)
+except Exception as e:
+    print(f"[dual-monitor] failed to start command: {e}", file=sys.stderr)
+    sys.exit(1)
+
+try:
+    proc.wait(timeout=timeout)
+    rc = proc.returncode
+except subprocess.TimeoutExpired:
+    print(f"[dual-monitor] timeout {timeout}s reached; stopping session (SIGINT)...", file=sys.stderr)
+    try:
+        os.killpg(proc.pid, signal.SIGINT)
+    except ProcessLookupError:
+        pass
+    try:
+        proc.wait(timeout=5)
+        rc = 0
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        rc = 0
+
+sys.exit(rc)
+PY
         else
             "${cmd[@]}" &
             local cmd_pid=$!
@@ -282,4 +326,3 @@ echo "[dual-monitor] dual reset-attach sessions launched."
 echo "[dual-monitor] PID files:"
 echo "  digital: $DIGITAL_PID_FILE"
 echo "  analog : $ANALOG_PID_FILE"
-

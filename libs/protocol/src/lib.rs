@@ -18,6 +18,13 @@ pub const FLAG_IS_NACK: u8 = 0x04;
 pub const FLAG_IS_RESP: u8 = 0x08;
 
 pub const MSG_FAST_STATUS: u8 = 0x10;
+/// SetPoint message: S3 (digital) → G431 (analog)
+///
+/// This is a minimal control message used to steer the analog board's
+/// constant-current setpoint. Units are milliamps (mA) and the value is
+/// interpreted as a signed 32-bit integer to leave room for future
+/// extensions (e.g. negative values for sink/source modes).
+pub const MSG_SET_POINT: u8 = 0x22;
 
 pub const SLIP_END: u8 = 0xC0;
 pub const SLIP_ESC: u8 = 0xDB;
@@ -68,6 +75,20 @@ pub struct FastStatus {
     pub mcu_temp_mc: i32,
     #[n(15)]
     pub fault_flags: u32,
+}
+
+/// Minimal control payload for adjusting the analog board's current setpoint.
+///
+/// The value is expressed in milliamps (mA). The analog firmware treats this
+/// as the target *local* sink current for channel 1. The digital side is
+/// responsible for clamping the value to a sane range for the current
+/// hardware (e.g. 0‒1000 mA).
+#[derive(Debug, Clone, Copy, Encode, Decode, Default)]
+#[cbor(map)]
+pub struct SetPoint {
+    /// Target current in milliamps.
+    #[n(0)]
+    pub target_i_ma: i32,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -126,6 +147,49 @@ pub fn encode_fast_status_frame(
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
+/// Encode a `SetPoint` payload into a binary frame with header and CRC,
+/// ready for SLIP framing.
+pub fn encode_set_point_frame(
+    seq: u8,
+    setpoint: &SetPoint,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = FLAG_ACK_REQ; // control frames request ACKs in future revisions
+    out[2] = seq;
+    out[3] = MSG_SET_POINT;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(setpoint).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
 pub fn decode_fast_status_frame(frame: &[u8]) -> Result<(FrameHeader, FastStatus), Error> {
     let (header, payload) = decode_frame(frame)?;
     if header.msg != MSG_FAST_STATUS {
@@ -134,6 +198,19 @@ pub fn decode_fast_status_frame(frame: &[u8]) -> Result<(FrameHeader, FastStatus
     let mut decoder = minicbor::Decoder::new(payload);
     let status: FastStatus = decoder.decode().map_err(map_decode_err)?;
     Ok((header, status))
+}
+
+/// Decode a `SetPoint` frame. Callers are expected to have obtained `frame`
+/// either from `decode_frame` + message ID filtering, or from a SLIP decoder
+/// that yields full binary frames.
+pub fn decode_set_point_frame(frame: &[u8]) -> Result<(FrameHeader, SetPoint), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_SET_POINT {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let setpoint: SetPoint = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, setpoint))
 }
 
 pub fn decode_frame(buf: &[u8]) -> Result<(FrameHeader, &[u8]), Error> {
@@ -339,6 +416,31 @@ mod tests {
         let mut slip_buf = [0u8; 256];
         let slip_len = slip_encode(&raw[..len], &mut slip_buf).unwrap();
         let mut decoder: SlipDecoder<256> = SlipDecoder::new();
+        let mut recovered = None;
+        for byte in &slip_buf[..slip_len] {
+            if let Some(frame) = decoder.push(*byte).unwrap() {
+                recovered = Some(frame);
+            }
+        }
+        let recovered = recovered.expect("frame not recovered");
+        assert_eq!(&recovered[..], &raw[..len]);
+    }
+
+    #[test]
+    fn set_point_roundtrip() {
+        let setpoint = SetPoint { target_i_ma: 600 };
+
+        let mut raw = [0u8; 64];
+        let len = encode_set_point_frame(3, &setpoint, &mut raw).unwrap();
+        let (header, decoded) = decode_set_point_frame(&raw[..len]).unwrap();
+        assert_eq!(header.version, PROTOCOL_VERSION);
+        assert_eq!(header.seq, 3);
+        assert_eq!(header.msg, MSG_SET_POINT);
+        assert_eq!(decoded.target_i_ma, setpoint.target_i_ma);
+
+        let mut slip_buf = [0u8; 96];
+        let slip_len = slip_encode(&raw[..len], &mut slip_buf).unwrap();
+        let mut decoder: SlipDecoder<96> = SlipDecoder::new();
         let mut recovered = None;
         for byte in &slip_buf[..slip_len] {
             if let Some(frame) = decoder.push(*byte).unwrap() {

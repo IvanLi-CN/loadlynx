@@ -5,25 +5,36 @@ use defmt::*;
 use defmt_rtt as _;
 use panic_probe as _;
 
+use core::sync::atomic::{AtomicI32, Ordering};
 use embassy_executor::Spawner;
 use embassy_stm32 as stm32;
 use embassy_stm32::adc::{Adc, AdcChannel, SampleTime, Temperature as AdcTemperature};
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dac::{Dac, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
-use embassy_stm32::usart::{Config as UartConfig, Uart};
+use embassy_stm32::mode::Async as UartAsync;
+use embassy_stm32::usart::{
+    Config as UartConfig, DataBits as UartDataBits, Parity as UartParity,
+    RingBufferedUartRx, StopBits as UartStopBits, Uart, UartRx, UartTx,
+};
+use static_cell::StaticCell;
 use embassy_time::{Instant, Timer};
-use loadlynx_protocol::{encode_fast_status_frame, slip_encode, FastStatus};
-use stm32_metapac::vrefbuf::vals::{Hiz, Vrs};
-use stm32_metapac::VREFBUF;
 use libm::logf;
+use loadlynx_protocol::{
+    FastStatus, MSG_SET_POINT, SlipDecoder, decode_set_point_frame, encode_fast_status_frame,
+    slip_encode,
+};
+use stm32_metapac::VREFBUF;
+use stm32_metapac::vrefbuf::vals::{Hiz, Vrs};
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
 });
 
-// 模拟板 FAST_STATUS 发送周期：1000/30 ms ≈ 33.3ms（≈30 Hz）
-const FAST_STATUS_PERIOD_MS: u64 = 1000 / 30;
+// 模拟板 FAST_STATUS 发送周期：20 Hz → 1000/20 ms = 50 ms
+const FAST_STATUS_PERIOD_MS: u64 = 1000 / 20;
+// 调试开关：如需只验证数字板→模拟板的 SetPoint 路径，可暂时关闭 FAST_STATUS TX。
+const ENABLE_FAST_STATUS_TX: bool = true;
 const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 
@@ -58,6 +69,19 @@ const ADC_FULL_SCALE: u32 = 4095;
 //   V_load = (124 / 10) * V_SP ≈ 12.4 * V_SP
 const SENSE_GAIN_NUM: u32 = 124;
 const SENSE_GAIN_DEN: u32 = 10;
+
+// 默认恒流目标（mA）：0.5 A，用于未接收到任何远端 SetPoint 时的启动值。
+const DEFAULT_TARGET_I_LOCAL_MA: i32 = 500;
+// 可接受的目标电流范围（mA），用于防止异常指令导致过流。
+const TARGET_I_MIN_MA: i32 = 0;
+const TARGET_I_MAX_MA: i32 = 2_000;
+
+// 由数字板通过 SetPoint 消息更新的电流设定（mA）。
+//
+// - 初始值为 DEFAULT_TARGET_I_LOCAL_MA（0.5 A）。
+// - uart_setpoint_rx_task 解析 SetPoint 帧并写入该原子量。
+// - 采样/遥测主循环在每次迭代中读取该值，用于计算 DAC 目标码与 loop_error。
+static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 
 fn timestamp_ms() -> u64 {
     Instant::now().as_millis() as u64
@@ -108,8 +132,7 @@ fn g4_internal_mcu_temp_to_mc(adc_code: u16) -> i32 {
         return 0;
     }
 
-    let temp_c = (TS_CAL2_TEMP_C - TS_CAL1_TEMP_C)
-        .saturating_mul(adc - ts_cal1)
+    let temp_c = (TS_CAL2_TEMP_C - TS_CAL1_TEMP_C).saturating_mul(adc - ts_cal1)
         / (ts_cal2 - ts_cal1)
         + TS_CAL1_TEMP_C;
 
@@ -149,12 +172,32 @@ async fn main(_spawner: Spawner) -> ! {
 
     // UART3：与数字板交互的链路，230400 8N1。
     let mut uart_cfg = UartConfig::default();
+    // Match digital side exactly: 230400 baud, 8 data bits, no parity, 1 stop bit.
     uart_cfg.baudrate = 230_400;
+    uart_cfg.data_bits = UartDataBits::DataBits8;
+    uart_cfg.parity = UartParity::ParityNone;
+    uart_cfg.stop_bits = UartStopBits::STOP1;
 
-    let mut uart = Uart::new(
+    let uart = Uart::new(
         p.USART3, p.PC11, p.PC10, Irqs, p.DMA1_CH1, p.DMA1_CH2, uart_cfg,
     )
     .unwrap();
+
+    // 拆分为 TX/RX 两个半通道：主循环持续通过 TX 发送 FAST_STATUS，
+    // 另起任务在 RX 上监听来自数字板的 SetPoint 控制帧。
+    let (mut uart_tx, uart_rx): (UartTx<'static, UartAsync>, UartRx<'static, UartAsync>) =
+        uart.split();
+
+    // 将 RX 端转换为环形缓冲 UART，以避免在任务之间存在调度间隙时丢字节。
+    static UART_RX_DMA_BUF: StaticCell<[u8; 128]> = StaticCell::new();
+    let uart_rx_ring: RingBufferedUartRx<'static> = uart_rx.into_ring_buffered(
+        UART_RX_DMA_BUF.init([0; 128]),
+    );
+
+    // 启动独立任务接收 SetPoint 控制消息。
+    if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring)) {
+        warn!("failed to spawn uart_setpoint_rx_task: {:?}", e);
+    }
 
     // ADC1/ADC2：阻塞读取即可满足 30Hz 遥测。
     let mut adc1 = Adc::new(p.ADC1);
@@ -186,14 +229,14 @@ async fn main(_spawner: Spawner) -> ! {
     let mut ts1 = p.PB0.degrade_adc();
     let mut ts2 = p.PB1.degrade_adc();
 
-    // DAC1：PA4/PA5 → CH1/CH2，当前仅启用 CH1 恒流 0.5A，CH2 置零。
+    // DAC1：PA4/PA5 → CH1/CH2，当前仅启用 CH1 恒流，CH2 置零。
     let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
     dac.ch1().set(DacValue::Bit12Right(CC_0P5A_DAC_CODE_CH1));
     dac.ch2().set(DacValue::Bit12Right(0));
 
     info!(
-        "CC setpoint CH1: target 0.5 A (DAC code = {})",
-        CC_0P5A_DAC_CODE_CH1
+        "CC setpoint CH1: default target {} mA (DAC code = {})",
+        DEFAULT_TARGET_I_LOCAL_MA, CC_0P5A_DAC_CODE_CH1
     );
 
     let mut seq: u8 = 0;
@@ -255,12 +298,24 @@ async fn main(_spawner: Spawner) -> ! {
         let calc_p_mw =
             ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
 
+        // 按目标电流线性缩放 DAC 码。标定点：0.5 A → CC_0P5A_DAC_CODE_CH1。
+        let mut target_i_local_ma = TARGET_I_LOCAL_MA.load(Ordering::Relaxed);
+        if target_i_local_ma < TARGET_I_MIN_MA {
+            target_i_local_ma = TARGET_I_MIN_MA;
+        }
+        if target_i_local_ma > TARGET_I_MAX_MA {
+            target_i_local_ma = TARGET_I_MAX_MA;
+        }
+        let dac_code = ((CC_0P5A_DAC_CODE_CH1 as i32) * target_i_local_ma
+            / DEFAULT_TARGET_I_LOCAL_MA)
+            .clamp(0, ADC_FULL_SCALE as i32) as u16;
+        dac.ch1().set(DacValue::Bit12Right(dac_code));
+
         // DAC 头间裕度：VREF - V_DAC（便于检查 CC 裁剪空间）
-        let dac_v_mv = (CC_0P5A_DAC_CODE_CH1 as u32) * ADC_VREF_MV / ADC_FULL_SCALE;
+        let dac_v_mv = (dac_code as u32) * ADC_VREF_MV / ADC_FULL_SCALE;
         let dac_headroom_mv = (ADC_VREF_MV.saturating_sub(dac_v_mv)) as u16;
 
-        // 目标恒流（设计值 0.5 A），用于 loop_error 与 UI 显示。
-        let target_i_local_ma: i32 = 500;
+        // 目标恒流（远端设定，单位 mA），用于 loop_error 与 UI 显示。
         let loop_error = target_i_local_ma - i_local_ma;
 
         // TS1: NTC on heatsink core between MOSFETs → MOS/sink core temperature.
@@ -289,11 +344,14 @@ async fn main(_spawner: Spawner) -> ! {
             fault_flags: 0,
         };
 
-        let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
-            .expect("encode fast_status frame");
-        let slip_len = slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
-        if let Err(_err) = uart.write(&slip_frame[..slip_len]).await {
-            warn!("uart tx error; dropping frame");
+        if ENABLE_FAST_STATUS_TX {
+            let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
+                .expect("encode fast_status frame");
+            let slip_len =
+                slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
+            if let Err(_err) = uart_tx.write(&slip_frame[..slip_len]).await {
+                warn!("uart tx error; dropping frame");
+            }
         }
 
         seq = seq.wrapping_add(1);
@@ -303,3 +361,72 @@ async fn main(_spawner: Spawner) -> ! {
 }
 
 // 旧版 mock FAST_STATUS 生成逻辑已被真实采样逻辑替代，保留占位以防回滚时需要参考。
+
+/// UART RX 任务：从数字板接收 SetPoint 帧并更新目标电流（mA）。
+#[embassy_executor::task]
+async fn uart_setpoint_rx_task(mut uart_rx: RingBufferedUartRx<'static>) {
+    info!(
+        "UART setpoint RX task starting (msg_id=0x{:02x}, default_target={} mA, range={}..{} mA)",
+        MSG_SET_POINT, DEFAULT_TARGET_I_LOCAL_MA, TARGET_I_MIN_MA, TARGET_I_MAX_MA
+    );
+
+    let mut decoder: SlipDecoder<128> = SlipDecoder::new();
+    let mut buf = [0u8; 32];
+    let mut byte_count: u32 = 0;
+
+    loop {
+        match uart_rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                for &b in &buf[..n] {
+                    byte_count = byte_count.wrapping_add(1);
+                    if byte_count <= 32 {
+                        info!("SetPoint RX: byte[{}]=0x{:02x}", byte_count, b);
+                    }
+                    match decoder.push(b) {
+                        Ok(Some(frame)) => {
+                            info!(
+                                "SetPoint RX: SLIP frame len={}, head={=[u8]:#04x}",
+                                frame.len(),
+                                &frame[..frame.len().min(16)]
+                            );
+                            match decode_set_point_frame(&frame) {
+                                Ok((_hdr, sp)) => {
+                                    let mut v = sp.target_i_ma;
+                                    if v < TARGET_I_MIN_MA {
+                                        v = TARGET_I_MIN_MA;
+                                    }
+                                    if v > TARGET_I_MAX_MA {
+                                        v = TARGET_I_MAX_MA;
+                                    }
+                                    let prev = TARGET_I_LOCAL_MA.swap(v, Ordering::Relaxed);
+                                    info!(
+                                        "SetPoint received: target_i_ma={} mA (prev={} mA)",
+                                        v, prev
+                                    );
+                                }
+                                Err(_err) => {
+                                    warn!(
+                                        "decode_set_point_frame error (len={}, head={=[u8]:#04x})",
+                                        frame.len(),
+                                        &frame[..frame.len().min(8)],
+                                    );
+                                    decoder.reset();
+                                }
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_err) => {
+                            warn!("SLIP decode error in SetPoint RX");
+                            decoder.reset();
+                        }
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(err) => {
+                warn!("uart rx error in SetPoint task: {:?}", err);
+                decoder.reset();
+            }
+        }
+    }
+}
