@@ -687,8 +687,7 @@ impl UiSnapshot {
         let _ = exhaust.push('C');
 
         let mut mcu = String::<20>::new();
-        // 标明这是模拟侧 STM32G431 的结温，避免与 ESP32-S3 混淆。
-        let _ = mcu.push_str("G431 ");
+        let _ = mcu.push_str("MCU  ");
         append_temp_1dp(&mut mcu, self.mcu_temp);
         let _ = mcu.push('C');
 

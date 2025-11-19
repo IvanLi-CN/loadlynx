@@ -306,3 +306,75 @@
     - `uart_rx_err_total` 不再增长；
     - `fast_status ok` 计数按预期节奏稳定增加。
   - 综合 upstream 报告与本地实验，当前版本下的 async UART `read_async()` 在本项目的高负载链路中仍存在调度/时序风险，需通过轮询或 UART UHCI DMA 等方式规避。
+
+## 经验补充：MCU↔MCU SetPoint 链路在 DMA + Embassy 场景下的可靠用法
+
+- 场景：数字板（ESP32‑S3）通过 UART1 + SLIP + CBOR 向模拟板（STM32G431）周期性发送 `SetPoint { target_i_ma }` 控制帧。
+- 问题症状（模拟板侧）：
+  - `uart_setpoint_rx_task` 逐字节读取 `UartRx<'static, Async>`（DMA 模式）时，只能看到类似
+    `0xc0, 0x01, 0x05, 0x00, 0x58, 0xc0`、`[0x01, 0x22, 0x00, 0x00, 0x02, ...]` 的残缺 SLIP 帧；
+  - `SlipDecoder<128>` 重构出的 `frame.len()` 只有 4 或 6 字节，`decode_set_point_frame()` 一直报 `InvalidPayloadLength`；
+  - 数字板 log 显示发送的 SLIP 帧完整且 CRC 正确（15 字节，首尾 0xC0）；
+  - 降低 FAST_STATUS 周期到 20 Hz、关闭 analog→digital FAST_STATUS TX 之后，症状依旧。
+- 根因总结：
+  - 在 Embassy STM32 HAL 中，`UartRx<'_, Async>` + DMA **并不保证在两次 `read()` 调用之间不会丢字节**；
+  - 官方文档建议：在需要“持续接收、不中断”的场景，必须使用
+    `UartRx::into_ring_buffered(&mut [u8]) -> RingBufferedUartRx` 或 `BufferedUartRx`；
+  - 本项目原先在模拟板上用单字节 `read(&mut [u8; 1]).await` 驱动 SlipDecoder，在数字板持续以 230400 8N1 发送 SLIP 帧时，
+    由于任务调度/中断间隙，DMA 在后台覆盖了 ring 中间段，造成 SetPoint 帧中部字节被“吃掉”。
+- 可靠方案（已在本仓库验证）：
+  - 在 analog 上，将 `UartRx<'static, Async>` 转为带环形缓冲的 `RingBufferedUartRx<'static>`：
+
+    ```rust
+    use embassy_stm32::usart::{RingBufferedUartRx, Uart, UartRx, UartTx, Config as UartConfig, ...};
+    use static_cell::StaticCell;
+
+    let uart = Uart::new(
+        p.USART3, p.PC11, p.PC10, Irqs, p.DMA1_CH1, p.DMA1_CH2, uart_cfg,
+    ).unwrap();
+
+    let (mut uart_tx, uart_rx): (UartTx<'static, UartAsync>, UartRx<'static, UartAsync>) =
+        uart.split();
+
+    static UART_RX_DMA_BUF: StaticCell<[u8; 128]> = StaticCell::new();
+    let uart_rx_ring: RingBufferedUartRx<'static> =
+        uart_rx.into_ring_buffered(UART_RX_DMA_BUF.init([0; 128]));
+    ```
+
+  - `uart_setpoint_rx_task` 中使用较小的临时缓冲做分块读取，并逐字节喂给 `SlipDecoder`：
+
+    ```rust
+    let mut decoder: SlipDecoder<128> = SlipDecoder::new();
+    let mut buf = [0u8; 32];
+
+    loop {
+        match uart_rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                for &b in &buf[..n] {
+                    // 可选：前若干字节打印调试日志
+                    match decoder.push(b) {
+                        Ok(Some(frame)) => {
+                            // 此时 frame.len() 恢复到完整 13 字节
+                            let (_hdr, sp) = decode_set_point_frame(&frame)?;
+                            // clamp 到 TARGET_I_MIN/MAX_MA 后写入 TARGET_I_LOCAL_MA
+                        }
+                        Ok(None) => {}
+                        Err(_) => decoder.reset(),
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => decoder.reset(),
+        }
+    }
+    ```
+
+  - 在关闭 FAST_STATUS TX 的简化实验中，使用上面 ring-buffered RX 之后：
+    - 模拟板能够完整看到数字板发送的 8 个 SetPoint SLIP 帧（每帧 13 字节 payload）；
+    - `SetPoint received: target_i_ma=600 mA (prev=500 mA)` 日志按预期打印；
+    - 证明协议、SLIP、CBOR 本身无结构性问题，原先的“帧被截断”纯粹是 RX 使用方式不当引入的丢字节。
+- 实战建议：
+  - 对于 MCU↔MCU 的高频单向流（300 kbps 级别、连续 SLIP 帧），在使用 Embassy STM32 + DMA 的场景下：
+    - **严禁** 用裸 `UartRx<'_, Async>::read(&mut [u8; 1])` 逐字节喂协议解析器；
+    - 必须使用 `RingBufferedUartRx` 或 `BufferedUartRx`，并在上层协议解析层使用 chunk 读取 + slip/CBOR 解码；
+    - 如果出现“数字板看到完整帧、模拟板看到部分帧”的情况，优先怀疑 RX 缓冲/调度问题，而不是先动协议。 
