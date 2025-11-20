@@ -21,7 +21,7 @@ micromath = "2.1"
 embassy-sync = "0.7"
 
 # HAL + Embassy integration for ESP32-S3
-esp-hal = { version = "=1.0.0-rc.1", features = ["esp32s3", "rt", "unstable", "defmt"] }
+esp-hal = { version = "=1.0.0", features = ["esp32s3", "rt", "unstable", "defmt"] }
 
 # Logging & panic/backtrace on ESP (defmt over espflash)
 esp-println = { version = "0.16", default-features = false, features = ["esp32s3", "uart", "defmt-espflash"] }
@@ -39,7 +39,7 @@ panic = "abort"
 
 [profile.release]
 opt-level = "s"
-debug = false
+debug = 2
 debug-assertions = false
 overflow-checks = false
 codegen-units = 1
