@@ -58,7 +58,7 @@ const TPS82130_ENABLE_DELAY_MS: u32 = 10;
 const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33;
 // 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
 // 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
-const DISPLAY_CHUNK_ROWS: usize = 8; // 再缩短单事务
+const DISPLAY_CHUNK_ROWS: usize = 4; // 再缩短单事务，降低单次 SPI 占用
 const DISPLAY_CHUNK_YIELD_LOOPS: usize = 6; // 增大让出次数
 const DISPLAY_DIRTY_MERGE_GAP_ROWS: usize = 8; // 适度扩大合并间隙，减少 SPI 往返
 const DISPLAY_DIRTY_SPAN_FALLBACK: usize = 12; // 脏区 span 过多时退回整帧推送
@@ -74,11 +74,12 @@ const ENABLE_DISPLAY_SPI_UPDATES: bool = true;
 const ENABLE_UART_LINK_TASK: bool = true;
 
 // UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
-const UART_BAUD: u32 = 230_400;
+const UART_BAUD: u32 = 115_200;
 const UART_RX_FIFO_FULL_THRESHOLD: u16 = 120;
-const UART_RX_TIMEOUT_SYMS: u8 = 10;
-const FAST_STATUS_SLIP_CAPACITY: usize = 1024; // revert to previous stable capacity
-const UART_DMA_BUF_LEN: usize = 512; // 测试更小 chunk，减少栈压力
+const UART_RX_TIMEOUT_SYMS: u8 = 12;
+const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段/截断
+// UART DMA 环形缓冲长度（同时作为 UHCI chunk_limit），与 SLIP 容量对齐以减少分段。
+const UART_DMA_BUF_LEN: usize = 1536;
 const ENABLE_UART_UHCI_DMA: bool = true;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -830,18 +831,16 @@ fn main() -> ! {
     let backlight_pin = peripherals.GPIO15;
     let ledc_peripheral = peripherals.LEDC;
 
-    // 配置 SPI2 并启用 DMA：使用固定大小的 DMA 缓冲区，HAL 会在内部按片段搬运。
-    // 单块显示数据约 15KB（32 行 × 480B/行），远小于 HAL 支持的 ~32KB 限制。
-    // 为降低内存占用与复杂度，使用较小的 DMA 缓冲（4KB 级别）。
-    // HAL 会根据描述符自动分段搬运更大的显示块。
-    let (rx_buf, rx_desc, tx_buf, tx_desc) = esp_hal::dma_buffers!(8190);
+    // 配置 SPI2 并启用 DMA：收缩 DMA 缓冲区以降低一次搬运的负载。
+    // 4 行（4*240*2=1920B）以内的块可以覆盖单次传输，DMA 缓冲 2048B 足够。
+    let (rx_buf, rx_desc, tx_buf, tx_desc) = esp_hal::dma_buffers!(2048);
     let dma_rx_buf = DmaRxBuf::new(rx_desc, rx_buf).expect("dma rx buf");
     let dma_tx_buf = DmaTxBuf::new(tx_desc, tx_buf).expect("dma tx buf");
 
     let spi = Spi::new(
         spi_peripheral,
         SpiConfig::default()
-            .with_frequency(Rate::from_mhz(80))
+            .with_frequency(Rate::from_mhz(40)) // 降低 SPI 频率以减少总线/栈压力
             .with_mode(Mode::_0),
     )
     .expect("spi init")
@@ -947,17 +946,16 @@ fn main() -> ! {
         // over to UHCI, and repeats a few times so the analog RX task has time
         // to come up.
         {
-            use embedded_io::Write as _;
-
             const FIXED_TARGET_I_MA: i32 = 1000;
             let sp = SetPoint {
                 target_i_ma: FIXED_TARGET_I_MA,
             };
             let mut raw = [0u8; 64];
-            let mut slip = [0u8; 128];
+            let mut slip = [0u8; 192];
             let mut send_delay = Delay::new();
 
-            for burst in 0..8 {
+            // 仅发送 2 帧，避免在模拟板上造成 UART Overrun；启动间隔拉长。
+            for burst in 0..2 {
                 match encode_set_point_frame(burst as u8, &sp, &mut raw) {
                     Ok(frame_len) => {
                         info!(
@@ -996,15 +994,14 @@ fn main() -> ! {
                     }
                 }
 
-                // Delay between bursts so the analog RX task has multiple chances
-                // to see a well-formed SetPoint frame even if startup is skewed.
-                send_delay.delay_millis(2_000);
+                // 给模拟侧更多启动时间，避免溢出
+                send_delay.delay_millis(2_500);
             }
         }
 
-        // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
-        let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
-            esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
+    // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
+    let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
+        esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
         let dma_rx = DmaRxBuf::new(uhci_rx_desc, uhci_rx_buf).expect("uhci dma rx buf");
 
         let mut uhci =
