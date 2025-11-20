@@ -80,6 +80,10 @@ const UART_RX_TIMEOUT_SYMS: u8 = 12;
 const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段/截断
 // UART DMA 环形缓冲长度（同时作为 UHCI chunk_limit），与 SLIP 容量对齐以减少分段。
 const UART_DMA_BUF_LEN: usize = 1536;
+// SetPoint 发送频率：20Hz（50ms）
+const SETPOINT_TX_PERIOD_MS: u32 = 50;
+// 固定 SetPoint 目标（测试阶段）
+const SETPOINT_TARGET_I_MA: i32 = 1000;
 const ENABLE_UART_UHCI_DMA: bool = true;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -933,6 +937,7 @@ fn main() -> ! {
     // 选择 UART 接收模式：默认启用 UHCI DMA 环形搬运，A/B 时可切换为 async no-DMA。
     let mut uart_async: Option<Uart<'static, Async>> = None;
     let mut uhci_rx_opt: Option<uhci::UhciRx<'static, Async>> = None;
+    let mut uhci_tx_opt: Option<uhci::UhciTx<'static, Async>> = None;
     let mut uhci_dma_buf_opt: Option<DmaRxBuf> = None;
 
     if ENABLE_UART_UHCI_DMA {
@@ -952,7 +957,7 @@ fn main() -> ! {
             };
             let mut raw = [0u8; 64];
             let mut slip = [0u8; 192];
-            let mut send_delay = Delay::new();
+            let send_delay = Delay::new();
 
             // 仅发送 2 帧，避免在模拟板上造成 UART Overrun；启动间隔拉长。
             for burst in 0..2 {
@@ -1012,8 +1017,9 @@ fn main() -> ! {
             .expect("uhci tx cfg");
         uhci.set_uart_config(&uart_cfg).expect("uhci set cfg");
 
-        let (uhci_rx, _uhci_tx) = uhci.split();
+        let (uhci_rx, uhci_tx) = uhci.split();
         uhci_rx_opt = Some(uhci_rx);
+        uhci_tx_opt = Some(uhci_tx);
         uhci_dma_buf_opt = Some(dma_rx);
     } else {
         let uart = Uart::new(peripherals.UART1, uart_cfg)
@@ -1056,6 +1062,14 @@ fn main() -> ! {
         }
         info!("spawning stats task");
         spawner.spawn(stats_task()).expect("stats_task spawn");
+        if let Some(uhci_tx) = uhci_tx_opt.take() {
+            info!("spawning setpoint tx task (UHCI TX, 20Hz fixed target)");
+            spawner
+                .spawn(setpoint_tx_task(uhci_tx))
+                .expect("setpoint_tx_task spawn");
+        } else {
+            warn!("setpoint tx task not started (UHCI TX unavailable)");
+        }
     })
 }
 
@@ -1075,6 +1089,58 @@ async fn stats_task() {
                 "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}",
                 ok, de, ut
             );
+        }
+    }
+}
+
+/// SetPoint 发送任务：20Hz 固定目标（测试），使用 UHCI TX FIFO。
+#[embassy_executor::task]
+async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
+    info!(
+        "SetPoint TX task starting (fixed target={} mA, msg_id=0x{:02x}, period={} ms)",
+        SETPOINT_TARGET_I_MA,
+        MSG_SET_POINT,
+        SETPOINT_TX_PERIOD_MS
+    );
+
+    let mut seq: u8 = 0;
+    let mut raw = [0u8; 64];
+    let mut slip = [0u8; 192];
+    loop {
+        let sp = SetPoint {
+            target_i_ma: SETPOINT_TARGET_I_MA,
+        };
+
+        if let Ok(frame_len) = encode_set_point_frame(seq, &sp, &mut raw) {
+            if let Ok(slip_len) = slip_encode(&raw[..frame_len], &mut slip) {
+                match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                    Ok(written) if written == slip_len => {
+                        let _ = uhci_tx.uart_tx.flush_async().await;
+                        seq = seq.wrapping_add(1);
+                    }
+                    Ok(written) => {
+                        warn!(
+                            "SetPoint TX short write: written={} len={} (seq={})",
+                            written, slip_len, seq
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            "SetPoint TX write error (seq={} target={} mA): {:?}",
+                            seq, SETPOINT_TARGET_I_MA, err
+                        );
+                    }
+                }
+            } else {
+                warn!("SetPoint TX slip_encode error");
+            }
+        } else {
+            warn!("SetPoint TX encode_set_point_frame error");
+        }
+
+        // 20Hz: cooperative delay ~50ms
+        for _ in 0..500 {
+            yield_now().await;
         }
     }
 }
