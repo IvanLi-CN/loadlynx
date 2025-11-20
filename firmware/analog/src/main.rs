@@ -170,10 +170,10 @@ async fn main(_spawner: Spawner) -> ! {
     load_en_ctl.set_high();
     load_en_ts.set_high();
 
-    // UART3：与数字板交互的链路，230400 8N1。
+    // UART3：与数字板交互的链路，115200 8N1。
     let mut uart_cfg = UartConfig::default();
-    // Match digital side exactly: 230400 baud, 8 data bits, no parity, 1 stop bit.
-    uart_cfg.baudrate = 230_400;
+    // Match digital side exactly: 115200 baud, 8 data bits, no parity, 1 stop bit.
+    uart_cfg.baudrate = 115_200;
     uart_cfg.data_bits = UartDataBits::DataBits8;
     uart_cfg.parity = UartParity::ParityNone;
     uart_cfg.stop_bits = UartStopBits::STOP1;
@@ -189,9 +189,9 @@ async fn main(_spawner: Spawner) -> ! {
         uart.split();
 
     // 将 RX 端转换为环形缓冲 UART，以避免在任务之间存在调度间隙时丢字节。
-    static UART_RX_DMA_BUF: StaticCell<[u8; 128]> = StaticCell::new();
+    static UART_RX_DMA_BUF: StaticCell<[u8; 256]> = StaticCell::new();
     let uart_rx_ring: RingBufferedUartRx<'static> = uart_rx.into_ring_buffered(
-        UART_RX_DMA_BUF.init([0; 128]),
+        UART_RX_DMA_BUF.init([0; 256]),
     );
 
     // 启动独立任务接收 SetPoint 控制消息。
