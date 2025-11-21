@@ -160,9 +160,9 @@ async fn diag_task() {
 
 #[embassy_executor::task]
 async fn encoder_task(
-    unit: &'static pcnt::unit::Unit<'static, 0>,
+    _unit: &'static pcnt::unit::Unit<'static, 0>,
     counter: pcnt::unit::Counter<'static, 0>,
-    mut button: Input<'static>,
+    button: Input<'static>,
 ) {
     info!(
         "encoder task starting (GPIO1=ENC_A, GPIO2=ENC_B, GPIO0=ENC_SW active-low, counts_per_step={})",
@@ -1054,7 +1054,7 @@ fn main() -> ! {
     let mut uhci_dma_buf_opt: Option<DmaRxBuf> = None;
 
     if ENABLE_UART_UHCI_DMA {
-        let mut uart_blocking = Uart::new(peripherals.UART1, uart_cfg)
+        let uart_blocking = Uart::new(peripherals.UART1, uart_cfg)
             .expect("uart1 init")
             .with_tx(peripherals.GPIO17)
             .with_rx(peripherals.GPIO18);
