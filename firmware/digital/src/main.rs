@@ -1153,6 +1153,7 @@ async fn stats_task() {
 }
 
 /// SetPoint 发送任务：20Hz，将编码器值映射为电流目标（步长 100mA）。
+/// 仅在目标变化时立即发送，并每 ~1s 发送一次心跳，降低模拟侧 UART 负载。
 #[embassy_executor::task]
 async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     info!(
@@ -1164,39 +1165,49 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
     let mut last_sent: Option<i32> = None;
+    let mut idle_ticks: u32 = 0;
     loop {
         let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
-        let sp = SetPoint { target_i_ma };
+        let changed = last_sent.map(|v| v != target_i_ma).unwrap_or(true);
+        let heartbeat = idle_ticks >= 20; // ~1s at 50ms loop
 
-        if let Ok(frame_len) = encode_set_point_frame(seq, &sp, &mut raw) {
-            if let Ok(slip_len) = slip_encode(&raw[..frame_len], &mut slip) {
-                match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-                    Ok(written) if written == slip_len => {
-                        let _ = uhci_tx.uart_tx.flush_async().await;
-                        seq = seq.wrapping_add(1);
-                        if last_sent != Some(target_i_ma) {
+        if changed || heartbeat {
+            let sp = SetPoint { target_i_ma };
+
+            if let Ok(frame_len) = encode_set_point_frame(seq, &sp, &mut raw) {
+                if let Ok(slip_len) = slip_encode(&raw[..frame_len], &mut slip) {
+                    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                        Ok(written) if written == slip_len => {
+                            let _ = uhci_tx.uart_tx.flush_async().await;
+                            seq = seq.wrapping_add(1);
                             last_sent = Some(target_i_ma);
-                            info!("setpoint sent: target_i_ma={} mA", target_i_ma);
+                            idle_ticks = 0;
+                            info!(
+                                "setpoint sent: target_i_ma={} mA (seq={})",
+                                target_i_ma, seq
+                            );
+                        }
+                        Ok(written) => {
+                            warn!(
+                                "SetPoint TX short write: written={} len={} (seq={})",
+                                written, slip_len, seq
+                            );
+                        }
+                        Err(err) => {
+                            warn!(
+                                "SetPoint TX write error (seq={} target={} mA): {:?}",
+                                seq, target_i_ma, err
+                            );
                         }
                     }
-                    Ok(written) => {
-                        warn!(
-                            "SetPoint TX short write: written={} len={} (seq={})",
-                            written, slip_len, seq
-                        );
-                    }
-                    Err(err) => {
-                        warn!(
-                            "SetPoint TX write error (seq={} target={} mA): {:?}",
-                            seq, target_i_ma, err
-                        );
-                    }
+                } else {
+                    warn!("SetPoint TX slip_encode error");
                 }
             } else {
-                warn!("SetPoint TX slip_encode error");
+                warn!("SetPoint TX encode_set_point_frame error");
             }
         } else {
-            warn!("SetPoint TX encode_set_point_frame error");
+            idle_ticks = idle_ticks.saturating_add(1);
         }
 
         // 20Hz: cooperative delay ~50ms
