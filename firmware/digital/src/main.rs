@@ -20,7 +20,7 @@ use esp_hal::{
     self as hal, Async,
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
-    gpio::{DriveMode, Input, InputConfig, Level, NoPin, Output, OutputConfig, Pull},
+    gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self as ledc_channel, ChannelIFace as _},
@@ -33,6 +33,9 @@ use esp_hal::{
     },
     time::Rate,
 };
+
+#[cfg(not(feature = "mock_setpoint"))]
+use esp_hal::gpio::{Input, InputConfig, Pull};
 
 #[cfg(not(feature = "mock_setpoint"))]
 use esp_hal::pcnt::{self, Pcnt, channel};
@@ -95,7 +98,7 @@ const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段
 // UART DMA 环形缓冲长度（同时作为 UHCI chunk_limit），与 SLIP 容量对齐以减少分段。
 const UART_DMA_BUF_LEN: usize = 1536;
 // SetPoint 发送频率：20Hz（50ms）
-const SETPOINT_TX_PERIOD_MS: u32 = 100; // 降低到 10Hz，减轻模拟侧 UART 压力
+const SETPOINT_TX_PERIOD_MS: u32 = 80; // used in encoder-driven mode
 const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 const ENABLE_UART_UHCI_DMA: bool = true;
 
@@ -167,8 +170,76 @@ async fn diag_task() {
     }
 }
 
+async fn cooperative_delay_ms(ms: u32) {
+    let start = now_ms32();
+    loop {
+        let elapsed = now_ms32().wrapping_sub(start);
+        if elapsed >= ms {
+            break;
+        }
+        yield_now().await;
+    }
+}
+
 #[cfg(feature = "mock_setpoint")]
-const MOCK_SETPOINT_SCRIPT: &[(u32, i32)] = &[(0, 0), (100, 600), (200, 0), (300, -600), (400, 0)];
+const MOCK_STEP_MA: i32 = 100;
+#[cfg(feature = "mock_setpoint")]
+// Calibrated so the cooperative scheduler yields an effective ~80 ms cadence on hardware.
+const MOCK_STEP_MS: u32 = 74;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_PEAK_MA: i32 = 2000;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_PEAK_HOLD_MS: u32 = 4_600;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_PERIOD_MS: u32 = 9_200;
+
+#[cfg(feature = "mock_setpoint")]
+const MOCK_STEPS_TO_PEAK: i32 = MOCK_PEAK_MA / MOCK_STEP_MA;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_RAMP_UP_MS: u32 = (MOCK_STEPS_TO_PEAK as u32) * MOCK_STEP_MS;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_SCRIPT_LEN: usize =
+    1 + MOCK_STEPS_TO_PEAK as usize + 1 + MOCK_STEPS_TO_PEAK as usize + 1;
+
+#[cfg(feature = "mock_setpoint")]
+const fn build_mock_script() -> [(u32, i32); MOCK_SCRIPT_LEN] {
+    let mut script = [(0u32, 0i32); MOCK_SCRIPT_LEN];
+
+    // t=0, ch1 = 0 mA
+    let mut idx = 0usize;
+    script[idx] = (0, 0);
+    idx += 1;
+
+    // Ramp up: 0 -> 2A @ +100 mA every 80 ms
+    let mut step = 1i32;
+    while step <= MOCK_STEPS_TO_PEAK {
+        script[idx] = ((step as u32) * MOCK_STEP_MS, step * MOCK_STEP_MA);
+        idx += 1;
+        step += 1;
+    }
+
+    // Hold at peak for 5 s
+    script[idx] = (MOCK_RAMP_UP_MS + MOCK_PEAK_HOLD_MS, MOCK_PEAK_MA);
+    idx += 1;
+
+    // Ramp down: 2A -> 0 @ -100 mA every 80 ms
+    let mut down_step = 1i32;
+    while down_step <= MOCK_STEPS_TO_PEAK {
+        script[idx] = (
+            MOCK_RAMP_UP_MS + MOCK_PEAK_HOLD_MS + (down_step as u32) * MOCK_STEP_MS,
+            MOCK_PEAK_MA - down_step * MOCK_STEP_MA,
+        );
+        idx += 1;
+        down_step += 1;
+    }
+
+    // Bottom hold to complete a 10 s period
+    script[idx] = (MOCK_PERIOD_MS, 0);
+    script
+}
+
+#[cfg(feature = "mock_setpoint")]
+const MOCK_SETPOINT_SCRIPT: [(u32, i32); MOCK_SCRIPT_LEN] = build_mock_script();
 
 #[cfg(feature = "mock_setpoint")]
 const MOCK_SCRIPT_LOOP: bool = true;
@@ -177,27 +248,28 @@ const MOCK_SCRIPT_LOOP: bool = true;
 #[embassy_executor::task]
 async fn mock_setpoint_task() {
     info!(
-        "mock setpoint task running (script len={}, loop={})",
+        "mock setpoint task running (0->2A->0, step={} mA every {} ms, hold={} ms, period {} ms, entries={}, loop={})",
+        MOCK_STEP_MA,
+        MOCK_STEP_MS,
+        MOCK_PEAK_HOLD_MS,
+        MOCK_PERIOD_MS,
         MOCK_SETPOINT_SCRIPT.len(),
         MOCK_SCRIPT_LOOP
     );
 
     loop {
         let mut last_t = 0u32;
-        for &(t_ms, target_ma) in MOCK_SETPOINT_SCRIPT.iter() {
+        for (idx, &(t_ms, target_ma)) in MOCK_SETPOINT_SCRIPT.iter().enumerate() {
             let delta = t_ms.saturating_sub(last_t);
             if delta > 0 {
-                // cooperative wait: delta ms at ~1ms granularity
-                for _ in 0..delta {
-                    yield_now().await;
-                }
+                cooperative_delay_ms(delta).await;
             }
             last_t = t_ms;
             let steps = target_ma / ENCODER_STEP_MA;
             ENCODER_VALUE.store(steps, Ordering::SeqCst);
             info!(
-                "mock setpoint script: t={} ms, target={} mA (steps={})",
-                t_ms, target_ma, steps
+                "mock setpoint script: step={} t={} ms target={} mA (steps={})",
+                idx, t_ms, target_ma, steps
             );
         }
 
@@ -1246,8 +1318,9 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
 
         if changed {
             let sp = SetPoint { target_i_ma };
+            let send_seq = seq;
 
-            if let Ok(frame_len) = encode_set_point_frame(seq, &sp, &mut raw) {
+            if let Ok(frame_len) = encode_set_point_frame(send_seq, &sp, &mut raw) {
                 if let Ok(slip_len) = slip_encode(&raw[..frame_len], &mut slip) {
                     match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
                         Ok(written) if written == slip_len => {
@@ -1255,8 +1328,10 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                             seq = seq.wrapping_add(1);
                             last_sent = Some(target_i_ma);
                             info!(
-                                "setpoint sent: target_i_ma={} mA (seq={} reason=change)",
-                                target_i_ma, seq
+                                "setpoint sent: seq={} target_i_ma={} mA ts={} ms (reason=change)",
+                                send_seq,
+                                target_i_ma,
+                                now_ms32()
                             );
                         }
                         Ok(written) => {
@@ -1280,9 +1355,14 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
             }
         }
 
-        // 10Hz: cooperative delay ~100ms
-        for _ in 0..1000 {
+        #[cfg(feature = "mock_setpoint")]
+        {
             yield_now().await;
+        }
+
+        #[cfg(not(feature = "mock_setpoint"))]
+        {
+            cooperative_delay_ms(SETPOINT_TX_PERIOD_MS).await;
         }
     }
 }
