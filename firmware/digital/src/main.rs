@@ -89,7 +89,7 @@ const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段
 // UART DMA 环形缓冲长度（同时作为 UHCI chunk_limit），与 SLIP 容量对齐以减少分段。
 const UART_DMA_BUF_LEN: usize = 1536;
 // SetPoint 发送频率：20Hz（50ms）
-const SETPOINT_TX_PERIOD_MS: u32 = 50;
+const SETPOINT_TX_PERIOD_MS: u32 = 100; // 降低到 10Hz，减轻模拟侧 UART 压力
 const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 const ENABLE_UART_UHCI_DMA: bool = true;
 
@@ -1152,8 +1152,9 @@ async fn stats_task() {
     }
 }
 
-/// SetPoint 发送任务：20Hz，将编码器值映射为电流目标（步长 100mA）。
-/// 仅在目标变化时立即发送，并每 ~1s 发送一次心跳，降低模拟侧 UART 负载。
+/// SetPoint 发送任务：10Hz，将编码器值映射为电流目标（步长 100mA）。
+/// 仅在目标变化时立即发送，并每 ~1s 发送一次心跳；若 2s 内编码器无变化，自动注入
+/// ±500mA 测试序列以验证链路（不修改编码器计数）。
 #[embassy_executor::task]
 async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     info!(
@@ -1166,13 +1167,38 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     let mut slip = [0u8; 192];
     let mut last_sent: Option<i32> = None;
     let mut idle_ticks: u32 = 0;
+    let mut idle_for_demo: u32 = 0;
+    let mut demo_phase: i32 = 0; // toggles between +500mA / -500mA
+    let mut last_encoder_val = ENCODER_VALUE.load(Ordering::SeqCst);
     loop {
         let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
         let changed = last_sent.map(|v| v != target_i_ma).unwrap_or(true);
-        let heartbeat = idle_ticks >= 20; // ~1s at 50ms loop
+        let heartbeat = idle_ticks >= 10; // ~1s at 100ms loop
 
-        if changed || heartbeat {
-            let sp = SetPoint { target_i_ma };
+        // 检测编码器是否有实际输入
+        let enc_now = ENCODER_VALUE.load(Ordering::SeqCst);
+        let encoder_moved = enc_now != last_encoder_val;
+        if encoder_moved {
+            idle_for_demo = 0;
+            last_encoder_val = enc_now;
+        } else {
+            idle_for_demo = idle_for_demo.saturating_add(1);
+        }
+
+        // demo 注入：编码器 2s 无动作时，交替发送 ±500mA
+        let mut demo_injected = false;
+        let mut target_for_send = target_i_ma;
+        if idle_for_demo >= 20 {
+            demo_phase ^= 1;
+            target_for_send = if demo_phase & 1 == 0 { 500 } else { -500 };
+            idle_for_demo = 0;
+            demo_injected = true;
+        }
+
+        if changed || heartbeat || demo_injected {
+            let sp = SetPoint {
+                target_i_ma: target_for_send,
+            };
 
             if let Ok(frame_len) = encode_set_point_frame(seq, &sp, &mut raw) {
                 if let Ok(slip_len) = slip_encode(&raw[..frame_len], &mut slip) {
@@ -1180,11 +1206,19 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                         Ok(written) if written == slip_len => {
                             let _ = uhci_tx.uart_tx.flush_async().await;
                             seq = seq.wrapping_add(1);
-                            last_sent = Some(target_i_ma);
+                            last_sent = Some(target_for_send);
                             idle_ticks = 0;
                             info!(
-                                "setpoint sent: target_i_ma={} mA (seq={})",
-                                target_i_ma, seq
+                                "setpoint sent: target_i_ma={} mA (seq={} reason={})",
+                                target_for_send,
+                                seq,
+                                if demo_injected {
+                                    "demo"
+                                } else if changed {
+                                    "change"
+                                } else {
+                                    "heartbeat"
+                                }
                             );
                         }
                         Ok(written) => {
@@ -1211,7 +1245,7 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
         }
 
         // 20Hz: cooperative delay ~50ms
-        for _ in 0..500 {
+        for _ in 0..1000 {
             yield_now().await;
         }
     }
