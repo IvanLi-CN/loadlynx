@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::convert::Infallible;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
@@ -20,14 +20,18 @@ use esp_hal::{
     self as hal, Async,
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
-    gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
+    gpio::{DriveMode, Input, InputConfig, Level, NoPin, Output, OutputConfig, Pull},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self as ledc_channel, ChannelIFace as _},
         timer::{self as ledc_timer, TimerIFace as _},
     },
     main,
-    spi::{Mode, master::{Config as SpiConfig, Spi, SpiDmaBus}},
+    pcnt::{self, Pcnt, channel},
+    spi::{
+        Mode,
+        master::{Config as SpiConfig, Spi, SpiDmaBus},
+    },
     time::Rate,
 };
 // Async is already in scope via `use esp_hal::{ self as hal, Async, ... }`
@@ -37,8 +41,8 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    FastStatus, SetPoint, SlipDecoder, decode_fast_status_frame, encode_set_point_frame,
-    slip_encode, MSG_SET_POINT,
+    FastStatus, MSG_SET_POINT, SetPoint, SlipDecoder, decode_fast_status_frame,
+    encode_set_point_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -72,6 +76,10 @@ const FRAME_LOG_POINTS: [(usize, usize); 3] = [
 const ENABLE_DISPLAY_SPI_UPDATES: bool = true;
 // 调试开关：正常运行应为 true，仅在单独验证 UI 或其它外设时才临时关闭 UART 链路任务。
 const ENABLE_UART_LINK_TASK: bool = true;
+const ENCODER_COUNTS_PER_STEP: i16 = 4; // quadrature: four edges per detent
+const ENCODER_POLL_YIELD_LOOPS: usize = 200; // cooperative delay between polls
+const ENCODER_DEBOUNCE_POLLS: u8 = 3; // simple stable-change debounce for button
+const ENCODER_FILTER_CYCLES: u16 = 800; // ≈10 µs @ 80 MHz APB, filters encoder bounce
 
 // UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
 const UART_BAUD: u32 = 115_200;
@@ -97,8 +105,16 @@ static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = Stati
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
+static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
 type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
+
+struct EncoderPins {
+    a: Input<'static>,
+    b: Input<'static>,
+}
+
+static ENCODER_PINS: StaticCell<EncoderPins> = StaticCell::new();
 
 // --- Telemetry & diagnostics -------------------------------------------------
 static UART_RX_ERR_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -108,6 +124,7 @@ static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
+static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 
 #[inline]
 fn now_ms32() -> u32 {
@@ -137,6 +154,68 @@ async fn diag_task() {
     info!("Display diag task alive");
     loop {
         for _ in 0..2000 {
+            yield_now().await;
+        }
+    }
+}
+
+#[embassy_executor::task]
+async fn encoder_task(
+    unit: &'static pcnt::unit::Unit<'static, 0>,
+    counter: pcnt::unit::Counter<'static, 0>,
+    mut button: Input<'static>,
+) {
+    info!(
+        "encoder task starting (GPIO1=ENC_A, GPIO2=ENC_B, GPIO0=ENC_SW active-low, counts_per_step={})",
+        ENCODER_COUNTS_PER_STEP
+    );
+
+    let mut last_count = counter.get();
+    let mut residual: i16 = 0;
+    let mut last_button = button.is_low();
+    let mut debounce: u8 = 0;
+
+    loop {
+        let count = counter.get();
+        let delta = count.wrapping_sub(last_count);
+        if delta != 0 {
+            last_count = count;
+            residual = residual.wrapping_add(delta);
+
+            while residual >= ENCODER_COUNTS_PER_STEP || residual <= -ENCODER_COUNTS_PER_STEP {
+                let phys_step = if residual > 0 { 1 } else { -1 };
+                residual -= phys_step * ENCODER_COUNTS_PER_STEP;
+
+                // Reverse logical direction to match panel orientation (CW increments).
+                let logical_step = -phys_step;
+                let new_val = ENCODER_VALUE
+                    .fetch_add(logical_step as i32, Ordering::SeqCst)
+                    .wrapping_add(logical_step as i32);
+
+                if logical_step > 0 {
+                    info!("encoder cw: value={}", new_val);
+                } else {
+                    info!("encoder ccw: value={}", new_val);
+                }
+            }
+        }
+
+        let pressed = button.is_low();
+        if pressed != last_button {
+            debounce = debounce.saturating_add(1);
+            if debounce >= ENCODER_DEBOUNCE_POLLS {
+                last_button = pressed;
+                debounce = 0;
+                if pressed {
+                    ENCODER_VALUE.store(0, Ordering::SeqCst);
+                    info!("encoder button pressed: value reset to 0");
+                }
+            }
+        } else {
+            debounce = 0;
+        }
+
+        for _ in 0..ENCODER_POLL_YIELD_LOOPS {
             yield_now().await;
         }
     }
@@ -449,14 +528,10 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
             let frame_idx = DISPLAY_FRAME_COUNT
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
-            let log_this_frame =
-                frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
+            let log_this_frame = frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
             if log_this_frame {
                 // 短期内每帧打印，之后按固定间隔抽样。
-                info!(
-                    "display: rendering frame {} (dt_ms={})",
-                    frame_idx, dt_ms
-                );
+                info!("display: rendering frame {} (dt_ms={})", frame_idx, dt_ms);
             }
 
             // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
@@ -902,6 +977,45 @@ fn main() -> ! {
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
 
+    let encoder_cfg = InputConfig::default().with_pull(Pull::Up);
+    let encoder_pins = ENCODER_PINS.init(EncoderPins {
+        a: Input::new(peripherals.GPIO1, encoder_cfg),
+        b: Input::new(peripherals.GPIO2, encoder_cfg),
+    });
+    let encoder_button = Input::new(peripherals.GPIO0, encoder_cfg);
+
+    // Hardware quadrature decoding via PCNT unit0.
+    let pcnt = PCNT.init(Pcnt::new(peripherals.PCNT));
+    let encoder_unit = &pcnt.unit0;
+
+    let filter_cycles = ENCODER_FILTER_CYCLES.min(1023u16);
+    encoder_unit
+        .set_filter(Some(filter_cycles))
+        .expect("encoder filter");
+    encoder_unit.clear();
+
+    let enc_a = encoder_pins.a.peripheral_input();
+    let enc_b = encoder_pins.b.peripheral_input();
+
+    let ch0 = &encoder_unit.channel0;
+    ch0.set_ctrl_signal(enc_a.clone());
+    ch0.set_edge_signal(enc_b.clone());
+    ch0.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+    ch0.set_input_mode(channel::EdgeMode::Increment, channel::EdgeMode::Decrement);
+
+    let ch1 = &encoder_unit.channel1;
+    ch1.set_ctrl_signal(enc_b);
+    ch1.set_edge_signal(enc_a);
+    ch1.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+    ch1.set_input_mode(channel::EdgeMode::Decrement, channel::EdgeMode::Increment);
+
+    encoder_unit.resume();
+    let encoder_counter = encoder_unit.counter.clone();
+    info!(
+        "encoder pcnt configured (unit0, filter_cycles={}, counts_per_step={})",
+        filter_cycles, ENCODER_COUNTS_PER_STEP
+    );
+
     const ENABLE_ANALOG_5V_ON_BOOT: bool = cfg!(feature = "enable_analog_5v_on_boot");
     if ENABLE_ANALOG_5V_ON_BOOT {
         info!("Digital peripherals ready; enabling TPS82130 5V rail after delay");
@@ -995,7 +1109,10 @@ fn main() -> ! {
                         }
                     }
                     Err(_e) => {
-                        warn!("SetPoint fixed burst {}: encode_set_point_frame error", burst);
+                        warn!(
+                            "SetPoint fixed burst {}: encode_set_point_frame error",
+                            burst
+                        );
                     }
                 }
 
@@ -1004,9 +1121,9 @@ fn main() -> ! {
             }
         }
 
-    // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
-    let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
-        esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
+        // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
+        let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
+            esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
         let dma_rx = DmaRxBuf::new(uhci_rx_desc, uhci_rx_buf).expect("uhci dma rx buf");
 
         let mut uhci =
@@ -1038,6 +1155,10 @@ fn main() -> ! {
         spawner.spawn(ticker()).expect("ticker spawn");
         info!("spawning diag task");
         spawner.spawn(diag_task()).expect("diag_task spawn");
+        info!("spawning encoder task");
+        spawner
+            .spawn(encoder_task(encoder_unit, encoder_counter, encoder_button))
+            .expect("encoder_task spawn");
         info!("spawning display task");
         spawner
             .spawn(display_task(resources, telemetry))
@@ -1098,9 +1219,7 @@ async fn stats_task() {
 async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     info!(
         "SetPoint TX task starting (fixed target={} mA, msg_id=0x{:02x}, period={} ms)",
-        SETPOINT_TARGET_I_MA,
-        MSG_SET_POINT,
-        SETPOINT_TX_PERIOD_MS
+        SETPOINT_TARGET_I_MA, MSG_SET_POINT, SETPOINT_TX_PERIOD_MS
     );
 
     let mut seq: u8 = 0;

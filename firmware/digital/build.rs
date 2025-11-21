@@ -91,11 +91,7 @@ fn repo_root_from_manifest() -> Option<PathBuf> {
 fn git_head_path() -> Option<PathBuf> {
     let repo_root = repo_root_from_manifest()?;
     let head = repo_root.join(".git/HEAD");
-    if head.exists() {
-        Some(head)
-    } else {
-        None
-    }
+    if head.exists() { Some(head) } else { None }
 }
 
 fn git_describe() -> Option<String> {
@@ -112,11 +108,7 @@ fn git_describe() -> Option<String> {
     }
 
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn source_digest() -> Option<u64> {

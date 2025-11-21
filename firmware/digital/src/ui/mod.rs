@@ -172,10 +172,7 @@ pub fn render_partial(
 
     if mask.voltage_pair {
         // 清理右侧电压对所占区域的背景，再重绘标题和条形图。
-        canvas.fill_rect(
-            Rect::new(190, 8, LOGICAL_WIDTH, 96),
-            rgb(0x080f19),
-        );
+        canvas.fill_rect(Rect::new(190, 8, LOGICAL_WIDTH, 96), rgb(0x080f19));
         let remote_text = curr.remote_voltage_text.as_str();
         let local_text = curr.local_voltage_text.as_str();
         draw_voltage_pair(&mut canvas, curr, remote_text, local_text);
@@ -183,10 +180,7 @@ pub fn render_partial(
 
     if mask.current_pair {
         // 清理右侧电流对所占区域的背景，再重绘标题和条形图。
-        canvas.fill_rect(
-            Rect::new(190, 96, LOGICAL_WIDTH, 180),
-            rgb(0x080f19),
-        );
+        canvas.fill_rect(Rect::new(190, 96, LOGICAL_WIDTH, 180), rgb(0x080f19));
         let ch1_text = curr.ch1_current_text.as_str();
         let ch2_text = curr.ch2_current_text.as_str();
         draw_current_pair(&mut canvas, curr, ch1_text, ch2_text);
@@ -221,10 +215,7 @@ pub fn render_partial(
 
 /// 在左上角叠加显示 FPS 信息。
 /// 参数 `fps` 通常来自 display_task 中按 500ms 窗口统计得到的整数 FPS。
-pub fn render_fps_overlay(
-    frame: &mut RawFrameBuf<Rgb565, &mut [u8]>,
-    fps: u32,
-) {
+pub fn render_fps_overlay(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, fps: u32) {
     let bytes = frame.as_mut_bytes();
     let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
