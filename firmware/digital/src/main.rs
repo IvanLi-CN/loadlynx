@@ -90,8 +90,7 @@ const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段
 const UART_DMA_BUF_LEN: usize = 1536;
 // SetPoint 发送频率：20Hz（50ms）
 const SETPOINT_TX_PERIOD_MS: u32 = 50;
-// 固定 SetPoint 目标（测试阶段）
-const SETPOINT_TARGET_I_MA: i32 = 1000;
+const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 const ENABLE_UART_UHCI_DMA: bool = true;
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -1060,67 +1059,6 @@ fn main() -> ! {
             .with_tx(peripherals.GPIO17)
             .with_rx(peripherals.GPIO18);
 
-        // Fixed SetPoint burst to exercise the analog control path without
-        // adding any long-lived async tasks. This runs before we hand the UART
-        // over to UHCI, and repeats a few times so the analog RX task has time
-        // to come up.
-        {
-            const FIXED_TARGET_I_MA: i32 = 1000;
-            let sp = SetPoint {
-                target_i_ma: FIXED_TARGET_I_MA,
-            };
-            let mut raw = [0u8; 64];
-            let mut slip = [0u8; 192];
-            let send_delay = Delay::new();
-
-            // 仅发送 2 帧，避免在模拟板上造成 UART Overrun；启动间隔拉长。
-            for burst in 0..2 {
-                match encode_set_point_frame(burst as u8, &sp, &mut raw) {
-                    Ok(frame_len) => {
-                        info!(
-                            "SetPoint raw frame burst {}: len={} head={=[u8]:#04x}",
-                            burst,
-                            frame_len,
-                            &raw[..frame_len.min(16)]
-                        );
-
-                        match slip_encode(&raw[..frame_len], &mut slip) {
-                            Ok(slip_len) => {
-                                info!(
-                                    "SetPoint SLIP frame burst {}: len={} head={=[u8]:#04x}",
-                                    burst,
-                                    slip_len,
-                                    &slip[..slip_len.min(16)]
-                                );
-
-                                match uart_blocking.write(&slip[..slip_len]) {
-                                    Ok(written) => info!(
-                                        "SetPoint fixed burst {}: target_i_ma={} mA (len={}, written={}, msg_id=0x{:02x})",
-                                        burst, FIXED_TARGET_I_MA, slip_len, written, MSG_SET_POINT
-                                    ),
-                                    Err(_e) => {
-                                        warn!("SetPoint fixed burst {}: UART write error", burst);
-                                    }
-                                }
-                            }
-                            Err(_e) => {
-                                warn!("SetPoint fixed burst {}: slip_encode error", burst);
-                            }
-                        }
-                    }
-                    Err(_e) => {
-                        warn!(
-                            "SetPoint fixed burst {}: encode_set_point_frame error",
-                            burst
-                        );
-                    }
-                }
-
-                // 给模拟侧更多启动时间，避免溢出
-                send_delay.delay_millis(2_500);
-            }
-        }
-
         // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
         let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
             esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
@@ -1214,21 +1152,21 @@ async fn stats_task() {
     }
 }
 
-/// SetPoint 发送任务：20Hz 固定目标（测试），使用 UHCI TX FIFO。
+/// SetPoint 发送任务：20Hz，将编码器值映射为电流目标（步长 100mA）。
 #[embassy_executor::task]
 async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     info!(
-        "SetPoint TX task starting (fixed target={} mA, msg_id=0x{:02x}, period={} ms)",
-        SETPOINT_TARGET_I_MA, MSG_SET_POINT, SETPOINT_TX_PERIOD_MS
+        "SetPoint TX task starting (encoder-driven, step={} mA, msg_id=0x{:02x}, period={} ms)",
+        ENCODER_STEP_MA, MSG_SET_POINT, SETPOINT_TX_PERIOD_MS
     );
 
     let mut seq: u8 = 0;
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
+    let mut last_sent: Option<i32> = None;
     loop {
-        let sp = SetPoint {
-            target_i_ma: SETPOINT_TARGET_I_MA,
-        };
+        let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
+        let sp = SetPoint { target_i_ma };
 
         if let Ok(frame_len) = encode_set_point_frame(seq, &sp, &mut raw) {
             if let Ok(slip_len) = slip_encode(&raw[..frame_len], &mut slip) {
@@ -1236,6 +1174,10 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                     Ok(written) if written == slip_len => {
                         let _ = uhci_tx.uart_tx.flush_async().await;
                         seq = seq.wrapping_add(1);
+                        if last_sent != Some(target_i_ma) {
+                            last_sent = Some(target_i_ma);
+                            info!("setpoint sent: target_i_ma={} mA", target_i_ma);
+                        }
                     }
                     Ok(written) => {
                         warn!(
@@ -1246,7 +1188,7 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                     Err(err) => {
                         warn!(
                             "SetPoint TX write error (seq={} target={} mA): {:?}",
-                            seq, SETPOINT_TARGET_I_MA, err
+                            seq, target_i_ma, err
                         );
                     }
                 }
