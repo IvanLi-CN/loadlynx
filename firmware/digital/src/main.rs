@@ -46,8 +46,8 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    FastStatus, MSG_SET_POINT, SetPoint, SlipDecoder, decode_fast_status_frame,
-    encode_set_point_frame, slip_encode,
+    CRC_LEN, FastStatus, HEADER_LEN, MSG_SET_POINT, SetPoint, SlipDecoder,
+    decode_fast_status_frame, encode_set_point_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -952,31 +952,39 @@ async fn feed_decoder(
 ) {
     for &byte in bytes {
         match decoder.push(byte) {
-            Ok(Some(frame)) => match decode_fast_status_frame(&frame) {
-                Ok((header, status)) => {
-                    apply_fast_status(telemetry, &status).await;
-                    let total = FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                    // 默认每 32 帧打印一次成功节奏，用于长时间验收；
-                    // 同时打印关键测量值，方便观察电流/电压是否在变化。
-                    if total % 32 == 0 {
-                        let display_running = DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
-                        info!(
-                            "fast_status ok (count={}, display_running={}, i_local_ma={} mA, target_value={} mA)",
-                            total, display_running, status.i_local_ma, status.target_value
-                        );
-                    }
-                    let _ = header; // keep header verified even if unused further
-                }
-                Err(err) => {
-                    PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
-                    rate_limited_proto_warn(protocol_error_str(&err), frame.len());
+            Ok(Some(frame)) => {
+                // Ignore obvious noise: SLIP frame shorter than header+CRC cannot be valid.
+                if frame.len() < HEADER_LEN + CRC_LEN {
                     decoder.reset();
+                    continue;
                 }
-            },
+
+                match decode_fast_status_frame(&frame) {
+                    Ok((header, status)) => {
+                        apply_fast_status(telemetry, &status).await;
+                        let total = FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                        // 默认每 32 帧打印一次成功节奏，用于长时间验收；
+                        // 同时打印关键测量值，方便观察电流/电压是否在变化。
+                        if total % 32 == 0 {
+                            let display_running = DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
+                            info!(
+                                "fast_status ok (count={}, display_running={}, i_local_ma={} mA, target_value={} mA)",
+                                total, display_running, status.i_local_ma, status.target_value
+                            );
+                        }
+                        let _ = header; // keep header verified even if unused further
+                    }
+                    Err(err) => {
+                        PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                        rate_limited_proto_warn(protocol_error_str(&err), Some(frame.as_slice()));
+                        decoder.reset();
+                    }
+                }
+            }
             Ok(None) => {}
             Err(err) => {
                 PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
-                rate_limited_proto_warn(protocol_error_str(&err), 0);
+                rate_limited_proto_warn(protocol_error_str(&err), None);
                 decoder.reset();
             }
         }
@@ -997,15 +1005,25 @@ fn rate_limited_uart_warn<E: defmt::Format>(err: &E) {
     }
 }
 
-fn rate_limited_proto_warn(kind: &str, len: usize) {
+fn rate_limited_proto_warn(kind: &str, frame: Option<&[u8]>) {
     let now = now_ms32();
     let last = LAST_PROTO_WARN_MS.load(Ordering::Relaxed);
     if now.wrapping_sub(last) >= 2000 {
         LAST_PROTO_WARN_MS.store(now, Ordering::Relaxed);
         let cnt = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
+        let len = frame.map(|f| f.len()).unwrap_or(0);
+        let mut head_buf = [0u8; 8];
+        let head = frame.map(|f| {
+            let head_len = f.len().min(head_buf.len());
+            head_buf[..head_len].copy_from_slice(&f[..head_len]);
+            &head_buf[..head_len]
+        });
         warn!(
-            "protocol decode error ({}), frame_len={} [total={}]; resetting",
-            kind, len, cnt
+            "protocol decode error ({}), frame_len={}, head={:02x} [total={}]; resetting",
+            kind,
+            len,
+            head.unwrap_or(&[]),
+            cnt
         );
     }
 }
