@@ -78,9 +78,13 @@ const FRAME_LOG_POINTS: [(usize, usize); 3] = [
 const ENABLE_DISPLAY_SPI_UPDATES: bool = true;
 // 调试开关：正常运行应为 true，仅在单独验证 UI 或其它外设时才临时关闭 UART 链路任务。
 const ENABLE_UART_LINK_TASK: bool = true;
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
 const ENCODER_COUNTS_PER_STEP: i16 = 4; // quadrature: four edges per detent
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
 const ENCODER_POLL_YIELD_LOOPS: usize = 200; // cooperative delay between polls
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
 const ENCODER_DEBOUNCE_POLLS: u8 = 3; // simple stable-change debounce for button
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
 const ENCODER_FILTER_CYCLES: u16 = 800; // ≈10 µs @ 80 MHz APB, filters encoder bounce
 
 // UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
@@ -164,18 +168,10 @@ async fn diag_task() {
 }
 
 #[cfg(feature = "mock_setpoint")]
-const MOCK_SETPOINT_SCRIPT: &[(u32, i32)] =
-    &[(0, 0), (1000, 500), (2000, 0), (3000, -500), (4000, 0)];
+const MOCK_SETPOINT_SCRIPT: &[(u32, i32)] = &[(0, 0), (100, 600), (200, 0), (300, -600), (400, 0)];
 
 #[cfg(feature = "mock_setpoint")]
 const MOCK_SCRIPT_LOOP: bool = true;
-
-#[cfg(feature = "mock_setpoint")]
-async fn mock_wait_ms(ms: u32) {
-    for _ in 0..ms {
-        yield_now().await;
-    }
-}
 
 #[cfg(feature = "mock_setpoint")]
 #[embassy_executor::task]
@@ -191,7 +187,10 @@ async fn mock_setpoint_task() {
         for &(t_ms, target_ma) in MOCK_SETPOINT_SCRIPT.iter() {
             let delta = t_ms.saturating_sub(last_t);
             if delta > 0 {
-                mock_wait_ms(delta).await;
+                // cooperative wait: delta ms at ~1ms granularity
+                for _ in 0..delta {
+                    yield_now().await;
+                }
             }
             last_t = t_ms;
             let steps = target_ma / ENCODER_STEP_MA;

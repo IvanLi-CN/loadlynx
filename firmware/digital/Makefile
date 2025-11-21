@@ -11,6 +11,7 @@ LOGFMT   ?= defmt
 ESPFLASH ?= espflash
 CARGO    ?= cargo +esp
 ENSURE_ESP32_PORT ?= $(abspath ../../scripts/ensure_esp32_port.sh)
+FEATURES ?=
 
 ifeq ($(PORT),)
   ifneq ($(wildcard $(ENSURE_ESP32_PORT)),)
@@ -22,6 +23,10 @@ ifeq ($(PROFILE),release)
   CARGO_FLAGS := --release
 else
   CARGO_FLAGS :=
+endif
+
+ifneq ($(FEATURES),)
+  CARGO_FLAGS += --features $(FEATURES)
 endif
 
 BINDIR := target/$(TARGET)/$(PROFILE)
