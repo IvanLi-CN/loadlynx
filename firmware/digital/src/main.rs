@@ -27,13 +27,15 @@ use esp_hal::{
         timer::{self as ledc_timer, TimerIFace as _},
     },
     main,
-    pcnt::{self, Pcnt, channel},
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi, SpiDmaBus},
     },
     time::Rate,
 };
+
+#[cfg(not(feature = "mock_setpoint"))]
+use esp_hal::pcnt::{self, Pcnt, channel};
 // Async is already in scope via `use esp_hal::{ self as hal, Async, ... }`
 // UART async API (`embedded-io`) provides awaitable reads; leveraged below
 use lcd_async::{
@@ -104,15 +106,18 @@ static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = Stati
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
+#[cfg(not(feature = "mock_setpoint"))]
 static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
 type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
 
+#[cfg(not(feature = "mock_setpoint"))]
 struct EncoderPins {
     a: Input<'static>,
     b: Input<'static>,
 }
 
+#[cfg(not(feature = "mock_setpoint"))]
 static ENCODER_PINS: StaticCell<EncoderPins> = StaticCell::new();
 
 // --- Telemetry & diagnostics -------------------------------------------------
@@ -158,6 +163,52 @@ async fn diag_task() {
     }
 }
 
+#[cfg(feature = "mock_setpoint")]
+const MOCK_SETPOINT_SCRIPT: &[(u32, i32)] =
+    &[(0, 0), (1000, 500), (2000, 0), (3000, -500), (4000, 0)];
+
+#[cfg(feature = "mock_setpoint")]
+const MOCK_SCRIPT_LOOP: bool = true;
+
+#[cfg(feature = "mock_setpoint")]
+async fn mock_wait_ms(ms: u32) {
+    for _ in 0..ms {
+        yield_now().await;
+    }
+}
+
+#[cfg(feature = "mock_setpoint")]
+#[embassy_executor::task]
+async fn mock_setpoint_task() {
+    info!(
+        "mock setpoint task running (script len={}, loop={})",
+        MOCK_SETPOINT_SCRIPT.len(),
+        MOCK_SCRIPT_LOOP
+    );
+
+    loop {
+        let mut last_t = 0u32;
+        for &(t_ms, target_ma) in MOCK_SETPOINT_SCRIPT.iter() {
+            let delta = t_ms.saturating_sub(last_t);
+            if delta > 0 {
+                mock_wait_ms(delta).await;
+            }
+            last_t = t_ms;
+            let steps = target_ma / ENCODER_STEP_MA;
+            ENCODER_VALUE.store(steps, Ordering::SeqCst);
+            info!(
+                "mock setpoint script: t={} ms, target={} mA (steps={})",
+                t_ms, target_ma, steps
+            );
+        }
+
+        if !MOCK_SCRIPT_LOOP {
+            break;
+        }
+    }
+}
+
+#[cfg(not(feature = "mock_setpoint"))]
 #[embassy_executor::task]
 async fn encoder_task(
     _unit: &'static pcnt::unit::Unit<'static, 0>,
@@ -976,44 +1027,49 @@ fn main() -> ! {
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
 
-    let encoder_cfg = InputConfig::default().with_pull(Pull::Up);
-    let encoder_pins = ENCODER_PINS.init(EncoderPins {
-        a: Input::new(peripherals.GPIO1, encoder_cfg),
-        b: Input::new(peripherals.GPIO2, encoder_cfg),
-    });
-    let encoder_button = Input::new(peripherals.GPIO0, encoder_cfg);
+    #[cfg(not(feature = "mock_setpoint"))]
+    let (encoder_button, encoder_unit, encoder_counter) = {
+        let encoder_cfg = InputConfig::default().with_pull(Pull::Up);
+        let encoder_pins = ENCODER_PINS.init(EncoderPins {
+            a: Input::new(peripherals.GPIO1, encoder_cfg),
+            b: Input::new(peripherals.GPIO2, encoder_cfg),
+        });
+        let encoder_button = Input::new(peripherals.GPIO0, encoder_cfg);
 
-    // Hardware quadrature decoding via PCNT unit0.
-    let pcnt = PCNT.init(Pcnt::new(peripherals.PCNT));
-    let encoder_unit = &pcnt.unit0;
+        // Hardware quadrature decoding via PCNT unit0.
+        let pcnt = PCNT.init(Pcnt::new(peripherals.PCNT));
+        let encoder_unit = &pcnt.unit0;
 
-    let filter_cycles = ENCODER_FILTER_CYCLES.min(1023u16);
-    encoder_unit
-        .set_filter(Some(filter_cycles))
-        .expect("encoder filter");
-    encoder_unit.clear();
+        let filter_cycles = ENCODER_FILTER_CYCLES.min(1023u16);
+        encoder_unit
+            .set_filter(Some(filter_cycles))
+            .expect("encoder filter");
+        encoder_unit.clear();
 
-    let enc_a = encoder_pins.a.peripheral_input();
-    let enc_b = encoder_pins.b.peripheral_input();
+        let enc_a = encoder_pins.a.peripheral_input();
+        let enc_b = encoder_pins.b.peripheral_input();
 
-    let ch0 = &encoder_unit.channel0;
-    ch0.set_ctrl_signal(enc_a.clone());
-    ch0.set_edge_signal(enc_b.clone());
-    ch0.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
-    ch0.set_input_mode(channel::EdgeMode::Increment, channel::EdgeMode::Decrement);
+        let ch0 = &encoder_unit.channel0;
+        ch0.set_ctrl_signal(enc_a.clone());
+        ch0.set_edge_signal(enc_b.clone());
+        ch0.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+        ch0.set_input_mode(channel::EdgeMode::Increment, channel::EdgeMode::Decrement);
 
-    let ch1 = &encoder_unit.channel1;
-    ch1.set_ctrl_signal(enc_b);
-    ch1.set_edge_signal(enc_a);
-    ch1.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
-    ch1.set_input_mode(channel::EdgeMode::Decrement, channel::EdgeMode::Increment);
+        let ch1 = &encoder_unit.channel1;
+        ch1.set_ctrl_signal(enc_b);
+        ch1.set_edge_signal(enc_a);
+        ch1.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+        ch1.set_input_mode(channel::EdgeMode::Decrement, channel::EdgeMode::Increment);
 
-    encoder_unit.resume();
-    let encoder_counter = encoder_unit.counter.clone();
-    info!(
-        "encoder pcnt configured (unit0, filter_cycles={}, counts_per_step={})",
-        filter_cycles, ENCODER_COUNTS_PER_STEP
-    );
+        encoder_unit.resume();
+        let encoder_counter = encoder_unit.counter.clone();
+        info!(
+            "encoder pcnt configured (unit0, filter_cycles={}, counts_per_step={})",
+            filter_cycles, ENCODER_COUNTS_PER_STEP
+        );
+
+        (encoder_button, encoder_unit, encoder_counter)
+    };
 
     const ENABLE_ANALOG_5V_ON_BOOT: bool = cfg!(feature = "enable_analog_5v_on_boot");
     if ENABLE_ANALOG_5V_ON_BOOT {
@@ -1093,10 +1149,22 @@ fn main() -> ! {
         spawner.spawn(ticker()).expect("ticker spawn");
         info!("spawning diag task");
         spawner.spawn(diag_task()).expect("diag_task spawn");
-        info!("spawning encoder task");
-        spawner
-            .spawn(encoder_task(encoder_unit, encoder_counter, encoder_button))
-            .expect("encoder_task spawn");
+
+        #[cfg(not(feature = "mock_setpoint"))]
+        {
+            info!("spawning encoder task");
+            spawner
+                .spawn(encoder_task(encoder_unit, encoder_counter, encoder_button))
+                .expect("encoder_task spawn");
+        }
+
+        #[cfg(feature = "mock_setpoint")]
+        {
+            info!("spawning mock setpoint task");
+            spawner
+                .spawn(mock_setpoint_task())
+                .expect("mock_setpoint_task spawn");
+        }
         info!("spawning display task");
         spawner
             .spawn(display_task(resources, telemetry))

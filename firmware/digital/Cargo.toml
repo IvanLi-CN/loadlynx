@@ -48,5 +48,7 @@ lto = "fat"
 panic = "abort"
 
 [features]
-default = ["enable_analog_5v_on_boot"]
+default = ["enable_analog_5v_on_boot", "esp32s3"]
 enable_analog_5v_on_boot = []
+esp32s3 = []
+mock_setpoint = []
