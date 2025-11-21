@@ -211,76 +211,62 @@ select_probe() {
     return 1
 }
 
-run_with_timeout_bg() {
+start_session() {
+    # args: <seconds> <log_file> <cmd...>
     local seconds="$1"; shift
-    local cmd=( "$@" )
+    local log_file="$1"; shift
 
-    # Spawn a subshell that enforces a wall-clock timeout for the command.
+    if command -v gtimeout >/dev/null 2>&1; then
+        ( gtimeout "$seconds" "$@" >>"$log_file" 2>&1 ) &
+        echo $!
+        return
+    fi
+
+    if command -v timeout >/dev/null 2>&1; then
+        ( timeout "$seconds" "$@" >>"$log_file" 2>&1 ) &
+        echo $!
+        return
+    fi
+
+    # Python fallback with explicit timeout and log redirection
     (
-        if command -v gtimeout >/dev/null 2>&1; then
-            gtimeout "$seconds" "${cmd[@]}"
-        elif command -v timeout >/dev/null 2>&1; then
-            timeout "$seconds" "${cmd[@]}"
-        elif command -v python3 >/dev/null 2>&1; then
-            # Use python3 to enforce a real wall-clock timeout and kill the
-            # entire process group (esp. espflash / probe-rs monitors) if it
-            # overruns.
-            python3 - "$seconds" "${cmd[@]}" <<'PY'
+        python3 - "$seconds" "$log_file" "$@" <<'PY'
 import os
 import signal
 import subprocess
 import sys
 
-if len(sys.argv) < 3:
+if len(sys.argv) < 4:
     sys.exit(2)
 
 timeout = int(sys.argv[1])
-cmd = sys.argv[2:]
+log_file = sys.argv[2]
+cmd = sys.argv[3:]
 
-try:
-    # Start the command in a new process group so we can terminate all children.
-    proc = subprocess.Popen(cmd, preexec_fn=os.setsid)
-except Exception as e:
-    print(f"[dual-monitor] failed to start command: {e}", file=sys.stderr)
-    sys.exit(1)
+os.makedirs(os.path.dirname(log_file), exist_ok=True)
+with open(log_file, "a", buffering=1) as log:
+    try:
+        proc = subprocess.Popen(cmd, stdout=log, stderr=log, preexec_fn=os.setsid)
+    except Exception as e:
+        print(f"[dual-monitor] failed to start command: {e}", file=sys.stderr)
+        sys.exit(1)
 
-try:
-    proc.wait(timeout=timeout)
-    rc = proc.returncode
-except subprocess.TimeoutExpired:
-    print(f"[dual-monitor] timeout {timeout}s reached; stopping session (SIGINT)...", file=sys.stderr)
     try:
-        os.killpg(proc.pid, signal.SIGINT)
-    except ProcessLookupError:
-        pass
-    try:
-        proc.wait(timeout=5)
-        rc = 0
+        proc.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
+        log.write(f"[dual-monitor] timeout {timeout}s reached; stopping session (SIGINT)...\n")
         try:
-            os.killpg(proc.pid, signal.SIGKILL)
+            os.killpg(proc.pid, signal.SIGINT)
         except ProcessLookupError:
             pass
-        rc = 0
-
-sys.exit(rc)
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 PY
-        else
-            "${cmd[@]}" &
-            local cmd_pid=$!
-
-            (
-                sleep "$seconds"
-                if kill -0 "$cmd_pid" 2>/dev/null; then
-                    echo "[dual-monitor] timeout ${seconds}s reached; stopping session (SIGINT)..." >&2
-                    kill -INT "-$cmd_pid" 2>/dev/null || kill "-$cmd_pid" 2>/dev/null || kill -KILL "-$cmd_pid" 2>/dev/null || true
-                fi
-            ) &
-            local watcher_pid=$!
-
-            wait "$cmd_pid" || true
-            kill "$watcher_pid" 2>/dev/null || true
-        fi
     ) &
 
     echo $!
@@ -304,23 +290,17 @@ echo "[dual-monitor] digital log: $DIGITAL_LOG"
 echo "[dual-monitor] analog  log: $ANALOG_LOG"
 
 # Start digital reset-attach first
-(
-    cd "$REPO_ROOT/firmware/digital"
-    pid=$(run_with_timeout_bg "$TIME_LIMIT_SECONDS" \
-        make reset-attach PROFILE="$PROFILE" PORT="$PORT_VALUE" \
-             ESPFLASH_ARGS="--non-interactive --skip-update-check" \
-             $EXTRA_MAKE_VARS)
-    echo "$pid" > "$DIGITAL_PID_FILE"
-) >>"$DIGITAL_LOG" 2>&1 &
+pid=$(start_session "$TIME_LIMIT_SECONDS" "$DIGITAL_LOG" \
+    make -C "$REPO_ROOT/firmware/digital" reset-attach PROFILE="$PROFILE" PORT="$PORT_VALUE" \
+         ESPFLASH_ARGS="--non-interactive --skip-update-check" \
+         $EXTRA_MAKE_VARS)
+echo "$pid" > "$DIGITAL_PID_FILE"
 
 # Then start analog reset-attach
-(
-    cd "$REPO_ROOT/firmware/analog"
-    pid=$(run_with_timeout_bg "$TIME_LIMIT_SECONDS" \
-        make reset-attach PROFILE="$PROFILE" PROBE="$PROBE_SEL" \
-             $EXTRA_MAKE_VARS)
-    echo "$pid" > "$ANALOG_PID_FILE"
-) >>"$ANALOG_LOG" 2>&1 &
+pid=$(start_session "$TIME_LIMIT_SECONDS" "$ANALOG_LOG" \
+    make -C "$REPO_ROOT/firmware/analog" reset-attach PROFILE="$PROFILE" PROBE="$PROBE_SEL" \
+         $EXTRA_MAKE_VARS)
+echo "$pid" > "$ANALOG_PID_FILE"
 
 echo "[dual-monitor] dual reset-attach sessions launched."
 echo "[dual-monitor] PID files:"
