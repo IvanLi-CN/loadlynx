@@ -10,7 +10,7 @@ use embassy_executor::Spawner;
 use embassy_stm32 as stm32;
 use embassy_stm32::adc::{Adc, AdcChannel, SampleTime, Temperature as AdcTemperature};
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::dac::{self, Dac, Value as DacValue};
+use embassy_stm32::dac::{Dac, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async as UartAsync;
 use embassy_stm32::usart::{
