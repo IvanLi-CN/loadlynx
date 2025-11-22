@@ -6,7 +6,7 @@ use minicbor::encode::{
     Error as CborEncodeError,
     write::{Cursor, EndOfSlice},
 };
-use minicbor::{Decode, Encode};
+use minicbor::{Decode, Decoder, Encode, Encoder};
 
 pub const PROTOCOL_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 6;
@@ -25,6 +25,9 @@ pub const MSG_FAST_STATUS: u8 = 0x10;
 /// interpreted as a signed 32-bit integer to leave room for future
 /// extensions (e.g. negative values for sink/source modes).
 pub const MSG_SET_POINT: u8 = 0x22;
+/// Soft-reset request/ack handshake initiated by the digital side to reset
+/// analog-side state without power-cycling.
+pub const MSG_SOFT_RESET: u8 = 0x26;
 
 pub const SLIP_END: u8 = 0xC0;
 pub const SLIP_ESC: u8 = 0xDB;
@@ -91,6 +94,78 @@ pub struct SetPoint {
     pub target_i_ma: i32,
 }
 
+/// Reason codes for a soft-reset request initiated by the digital side.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SoftResetReason {
+    Manual,
+    FirmwareUpdate,
+    UiRecover,
+    LinkRecover,
+    Unknown(u8),
+}
+
+impl From<u8> for SoftResetReason {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => SoftResetReason::Manual,
+            1 => SoftResetReason::FirmwareUpdate,
+            2 => SoftResetReason::UiRecover,
+            3 => SoftResetReason::LinkRecover,
+            other => SoftResetReason::Unknown(other),
+        }
+    }
+}
+
+impl From<SoftResetReason> for u8 {
+    fn from(reason: SoftResetReason) -> Self {
+        match reason {
+            SoftResetReason::Manual => 0,
+            SoftResetReason::FirmwareUpdate => 1,
+            SoftResetReason::UiRecover => 2,
+            SoftResetReason::LinkRecover => 3,
+            SoftResetReason::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Default for SoftResetReason {
+    fn default() -> Self {
+        SoftResetReason::Manual
+    }
+}
+
+impl<C> Encode<C> for SoftResetReason {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.u8((*self).into())?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for SoftResetReason {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let raw = d.u8()?;
+        Ok(raw.into())
+    }
+}
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default)]
+#[cbor(map)]
+pub struct SoftReset {
+    /// Enumerated reason for the reset, mapped to u8 for forward compatibility.
+    #[n(0)]
+    pub reason: SoftResetReason,
+    /// Timestamp in milliseconds from the sender when the request was issued.
+    #[n(1)]
+    pub timestamp_ms: u32,
+}
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     BufferTooSmall,
@@ -190,6 +265,52 @@ pub fn encode_set_point_frame(
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
+/// Encode a soft-reset frame. Requests set `is_ack=false`; acknowledgements
+/// set `is_ack=true`. Requests automatically set `FLAG_ACK_REQ` to request a
+/// reply from the analog side.
+pub fn encode_soft_reset_frame(
+    seq: u8,
+    reset: &SoftReset,
+    is_ack: bool,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = if is_ack { FLAG_IS_ACK } else { FLAG_ACK_REQ };
+    out[2] = seq;
+    out[3] = MSG_SOFT_RESET;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(reset).map_err(map_encode_err)?;
+        cursor.position()
+    };
+
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
 pub fn decode_fast_status_frame(frame: &[u8]) -> Result<(FrameHeader, FastStatus), Error> {
     let (header, payload) = decode_frame(frame)?;
     if header.msg != MSG_FAST_STATUS {
@@ -211,6 +332,18 @@ pub fn decode_set_point_frame(frame: &[u8]) -> Result<(FrameHeader, SetPoint), E
     let mut decoder = minicbor::Decoder::new(payload);
     let setpoint: SetPoint = decoder.decode().map_err(map_decode_err)?;
     Ok((header, setpoint))
+}
+
+/// Decode a soft-reset frame (request or ACK). Callers should inspect
+/// `header.flags` to distinguish requests from acknowledgements.
+pub fn decode_soft_reset_frame(frame: &[u8]) -> Result<(FrameHeader, SoftReset), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_SOFT_RESET {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let reset: SoftReset = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, reset))
 }
 
 pub fn decode_frame(buf: &[u8]) -> Result<(FrameHeader, &[u8]), Error> {
@@ -449,6 +582,27 @@ mod tests {
         }
         let recovered = recovered.expect("frame not recovered");
         assert_eq!(&recovered[..], &raw[..len]);
+    }
+
+    #[test]
+    fn soft_reset_roundtrip_and_ack_flag() {
+        let reset = SoftReset {
+            reason: SoftResetReason::FirmwareUpdate,
+            timestamp_ms: 123_456,
+        };
+
+        let mut raw = [0u8; 64];
+        let len = encode_soft_reset_frame(9, &reset, false, &mut raw).unwrap();
+        let (hdr, decoded) = decode_soft_reset_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.msg, MSG_SOFT_RESET);
+        assert_eq!(hdr.flags & FLAG_ACK_REQ, FLAG_ACK_REQ);
+        assert_eq!(decoded.timestamp_ms, reset.timestamp_ms);
+
+        let mut ack_raw = [0u8; 64];
+        let ack_len = encode_soft_reset_frame(9, &reset, true, &mut ack_raw).unwrap();
+        let (ack_hdr, ack_decoded) = decode_soft_reset_frame(&ack_raw[..ack_len]).unwrap();
+        assert_eq!(ack_hdr.flags & FLAG_IS_ACK, FLAG_IS_ACK);
+        assert_eq!(ack_decoded.reason, reset.reason);
     }
 
     #[test]

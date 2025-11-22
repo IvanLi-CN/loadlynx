@@ -5,25 +5,27 @@ use defmt::*;
 use defmt_rtt as _;
 use panic_probe as _;
 
-use core::sync::atomic::{AtomicI32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
 use embassy_executor::Spawner;
 use embassy_stm32 as stm32;
 use embassy_stm32::adc::{Adc, AdcChannel, SampleTime, Temperature as AdcTemperature};
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::dac::{Dac, Value as DacValue};
+use embassy_stm32::dac::{self, Dac, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async as UartAsync;
 use embassy_stm32::usart::{
-    Config as UartConfig, DataBits as UartDataBits, Parity as UartParity,
-    RingBufferedUartRx, StopBits as UartStopBits, Uart, UartRx, UartTx,
+    Config as UartConfig, DataBits as UartDataBits, Parity as UartParity, RingBufferedUartRx,
+    StopBits as UartStopBits, Uart, UartRx, UartTx,
 };
-use static_cell::StaticCell;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use libm::logf;
 use loadlynx_protocol::{
-    FastStatus, MSG_SET_POINT, SlipDecoder, decode_set_point_frame, encode_fast_status_frame,
-    slip_encode,
+    Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, MSG_SET_POINT, SlipDecoder,
+    SoftReset, SoftResetReason, decode_set_point_frame, decode_soft_reset_frame,
+    encode_fast_status_frame, encode_soft_reset_frame, slip_encode,
 };
+use static_cell::StaticCell;
 use stm32_metapac::VREFBUF;
 use stm32_metapac::vrefbuf::vals::{Hiz, Vrs};
 
@@ -82,6 +84,11 @@ const TARGET_I_MAX_MA: i32 = 2_000;
 // - uart_setpoint_rx_task 解析 SetPoint 帧并写入该原子量。
 // - 采样/遥测主循环在每次迭代中读取该值，用于计算 DAC 目标码与 loop_error。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
+static SOFT_RESET_PENDING: AtomicBool = AtomicBool::new(false);
+static LAST_SOFT_RESET_REASON: AtomicU8 = AtomicU8::new(0);
+
+static UART_TX_SHARED: StaticCell<Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>> =
+    StaticCell::new();
 
 fn timestamp_ms() -> u64 {
     Instant::now().as_millis() as u64
@@ -185,17 +192,17 @@ async fn main(_spawner: Spawner) -> ! {
 
     // 拆分为 TX/RX 两个半通道：主循环持续通过 TX 发送 FAST_STATUS，
     // 另起任务在 RX 上监听来自数字板的 SetPoint 控制帧。
-    let (mut uart_tx, uart_rx): (UartTx<'static, UartAsync>, UartRx<'static, UartAsync>) =
-        uart.split();
+    let (uart_tx, uart_rx): (UartTx<'static, UartAsync>, UartRx<'static, UartAsync>) = uart.split();
+
+    let uart_tx_shared = UART_TX_SHARED.init(Mutex::new(uart_tx));
 
     // 将 RX 端转换为环形缓冲 UART，以避免在任务之间存在调度间隙时丢字节。
     static UART_RX_DMA_BUF: StaticCell<[u8; 256]> = StaticCell::new();
-    let uart_rx_ring: RingBufferedUartRx<'static> = uart_rx.into_ring_buffered(
-        UART_RX_DMA_BUF.init([0; 256]),
-    );
+    let uart_rx_ring: RingBufferedUartRx<'static> =
+        uart_rx.into_ring_buffered(UART_RX_DMA_BUF.init([0; 256]));
 
     // 启动独立任务接收 SetPoint 控制消息。
-    if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring)) {
+    if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring, uart_tx_shared)) {
         warn!("failed to spawn uart_setpoint_rx_task: {:?}", e);
     }
 
@@ -245,6 +252,10 @@ async fn main(_spawner: Spawner) -> ! {
     let mut slip_frame = [0u8; 384];
 
     loop {
+        if SOFT_RESET_PENDING.swap(false, Ordering::SeqCst) {
+            apply_soft_reset_safing(&mut dac, &mut load_en_ctl, &mut load_en_ts).await;
+        }
+
         // --- 采样所有相关 ADC 通道（阻塞读取） ---
         let v_rmt_sp_code = adc1.blocking_read(&mut v_rmt_sp);
         let v_rmt_sn_code = adc1.blocking_read(&mut v_rmt_sn);
@@ -349,7 +360,8 @@ async fn main(_spawner: Spawner) -> ! {
                 .expect("encode fast_status frame");
             let slip_len =
                 slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
-            if let Err(_err) = uart_tx.write(&slip_frame[..slip_len]).await {
+            let mut tx = uart_tx_shared.lock().await;
+            if let Err(_err) = tx.write(&slip_frame[..slip_len]).await {
                 warn!("uart tx error; dropping frame");
             }
         }
@@ -362,9 +374,77 @@ async fn main(_spawner: Spawner) -> ! {
 
 // 旧版 mock FAST_STATUS 生成逻辑已被真实采样逻辑替代，保留占位以防回滚时需要参考。
 
+async fn apply_soft_reset_safing(
+    dac: &mut Dac<'static, stm32::peripherals::DAC1, embassy_stm32::mode::Blocking>,
+    load_en_ctl: &mut Output<'static>,
+    load_en_ts: &mut Output<'static>,
+) {
+    let reason = SoftResetReason::from(LAST_SOFT_RESET_REASON.load(Ordering::Relaxed));
+
+    load_en_ctl.set_low();
+    load_en_ts.set_low();
+
+    TARGET_I_LOCAL_MA.store(0, Ordering::Relaxed);
+    dac.ch1().set(DacValue::Bit12Right(0));
+    dac.ch2().set(DacValue::Bit12Right(0));
+
+    Timer::after_millis(5).await;
+
+    load_en_ctl.set_high();
+    load_en_ts.set_high();
+
+    info!(
+        "soft reset applied: reason={:?}, target reset to 0 mA, load re-enabled",
+        reason
+    );
+}
+
+async fn handle_soft_reset_request(
+    uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
+    ack_raw: &mut [u8],
+    ack_slip: &mut [u8],
+    header: FrameHeader,
+    reset: SoftReset,
+) {
+    if header.flags & FLAG_IS_ACK != 0 {
+        info!("soft_reset ack received on analog side (unexpected but ignored)");
+        return;
+    }
+
+    LAST_SOFT_RESET_REASON.store(u8::from(reset.reason), Ordering::Relaxed);
+    SOFT_RESET_PENDING.store(true, Ordering::SeqCst);
+
+    let ack_len = match encode_soft_reset_frame(header.seq, &reset, true, ack_raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("soft_reset ack encode error: {:?}", err);
+            return;
+        }
+    };
+    let slip_len = match slip_encode(&ack_raw[..ack_len], ack_slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("soft_reset ack slip encode error: {:?}", err);
+            return;
+        }
+    };
+
+    let mut tx = uart_tx.lock().await;
+    match tx.write(&ack_slip[..slip_len]).await {
+        Ok(_) => info!(
+            "soft_reset ACK sent: seq={} reason={:?} ts_ms={}",
+            header.seq, reset.reason, reset.timestamp_ms
+        ),
+        Err(err) => warn!("soft_reset ack write error: {:?}", err),
+    }
+}
+
 /// UART RX 任务：从数字板接收 SetPoint 帧并更新目标电流（mA）。
 #[embassy_executor::task]
-async fn uart_setpoint_rx_task(mut uart_rx: RingBufferedUartRx<'static>) {
+async fn uart_setpoint_rx_task(
+    mut uart_rx: RingBufferedUartRx<'static>,
+    uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
+) {
     info!(
         "UART setpoint RX task starting (msg_id=0x{:02x}, default_target={} mA, range={}..{} mA)",
         MSG_SET_POINT, DEFAULT_TARGET_I_LOCAL_MA, TARGET_I_MIN_MA, TARGET_I_MAX_MA
@@ -373,6 +453,8 @@ async fn uart_setpoint_rx_task(mut uart_rx: RingBufferedUartRx<'static>) {
     let mut decoder: SlipDecoder<128> = SlipDecoder::new();
     let mut buf = [0u8; 32];
     let mut byte_count: u32 = 0;
+    let mut ack_raw = [0u8; 64];
+    let mut ack_slip = [0u8; 96];
 
     loop {
         match uart_rx.read(&mut buf).await {
@@ -404,9 +486,33 @@ async fn uart_setpoint_rx_task(mut uart_rx: RingBufferedUartRx<'static>) {
                                         v, prev
                                     );
                                 }
-                                Err(_err) => {
+                                Err(ProtocolError::UnsupportedMessage(_)) => {
+                                    match decode_soft_reset_frame(&frame) {
+                                        Ok((hdr, reset)) => {
+                                            handle_soft_reset_request(
+                                                uart_tx,
+                                                &mut ack_raw,
+                                                &mut ack_slip,
+                                                hdr,
+                                                reset,
+                                            )
+                                            .await;
+                                        }
+                                        Err(err) => {
+                                            warn!(
+                                                "soft_reset decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                err,
+                                                frame.len(),
+                                                &frame[..frame.len().min(8)],
+                                            );
+                                            decoder.reset();
+                                        }
+                                    }
+                                }
+                                Err(err) => {
                                     warn!(
-                                        "decode_set_point_frame error (len={}, head={=[u8]:#04x})",
+                                        "decode_set_point_frame error {:?} (len={}, head={=[u8]:#04x})",
+                                        err,
                                         frame.len(),
                                         &frame[..frame.len().min(8)],
                                     );

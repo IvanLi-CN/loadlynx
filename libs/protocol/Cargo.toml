@@ -6,3 +6,8 @@ edition = "2024"
 [dependencies]
 heapless = { version = "0.8", default-features = false }
 minicbor = { version = "0.24", default-features = false, features = ["derive"] }
+defmt = { version = "0.3", optional = true }
+
+[features]
+default = []
+defmt = ["dep:defmt"]

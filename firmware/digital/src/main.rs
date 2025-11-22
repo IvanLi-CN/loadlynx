@@ -46,8 +46,10 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    CRC_LEN, FastStatus, HEADER_LEN, MSG_SET_POINT, SetPoint, SlipDecoder,
-    decode_fast_status_frame, encode_set_point_frame, slip_encode,
+    CRC_LEN, Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
+    MSG_SET_POINT, MSG_SOFT_RESET, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
+    decode_fast_status_frame, decode_soft_reset_frame, encode_set_point_frame,
+    encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -136,6 +138,7 @@ static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 
 #[inline]
 fn now_ms32() -> u32 {
@@ -974,6 +977,21 @@ async fn feed_decoder(
                         }
                         let _ = header; // keep header verified even if unused further
                     }
+                    Err(ProtocolError::UnsupportedMessage(msg)) if msg == MSG_SOFT_RESET => {
+                        match decode_soft_reset_frame(&frame) {
+                            Ok((header, reset)) => {
+                                handle_soft_reset_frame(&header, &reset);
+                            }
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
+                                decoder.reset();
+                            }
+                        }
+                    }
                     Err(err) => {
                         PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
                         rate_limited_proto_warn(protocol_error_str(&err), Some(frame.as_slice()));
@@ -993,6 +1011,18 @@ async fn feed_decoder(
 
 fn record_uart_error() {
     UART_RX_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn handle_soft_reset_frame(header: &FrameHeader, reset: &SoftReset) {
+    if header.flags & FLAG_IS_ACK != 0 {
+        SOFT_RESET_ACKED.store(true, Ordering::Relaxed);
+        info!(
+            "soft_reset ACK received: seq={} reason={:?} ts_ms={}",
+            header.seq, reset.reason, reset.timestamp_ms
+        );
+    } else {
+        warn!("soft_reset request received from analog side; ignoring");
+    }
 }
 
 fn rate_limited_uart_warn<E: defmt::Format>(err: &E) {
@@ -1323,6 +1353,10 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     let mut slip = [0u8; 192];
     let mut last_sent: Option<i32> = None;
     let mut last_encoder_val = ENCODER_VALUE.load(Ordering::SeqCst);
+
+    // 先执行数字侧触发的软复位握手，确保模拟板在不断电场景下清空状态。
+    send_soft_reset_handshake(&mut uhci_tx, &mut seq, &mut raw, &mut slip).await;
+
     loop {
         let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
         let enc_now = ENCODER_VALUE.load(Ordering::SeqCst);
@@ -1382,5 +1416,77 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
         {
             cooperative_delay_ms(SETPOINT_TX_PERIOD_MS).await;
         }
+    }
+}
+
+async fn send_soft_reset_handshake(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: &mut u8,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+) {
+    if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+        return;
+    }
+
+    let reset = SoftReset {
+        reason: SoftResetReason::FirmwareUpdate,
+        timestamp_ms: now_ms32(),
+    };
+
+    for attempt in 0..3 {
+        if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let send_seq = *seq;
+        let frame_len = match encode_soft_reset_frame(send_seq, &reset, false, raw) {
+            Ok(len) => len,
+            Err(err) => {
+                warn!("soft_reset encode error: {:?}", err);
+                break;
+            }
+        };
+        let slip_len = match slip_encode(&raw[..frame_len], slip) {
+            Ok(len) => len,
+            Err(err) => {
+                warn!("soft_reset slip encode error: {:?}", err);
+                break;
+            }
+        };
+
+        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+            Ok(written) if written == slip_len => {
+                let _ = uhci_tx.uart_tx.flush_async().await;
+                info!(
+                    "soft_reset req sent (attempt={}, seq={}, reason={:?}, ts_ms={})",
+                    attempt + 1,
+                    send_seq,
+                    reset.reason,
+                    reset.timestamp_ms
+                );
+                *seq = seq.wrapping_add(1);
+            }
+            Ok(written) => {
+                warn!(
+                    "soft_reset short write: written={} len={} (seq={})",
+                    written, slip_len, send_seq
+                );
+            }
+            Err(err) => {
+                warn!("soft_reset write error: {:?}", err);
+            }
+        }
+
+        if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+            break;
+        }
+        cooperative_delay_ms(150).await;
+    }
+
+    if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+        info!("soft_reset ack received; continuing link init");
+    } else {
+        warn!("soft_reset ack not received after retries; proceed with caution");
     }
 }
