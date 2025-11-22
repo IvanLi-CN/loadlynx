@@ -19,6 +19,25 @@
   - 进展/结果：未开始。
   - 备注：无。
 
+- [ ] 任务名：实现 SetPoint ACK/重传机制，避免状态不同步
+  - 描述/复现：当前 SetPoint 仅发送不等确认，掉帧时模拟板目标不更新；需按 `docs/interfaces/uart-link.md` 新增的“SetPoint 可靠传输方案（v1）”实现并验证。
+  - 验收标准：
+    1) 数字侧出现 `setpoint sent` 后在超时时间内看到匹配的 `setpoint ack received`；
+    2) 故意丢弃 1–2 帧（或拔插串口）后，重传成功且模拟侧日志出现对应 `SetPoint received`；
+    3) 遥测中的 `target_value` 连续与数字侧期望一致（允许 clamp 后值匹配）。
+  - 实施建议：
+    - libs/protocol 支持 SetPoint ACK/NACK 生成；
+    - 数字侧添加等待 ACK + 30/60/120 ms 退避重传，最新值优先；
+    - 模拟侧解帧后幂等 ACK（重复 seq 只 ACK 不重放）；解析失败回 NACK；
+    - 在 RX 处理处匹配 ACK/NACK，更新统计与 UI 告警；
+    - 新增自检：对比 fast_status.target_value 与期望，连续不一致时强制重发并告警。
+    - 利用 `mock_setpoint` 功能做自动化串口通信测试：
+      - 数字侧开启 mock_setpoint 生成可重复的 SetPoint 流，结合退避重传统计；
+      - 在真机 dual monitor 场景运行 40–60 s，记录双端日志，自动统计 sent/ack/retx/dup；
+      - 脱机脚本检查：ACK 覆盖率 100%，重传次数在预期范围内（掉线时可恢复），遥测 `target_value` 与期望一致。
+  - 进展/结果：未开始。
+  - 备注：实现后需回归 dual monitor 40 s 与人工掉帧测试。
+
 - [ ] 任务名：消除正常运行下的协议解码错误（payload length mismatch）
   - 描述/复现：默认配置 dual monitor 运行 40 秒，偶发 `payload length mismatch`。
   - 验收标准：decode_err=0，fast_status_ok 连续递增。
