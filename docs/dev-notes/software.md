@@ -16,15 +16,19 @@
 
 ### 控制板片外（同板其他数字资源）
 
-4. **板载数字外设完结**
+1. **板载数字外设完结**
    - 记录数字域已就绪，插入约 10 ms 的启动延迟，确保控制板所有本地外设稳定。
 
 ### 模拟板片外（隔离域资源）
 
-5. **TPS82130 使能**
+1. **TPS82130 使能**
    - 延时结束后把 `ALG_EN` 拉高，通过 FPC 启动 `5V_EN`，驱动模拟板上的 TPS82130SILR EN 引脚（`docs/power/netlists/analog-board-netlist.enet:5288-5308`），隔离 5 V 轨开始为模拟域供电。
-6. **任务调度启动**
-   - 启动任务执行器，此时模拟板 5 V 已经具备，可安全与 STM32/模拟前端协作。
+2. **软复位模拟板（协议层，无需掉电）**
+   - 发送 `SOFT_RESET_REQ(reason=fw_update, timestamp_ms=now)` 并等待 `SOFT_RESET_ACK`；收到后等待新的 `HELLO` 再继续后续握手。
+   - 超时策略：150 ms 未 ACK 则重试 2 次；仍失败时提示 UI“软复位失败，可尝试电源循环”，不向模拟侧发送控制类指令。
+   - 目的：在保持持续供电的调试环境中，确保模拟侧控制环、故障锁存、积分器等被清空，避免残留状态。
+3. **任务调度启动**
+   - 启动任务执行器，此时模拟板 5 V 已经具备且完成软复位，可安全与 STM32/模拟前端协作。
 
 ## 2. 调参要点
 
@@ -58,6 +62,7 @@
   - UART/协议错误通过限频日志计数：`UART RX error: ...`、`protocol decode error (...)` 等。
 
 构建/烧录：
+
 - 构建：`(cd firmware/digital && cargo +esp build --release)` 或 `make d-build`
 - 烧录：`scripts/flash_s3.sh --release [--port /dev/tty.*]` 或 `make d-run PORT=/dev/tty.*`
 
@@ -72,6 +77,7 @@
   - 通过 USART3 发送整帧；若 UART 写入失败，会打印 `uart tx error; dropping frame` 但继续重试。
 
 构建/烧录：
+
 - 构建：`(cd firmware/analog && cargo build --release)` 或 `make a-build`
 - 烧录运行：`make a-run PROBE=<VID:PID[:SER]>` 或 `scripts/flash_g431.sh release PROBE=<...>`
 

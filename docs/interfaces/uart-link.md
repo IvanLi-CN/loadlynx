@@ -103,6 +103,7 @@
 | `SETPOINT_STREAM` (0x21) | `seq`、`mode`、`enable`、`target_value`、`slew_limit`、`i_limit_ma`、`p_limit_mw`、`profile_id` | ≈18 B | 默认 50 Hz（旋钮/远程 UI），峰值 100 Hz | 0.9 kB/s ≈ 7.2 kbps（100 Hz 时 14.4 kbps） | 连续设定流（含限值快照），全部要求 ACK |
 | `LIMIT_PROFILE` (0x23) | `max_i`、`max_p`、`ovp_mv`、`temp_trip`、`thermal_derate`、预留 | ≈20 B | 0.2–1 Hz（用户修改时） | ≤20 B/s ≈ 0.16 kbps | 每次下发表征最大允许功率/电流的参数，并附 ESP 根据风扇控制计算出的 `thermal_derate`，便于版本化 |
 | `CONTROL_CMD` (0x20/0x24/0x25 等) | `SetEnable`、`ModeSwitch`、`GetStatus`、`FaultClear` 等短指令 | 8–12 B | 0–20 Hz（按键/脚本触发） | ≤160 B/s ≈ 1.3 kbps | 均带 ACK_REQ，失败可按 5/10/20 ms 退避重试 |
+| `SOFT_RESET_REQ` (0x26) | `reason`（u8，0=manual、1=fw_update、2=ui_recover、3=link_recover）、`timestamp_ms` | 6 B | 上电后一次；或 UI/脚本按需触发（<0.2 Hz） | ≈1.2 B/s | 数字侧请求模拟侧“软复位”：G431 先本地失能并清空状态，再回复 `SOFT_RESET_ACK`；完成后重新发送 `HELLO` 进入握手 |
 | `CAL_RW` (0x30/0x31) | `index`、`payload[32]`、`crc` | ≈48 B | 0.5 Hz（标定/量产） | ≤24 B/s ≈ 0.19 kbps | 与上行 `CAL_CHUNK` 配对，用于 EEPROM/FLASH 同步 |
 | `PING/HEARTBEAT` (0x02) | `timestamp`、`nonce` | 6 B | 10 Hz | 60 B/s ≈ 0.48 kbps | 空闲期保持链路活跃，>300 ms 无回应即判为降级 |
 | `RESERVED_FOTA` (0x50+) | （暂未定义——需后续 bootstub/升级协议落地） | 0 B | 0 Hz | 0 | 当前项目未实现固件块传输；仅保留 ID 以免未来扩展时与现有消息冲突 |
@@ -133,6 +134,23 @@
     2. 继续以 10 Hz 发送 `PING`，若 1 s 内仍无响应则提示用户检查线缆/电源；
     3. 可允许用户发“重新握手”命令（重新触发 `HELLO`/`CAL_REQ` 流程）。
 - **恢复流程**：任意一侧在失联后再次收到合法帧（CRC 正确、`ver` 兼容）即退出降级。G431 在退出时仍要求重新确认 `enable`（即必须等待新的 `SetEnable=1`），避免误导出力；S3 在 UI 中同步清除告警。
+
+### 软复位序列（数字侧触发、无需掉电）
+
+- **目的**：在开发/调试阶段保持持续供电时，避免模拟侧残留旧状态（积分、PID 内部缓存、限值、故障锁存）导致行为不一致。
+- **触发**：
+  - 数字板上电后、在首次 `HELLO` 成功前发送一次 `SOFT_RESET_REQ(reason=fw_update, timestamp_ms=now)`；
+  - UI/上位机可通过脚本/按钮按需再发（限速 <0.2 Hz）。
+- **模拟侧动作（G431）**：收到请求即刻进入安全态：
+  1. 立刻拉低 `enable`、清零 DAC/驱动、停止 PWM；
+  2. 清空控制环内部状态（积分器、限幅、滑动平均、故障锁存、序号基线等）；
+  3. 记录 `reset_reason`，回复 `SOFT_RESET_ACK`，随后重新发送 `HELLO` 开启握手；
+  4. 在完成重新握手前，保持 `SetEnable=0` 且忽略控制类命令，直到收到新的 `SetEnable=1`。
+- **数字侧动作（S3）**：
+  - 发送 `SOFT_RESET_REQ` 时设置 `ACK_REQ`；若 150 ms 未收到 `SOFT_RESET_ACK`，重试 2 次，仍超时则提示 UI“软复位失败，可尝试电源循环/检查链路”。
+  - 收到 `SOFT_RESET_ACK` 后等待新的 `HELLO`，确认版本匹配再继续下发 `CAL_RW`/`SETPOINT_STREAM`。
+- **幂等性**：模拟侧将重复请求视为重新进入安全态的 idempotent 操作，连续触发不会破坏状态机；`reason` 字段仅用于日志/诊断。
+- **故障降级**：若模拟侧在 300 ms 内未重新发出 `HELLO`，数字侧应在 UI 中标记“等待重握手”，并禁止控制命令。
 
 ### 近/远端电压与双电流采样
 

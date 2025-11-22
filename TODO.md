@@ -1,12 +1,38 @@
 # TODO
 
-- [x] 修复数字板在启用 `mock_setpoint` 时启动 panic：报错 “Clocks have not been initialized yet”。
-      复现：`FEATURES=mock_setpoint scripts/agent_verify_digital.sh --timeout 20`（单板）或 dual monitor。
-      验收：启用 mock_setpoint 时数字固件能正常启动并运行 setpoint 发送任务，无 panic。
-      说明：旧 dual-monitor 日志中的 panic 出现在早期版本（日志里版本号为“14”）；在当前 HEAD=8254578 上按上述命令复测时，该 panic 未再出现，mock_setpoint 与 setpoint 任务均正常运行，因此可以确认当前版本中不存在这一问题。
-- [ ] 确认 SetPoint/ACK 链路在修复后无丢包。
-      复现：通过 mock_setpoint 或旋钮产生 setpoint，dual monitor 40 秒。
-      验收：数字日志出现 `setpoint sent`，模拟日志出现 `SetPoint received`，decode_err=0。
-- [ ] 消除正常运行下的协议解码错误（payload length mismatch）。
-      复现：默认设置 dual monitor 40 秒。
-      验收：decode_err=0，fast_status_ok 连续递增。
+编写要求（保持任务可审计、可交接）：
+
+- 每条任务包含：任务名、描述/复现、验收标准、实施建议、进展/结果（未开始/进行中/完成）、备注（完成时填写关键结论或遗留风险）。
+- 状态使用 `[ ]` 未开始、`[-]` 进行中、`[x]` 已完成。
+
+- [x] 任务名：修复数字板启用 `mock_setpoint` 时启动 panic
+  - 描述/复现：`FEATURES=mock_setpoint scripts/agent_verify_digital.sh --timeout 20`（单板或 dual monitor）曾报错 “Clocks have not been initialized yet”。
+  - 验收标准：启用 mock_setpoint 时数字固件能正常启动并运行 setpoint 发送任务，无 panic。
+  - 实施建议：确认时钟初始化顺序，保持 mock_setpoint 代码路径与正常路径一致的时钟依赖；必要时在启动早期补充时钟 guard。
+  - 进展/结果：完成。当前 HEAD=8254578 复测未再出现 panic，mock_setpoint 与 setpoint 任务均正常运行。
+  - 备注：旧 dual-monitor 日志的 panic 属早期版本，已消除。
+
+- [ ] 任务名：确认 SetPoint/ACK 链路在修复后无丢包
+  - 描述/复现：通过 mock_setpoint 或旋钮产生 setpoint，dual monitor 运行 40 秒。
+  - 验收标准：数字日志出现 `setpoint sent`，模拟日志出现 `SetPoint received`，且 decode_err=0。
+  - 实施建议：统计 seq/ACK 计数；必要时调高 UART FIFO 阈值或退避策略；收集 40 s 双端日志做比对。
+  - 进展/结果：未开始。
+  - 备注：无。
+
+- [ ] 任务名：消除正常运行下的协议解码错误（payload length mismatch）
+  - 描述/复现：默认配置 dual monitor 运行 40 秒，偶发 `payload length mismatch`。
+  - 验收标准：decode_err=0，fast_status_ok 连续递增。
+  - 实施建议：检查 SLIP 分帧容量、超时、UART DMA chunk；在 libs/protocol 增加健壮性日志；复现后抓取原始帧。
+  - 进展/结果：未开始。
+  - 备注：无。
+
+- [ ] 任务名：实现数字侧触发的软复位链路（SOFT_RESET_REQ/ACK）
+  - 描述/复现：保持持续供电，要求数字板每次上电或 UI 命令可触发模拟板软复位，清除残留状态。
+  - 验收标准：不断电场景下重复软复位，模拟板状态清零、重新 HELLO；无残留输出，握手与 CAL 下发能恢复。
+  - 实施建议：
+    1) `libs/protocol` 定义 0x26/ACK 帧与 reason 枚举；
+    2) ESP32 固件：启动后发送 + 150 ms×3 尝试 + UI 提示；收到 ACK 后等待新 HELLO；
+    3) STM32 固件：收到请求即失能/清状态、回 ACK、重新 HELLO；幂等处理重复请求；
+    4) 自测：dual monitor 不断电连续触发，核对 fast_status/状态位。
+  - 进展/结果：未开始。
+  - 备注：无。
