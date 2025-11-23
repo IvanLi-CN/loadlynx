@@ -5,8 +5,6 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        Self {
-            tail_default: 200,
-        }
+        Self { tail_default: 200 }
     }
 }

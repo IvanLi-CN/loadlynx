@@ -17,3 +17,5 @@ fs2 = "0.4"
 directories = "5.0"
 humantime = "2.3.0"
 nix = { version = "0.30.1", features = ["signal"] }
+dialoguer = "0.11"
+serialport = "4.3"
