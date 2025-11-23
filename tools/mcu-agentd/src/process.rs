@@ -2,11 +2,13 @@ use crate::model::McuKind;
 use crate::paths::Paths;
 use crate::timefmt::Timestamp;
 use anyhow::{Context, Result};
+use serde_json;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::watch;
 use tokio::time::{Instant, sleep_until};
 
 #[derive(Debug)]
@@ -23,8 +25,10 @@ pub async fn run_mcu_cmd(
     mut cmd: Command,
     duration: Option<std::time::Duration>,
     line_limit: Option<usize>,
+    cancel: Option<watch::Receiver<bool>>,
+    log_path_override: Option<PathBuf>,
 ) -> Result<RunResult> {
-    let session_file = session_file_path(paths, mcu, ts);
+    let session_file = log_path_override.unwrap_or_else(|| session_file_path(paths, mcu, ts));
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
@@ -46,6 +50,7 @@ pub async fn run_mcu_cmd(
     let mut lines_seen: usize = 0;
     let mut timed_out = false;
 
+    let mut cancel_rx = cancel;
     loop {
         tokio::select! {
             _ = async {
@@ -57,12 +62,20 @@ pub async fn run_mcu_cmd(
                 let _ = child.start_kill();
                 break;
             }
+            _ = async {
+                if let Some(rx) = cancel_rx.as_mut() {
+                    let _ = rx.changed().await;
+                }
+            }, if cancel_rx.is_some() => {
+                let _ = child.start_kill();
+                break;
+            }
             line = out_reader.next_line() => {
                 match line? {
                     Some(l) => {
                         lines_seen += 1;
-                        let pref = prefix(&ts.iso(), mcu, "log");
-                        writeln!(file, "{} {}", pref, l)?;
+                        let line_json = log_json(&ts.iso(), mcu, "stdout", &l);
+                        writeln!(file, "{}", line_json)?;
                         if line_limit.map(|lim| lines_seen >= lim).unwrap_or(false) {
                             let _ = child.start_kill();
                             break;
@@ -74,8 +87,8 @@ pub async fn run_mcu_cmd(
             line = err_reader.next_line() => {
                 match line? {
                     Some(l) => {
-                        let pref = prefix(&ts.iso(), mcu, "err");
-                        writeln!(file, "{} {}", pref, l)?;
+                        let line_json = log_json(&ts.iso(), mcu, "stderr", &l);
+                        writeln!(file, "{}", line_json)?;
                     }
                     None => break,
                 }
@@ -102,14 +115,15 @@ fn session_file_path(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> PathBuf {
     dir.join(filename)
 }
 
-fn prefix(ts: &str, mcu: &McuKind, event: &str) -> String {
+fn log_json(ts: &str, mcu: &McuKind, src: &str, text: &str) -> String {
     format!(
-        "{{\"ts\":\"{}\",\"mcu\":\"{}\",\"event\":\"{}\"}}",
+        "{{\"ts\":\"{}\",\"mcu\":\"{}\",\"src\":\"{}\",\"text\":{}}}",
         ts,
         match mcu {
             McuKind::Digital => "digital",
             McuKind::Analog => "analog",
         },
-        event
+        src,
+        serde_json::to_string(text).unwrap_or_else(|_| "\"\"".to_string())
     )
 }

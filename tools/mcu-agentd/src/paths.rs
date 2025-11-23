@@ -13,6 +13,8 @@ pub struct Paths {
     pub meta_analog: PathBuf,
     pub session_digital: PathBuf,
     pub session_analog: PathBuf,
+    pub mon_digital: PathBuf,
+    pub mon_analog: PathBuf,
     pub esp32_port: PathBuf,
     pub stm32_probe: PathBuf,
     pub stm32_legacy: PathBuf,
@@ -27,13 +29,14 @@ impl Paths {
         let root = find_repo_root()?;
         let logs_dir = root.join("logs/agentd");
         let tmp_logs_dir = root.join("tmp/agent-logs");
-        // Namespace socket/lock to avoid interference with similarly named tools in other repos.
-        let sock = root.join("tmp/mcu-agentd-loadlynx.sock");
-        let lock = root.join("tmp/mcu-agentd-loadlynx.lock");
+        let sock = logs_dir.join("agentd.sock");
+        let lock = logs_dir.join("agentd.lock");
         let meta_digital = logs_dir.join("digital.meta.log");
         let meta_analog = logs_dir.join("analog.meta.log");
         let session_digital = logs_dir.join("digital");
         let session_analog = logs_dir.join("analog");
+        let mon_digital = logs_dir.join("digital/monitor");
+        let mon_analog = logs_dir.join("analog/monitor");
         let esp32_port = root.join(".esp32-port");
         let stm32_probe = root.join(".stm32-probe");
         let stm32_legacy = root.join(".stm32-port");
@@ -51,6 +54,8 @@ impl Paths {
             meta_analog,
             session_digital,
             session_analog,
+            mon_digital,
+            mon_analog,
             esp32_port,
             stm32_probe,
             stm32_legacy,
@@ -67,6 +72,8 @@ impl Paths {
         std::fs::create_dir_all(&self.session_analog)?;
         std::fs::create_dir_all(self.tmp_logs_parent())?;
         std::fs::create_dir_all(&self.tmp_logs_dir)?;
+        std::fs::create_dir_all(&self.mon_digital)?;
+        std::fs::create_dir_all(&self.mon_analog)?;
         std::fs::create_dir_all(self.sock.parent().unwrap())?;
         Ok(())
     }
@@ -85,6 +92,13 @@ impl Paths {
         }
     }
 
+    pub fn monitor_dir(&self, mcu: crate::model::McuKind) -> &Path {
+        match mcu {
+            crate::model::McuKind::Digital => self.mon_digital.as_path(),
+            crate::model::McuKind::Analog => self.mon_analog.as_path(),
+        }
+    }
+
     pub fn lock_path(&self) -> &Path {
         self.lock.as_path()
     }
@@ -100,7 +114,7 @@ impl Paths {
     }
 
     pub fn log_file(&self) -> PathBuf {
-        self.root.join("tmp/mcu-agentd-loadlynx.log")
+        self.logs_dir.join("agentd.log")
     }
 }
 

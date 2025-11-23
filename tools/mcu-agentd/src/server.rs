@@ -8,6 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use chrono::{DateTime, FixedOffset};
 use fs2::FileExt;
 use serde_json::json;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -18,15 +19,32 @@ use std::sync::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader as TokioBuf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::process::Command;
+use tokio::sync::{Mutex, watch};
 use tokio::time::Duration;
 
 pub struct Server;
+
+#[derive(Clone)]
+struct DaemonState {
+    monitors: Arc<Mutex<HashMap<McuKind, MonitorTask>>>,
+    config: Config,
+}
+
+#[derive(Clone)]
+struct MonitorTask {
+    cancel: watch::Sender<bool>,
+    log_path: PathBuf,
+}
 
 impl Server {
     pub async fn run() -> Result<()> {
         let paths = Paths::new()?;
         paths.ensure_dirs()?;
-        let config = Config::load(paths.root())?;
+        let config = Config::default();
+        let state = DaemonState {
+            monitors: Arc::new(Mutex::new(HashMap::new())),
+            config,
+        };
         if paths.sock.exists() {
             let _ = std::fs::remove_file(&paths.sock);
         }
@@ -42,26 +60,18 @@ impl Server {
         let listener = UnixListener::bind(&paths.sock)?;
         println!("mcu-agentd listening at {:?}", paths.sock);
         let running = Arc::new(AtomicBool::new(true));
-
-        // heartbeat task
-        let hb_paths = paths.clone();
-        let hb_clock = clock;
-        let hb_cfg = config.clone();
-        let hb_running = running.clone();
-        tokio::spawn(async move {
-            heartbeat_task(hb_paths, hb_clock, hb_cfg, hb_running)
-                .await
-                .ok();
-        });
+        // start background monitors if ports cached
+        start_cached_monitors(&paths, &state, &clock).await.ok();
 
         while running.load(Ordering::SeqCst) {
             let (stream, _) = listener.accept().await?;
             let paths_cl = paths.clone();
             let clock_cl = clock;
             let running_cl = running.clone();
-            let cfg_cl = config.clone();
+            let state_cl = state.clone();
             tokio::spawn(async move {
-                if let Err(e) = handle_conn(stream, paths_cl, clock_cl, running_cl, cfg_cl).await {
+                if let Err(e) = handle_conn(stream, paths_cl, clock_cl, running_cl, state_cl).await
+                {
                     eprintln!("conn error: {e:#}");
                 }
             });
@@ -72,7 +82,7 @@ impl Server {
     pub async fn spawn_background() -> Result<()> {
         let paths = Paths::new()?;
         paths.ensure_dirs()?;
-        let _cfg = Config::load(paths.root())?;
+        let _cfg = Config::default();
         // If a stale socket exists while no server listens, remove it.
         if paths.sock.exists() && UnixStream::connect(&paths.sock).await.is_err() {
             let _ = std::fs::remove_file(&paths.sock);
@@ -154,14 +164,14 @@ async fn handle_conn(
     paths: Paths,
     clock: Clock,
     running: Arc<AtomicBool>,
-    config: Config,
+    state: DaemonState,
 ) -> Result<()> {
     let (read_half, mut write_half) = stream.into_split();
     let mut reader = TokioBuf::new(read_half);
     let mut buf = String::new();
     reader.read_line(&mut buf).await?;
     let req: ClientRequest = serde_json::from_str(&buf)?;
-    let resp = handle_request(req, &paths, &clock, &running, &config)
+    let resp = handle_request(req, &paths, &clock, &running, &state)
         .await
         .unwrap_or_else(|e| ClientResponse::err(format!("{e:#}")));
     let line = serde_json::to_string(&resp)? + "\n";
@@ -174,13 +184,13 @@ async fn handle_request(
     paths: &Paths,
     clock: &Clock,
     running: &Arc<AtomicBool>,
-    config: &Config,
+    state: &DaemonState,
 ) -> Result<ClientResponse> {
     match req {
         ClientRequest::Shutdown => {
-            write_shutdown_meta(paths, clock)?;
             std::fs::remove_file(&paths.sock).ok();
             running.store(false, Ordering::SeqCst);
+            stop_all_monitors(paths, state).await.ok();
             Ok(ClientResponse::ok(json!({"status":"stopping"})))
         }
         ClientRequest::Status => {
@@ -211,13 +221,20 @@ async fn handle_request(
         }
         ClientRequest::Flash { mcu, elf, after } => {
             let ts = clock.now();
-            let res =
-                flash_mcu(paths, &mcu, elf, after.unwrap_or(AfterPolicy::NoReset), &ts).await?;
+            let res = flash_mcu(
+                paths,
+                state,
+                &mcu,
+                elf,
+                after.unwrap_or(AfterPolicy::NoReset),
+                &ts,
+            )
+            .await?;
             Ok(ClientResponse::ok(res))
         }
         ClientRequest::Reset { mcu } => {
             let ts = clock.now();
-            let res = reset_mcu(paths, &mcu, &ts).await?;
+            let res = reset_mcu(paths, state, &mcu, &ts).await?;
             Ok(ClientResponse::ok(res))
         }
         ClientRequest::Monitor {
@@ -237,7 +254,7 @@ async fn handle_request(
             tail,
             sessions,
         } => {
-            let effective_tail = tail.unwrap_or(config.tail_default);
+            let effective_tail = tail.unwrap_or(state.config.tail_default);
             let entries = query_logs(
                 paths,
                 mcu,
@@ -339,15 +356,7 @@ async fn ensure_elf(paths: &Paths, mcu: &McuKind, elf: Option<PathBuf>) -> Resul
             if p.exists() {
                 return Ok(p);
             }
-            let status = Command::new("make")
-                .arg("d-build")
-                .current_dir(paths.root())
-                .status()
-                .await?;
-            if !status.success() {
-                return Err(anyhow!("make d-build failed: {status}"));
-            }
-            Ok(p)
+            Err(anyhow!("default ELF missing; provide --elf"))
         }
         McuKind::Analog => {
             let p = paths
@@ -356,52 +365,22 @@ async fn ensure_elf(paths: &Paths, mcu: &McuKind, elf: Option<PathBuf>) -> Resul
             if p.exists() {
                 return Ok(p);
             }
-            let status = Command::new("make")
-                .arg("a-build")
-                .current_dir(paths.root())
-                .status()
-                .await?;
-            if !status.success() {
-                return Err(anyhow!("make a-build failed: {status}"));
-            }
-            Ok(p)
+            Err(anyhow!("default ELF missing; provide --elf"))
         }
     }
 }
 
 async fn flash_mcu(
     paths: &Paths,
+    state: &DaemonState,
     mcu: &McuKind,
     elf: Option<PathBuf>,
     after: AfterPolicy,
     ts: &Timestamp,
 ) -> Result<serde_json::Value> {
+    stop_monitor(paths, state, mcu).await.ok();
     // Ensure ELF exists/builds; we need the path for flash.
     let elf_path = ensure_elf(paths, mcu, elf).await?;
-
-    // Analog flash endurance gate: skip if version unchanged.
-    if *mcu == McuKind::Analog {
-        let build_ver = read_trim(&paths.analog_fw_version);
-        let last_ver = read_trim(&paths.analog_last_flashed);
-        if let (Some(b), Some(l)) = (build_ver.clone(), last_ver.clone()) {
-            if b == l {
-                let dummy = crate::process::RunResult {
-                    status: 0,
-                    duration_ms: 0,
-                    session_file: PathBuf::new(),
-                };
-                write_meta(paths, mcu, ts, "flash-skip", &dummy)?;
-                return Ok(json!({
-                    "ts": ts.iso(),
-                    "mcu": mcu,
-                    "status": 0,
-                    "skipped": true,
-                    "reason": "analog version unchanged",
-                    "version": b,
-                }));
-            }
-        }
-    }
     let cmd = match mcu {
         McuKind::Digital => {
             let port = require_port(paths, McuKind::Digital)?;
@@ -434,18 +413,9 @@ async fn flash_mcu(
             c
         }
     };
-    let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None).await?;
-    // flash succeeded; update last-flashed markers if version available
-    if *mcu == McuKind::Analog {
-        if let Some(ver) = read_trim(&paths.analog_fw_version) {
-            let _ = std::fs::write(&paths.analog_last_flashed, ver);
-        }
-    } else {
-        if let Some(ver) = read_trim(&paths.digital_fw_version) {
-            let _ = std::fs::write(&paths.digital_last_flashed, ver);
-        }
-    }
+    let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
     write_meta(paths, mcu, ts, "flash", &res)?;
+    start_monitor_if_cached(paths, state, mcu, ts).await.ok();
     Ok(json!({
         "ts": ts.iso(),
         "mcu": mcu,
@@ -455,7 +425,13 @@ async fn flash_mcu(
     }))
 }
 
-async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde_json::Value> {
+async fn reset_mcu(
+    paths: &Paths,
+    state: &DaemonState,
+    mcu: &McuKind,
+    ts: &Timestamp,
+) -> Result<serde_json::Value> {
+    stop_monitor(paths, state, mcu).await.ok();
     let cmd = match mcu {
         McuKind::Digital => {
             let port = require_port(paths, McuKind::Digital)?;
@@ -478,8 +454,9 @@ async fn reset_mcu(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> Result<serde
             c
         }
     };
-    let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None).await?;
+    let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
     write_meta(paths, mcu, ts, "reset", &res)?;
+    start_monitor_if_cached(paths, state, mcu, ts).await.ok();
     Ok(json!({
         "ts": ts.iso(),
         "mcu": mcu,
@@ -497,37 +474,15 @@ async fn monitor_mcu(
     lines: Option<usize>,
     ts: &Timestamp,
 ) -> Result<serde_json::Value> {
-    let _elf_path = ensure_elf(paths, mcu, elf).await?;
-    let cmd = match mcu {
-        McuKind::Digital => {
-            let port = require_port(paths, McuKind::Digital)?;
-            let cfg = Config::load(paths.root())?;
-            let mut c = Command::new("make");
-            c.arg("d-run")
-                .current_dir(paths.root())
-                .env("PORT", port)
-                .env("ESPFLASH_ARGS", cfg.espflash_args);
-            c
-        }
-        McuKind::Analog => {
-            let probe = require_port(paths, McuKind::Analog)?;
-            let mut c = Command::new("make");
-            c.arg("a-reset-attach")
-                .current_dir(paths.root())
-                .env("PROBE", probe);
-            c
-        }
-    };
-
+    let latest = latest_log(paths, mcu, elf.as_ref())?;
     let duration = duration_ms.map(Duration::from_millis);
-    let res = run_mcu_cmd(paths, mcu, ts, cmd, duration, lines).await?;
-    write_meta(paths, mcu, ts, "monitor", &res)?;
+    let lines = lines.unwrap_or(0);
     Ok(json!({
         "ts": ts.iso(),
         "mcu": mcu,
-        "status": res.status,
-        "duration_ms": res.duration_ms,
-        "session": res.session_file,
+        "path": latest,
+        "duration_ms": duration.map(|d| d.as_millis()),
+        "lines": if lines==0 { None::<usize> } else { Some(lines) },
     }))
 }
 
@@ -558,13 +513,6 @@ fn require_port(paths: &Paths, mcu: McuKind) -> Result<String> {
 // Minimal log querying: tail from meta files if needed later; stub for now.
 fn _query_logs(_paths: &Paths) -> Result<Vec<serde_json::Value>> {
     Ok(vec![])
-}
-
-fn read_trim(path: &PathBuf) -> Option<String> {
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
 }
 
 fn parse_rfc3339(s: &str) -> Option<DateTime<FixedOffset>> {
@@ -663,7 +611,7 @@ fn query_session_logs(
     meta_entries: &serde_json::Value,
     tail: usize,
 ) -> Result<serde_json::Value> {
-    let mut session_lines = Vec::new();
+    let mut sessions = Vec::new();
     let arr = meta_entries.as_array().cloned().unwrap_or_default();
     for entry in arr {
         if let Some(sess_path) = entry.get("session").and_then(|s| s.as_str()) {
@@ -677,48 +625,164 @@ fn query_session_logs(
             if buf.len() > tail {
                 buf = buf.split_off(buf.len() - tail);
             }
-            for l in buf {
-                session_lines.push(l);
+            sessions.push(json!({"session": p, "lines": buf}));
+        }
+    }
+    Ok(serde_json::Value::Array(sessions))
+}
+
+async fn start_cached_monitors(paths: &Paths, state: &DaemonState, clock: &Clock) -> Result<()> {
+    for mcu in [McuKind::Digital, McuKind::Analog] {
+        start_monitor_if_cached(paths, state, &mcu, &clock.now())
+            .await
+            .ok();
+    }
+    Ok(())
+}
+
+async fn start_monitor_if_cached(
+    paths: &Paths,
+    state: &DaemonState,
+    mcu: &McuKind,
+    ts: &Timestamp,
+) -> Result<()> {
+    let port = match port_cache::read_port(paths, mcu.clone())? {
+        Some(p) => p,
+        None => return Ok(()),
+    };
+    let mut map = state.monitors.lock().await;
+    if map.contains_key(mcu) {
+        return Ok(());
+    }
+    let elf = ensure_elf(paths, mcu, None).await?;
+    let log_path = monitor_file_path(paths, mcu, ts);
+    let (tx, rx) = watch::channel(false);
+    let paths_cl = paths.clone();
+    let mcu_cl = mcu.clone();
+    let ts_cl = ts.clone();
+    let elf_cl = elf.clone();
+    let port_cl = port.clone();
+    let log_path_spawn = log_path.clone();
+    tokio::spawn(async move {
+        let cmd = match mcu_cl {
+            McuKind::Digital => {
+                let mut c = Command::new("espflash");
+                c.arg("monitor")
+                    .arg("--chip")
+                    .arg("esp32s3")
+                    .arg("--port")
+                    .arg(port_cl)
+                    .arg("--elf")
+                    .arg(elf_cl)
+                    .arg("--log-format")
+                    .arg("defmt")
+                    .arg("--non-interactive")
+                    .arg("--skip-update-check")
+                    .arg("--after")
+                    .arg("no-reset");
+                c
+            }
+            McuKind::Analog => {
+                let mut c = Command::new("probe-rs");
+                c.arg("run")
+                    .arg("--chip")
+                    .arg("STM32G431CB")
+                    .arg("--probe")
+                    .arg(port_cl)
+                    .arg("--log-format")
+                    .arg("oneline")
+                    .arg(elf_cl);
+                c
+            }
+        };
+        let _ = run_mcu_cmd(
+            &paths_cl,
+            &mcu_cl,
+            &ts_cl,
+            cmd,
+            None,
+            None,
+            Some(rx),
+            Some(log_path_spawn),
+        )
+        .await;
+    });
+    write_meta(
+        paths,
+        mcu,
+        ts,
+        "monitor-start",
+        &crate::process::RunResult {
+            status: 0,
+            duration_ms: 0,
+            session_file: log_path.clone(),
+        },
+    )?;
+    map.insert(
+        mcu.clone(),
+        MonitorTask {
+            cancel: tx,
+            log_path,
+        },
+    );
+    Ok(())
+}
+
+async fn stop_monitor(paths: &Paths, state: &DaemonState, mcu: &McuKind) -> Result<()> {
+    let mut map = state.monitors.lock().await;
+    if let Some(task) = map.remove(mcu) {
+        let _ = task.cancel.send(true);
+        write_meta(
+            paths,
+            mcu,
+            &Clock::new().now(),
+            "monitor-stop",
+            &crate::process::RunResult {
+                status: 0,
+                duration_ms: 0,
+                session_file: task.log_path,
+            },
+        )?;
+    }
+    Ok(())
+}
+
+async fn stop_all_monitors(paths: &Paths, state: &DaemonState) -> Result<()> {
+    for mcu in [McuKind::Digital, McuKind::Analog] {
+        stop_monitor(paths, state, &mcu).await.ok();
+    }
+    Ok(())
+}
+
+fn monitor_file_path(paths: &Paths, mcu: &McuKind, ts: &Timestamp) -> PathBuf {
+    let dir = paths.monitor_dir(mcu.clone());
+    let filename = format!("{}.mon.log", ts.wall.format("%Y%m%d_%H%M%S"));
+    dir.join(filename)
+}
+
+fn latest_log(paths: &Paths, mcu: &McuKind, _elf: Option<&PathBuf>) -> Result<PathBuf> {
+    let mut latest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let dirs = vec![
+        paths.monitor_dir(mcu.clone()).to_path_buf(),
+        paths.session_dir(mcu.clone()).to_path_buf(),
+    ];
+    for d in dirs {
+        if !d.exists() {
+            continue;
+        }
+        for entry in std::fs::read_dir(d)? {
+            let e = entry?;
+            let md = e.metadata()?;
+            if md.is_file() {
+                if let Ok(mt) = md.modified() {
+                    if latest.as_ref().map(|(t, _)| mt > *t).unwrap_or(true) {
+                        latest = Some((mt, e.path()));
+                    }
+                }
             }
         }
     }
-    Ok(serde_json::Value::Array(
-        session_lines
-            .into_iter()
-            .map(serde_json::Value::from)
-            .collect(),
-    ))
-}
-
-async fn heartbeat_task(
-    paths: Paths,
-    clock: Clock,
-    config: Config,
-    running: Arc<AtomicBool>,
-) -> Result<()> {
-    let interval = Duration::from_secs(config.heartbeat_secs);
-    while running.load(Ordering::SeqCst) {
-        let ts = clock.now();
-        let dummy = crate::process::RunResult {
-            status: 0,
-            duration_ms: 0,
-            session_file: PathBuf::new(),
-        };
-        let _ = write_meta(&paths, &McuKind::Digital, &ts, "heartbeat", &dummy);
-        let _ = write_meta(&paths, &McuKind::Analog, &ts, "heartbeat", &dummy);
-        tokio::time::sleep(interval).await;
-    }
-    Ok(())
-}
-
-fn write_shutdown_meta(paths: &Paths, clock: &Clock) -> Result<()> {
-    let ts = clock.now();
-    let dummy = crate::process::RunResult {
-        status: 0,
-        duration_ms: 0,
-        session_file: PathBuf::new(),
-    };
-    let _ = write_meta(paths, &McuKind::Digital, &ts, "shutdown", &dummy);
-    let _ = write_meta(paths, &McuKind::Analog, &ts, "shutdown", &dummy);
-    Ok(())
+    latest
+        .map(|(_, p)| p)
+        .ok_or_else(|| anyhow!("no logs found for {:?}", mcu))
 }

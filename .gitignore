@@ -1,5 +1,6 @@
 downloads/
 tmp/
+logs/agentd/
 
 # Rust build artifacts
 **/target/
@@ -8,4 +9,5 @@ tmp/
 .serena/memories/suggested_commands.md
 .serena/memories/task_completion.md
 .stm32-probe
+.stm32-port
 .esp32-port

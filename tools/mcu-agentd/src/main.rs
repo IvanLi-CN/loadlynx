@@ -9,8 +9,12 @@ mod timefmt;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use model::{ClientRequest, McuKind};
+use serde_json;
 use server::Server;
 use std::path::PathBuf;
+use tokio::fs::File;
+use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
+use tokio::time::{Duration, Instant};
 
 /// MCU agentd – single-instance helper for LoadLynx boards (ESP32-S3 + STM32G431).
 #[derive(Parser, Debug)]
@@ -183,6 +187,11 @@ async fn main() -> Result<()> {
             })
             .await?;
             println!("{}", serde_json::to_string_pretty(&resp)?);
+            if resp.ok {
+                if let Some(path) = resp.payload.get("path").and_then(|p| p.as_str()) {
+                    tail_file(PathBuf::from(path), duration, lines).await?;
+                }
+            }
         }
         Cmd::Logs {
             mcu,
@@ -229,6 +238,54 @@ impl From<OptionAfter> for model::AfterPolicy {
         match a {
             OptionAfter::NoReset => model::AfterPolicy::NoReset,
             OptionAfter::HardReset => model::AfterPolicy::HardReset,
+        }
+    }
+}
+
+async fn tail_file(path: PathBuf, duration: std::time::Duration, lines: usize) -> Result<()> {
+    if !path.exists() {
+        eprintln!("monitor: log file not found: {:?}", path);
+        return Ok(());
+    }
+    let mut file = File::open(&path).await?;
+    file.seek(std::io::SeekFrom::End(0)).await?;
+    let mut reader = BufReader::new(file).lines();
+    let deadline = if duration.as_millis() == 0 {
+        None
+    } else {
+        Some(Instant::now() + Duration::from_millis(duration.as_millis() as u64))
+    };
+    let mut remaining = if lines == 0 { None } else { Some(lines) };
+    loop {
+        if let Some(dl) = deadline {
+            if Instant::now() >= dl {
+                return Ok(());
+            }
+        }
+        match reader.next_line().await? {
+            Some(l) => {
+                let out = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&l) {
+                    v.get("text")
+                        .and_then(|t| t.as_str())
+                        .unwrap_or(&l)
+                        .to_string()
+                } else {
+                    l
+                };
+                println!("{}", out);
+                if let Some(ref mut rem) = remaining {
+                    if *rem == 0 {
+                        return Ok(());
+                    }
+                    *rem -= 1;
+                    if *rem == 0 {
+                        return Ok(());
+                    }
+                }
+            }
+            None => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
         }
     }
 }
