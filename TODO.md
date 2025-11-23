@@ -12,12 +12,12 @@
   - 进展/结果：完成。当前 HEAD=8254578 复测未再出现 panic，mock_setpoint 与 setpoint 任务均正常运行。
   - 备注：旧 dual-monitor 日志的 panic 属早期版本，已消除。
 
-- [ ] 任务名：确认 SetPoint/ACK 链路在修复后无丢包
+- [x] 任务名：确认 SetPoint/ACK 链路在修复后无丢包
   - 描述/复现：通过 mock_setpoint 或旋钮产生 setpoint，dual monitor 运行 40 秒。
   - 验收标准：数字日志出现 `setpoint sent`，模拟日志出现 `SetPoint received`，且 decode_err=0。
   - 实施建议：统计 seq/ACK 计数；必要时调高 UART FIFO 阈值或退避策略；收集 40 s 双端日志做比对。
-  - 进展/结果：未开始。
-  - 备注：无。
+  - 进展/结果：完成。6 分钟 soak（序号自增 1..255 循环）数字侧统计 setpoint_tx=1319、ack=1319、retx=0、timeout=0、decode_errs=0，模拟侧全程逐帧 ACK 无告警，未见 FAST_STATUS CRC/长度错误。
+  - 备注：日志路径 `tmp/agent-logs/digital-20251123-133501.log`（360 s）与 `tmp/agent-logs/analog-20251123-133444.log`（~315 s，含 seq wrap），当前固件版本：analog 0.1.0 (fe7cc03-dirty)、digital 0.1.0 (951a3ed-dirty, soak build)。
 
 - [ ] 任务名：实现 SetPoint ACK/重传机制，避免状态不同步
   - 描述/复现：当前 SetPoint 仅发送不等确认，掉帧时模拟板目标不更新；需按 `docs/interfaces/uart-link.md` 新增的“SetPoint 可靠传输方案（v1）”实现并验证。
