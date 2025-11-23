@@ -47,9 +47,9 @@ use lcd_async::{
 };
 use loadlynx_protocol::{
     CRC_LEN, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_FAST_STATUS, MSG_SET_POINT,
-    MSG_SOFT_RESET, SLIP_END, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
-    decode_fast_status_frame, decode_frame, decode_soft_reset_frame, encode_set_point_frame,
-    encode_soft_reset_frame, slip_encode,
+    MSG_SOFT_RESET, SetPoint, SlipDecoder, SoftReset, SoftResetReason, decode_fast_status_frame,
+    decode_frame, decode_soft_reset_frame, encode_set_point_frame, encode_soft_reset_frame,
+    slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -1396,10 +1396,6 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
 
-    // Proactively provide a clean SLIP boundary before any frames.
-    let _ = uhci_tx.uart_tx.write(&[SLIP_END, SLIP_END]);
-    let _ = uhci_tx.uart_tx.flush_async().await;
-
     // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
     let soft_reset_seq: u8 = 0;
     let soft_reset_acked =
@@ -1408,8 +1404,8 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
         warn!("soft_reset ack missing within retry window; continuing after quiet gap");
     }
 
-    // Quiet gap to let both sides drain stale bytes and settle.
-    cooperative_delay_ms(500).await;
+    // Short quiet gap to let both sides drain stale bytes and settle.
+    cooperative_delay_ms(150).await;
 
     // Single SetPoint seq=1, no retries
     let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
