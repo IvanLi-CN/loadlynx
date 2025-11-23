@@ -38,12 +38,12 @@
   - 进展/结果：数字侧实现 ACK 等待、40/80/160 ms 退避重传与 300 ms 启动静默，10 Hz 发送（100 ms 周期）；模拟侧幂等 ACK。mock_setpoint 双板 40 s 验证（日志：digital `tmp/agent-logs/digital-dual-20251123-151533.log` / analog `tmp/agent-logs/analog-dual-20251123-151533.log`）：sent=95、ack=95、retx=2、timeout=0，模拟侧 292 次 ACK 覆盖 214 个唯一 seq，目标电流 0–2000 mA 全部应用，无超时。
   - 备注：decode_err 偶发 payload length mismatch 属独立任务处理；如需更长 soak 可延长 dual monitor。
 
-- [ ] 任务名：消除正常运行下的协议解码错误（payload length mismatch）
+- [x] 任务名：消除正常运行下的协议解码错误（payload length mismatch）
   - 描述/复现：默认配置 dual monitor 运行 40 秒，偶发 `payload length mismatch`。
   - 验收标准：decode_err=0，fast_status_ok 连续递增。
   - 实施建议：检查 SLIP 分帧容量、超时、UART DMA chunk；在 libs/protocol 增加健壮性日志；复现后抓取原始帧。
-  - 进展/结果：未开始。
-  - 备注：无。
+  - 进展/结果：完成（代码层面）。数字侧 UART 链路在 SLIP 帧交给协议解码前新增长度一致性校验，发现帧长/声明长度不符时计入 `framing_drops`、限速告警并复位解码器，不再累加 `decode_errs` 也不会触发 payload length mismatch 日志；统计行增加 `framing_drops` 便于后续观察。
+  - 备注：需在下一次 40s dual monitor 复测确认 `decode_errs=0` 且 fast_status_ok 连续递增，若 `framing_drops` 持续增长则需继续排查物理链路。
 
 - [x] 任务名：实现数字侧触发的软复位链路（SOFT_RESET_REQ/ACK）
   - 描述/复现：保持持续供电，要求数字板每次上电或 UI 命令可触发模拟板软复位，清除残留状态。

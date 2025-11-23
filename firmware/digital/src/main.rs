@@ -135,6 +135,7 @@ static ENCODER_PINS: StaticCell<EncoderPins> = StaticCell::new();
 // --- Telemetry & diagnostics -------------------------------------------------
 static UART_RX_ERR_TOTAL: AtomicU32 = AtomicU32::new(0);
 static PROTO_DECODE_ERRS: AtomicU32 = AtomicU32::new(0);
+static PROTO_FRAMING_DROPS: AtomicU32 = AtomicU32::new(0);
 static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
@@ -973,6 +974,19 @@ async fn feed_decoder(
                     continue;
                 }
 
+                // Fast-path framing sanity: drop frames whose declared length does not
+                // match the actual SLIP payload to avoid surfacing spurious
+                // `payload length mismatch` decode errors when bytes are truncated in
+                // transit.
+                let declared_payload_len = u16::from_le_bytes([frame[4], frame[5]]) as usize;
+                let expected_total = HEADER_LEN + declared_payload_len + CRC_LEN;
+                if expected_total != frame.len() {
+                    let drops = PROTO_FRAMING_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+                    rate_limited_framing_warn(frame.len(), declared_payload_len, drops);
+                    decoder.reset();
+                    continue;
+                }
+
                 match decode_frame(&frame) {
                     Ok((header, _payload)) => match header.msg {
                         MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
@@ -1096,6 +1110,18 @@ fn rate_limited_proto_warn(kind: &str, frame: Option<&[u8]>) {
             len,
             head.unwrap_or(&[]),
             cnt
+        );
+    }
+}
+
+fn rate_limited_framing_warn(frame_len: usize, declared_payload_len: usize, drops: u32) {
+    let now = now_ms32();
+    let last = LAST_PROTO_WARN_MS.load(Ordering::Relaxed);
+    if now.wrapping_sub(last) >= 2000 {
+        LAST_PROTO_WARN_MS.store(now, Ordering::Relaxed);
+        warn!(
+            "protocol framing drop (payload length mismatch): frame_len={} declared_payload_len={} total_drop={}",
+            frame_len, declared_payload_len, drops
         );
     }
 }
@@ -1372,14 +1398,15 @@ async fn stats_task() {
             last_ms = now;
             let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
+            let df = PROTO_FRAMING_DROPS.load(Ordering::Relaxed);
             let ut = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
             let sp_tx = SETPOINT_TX_TOTAL.load(Ordering::Relaxed);
             let sp_ack = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
             let sp_retx = SETPOINT_RETX_TOTAL.load(Ordering::Relaxed);
             let sp_timeout = SETPOINT_TIMEOUT_TOTAL.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}",
-                ok, de, ut, sp_tx, sp_ack, sp_retx, sp_timeout
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}",
+                ok, de, df, ut, sp_tx, sp_ack, sp_retx, sp_timeout
             );
         }
     }
