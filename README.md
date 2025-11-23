@@ -25,11 +25,12 @@
 本仓库仅提供最小可编译脚手架（占位代码）。实际硬件驱动、管脚、控制环参数需根据原理图与 PCB 定稿同步更新。
 
 ### 环境
+
 - Rust nightly（embedded） + `thumbv7em-none-eabihf` 目标
 - probe-rs 工具链（调试/烧录）
 - ESP32‑S3 Xtensa 工具链（`espup`）与 `espflash`（通过 `cargo +esp` 使用）
 
-顶层 `Makefile` 已经封装了常用构建/烧录命令，推荐优先使用 `make` 工作流，必要时再落到子目录里的 `cargo` 命令。
+现在推荐用 `just` 作为统一入口：根目录 `Justfile` 一一包装了原有 `make` 目标，环境变量（如 PROFILE/PROBE/PORT/BAUD 等）直接在命令前导出即可；`Makefile` 保留以兼容已有脚本和习惯。
 
 ### G431（analog）
 
@@ -37,10 +38,10 @@
 
 ```sh
 # 构建（默认 PROFILE=release）
-make a-build
+just a-build
 
 # 烧录 + 运行（需要先接好调试 probe）
-make a-run PROBE=0483:3748              # 或使用你的 VID:PID[:SER]
+PROBE=0483:3748 just a-run              # 或使用你的 VID:PID[:SER]
 
 # 或通过脚本封装（内部仍调用 make a-run）
 scripts/flash_g431.sh release PROBE=0483:3748
@@ -58,10 +59,10 @@ scripts/flash_g431.sh release PROBE=0483:3748
 
 ```sh
 # 构建（Rust + esp-hal，默认 PROFILE=release）
-make d-build
+just d-build
 
 # 烧录 + 串口监视（自动探测串口或指定端口）
-make d-run PORT=/dev/tty.usbserial-xxxx
+PORT=/dev/tty.usbserial-xxxx just d-run
 
 # 或使用脚本封装（内部调用 make d-run）
 scripts/flash_s3.sh --release --port /dev/tty.usbserial-xxxx
@@ -73,7 +74,19 @@ scripts/flash_s3.sh --release --port /dev/tty.usbserial-xxxx
 (cd firmware/digital && cargo +esp build --release)
 ```
 
+### MCU Agent 守护进程
+
+`tools/mcu-agentd` 已提供 Just 配方，便于以 release 方式运行/配置串口：
+
+```sh
+just agentd start                 # 启动后台守护
+just agentd status                # 查询状态
+just agentd stop                  # 停止
+just agentd set-port analog /dev/tty.usbserial-xxxx
+```
+
 ## 目录结构
+
 - `firmware/analog/` — G431 上运行的 Embassy 应用（控制环路 + 遥测流）
 - `firmware/digital/` — S3 上运行的 Rust + esp‑hal 应用（本地 UI + UART 链路终端）
 - `libs/` — 共享驱动与协议约定（当前包含无分配的 MCU↔MCU 协议 crate `loadlynx-protocol`）
@@ -81,9 +94,11 @@ scripts/flash_s3.sh --release --port /dev/tty.usbserial-xxxx
 - `scripts/` — 烧录与构建脚本（例如 `flash_g431.sh`, `flash_s3.sh`）
 
 ## 片间通信建议
+
 - 默认：UART + 帧编码（CBOR/SLIP），易调试、鲁棒、带宽足够
 - 预留：SPI/I²C 可选（视硬件走线与带宽/时延需求）
 
 ## 致谢
+
 - Embassy 项目（异步 HAL 与执行器）
 - ESP‑IDF（ESP32 官方框架）
