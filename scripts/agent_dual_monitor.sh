@@ -289,18 +289,21 @@ echo "[dual-monitor] timeout per session: ${TIME_LIMIT_SECONDS}s"
 echo "[dual-monitor] digital log: $DIGITAL_LOG"
 echo "[dual-monitor] analog  log: $ANALOG_LOG"
 
-# Start digital reset-attach first
+# Start analog reset-attach first to ensure the receiver is ready
+pid=$(start_session "$TIME_LIMIT_SECONDS" "$ANALOG_LOG" \
+    make -C "$REPO_ROOT/firmware/analog" reset-attach PROFILE="$PROFILE" PROBE="$PROBE_SEL" \
+         $EXTRA_MAKE_VARS)
+echo "$pid" > "$ANALOG_PID_FILE"
+
+# Give analog side time to come up before starting digital
+sleep 5
+
+# Then start digital reset-attach
 pid=$(start_session "$TIME_LIMIT_SECONDS" "$DIGITAL_LOG" \
     make -C "$REPO_ROOT/firmware/digital" reset-attach PROFILE="$PROFILE" PORT="$PORT_VALUE" \
          ESPFLASH_ARGS="--non-interactive --skip-update-check" \
          $EXTRA_MAKE_VARS)
 echo "$pid" > "$DIGITAL_PID_FILE"
-
-# Then start analog reset-attach
-pid=$(start_session "$TIME_LIMIT_SECONDS" "$ANALOG_LOG" \
-    make -C "$REPO_ROOT/firmware/analog" reset-attach PROFILE="$PROFILE" PROBE="$PROBE_SEL" \
-         $EXTRA_MAKE_VARS)
-echo "$pid" > "$ANALOG_PID_FILE"
 
 echo "[dual-monitor] dual reset-attach sessions launched."
 echo "[dual-monitor] PID files:"

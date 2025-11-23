@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::convert::Infallible;
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
@@ -46,9 +46,9 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    CRC_LEN, Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
-    MSG_SET_POINT, MSG_SOFT_RESET, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
-    decode_fast_status_frame, decode_soft_reset_frame, encode_set_point_frame,
+    CRC_LEN, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_FAST_STATUS, MSG_SET_POINT,
+    MSG_SOFT_RESET, SLIP_END, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
+    decode_fast_status_frame, decode_frame, decode_soft_reset_frame, encode_set_point_frame,
     encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
@@ -103,6 +103,9 @@ const UART_DMA_BUF_LEN: usize = 1536;
 const SETPOINT_TX_PERIOD_MS: u32 = 80; // used in encoder-driven mode
 const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 const ENABLE_UART_UHCI_DMA: bool = true;
+// Single-shot test mode: send only one SetPoint and do not retry/advance seq.
+const SETPOINT_ACK_TIMEOUT_MS: u32 = 30;
+const SETPOINT_RETRY_BACKOFF_MS: [u32; 0] = [];
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 #[repr(align(32))]
@@ -139,6 +142,13 @@ static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
+static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
+static SETPOINT_ACK_PENDING: AtomicBool = AtomicBool::new(false);
+static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
 
 #[inline]
 fn now_ms32() -> u32 {
@@ -474,6 +484,7 @@ fn write_runtime(target: &mut heapless::String<16>, uptime_ms: u32) {
 async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
     let mut guard = telemetry.lock().await;
     guard.update_from_status(status);
+    LAST_TARGET_VALUE_FROM_STATUS.store(status.target_value, Ordering::Relaxed);
 }
 
 fn protocol_error_str(err: &loadlynx_protocol::Error) -> &'static str {
@@ -962,25 +973,24 @@ async fn feed_decoder(
                     continue;
                 }
 
-                match decode_fast_status_frame(&frame) {
-                    Ok((header, status)) => {
-                        apply_fast_status(telemetry, &status).await;
-                        let total = FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                        // 默认每 32 帧打印一次成功节奏，用于长时间验收；
-                        // 同时打印关键测量值，方便观察电流/电压是否在变化。
-                        if total % 32 == 0 {
-                            let display_running = DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
-                            info!(
-                                "fast_status ok (count={}, display_running={}, i_local_ma={} mA, target_value={} mA)",
-                                total, display_running, status.i_local_ma, status.target_value
-                            );
-                        }
-                        let _ = header; // keep header verified even if unused further
-                    }
-                    Err(ProtocolError::UnsupportedMessage(msg)) if msg == MSG_SOFT_RESET => {
-                        match decode_soft_reset_frame(&frame) {
-                            Ok((header, reset)) => {
-                                handle_soft_reset_frame(&header, &reset);
+                match decode_frame(&frame) {
+                    Ok((header, _payload)) => match header.msg {
+                        MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
+                            Ok((_hdr, status)) => {
+                                apply_fast_status(telemetry, &status).await;
+                                let total =
+                                    FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                                if total % 32 == 0 {
+                                    let display_running =
+                                        DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
+                                    info!(
+                                        "fast_status ok (count={}, display_running={}, i_local_ma={} mA, target_value={} mA)",
+                                        total,
+                                        display_running,
+                                        status.i_local_ma,
+                                        status.target_value
+                                    );
+                                }
                             }
                             Err(err) => {
                                 PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
@@ -990,8 +1000,30 @@ async fn feed_decoder(
                                 );
                                 decoder.reset();
                             }
+                        },
+                        MSG_SET_POINT => {
+                            if header.flags & FLAG_IS_ACK != 0 {
+                                handle_setpoint_ack(&header);
+                            } else {
+                                // For now we do not expect SetPoint requests on the digital side.
+                                rate_limited_proto_warn("unexpected setpoint frame", None);
+                            }
                         }
-                    }
+                        MSG_SOFT_RESET => match decode_soft_reset_frame(&frame) {
+                            Ok((hdr, reset)) => handle_soft_reset_frame(&hdr, &reset),
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
+                                decoder.reset();
+                            }
+                        },
+                        _ => {
+                            rate_limited_proto_warn("unsupported msg", Some(frame.as_slice()));
+                        }
+                    },
                     Err(err) => {
                         PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
                         rate_limited_proto_warn(protocol_error_str(&err), Some(frame.as_slice()));
@@ -1011,6 +1043,16 @@ async fn feed_decoder(
 
 fn record_uart_error() {
     UART_RX_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn handle_setpoint_ack(header: &FrameHeader) {
+    SETPOINT_LAST_ACK_SEQ.store(header.seq, Ordering::Relaxed);
+    SETPOINT_ACK_PENDING.store(true, Ordering::Release);
+    let total = SETPOINT_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    info!(
+        "setpoint ack received: seq={} flags=0x{:02x} len={} (ack_total={})",
+        header.seq, header.flags, header.len, total
+    );
 }
 
 fn handle_soft_reset_frame(header: &FrameHeader, reset: &SoftReset) {
@@ -1331,9 +1373,13 @@ async fn stats_task() {
             let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
             let ut = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
+            let sp_tx = SETPOINT_TX_TOTAL.load(Ordering::Relaxed);
+            let sp_ack = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+            let sp_retx = SETPOINT_RETX_TOTAL.load(Ordering::Relaxed);
+            let sp_timeout = SETPOINT_TIMEOUT_TOTAL.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}",
-                ok, de, ut
+                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}",
+                ok, de, ut, sp_tx, sp_ack, sp_retx, sp_timeout
             );
         }
     }
@@ -1344,89 +1390,113 @@ async fn stats_task() {
 #[embassy_executor::task]
 async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     info!(
-        "SetPoint TX task starting (encoder-driven, step={} mA, msg_id=0x{:02x}, period={} ms)",
-        ENCODER_STEP_MA, MSG_SET_POINT, SETPOINT_TX_PERIOD_MS
+        "SetPoint TX single-shot test starting (seq=1, msg_id=0x{:02x})",
+        MSG_SET_POINT
     );
-
-    let mut seq: u8 = 0;
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
-    let mut last_sent: Option<i32> = None;
-    let mut last_encoder_val = ENCODER_VALUE.load(Ordering::SeqCst);
 
-    // 先执行数字侧触发的软复位握手，确保模拟板在不断电场景下清空状态。
-    send_soft_reset_handshake(&mut uhci_tx, &mut seq, &mut raw, &mut slip).await;
+    // Proactively provide a clean SLIP boundary before any frames.
+    let _ = uhci_tx.uart_tx.write(&[SLIP_END, SLIP_END]);
+    let _ = uhci_tx.uart_tx.flush_async().await;
 
-    loop {
-        let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
-        let enc_now = ENCODER_VALUE.load(Ordering::SeqCst);
-        let encoder_moved = enc_now != last_encoder_val;
-        if encoder_moved {
-            last_encoder_val = enc_now;
+    // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
+    let soft_reset_seq: u8 = 0;
+    let soft_reset_acked =
+        send_soft_reset_handshake(&mut uhci_tx, soft_reset_seq, &mut raw, &mut slip).await;
+    if !soft_reset_acked {
+        warn!("soft_reset ack missing within retry window; continuing after quiet gap");
+    }
+
+    // Quiet gap to let both sides drain stale bytes and settle.
+    cooperative_delay_ms(500).await;
+
+    // Single SetPoint seq=1, no retries
+    let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
+    let send_seq = 1u8;
+    if send_setpoint_frame(
+        &mut uhci_tx,
+        send_seq,
+        target_i_ma,
+        &mut raw,
+        &mut slip,
+        "single-test",
+    )
+    .await
+    {
+        SETPOINT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
+        info!(
+            "single-shot setpoint sent seq={} target={} mA",
+            send_seq, target_i_ma
+        );
+    } else {
+        warn!("single-shot setpoint send failed");
+    }
+
+    cooperative_delay_ms(1000).await;
+    info!("setpoint tx single-shot test done");
+}
+
+async fn send_setpoint_frame(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    target_i_ma: i32,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) -> bool {
+    let setpoint = SetPoint { target_i_ma };
+
+    let frame_len = match encode_set_point_frame(seq, &setpoint, raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: encode_set_point_frame error: {:?}", ctx, err);
+            return false;
         }
+    };
 
-        // 仅在值变化时发送
-        let changed = last_sent.map(|v| v != target_i_ma).unwrap_or(true);
-
-        if changed {
-            let sp = SetPoint { target_i_ma };
-            let send_seq = seq;
-
-            if let Ok(frame_len) = encode_set_point_frame(send_seq, &sp, &mut raw) {
-                if let Ok(slip_len) = slip_encode(&raw[..frame_len], &mut slip) {
-                    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-                        Ok(written) if written == slip_len => {
-                            let _ = uhci_tx.uart_tx.flush_async().await;
-                            seq = seq.wrapping_add(1);
-                            last_sent = Some(target_i_ma);
-                            info!(
-                                "setpoint sent: seq={} target_i_ma={} mA ts={} ms (reason=change)",
-                                send_seq,
-                                target_i_ma,
-                                now_ms32()
-                            );
-                        }
-                        Ok(written) => {
-                            warn!(
-                                "SetPoint TX short write: written={} len={} (seq={})",
-                                written, slip_len, seq
-                            );
-                        }
-                        Err(err) => {
-                            warn!(
-                                "SetPoint TX write error (seq={} target={} mA): {:?}",
-                                seq, target_i_ma, err
-                            );
-                        }
-                    }
-                } else {
-                    warn!("SetPoint TX slip_encode error");
-                }
-            } else {
-                warn!("SetPoint TX encode_set_point_frame error");
-            }
+    let slip_len = match slip_encode(&raw[..frame_len], slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: slip_encode error: {:?}", ctx, err);
+            return false;
         }
+    };
 
-        #[cfg(feature = "mock_setpoint")]
-        {
-            yield_now().await;
+    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+        Ok(written) if written == slip_len => {
+            let _ = uhci_tx.uart_tx.flush_async().await;
+            SETPOINT_ACK_PENDING.store(true, Ordering::Release);
+            info!(
+                "{}: setpoint frame sent seq={} target={} mA len={} slip_len={}",
+                ctx, seq, target_i_ma, frame_len, slip_len
+            );
+            true
         }
-
-        #[cfg(not(feature = "mock_setpoint"))]
-        {
-            cooperative_delay_ms(SETPOINT_TX_PERIOD_MS).await;
+        Ok(written) => {
+            warn!(
+                "{}: short write {} < {} (seq={}, target={} mA)",
+                ctx, written, slip_len, seq, target_i_ma
+            );
+            false
+        }
+        Err(err) => {
+            warn!(
+                "{}: uart write error for setpoint seq={}: {:?}",
+                ctx, seq, err
+            );
+            false
         }
     }
 }
-
 async fn send_soft_reset_handshake(
     uhci_tx: &mut uhci::UhciTx<'static, Async>,
-    seq: &mut u8,
+    seq: u8,
     raw: &mut [u8; 64],
     slip: &mut [u8; 192],
-) {
+) -> bool {
     if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
-        return;
+        return true;
     }
 
     let reset = SoftReset {
@@ -1439,8 +1509,7 @@ async fn send_soft_reset_handshake(
             break;
         }
 
-        let send_seq = *seq;
-        let frame_len = match encode_soft_reset_frame(send_seq, &reset, false, raw) {
+        let frame_len = match encode_soft_reset_frame(seq, &reset, false, raw) {
             Ok(len) => len,
             Err(err) => {
                 warn!("soft_reset encode error: {:?}", err);
@@ -1461,16 +1530,15 @@ async fn send_soft_reset_handshake(
                 info!(
                     "soft_reset req sent (attempt={}, seq={}, reason={:?}, ts_ms={})",
                     attempt + 1,
-                    send_seq,
+                    seq,
                     reset.reason,
                     reset.timestamp_ms
                 );
-                *seq = seq.wrapping_add(1);
             }
             Ok(written) => {
                 warn!(
                     "soft_reset short write: written={} len={} (seq={})",
-                    written, slip_len, send_seq
+                    written, slip_len, seq
                 );
             }
             Err(err) => {
@@ -1486,7 +1554,9 @@ async fn send_soft_reset_handshake(
 
     if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
         info!("soft_reset ack received; continuing link init");
+        true
     } else {
         warn!("soft_reset ack not received after retries; proceed with caution");
+        false
     }
 }
