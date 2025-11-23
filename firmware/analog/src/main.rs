@@ -5,7 +5,7 @@ use defmt::*;
 use defmt_rtt as _;
 use panic_probe as _;
 
-use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use embassy_executor::Spawner;
 use embassy_stm32 as stm32;
 use embassy_stm32::adc::{Adc, AdcChannel, SampleTime, Temperature as AdcTemperature};
@@ -21,9 +21,10 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use libm::logf;
 use loadlynx_protocol::{
-    Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, MSG_SET_POINT, SlipDecoder,
-    SoftReset, SoftResetReason, decode_set_point_frame, decode_soft_reset_frame,
-    encode_fast_status_frame, encode_soft_reset_frame, slip_encode,
+    CRC_LEN, Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
+    MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_set_point_frame,
+    decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame,
+    encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use stm32_metapac::VREFBUF;
@@ -86,6 +87,10 @@ const TARGET_I_MAX_MA: i32 = 2_000;
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 static SOFT_RESET_PENDING: AtomicBool = AtomicBool::new(false);
 static LAST_SOFT_RESET_REASON: AtomicU8 = AtomicU8::new(0);
+static LAST_SETPOINT_SEQ_VALID: AtomicBool = AtomicBool::new(false);
+static LAST_SETPOINT_SEQ: AtomicU8 = AtomicU8::new(0);
+static QUIET_UNTIL_MS: AtomicU32 = AtomicU32::new(0);
+const RAW_DUMP_BYTES: usize = 256;
 
 static UART_TX_SHARED: StaticCell<Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>> =
     StaticCell::new();
@@ -356,17 +361,21 @@ async fn main(_spawner: Spawner) -> ! {
         };
 
         if ENABLE_FAST_STATUS_TX {
-            let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
-                .expect("encode fast_status frame");
-            let slip_len =
-                slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
-            let mut tx = uart_tx_shared.lock().await;
-            if let Err(_err) = tx.write(&slip_frame[..slip_len]).await {
-                warn!("uart tx error; dropping frame");
+            let now_ms = timestamp_ms() as u32;
+            let quiet_until = QUIET_UNTIL_MS.load(Ordering::Relaxed);
+            if now_ms >= quiet_until {
+                let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
+                    .expect("encode fast_status frame");
+                let slip_len =
+                    slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
+                let mut tx = uart_tx_shared.lock().await;
+                if let Err(_err) = tx.write(&slip_frame[..slip_len]).await {
+                    warn!("uart tx error; dropping frame");
+                }
+                seq = seq.wrapping_add(1);
             }
         }
 
-        seq = seq.wrapping_add(1);
         uptime_ms = uptime_ms.wrapping_add(FAST_STATUS_PERIOD_MS as u32);
         Timer::after_millis(FAST_STATUS_PERIOD_MS).await;
     }
@@ -399,6 +408,34 @@ async fn apply_soft_reset_safing(
     );
 }
 
+async fn send_setpoint_ack(
+    seq: u8,
+    uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
+    ack_raw: &mut [u8],
+    ack_slip: &mut [u8],
+) {
+    let ack_len = match encode_ack_only_frame(seq, MSG_SET_POINT, false, ack_raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("setpoint ack encode error: {:?}", err);
+            return;
+        }
+    };
+    let slip_len = match slip_encode(&ack_raw[..ack_len], ack_slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("setpoint ack slip encode error: {:?}", err);
+            return;
+        }
+    };
+
+    let mut tx = uart_tx.lock().await;
+    match tx.write(&ack_slip[..slip_len]).await {
+        Ok(_) => info!("setpoint ACK sent: seq={} len={}B", seq, slip_len),
+        Err(err) => warn!("setpoint ack write error: {:?}", err),
+    }
+}
+
 async fn handle_soft_reset_request(
     uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
     ack_raw: &mut [u8],
@@ -407,12 +444,26 @@ async fn handle_soft_reset_request(
     reset: SoftReset,
 ) {
     if header.flags & FLAG_IS_ACK != 0 {
-        info!("soft_reset ack received on analog side (unexpected but ignored)");
+        info!(
+            "soft_reset ack received on analog side (unexpected but ignored) seq={}",
+            header.seq
+        );
         return;
     }
 
     LAST_SOFT_RESET_REASON.store(u8::from(reset.reason), Ordering::Relaxed);
     SOFT_RESET_PENDING.store(true, Ordering::SeqCst);
+    LAST_SETPOINT_SEQ_VALID.store(false, Ordering::Relaxed);
+    QUIET_UNTIL_MS.store(
+        (timestamp_ms() as u32).saturating_add(500),
+        Ordering::Relaxed,
+    );
+    LAST_SETPOINT_SEQ_VALID.store(false, Ordering::Relaxed);
+
+    info!(
+        "soft_reset request received: seq={} reason={:?} ts_ms={}",
+        header.seq, reset.reason, reset.timestamp_ms
+    );
 
     let ack_len = match encode_soft_reset_frame(header.seq, &reset, true, ack_raw) {
         Ok(len) => len,
@@ -451,10 +502,68 @@ async fn uart_setpoint_rx_task(
     );
 
     let mut decoder: SlipDecoder<128> = SlipDecoder::new();
+    decoder.reset(); // ensure clean state on startup
     let mut buf = [0u8; 32];
     let mut byte_count: u32 = 0;
     let mut ack_raw = [0u8; 64];
     let mut ack_slip = [0u8; 96];
+
+    // Startup quiet window: ignore traffic for a short period to align buffers.
+    QUIET_UNTIL_MS.store(
+        (timestamp_ms() as u32).saturating_add(500),
+        Ordering::Relaxed,
+    );
+
+    // Drain any stale bytes in UART FIFO to avoid misaligned first frame, and
+    // resynchronize to the first SLIP_END boundary before starting decode.
+    if let Ok(drained) = uart_rx.read(&mut buf).await {
+        if drained > 0 {
+            info!("SetPoint RX: drained {} stale bytes before start", drained);
+        }
+    }
+
+    // Wait until we see two consecutive SLIP_END to align to frame boundary.
+    let mut end_seen = 0;
+    loop {
+        match uart_rx.read(&mut buf[..1]).await {
+            Ok(1) if buf[0] == SLIP_END => {
+                end_seen += 1;
+                if end_seen >= 2 {
+                    decoder.reset();
+                    info!("SetPoint RX: synced to double SLIP_END boundary");
+                    break;
+                }
+            }
+            Ok(_) => end_seen = 0,
+            Err(_) => break,
+        }
+    }
+
+    // Dump first RAW_DUMP_BYTES of raw UART stream for debugging, without decoding.
+    let mut raw_dump = [0u8; RAW_DUMP_BYTES];
+    let mut raw_len = 0usize;
+    let dump_start = timestamp_ms() as u32;
+    while raw_len < RAW_DUMP_BYTES {
+        match uart_rx.read(&mut buf).await {
+            Ok(n) if n > 0 => {
+                let take = core::cmp::min(n, RAW_DUMP_BYTES - raw_len);
+                raw_dump[raw_len..raw_len + take].copy_from_slice(&buf[..take]);
+                raw_len += take;
+            }
+            _ => {}
+        }
+        if (timestamp_ms() as u32).wrapping_sub(dump_start) > 300 {
+            break;
+        }
+    }
+    if raw_len > 0 {
+        info!(
+            "SetPoint RX raw_dump len={} data={=[u8]:#04x}",
+            raw_len,
+            &raw_dump[..raw_len]
+        );
+    }
+    decoder.reset();
 
     loop {
         match uart_rx.read(&mut buf).await {
@@ -466,13 +575,21 @@ async fn uart_setpoint_rx_task(
                     }
                     match decoder.push(b) {
                         Ok(Some(frame)) => {
+                            if frame.len() < HEADER_LEN + CRC_LEN {
+                                warn!(
+                                    "SetPoint RX: too-short frame len={} resetting decoder",
+                                    frame.len()
+                                );
+                                decoder.reset();
+                                continue;
+                            }
                             info!(
                                 "SetPoint RX: SLIP frame len={}, head={=[u8]:#04x}",
                                 frame.len(),
                                 &frame[..frame.len().min(16)]
                             );
                             match decode_set_point_frame(&frame) {
-                                Ok((_hdr, sp)) => {
+                                Ok((hdr, sp)) => {
                                     let mut v = sp.target_i_ma;
                                     if v < TARGET_I_MIN_MA {
                                         v = TARGET_I_MIN_MA;
@@ -480,11 +597,42 @@ async fn uart_setpoint_rx_task(
                                     if v > TARGET_I_MAX_MA {
                                         v = TARGET_I_MAX_MA;
                                     }
-                                    let prev = TARGET_I_LOCAL_MA.swap(v, Ordering::Relaxed);
-                                    info!(
-                                        "SetPoint received: target_i_ma={} mA (prev={} mA)",
-                                        v, prev
-                                    );
+                                    let last_seq = LAST_SETPOINT_SEQ.load(Ordering::Relaxed);
+                                    let last_valid =
+                                        LAST_SETPOINT_SEQ_VALID.load(Ordering::Relaxed);
+                                    let is_dup = last_valid && hdr.seq == last_seq;
+
+                                    if !is_dup {
+                                        let prev = TARGET_I_LOCAL_MA.swap(v, Ordering::Relaxed);
+                                        LAST_SETPOINT_SEQ.store(hdr.seq, Ordering::Relaxed);
+                                        LAST_SETPOINT_SEQ_VALID.store(true, Ordering::Relaxed);
+                                        info!(
+                                            "SetPoint received: target_i_ma={} mA (prev={} mA, seq={})",
+                                            v, prev, hdr.seq
+                                        );
+                                    } else if !last_valid {
+                                        // First frame must establish seq; if not valid yet, reset decoder.
+                                        warn!(
+                                            "SetPoint RX: seq invalid on first frame, resetting decoder"
+                                        );
+                                        LAST_SETPOINT_SEQ_VALID.store(false, Ordering::Relaxed);
+                                        decoder.reset();
+                                        continue;
+                                    } else {
+                                        info!(
+                                            "SetPoint duplicate received: seq={} target_i_ma={} mA (ignored, ack only)",
+                                            hdr.seq, v
+                                        );
+                                    }
+
+                                    // ACK regardless of whether it was a duplicate to keep sender state in sync.
+                                    send_setpoint_ack(
+                                        hdr.seq,
+                                        uart_tx,
+                                        &mut ack_raw,
+                                        &mut ack_slip,
+                                    )
+                                    .await;
                                 }
                                 Err(ProtocolError::UnsupportedMessage(_)) => {
                                     match decode_soft_reset_frame(&frame) {

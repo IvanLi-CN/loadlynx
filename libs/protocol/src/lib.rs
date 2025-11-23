@@ -222,6 +222,34 @@ pub fn encode_fast_status_frame(
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
+/// Encode an ACK or NACK frame with no payload. This is intended for
+/// lightweight confirmations such as SetPoint ACKs. `msg` is echoed from the
+/// original request; `is_nack` selects between ACK (`FLAG_IS_ACK`) and NACK
+/// (`FLAG_IS_NACK`).
+pub fn encode_ack_only_frame(
+    seq: u8,
+    msg: u8,
+    is_nack: bool,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = if is_nack { FLAG_IS_NACK } else { FLAG_IS_ACK };
+    out[2] = seq;
+    out[3] = msg;
+    out[4] = 0;
+    out[5] = 0;
+
+    let crc = crc16_ccitt_false(&out[..HEADER_LEN]);
+    let crc_bytes = crc.to_le_bytes();
+    out[HEADER_LEN] = crc_bytes[0];
+    out[HEADER_LEN + 1] = crc_bytes[1];
+    Ok(HEADER_LEN + CRC_LEN)
+}
+
 /// Encode a `SetPoint` payload into a binary frame with header and CRC,
 /// ready for SLIP framing.
 pub fn encode_set_point_frame(
@@ -582,6 +610,19 @@ mod tests {
         }
         let recovered = recovered.expect("frame not recovered");
         assert_eq!(&recovered[..], &raw[..len]);
+    }
+
+    #[test]
+    fn ack_only_frame_roundtrip() {
+        let mut raw = [0u8; 16];
+        let len = encode_ack_only_frame(5, MSG_SET_POINT, false, &mut raw).unwrap();
+        assert_eq!(len, HEADER_LEN + CRC_LEN);
+
+        let (hdr, payload) = decode_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.seq, 5);
+        assert_eq!(hdr.msg, MSG_SET_POINT);
+        assert_eq!(hdr.flags & FLAG_IS_ACK, FLAG_IS_ACK);
+        assert_eq!(payload.len(), 0);
     }
 
     #[test]
