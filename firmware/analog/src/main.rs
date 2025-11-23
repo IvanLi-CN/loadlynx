@@ -77,7 +77,7 @@ const SENSE_GAIN_DEN: u32 = 10;
 const DEFAULT_TARGET_I_LOCAL_MA: i32 = 500;
 // 可接受的目标电流范围（mA），用于防止异常指令导致过流。
 const TARGET_I_MIN_MA: i32 = 0;
-const TARGET_I_MAX_MA: i32 = 2_000;
+const TARGET_I_MAX_MA: i32 = 5_000;
 
 // 由数字板通过 SetPoint 消息更新的电流设定（mA）。
 //

@@ -102,6 +102,9 @@ const UART_DMA_BUF_LEN: usize = 1536;
 // SetPoint 发送频率：降到 10Hz（100ms）以减轻模拟侧 UART 压力
 const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
 const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
+const TARGET_I_MIN_MA: i32 = 0;
+const TARGET_I_MAX_MA: i32 = 5_000;
+const ENCODER_MAX_STEPS: i32 = TARGET_I_MAX_MA / ENCODER_STEP_MA;
 const ENABLE_UART_UHCI_DMA: bool = true;
 // SetPoint 可靠传输：ACK 等待与退避重传（最新值优先）。
 const SETPOINT_ACK_TIMEOUT_MS: u32 = 40;
@@ -323,14 +326,42 @@ async fn encoder_task(
 
                 // Reverse logical direction to match panel orientation (CW increments).
                 let logical_step = -phys_step;
-                let new_val = ENCODER_VALUE
-                    .fetch_add(logical_step as i32, Ordering::SeqCst)
-                    .wrapping_add(logical_step as i32);
+                let mut prev_steps = ENCODER_VALUE.load(Ordering::SeqCst);
+                let (old_steps, new_steps) = loop {
+                    let candidate = (prev_steps + logical_step as i32).clamp(0, ENCODER_MAX_STEPS);
+                    match ENCODER_VALUE.compare_exchange(
+                        prev_steps,
+                        candidate,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(old) => break (old, candidate),
+                        Err(cur) => prev_steps = cur,
+                    }
+                };
 
-                if logical_step > 0 {
-                    info!("encoder cw: value={}", new_val);
-                } else {
-                    info!("encoder ccw: value={}", new_val);
+                if new_steps != old_steps {
+                    if logical_step > 0 {
+                        info!(
+                            "encoder cw: value={} ({} mA)",
+                            new_steps,
+                            new_steps * ENCODER_STEP_MA
+                        );
+                    } else {
+                        info!(
+                            "encoder ccw: value={} ({} mA)",
+                            new_steps,
+                            new_steps * ENCODER_STEP_MA
+                        );
+                    }
+                } else if (new_steps == 0 && logical_step < 0)
+                    || (new_steps == ENCODER_MAX_STEPS && logical_step > 0)
+                {
+                    info!(
+                        "encoder at limit: value={} ({} mA)",
+                        new_steps,
+                        new_steps * ENCODER_STEP_MA
+                    );
                 }
             }
         }
@@ -1452,7 +1483,8 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     loop {
         yield_now().await;
         let now = now_ms32();
-        let desired_target = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
+        let desired_target =
+            clamp_target_ma(ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA);
         let observed_target = LAST_TARGET_VALUE_FROM_STATUS.load(Ordering::Relaxed);
 
         if observed_target == desired_target {
@@ -1570,6 +1602,10 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
 
         cooperative_delay_ms(10).await;
     }
+}
+
+fn clamp_target_ma(v: i32) -> i32 {
+    v.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA)
 }
 
 async fn send_setpoint_frame(
