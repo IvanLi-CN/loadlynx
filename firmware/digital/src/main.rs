@@ -99,13 +99,13 @@ const UART_RX_TIMEOUT_SYMS: u8 = 12;
 const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段/截断
 // UART DMA 环形缓冲长度（同时作为 UHCI chunk_limit），与 SLIP 容量对齐以减少分段。
 const UART_DMA_BUF_LEN: usize = 1536;
-// SetPoint 发送频率：20Hz（50ms）
-const SETPOINT_TX_PERIOD_MS: u32 = 80; // used in encoder-driven mode
+// SetPoint 发送频率：降到 10Hz（100ms）以减轻模拟侧 UART 压力
+const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
 const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 const ENABLE_UART_UHCI_DMA: bool = true;
-// Single-shot test mode: send only one SetPoint and do not retry/advance seq.
-const SETPOINT_ACK_TIMEOUT_MS: u32 = 30;
-const SETPOINT_RETRY_BACKOFF_MS: [u32; 0] = [];
+// SetPoint 可靠传输：ACK 等待与退避重传（最新值优先）。
+const SETPOINT_ACK_TIMEOUT_MS: u32 = 40;
+const SETPOINT_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 #[repr(align(32))]
@@ -1047,7 +1047,7 @@ fn record_uart_error() {
 
 fn handle_setpoint_ack(header: &FrameHeader) {
     SETPOINT_LAST_ACK_SEQ.store(header.seq, Ordering::Relaxed);
-    SETPOINT_ACK_PENDING.store(true, Ordering::Release);
+    SETPOINT_ACK_PENDING.store(false, Ordering::Release);
     let total = SETPOINT_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
     info!(
         "setpoint ack received: seq={} flags=0x{:02x} len={} (ack_total={})",
@@ -1385,14 +1385,23 @@ async fn stats_task() {
     }
 }
 
-/// SetPoint 发送任务：10Hz，将编码器值映射为电流目标（步长 100mA）。
-/// 仅在目标变化时发送，不做自注入或心跳，避免与实际操作混淆。
+/// SetPoint 发送任务：20 Hz（或按需要），带 ACK 等待与退避重传，最新值优先。
 #[embassy_executor::task]
 async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     info!(
-        "SetPoint TX single-shot test starting (seq=1, msg_id=0x{:02x})",
-        MSG_SET_POINT
+        "SetPoint TX task starting (ack_timeout={} ms, backoff={:?})",
+        SETPOINT_ACK_TIMEOUT_MS, SETPOINT_RETRY_BACKOFF_MS
     );
+
+    #[derive(Clone, Copy)]
+    struct Pending {
+        seq: u8,
+        target_i_ma: i32,
+        attempts: u8, // includes initial send
+        ack_total_at_send: u32,
+        deadline_ms: u32,
+    }
+
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
 
@@ -1404,33 +1413,136 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
         warn!("soft_reset ack missing within retry window; continuing after quiet gap");
     }
 
-    // Short quiet gap to let both sides drain stale bytes and settle.
-    cooperative_delay_ms(150).await;
+    // 更长的静默让模拟侧 UART 启动稳定，避免一上电被突发刷屏。
+    cooperative_delay_ms(300).await;
 
-    // Single SetPoint seq=1, no retries
-    let target_i_ma = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
-    let send_seq = 1u8;
-    if send_setpoint_frame(
-        &mut uhci_tx,
-        send_seq,
-        target_i_ma,
-        &mut raw,
-        &mut slip,
-        "single-test",
-    )
-    .await
-    {
-        SETPOINT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
-        info!(
-            "single-shot setpoint sent seq={} target={} mA",
-            send_seq, target_i_ma
-        );
-    } else {
-        warn!("single-shot setpoint send failed");
+    let mut seq: u8 = 1;
+    let mut pending: Option<Pending> = None;
+    let mut last_sent_target: Option<i32> = None;
+    let mut last_sent_ms: u32 = now_ms32();
+    let mut mismatch_streak: u8 = 0;
+
+    loop {
+        yield_now().await;
+        let now = now_ms32();
+        let desired_target = ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA;
+        let observed_target = LAST_TARGET_VALUE_FROM_STATUS.load(Ordering::Relaxed);
+
+        if observed_target == desired_target {
+            mismatch_streak = 0;
+        } else {
+            mismatch_streak = mismatch_streak.saturating_add(1);
+        }
+
+        // Check for ACK arrival on the current pending seq.
+        let ack_hit = if let Some(p) = pending.as_ref() {
+            let ack_total = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+            let ack_seq = SETPOINT_LAST_ACK_SEQ.load(Ordering::Relaxed);
+            ack_total != p.ack_total_at_send && ack_seq == p.seq
+        } else {
+            false
+        };
+        if ack_hit {
+            if let Some(p) = pending.take() {
+                SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+                last_sent_target = Some(p.target_i_ma);
+                last_sent_ms = now;
+            }
+            continue;
+        }
+
+        // Pre-empt with latest value if target changed while waiting.
+        let mut should_send_new = false;
+        let mut send_reason = "periodic";
+        if let Some(p) = pending.as_ref() {
+            if p.target_i_ma != desired_target {
+                should_send_new = true;
+                send_reason = "latest-value-preempt";
+                pending = None; // drop old pending; latest值优先
+            }
+        } else if last_sent_target
+            .map(|t| t != desired_target)
+            .unwrap_or(true)
+            && now.saturating_sub(last_sent_ms) >= SETPOINT_TX_PERIOD_MS
+        {
+            should_send_new = true;
+            send_reason = "target-change";
+        } else if mismatch_streak >= 3 {
+            should_send_new = true;
+            send_reason = "telemetry-mismatch";
+        }
+
+        if should_send_new {
+            let send_seq = seq;
+            seq = seq.wrapping_add(1);
+            let ack_baseline = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+            if send_setpoint_frame(
+                &mut uhci_tx,
+                send_seq,
+                desired_target,
+                &mut raw,
+                &mut slip,
+                send_reason,
+            )
+            .await
+            {
+                SETPOINT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
+                let deadline = now.saturating_add(SETPOINT_ACK_TIMEOUT_MS);
+                last_sent_target = Some(desired_target);
+                last_sent_ms = now;
+                pending = Some(Pending {
+                    seq: send_seq,
+                    target_i_ma: desired_target,
+                    attempts: 1,
+                    ack_total_at_send: ack_baseline,
+                    deadline_ms: deadline,
+                });
+            } else {
+                SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+            }
+        } else if let Some(mut p) = pending.take() {
+            // Timeout + retry path
+            if now >= p.deadline_ms {
+                if (p.attempts as usize) <= SETPOINT_RETRY_BACKOFF_MS.len() {
+                    let backoff_ms = SETPOINT_RETRY_BACKOFF_MS[(p.attempts - 1) as usize];
+                    let ack_baseline = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+                    let send_seq = p.seq;
+                    if send_setpoint_frame(
+                        &mut uhci_tx,
+                        send_seq,
+                        p.target_i_ma,
+                        &mut raw,
+                        &mut slip,
+                        "retx",
+                    )
+                    .await
+                    {
+                        SETPOINT_RETX_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        p.attempts = p.attempts.saturating_add(1);
+                        p.ack_total_at_send = ack_baseline;
+                        p.deadline_ms = now.saturating_add(backoff_ms);
+                        last_sent_ms = now;
+                        pending = Some(p);
+                    } else {
+                        SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+                        pending = None;
+                    }
+                } else {
+                    SETPOINT_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        "setpoint ack timeout after {} attempts (seq={}, target={} mA)",
+                        p.attempts, p.seq, p.target_i_ma
+                    );
+                    SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+                    pending = None;
+                }
+            } else {
+                pending = Some(p);
+            }
+        }
+
+        cooperative_delay_ms(10).await;
     }
-
-    cooperative_delay_ms(1000).await;
-    info!("setpoint tx single-shot test done");
 }
 
 async fn send_setpoint_frame(

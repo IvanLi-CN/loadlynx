@@ -19,7 +19,7 @@
   - 进展/结果：完成。6 分钟 soak（序号自增 1..255 循环）数字侧统计 setpoint_tx=1319、ack=1319、retx=0、timeout=0、decode_errs=0，模拟侧全程逐帧 ACK 无告警，未见 FAST_STATUS CRC/长度错误。
   - 备注：日志路径 `tmp/agent-logs/digital-20251123-133501.log`（360 s）与 `tmp/agent-logs/analog-20251123-133444.log`（~315 s，含 seq wrap），当前固件版本：analog 0.1.0 (fe7cc03-dirty)、digital 0.1.0 (951a3ed-dirty, soak build)。
 
-- [ ] 任务名：实现 SetPoint ACK/重传机制，避免状态不同步
+- [x] 任务名：实现 SetPoint ACK/重传机制，避免状态不同步
   - 描述/复现：当前 SetPoint 仅发送不等确认，掉帧时模拟板目标不更新；需按 `docs/interfaces/uart-link.md` 新增的“SetPoint 可靠传输方案（v1）”实现并验证。
   - 验收标准：
     1) 数字侧出现 `setpoint sent` 后在超时时间内看到匹配的 `setpoint ack received`；
@@ -35,8 +35,8 @@
       - 数字侧开启 mock_setpoint 生成可重复的 SetPoint 流，结合退避重传统计；
       - 在真机 dual monitor 场景运行 40–60 s，记录双端日志，自动统计 sent/ack/retx/dup；
       - 脱机脚本检查：ACK 覆盖率 100%，重传次数在预期范围内（掉线时可恢复），遥测 `target_value` 与期望一致。
-  - 进展/结果：未开始。
-  - 备注：实现后需回归 dual monitor 40 s 与人工掉帧测试。
+  - 进展/结果：数字侧实现 ACK 等待、40/80/160 ms 退避重传与 300 ms 启动静默，10 Hz 发送（100 ms 周期）；模拟侧幂等 ACK。mock_setpoint 双板 40 s 验证（日志：digital `tmp/agent-logs/digital-dual-20251123-151533.log` / analog `tmp/agent-logs/analog-dual-20251123-151533.log`）：sent=95、ack=95、retx=2、timeout=0，模拟侧 292 次 ACK 覆盖 214 个唯一 seq，目标电流 0–2000 mA 全部应用，无超时。
+  - 备注：decode_err 偶发 payload length mismatch 属独立任务处理；如需更长 soak 可延长 dual monitor。
 
 - [ ] 任务名：消除正常运行下的协议解码错误（payload length mismatch）
   - 描述/复现：默认配置 dual monitor 运行 40 秒，偶发 `payload length mismatch`。
