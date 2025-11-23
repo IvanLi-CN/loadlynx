@@ -50,7 +50,7 @@ Hardware-in-the-loop verification is now driven by the single-instance `tools/mc
 
 - Daemon control: `just agentd-start` / `just agentd-status` / `just agentd-stop` (equivalent to `cd tools/mcu-agentd && cargo run --release -- {start|status|stop}`). Socket and lock live under `logs/agentd/`.
 - Port/probe cache:
-  - Set: `just agentd-set-port digital /dev/tty.usbserial-xxxx`; `just agentd-set-port analog 0483:3748:SERIAL` (omit the path to enter interactive selection).
+  - Set: `just agentd set-port digital /dev/tty.usbserial-xxxx`; `just agentd set-port analog 0483:3748:SERIAL`（无连字符版本）。在修改端口/探针前必须征得用户明确批准，严禁擅自切换连接设备。
   - Get: `just agentd-get-port digital` / `analog`.
 - Flash: `just agentd flash digital` or `just agentd flash analog`. Uses release ELF by default; if the default ELF is missing it will ask to build or to provide `--elf`. Digital supports `--after hard-reset`.
 - Reset: `just agentd reset digital|analog` (reset only, no flash).
@@ -63,9 +63,11 @@ Hardware-in-the-loop verification is now driven by the single-instance `tools/mc
 
 ### Expectations
 
-- Prefer `mcu-agentd` for build/flash/reset/log capture; do not ask the user to run scripts manually. If a port/probe is unknown, use `set-port`/`list-ports` first, then confirm with the user.
+ - Prefer `mcu-agentd` for build/flash/reset/log capture; do not ask the user to run scripts manually. If a port/probe is unknown,在获得用户明确同意后再使用 `just agentd set-port ...` 或 `just agentd list-ports`，不得擅自调用或更换连接设备。
+- `agentd` will first use its cached port/probe or auto-select a likely candidate; only if it cannot resolve a usable port/probe and returns an error should the user be asked to confirm or provide one.
 - When analyzing logs, always cross-check `LOADLYNX_FW_VERSION` against local `tmp/{analog|digital}-fw-version.txt`.
 - Treat probe-rs/espflash failures as repository engineering issues first; adjust config or command arguments before escalating.
+
 ## Commit & Pull Request Guidelines
 
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`, etc. Examples from history: `feat: scaffold ...`, `docs: add Markdown datasheets ...`.
