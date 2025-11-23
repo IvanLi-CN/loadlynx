@@ -6,7 +6,8 @@ SHELL := /bin/sh
 
 .PHONY: help fmt FORCE \
         a-build a-run a-run-force a-attach a-reset a-reset-attach a-info a-clean a-size \
-        d-build d-run d-reset d-reset-attach d-attach d-monitor d-ports d-env d-clean
+        a-run-pick a-probes a-select-probe select-probe \
+        d-build d-run d-reset d-reset-attach d-attach d-monitor d-ports d-env d-clean d-select-port
 
 help:
 	@echo "LoadLynx Makefile"
@@ -20,7 +21,8 @@ help:
 	@echo "  a-info                  Show STM32G431 build artifacts"
 	@echo "  a-size                  Print STM32G431 ELF size (requires cargo-binutils)"
 	@echo "  a-clean                 Clean STM32G431 artifacts"
-	@echo "  a-probes               List STM32 debug probes (VID:PID[:SER])"
+	@echo "  a-probes                List STM32 debug probes (VID:PID[:SER])"
+	@echo "  a-select-probe          Force reselect and cache STM32 debug probe"
 	@echo "  d-build                 Build ESP32-S3 firmware (cargo +esp)"
 	@echo "  d-run                   Flash + monitor ESP32-S3 (espflash)"
 	@echo "  d-reset                 Reset ESP32-S3 via espflash"
@@ -28,6 +30,7 @@ help:
 	@echo "  d-attach                Monitor ESP32-S3 using existing ELF"
 	@echo "  d-monitor               Alias for d-attach"
 	@echo "  d-ports                 List ESP32-S3 serial ports"
+	@echo "  d-select-port           Force reselect and cache ESP32-S3 serial port"
 	@echo "  d-env                   Show ESP32-S3 build environment"
 	@echo "  d-clean                 Clean ESP32-S3 artifacts"
 	@echo "Vars forwarded automatically (if set):"
@@ -117,7 +120,7 @@ a-run-pick:
 	./scripts/select_stm32_probe.sh a-run $(if $(PROFILE),PROFILE=$(PROFILE),)
 
 # explicit reselection: forget cached probe and pick again
-select-probe:
+a-select-probe select-probe:
 	rm -f .stm32-probe
 	./scripts/select_stm32_probe.sh
 
@@ -166,6 +169,10 @@ d-monitor: d-attach
 
 d-ports:
 	$(MAKE) -C firmware/digital ports
+
+d-select-port:
+	rm -f .esp32-port
+	PORT=$${PORT:-} ./scripts/ensure_esp32_port.sh
 
 d-env:
 	$(MAKE) -C firmware/digital env \

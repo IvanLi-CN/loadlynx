@@ -76,6 +76,26 @@ if [ -f "$CACHE_FILE" ]; then
   fi
 fi
 
+# Interactive selection when multiple ports are present and we are in a TTY.
+if [ -t 0 ] && [ -t 1 ]; then
+  err "[esp32-port] 检测到多个串口: ${ALL_PORTS[*]}"
+  err "[esp32-port] 请选择要使用的端口（或 Ctrl+C 退出）："
+  PS3="[esp32-port] 输入编号并回车: "
+  select choice in "${ALL_PORTS[@]}" "取消/Cancel"; do
+    case "$choice" in
+      "取消/Cancel"|"")
+        err "[esp32-port] 已取消。使用 PORT=/dev/cu.xxx make d-reset-attach 或写入 .esp32-port 指定。"
+        exit 1 ;;
+      *)
+        if contains_port "$choice" "${ALL_PORTS[@]}"; then
+          pick_port "$choice"
+          exit 0
+        fi
+        err "[esp32-port] 无效选择，请重新输入。" ;;
+    esac
+  done
+fi
+
 err "[esp32-port] 检测到多个串口: ${ALL_PORTS[*]}"
 err "[esp32-port] 请使用 PORT=/dev/cu.xxx make d-reset-attach（或写入 .esp32-port）来选择。"
 exit 1
