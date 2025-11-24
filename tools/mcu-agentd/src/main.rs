@@ -14,6 +14,7 @@ use serde_json;
 use serialport::{SerialPortType, available_ports};
 use server::Server;
 use std::path::PathBuf;
+use std::process::exit;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::time::{Duration, Instant};
@@ -125,6 +126,18 @@ enum OptionAfter {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    fn print_and_exit(resp: &model::ClientResponse) -> Result<()> {
+        let out = serde_json::to_string_pretty(resp)?;
+        if resp.ok {
+            println!("{}", out);
+            Ok(())
+        } else {
+            eprintln!("{}", out);
+            exit(1);
+        }
+    }
+
     match cli.cmd {
         Cmd::Serve => {
             Server::run().await?;
@@ -135,7 +148,7 @@ async fn main() -> Result<()> {
         }
         Cmd::Stop => {
             let resp = Server::try_stop().await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
         }
         Cmd::Status => match Server::client_send(ClientRequest::Status).await {
             Ok(resp) => println!("{}", serde_json::to_string_pretty(&resp)?),
@@ -154,15 +167,15 @@ async fn main() -> Result<()> {
                 path: p,
             })
             .await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
         }
         Cmd::GetPort { mcu } => {
             let resp = Server::client_send(ClientRequest::GetPort { mcu: mcu.into() }).await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
         }
         Cmd::ListPorts { mcu } => {
             let resp = Server::client_send(ClientRequest::ListPorts { mcu: mcu.into() }).await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
         }
         Cmd::Flash { mcu, elf, after } => {
             let resp = Server::client_send(ClientRequest::Flash {
@@ -171,11 +184,11 @@ async fn main() -> Result<()> {
                 after: Some(after.into()),
             })
             .await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
         }
         Cmd::Reset { mcu } => {
             let resp = Server::client_send(ClientRequest::Reset { mcu: mcu.into() }).await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
         }
         Cmd::Monitor {
             mcu,
@@ -194,7 +207,7 @@ async fn main() -> Result<()> {
                 lines: if lines == 0 { None } else { Some(lines) },
             })
             .await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
             if resp.ok {
                 if let Some(path) = resp.payload.get("path").and_then(|p| p.as_str()) {
                     tail_file(PathBuf::from(path), duration, lines).await?;
@@ -216,7 +229,7 @@ async fn main() -> Result<()> {
                 sessions,
             })
             .await?;
-            println!("{}", serde_json::to_string_pretty(&resp)?);
+            print_and_exit(&resp)?;
         }
     }
     Ok(())

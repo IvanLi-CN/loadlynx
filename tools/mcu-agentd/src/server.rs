@@ -415,6 +415,13 @@ async fn flash_mcu(
     };
     let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
     write_meta(paths, mcu, ts, "flash", &res)?;
+    if res.status != 0 {
+        return Err(anyhow!(
+            "flash command exited with status {} (see {})",
+            res.status,
+            res.session_file.display()
+        ));
+    }
     start_monitor_if_cached(paths, state, mcu, ts).await.ok();
     Ok(json!({
         "ts": ts.iso(),
@@ -456,6 +463,13 @@ async fn reset_mcu(
     };
     let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
     write_meta(paths, mcu, ts, "reset", &res)?;
+    if res.status != 0 {
+        return Err(anyhow!(
+            "reset command exited with status {} (see {})",
+            res.status,
+            res.session_file.display()
+        ));
+    }
     start_monitor_if_cached(paths, state, mcu, ts).await.ok();
     Ok(json!({
         "ts": ts.iso(),
