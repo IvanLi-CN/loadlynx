@@ -92,8 +92,6 @@ const SENSE_GAIN_DEN: u32 = 10;
 
 // 默认恒流目标（mA）：1.0 A，用于未接收到任何远端 SetPoint 时的启动值。
 const DEFAULT_TARGET_I_LOCAL_MA: i32 = 1_000;
-// 若需在无数字板场景强制固定目标，可在此设定；None 表示允许远端 SetPoint 覆盖。
-const FORCE_TARGET_I_LOCAL_MA: Option<i32> = Some(DEFAULT_TARGET_I_LOCAL_MA);
 // DAC 标定参考点（mA）：0.5 A → CC_0P5A_DAC_CODE_CH1。
 const DAC_CAL_REF_I_MA: i32 = 500;
 // 可接受的目标电流范围（mA），用于防止异常指令导致过流。
@@ -103,7 +101,7 @@ const TARGET_I_MAX_MA: i32 = 5_000;
 // 由数字板通过 SetPoint 消息更新的电流设定（mA）。
 //
 // - 初始值为 DEFAULT_TARGET_I_LOCAL_MA（1.0 A）。
-// - uart_setpoint_rx_task 解析 SetPoint 帧并写入该原子量（可被 FORCE_TARGET_I_LOCAL_MA 覆盖）。
+// - uart_setpoint_rx_task 解析 SetPoint 帧并写入该原子量；
 // - 采样/遥测主循环在每次迭代中读取该值，用于计算 DAC 目标码与 loop_error。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 static SOFT_RESET_PENDING: AtomicBool = AtomicBool::new(false);
@@ -225,12 +223,8 @@ async fn main(_spawner: Spawner) -> ! {
         uart_rx.into_ring_buffered(UART_RX_DMA_BUF.init([0; 256]));
 
     // 启动独立任务接收 SetPoint 控制消息。
-    if FORCE_TARGET_I_LOCAL_MA.is_none() {
-        if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring, uart_tx_shared)) {
-            warn!("failed to spawn uart_setpoint_rx_task: {:?}", e);
-        }
-    } else {
-        info!("SetPoint RX task skipped (forced target mode)");
+    if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring, uart_tx_shared)) {
+        warn!("failed to spawn uart_setpoint_rx_task: {:?}", e);
     }
 
     // ADC1/ADC2：阻塞读取即可满足 30Hz 遥测。
@@ -293,10 +287,8 @@ async fn main(_spawner: Spawner) -> ! {
     dac.ch2().set(DacValue::Bit12Right(0));
 
     info!(
-        "CC setpoint CH1: default target {} mA (DAC code = {}, forced_mode={})",
-        DEFAULT_TARGET_I_LOCAL_MA,
-        init_dac_code,
-        FORCE_TARGET_I_LOCAL_MA.is_some()
+        "CC setpoint CH1: default target {} mA (DAC code = {})",
+        DEFAULT_TARGET_I_LOCAL_MA, init_dac_code
     );
 
     let mut seq: u8 = 0;
@@ -369,11 +361,7 @@ async fn main(_spawner: Spawner) -> ! {
             ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
 
         // 按目标电流线性缩放 DAC 码。标定点：0.5 A → CC_0P5A_DAC_CODE_CH1。
-        let mut target_i_local_ma = if let Some(forced) = FORCE_TARGET_I_LOCAL_MA {
-            forced
-        } else {
-            TARGET_I_LOCAL_MA.load(Ordering::Relaxed)
-        };
+        let mut target_i_local_ma = TARGET_I_LOCAL_MA.load(Ordering::Relaxed);
         if target_i_local_ma < TARGET_I_MIN_MA {
             target_i_local_ma = TARGET_I_MIN_MA;
         }
@@ -462,7 +450,8 @@ async fn apply_soft_reset_safing(
     load_en_ctl.set_low();
     load_en_ts.set_low();
 
-    let reset_target = FORCE_TARGET_I_LOCAL_MA.unwrap_or(0);
+    // SOFT_RESET：清零目标电流，等待数字板重新下发 SetPoint。
+    let reset_target = 0;
     TARGET_I_LOCAL_MA.store(reset_target, Ordering::Relaxed);
     let reset_dac_code = ((CC_0P5A_DAC_CODE_CH1 as i32) * reset_target / DAC_CAL_REF_I_MA)
         .clamp(0, ADC_FULL_SCALE as i32) as u16;
