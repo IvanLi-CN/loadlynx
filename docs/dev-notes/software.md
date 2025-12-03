@@ -1,4 +1,4 @@
-# 软件开发笔记（ESP32-S3 启动流程）
+# 软件开发笔记（数字/模拟板启动与串口链路）
 
 本文档说明 ESP32-S3 固件在上电后执行的初始化流程，并区分 MCU 片上（SoC 内部资源）与片外（经 FPC/连接器到板级器件）的步骤，供调试与审计使用。
 
@@ -24,11 +24,11 @@
 1. **TPS82130 使能**
    - 延时结束后把 `ALG_EN` 拉高，通过 FPC 启动 `5V_EN`，驱动模拟板上的 TPS82130SILR EN 引脚（`docs/power/netlists/analog-board-netlist.enet:5288-5308`），隔离 5 V 轨开始为模拟域供电。
 2. **软复位模拟板（协议层，无需掉电）**
-   - 发送 `SOFT_RESET_REQ(reason=fw_update, timestamp_ms=now)` 并等待 `SOFT_RESET_ACK`；收到后等待新的 `HELLO` 再继续后续握手。
-   - 超时策略：150 ms 未 ACK 则重试 2 次；仍失败时提示 UI“软复位失败，可尝试电源循环”，不向模拟侧发送控制类指令。
-   - 目的：在保持持续供电的调试环境中，确保模拟侧控制环、故障锁存、积分器等被清空，避免残留状态。
+   - 数字侧通过 `SoftReset` 消息（0x26，`reason=fw_update`）请求模拟板进入安全态并清空故障/积分等内部状态。
+   - 当前固件在启动时最多尝试 3 次发送 SoftReset 请求，每次间隔约 150 ms；若在重试窗口内收到带 `FLAG_IS_ACK` 的应答则认为软复位成功。
+   - 若始终未收到 ACK，固件会在日志中给出类似 “soft_reset ack not received; proceed with caution” 的告警，但仍继续后续握手；推荐在 UI 中对这类情况额外标注“软复位可能未完成”并提示必要时进行电源循环。
 3. **任务调度启动**
-   - 启动任务执行器，此时模拟板 5 V 已经具备且完成软复位，可安全与 STM32/模拟前端协作。
+   - 启动任务执行器，此时模拟板 5 V 已经具备且软复位流程已尝试完成，可安全与 STM32/模拟前端协作。
 
 ## 2. 调参要点
 
@@ -46,146 +46,167 @@
 
 以上流程为当前 ESP32-S3 固件的权威初始化记录；若固件或硬件改版，请同步修订本笔记。
 
-## 4. 串口通信（最小验证 → FAST_STATUS 流）
+## 4. 串口链路与任务分工（当前实现）
 
-目标：在 ESP32‑S3 与 STM32G431 之间建立稳定的 UART 链路，并基于共享协议 crate（`loadlynx-protocol`）持续传输 FAST_STATUS 遥测帧。
+目标：在 ESP32‑S3 与 STM32G431 之间建立稳定的 UART 链路，并基于共享协议 crate（`loadlynx-protocol`）完成 FastStatus 遥测 + SetPoint/SoftReset/SetEnable/CalWrite 控制闭环。
 
-### ESP32‑S3 侧（UART1）
+### ESP32‑S3 侧（UART1 + UHCI DMA）
 
-- 实例与引脚：`UART1`，TX=`GPIO17`，RX=`GPIO18`（见 `docs/interfaces/pinmaps/esp32-s3.md:120-121`）。
-- 配置：`115200` baud，8N1，无流控；RX 侧使用较高 FIFO 满阈值与适度超时配置（见 `firmware/digital/src/main.rs` 中 `UartConfig`）。
-- 代码位置：`firmware/digital/src/main.rs` 中 `uart_link_task` + `feed_decoder`。
-- 行为：
-  - 持续从 UART1 读取字节流并送入 `SlipDecoder`，以 SLIP 帧边界拆分完整帧。
-  - 对每个完整帧调用 `decode_fast_status_frame`，解析出 `FastStatus`。
-  - 将解析结果写入 UI 模型（`TelemetryModel::update_from_status`），并周期打印 `fast_status ok (count=...)`（默认每 32 帧一次）。
-  - UART/协议错误通过限频日志计数：`UART RX error: ...`、`protocol decode error (...)` 等。
+- 实例与引脚：`UART1`，TX=`GPIO17`，RX=`GPIO18`（见 `docs/interfaces/pinmaps/esp32-s3.md`）。
+- 物理配置：`115200` baud，8N1；RX 侧使用较高 FIFO 满阈值（约 120 字节）与适度超时配置（`UART_RX_FIFO_FULL_THRESHOLD` / `UART_RX_TIMEOUT_SYMS`）。
+- 链路实现：
+  - 默认使用 `UART1 + UHCI DMA` 环形搬运（`uart_link_task_dma`），DMA 块交给 `SlipDecoder` 逐字节推送。
+  - `feed_decoder` 负责从 SLIP 流中拆出完整帧，先用 `decode_frame` 做头部 + CRC 校验，再按 `msg` 分发：
+    - `MSG_HELLO` → 更新 `HELLO_SEEN`/`LINK_UP` 标志；
+    - `MSG_FAST_STATUS` → 调用 `apply_fast_status` 更新 `TelemetryModel`，记录电压/电流/温度与故障标志；
+    - `MSG_SET_POINT`（带 `FLAG_IS_ACK`）→ 调用 `handle_setpoint_ack`，驱动 SetPoint 重传状态机；
+    - `MSG_SOFT_RESET`（带 `FLAG_IS_ACK`）→ 调用 `handle_soft_reset_frame`，确认软复位握手。
+  - 协议/SLIP 错误通过限频日志计数：`UART RX error: ...`、`protocol decode error (...)` 等。
+- 链路健康：
+  - 每次成功处理 `HELLO`/`FAST_STATUS`/ACK 帧都会刷新 `LAST_GOOD_FRAME_MS`；
+  - `stats_task` 每秒检查一次该时间戳，若 >300 ms 未见有效帧则将 `LINK_UP=false` 并在日志中标记“link down”，SetPoint 发送任务会在 `LINK_UP=false` 时暂缓新的控制指令。
 
-构建/烧录：
-
-- 构建：`(cd firmware/digital && cargo +esp build --release)` 或 `make d-build`
-- 烧录：`scripts/flash_s3.sh --release [--port /dev/tty.*]` 或 `make d-run PORT=/dev/tty.*`
-
-### STM32G431 侧（USART3）
+### STM32G431 侧（USART3 + 单任务主循环）
 
 - 实例与引脚：`USART3`，TX=`PC10`，RX=`PC11`（见 `docs/interfaces/uart-link.md` 与 `loadlynx.ioc`）。
-- 配置：`115200` baud，8N1。
-- 代码位置：`firmware/analog/src/main.rs` 中 `Uart::new(...)` 与主循环。
-- 行为：
-  - 以约 60 Hz 周期构造 `FastStatus` 模拟数据（电压、电流、功率、温度等字段）。
-  - 使用 `encode_fast_status_frame` 生成带 CRC 的帧，再通过 `slip_encode` 封装为 SLIP 流。
-  - 通过 USART3 发送整帧；若 UART 写入失败，会打印 `uart tx error; dropping frame` 但继续重试。
+- 物理配置：`115200` baud，8N1。
+- 结构：
+  - `main` 是唯一的 Embassy task，负责外设初始化 + 采样 + FastStatus 打包与发送；
+  - 另起一个 `uart_setpoint_rx_task` 使用 `RingBufferedUartRx + SlipDecoder` 接收控制帧。
+- 主循环职责（约 20 Hz）：
+  - 初始化时钟、VREFBUF、ADC1/ADC2、DAC1、USART3、`LOAD_EN_CTL/LOAD_EN_TS` 与板载 LED 后进入循环；
+  - 每 50 ms：
+    - 通过 VrefInt 计算当前 `vref_mv`；
+    - 采样本地/远端电压、电流、5 V 轨、电源温度、两路 NTC 与 MCU 内部温度；
+    - 根据传感器换算得到 `v_local_mv`/`v_remote_mv`、`i_local_ma`/`i_remote_ma`、`calc_p_mw`、三路温度与 `dac_headroom_mv`；
+    - 做远端 sense 判定：电压在 0.5–55 V 且 ADC 原码远离饱和，3 帧进入 / 2 帧退出，驱动 `STATE_FLAG_REMOTE_ACTIVE`；
+    - 基于 `LAST_RX_GOOD_MS` 与 300 ms 超时时间计算链路是否健康，超时则认为 link fault：LED1 以约 2 Hz 闪烁，并在 FastStatus 的 `state_flags` 中清除 `STATE_FLAG_LINK_GOOD`；
+    - 结合 `ENABLE_REQUESTED`、`CAL_READY` 与 `FAULT_FLAGS` 计算 `effective_enable_with_fault`，据此决定目标电流与 DAC 输出；
+    - 打包 `FastStatus`（包括 `fault_flags`）并通过 `encode_fast_status_frame + slip_encode` 从 USART3 发出。
 
-构建/烧录：
+### UART RX 任务与控制帧处理（G431）
 
-- 构建：`(cd firmware/analog && cargo build --release)` 或 `make a-build`
-- 烧录运行：`make a-run PROBE=<VID:PID[:SER]>` 或 `scripts/flash_g431.sh release PROBE=<...>`
+`uart_setpoint_rx_task` 在独立任务中消费 USART3 RX 环缓冲，逐帧解析控制消息：
+
+- `MSG_SET_POINT`：
+  - 成功解析后更新 `TARGET_I_LOCAL_MA`，并记录 `LAST_SETPOINT_SEQ`；
+  - 对首次或新 `seq` 应用 setpoint，重复 `seq` 视为重传只回 ACK 不改目标（幂等）；
+  - 通过 `encode_ack_only_frame(MSG_SET_POINT)` 立即返回 ACK，数字侧基于 `FLAG_IS_ACK` 驱动重传状态机。
+- `MSG_SOFT_RESET`：
+  - 收到请求帧后调用 `apply_soft_reset_safing`：
+    - 拉低 `LOAD_EN_CTL/LOAD_EN_TS`，硬件上断开功率级；
+    - 将目标电流与 DAC 输出清零，清除 `FAULT_FLAGS`；
+    - 稍作延时后重新拉高 `LOAD_EN_*` 以允许重新上电；
+  - 随后重发一次 `HELLO` 供数字侧确认版本；
+  - 同时刷新 `LAST_RX_GOOD_MS`。
+- `MSG_SET_ENABLE`：
+  - 更新 `ENABLE_REQUESTED`（true/false），主循环按 `enable && cal_ready && (fault_flags == 0)` 决定是否真正出力。
+- `MSG_CAL_WRITE`：
+  - 当前版本仅使用 `index=0` 的下行写入，payload 视为不透明；
+  - 成功解析任意一帧即置 `CAL_READY=true`，作为 enable gating 条件之一；
+  - 未实现上行 `CAL_READ` 或多块标定同步流程。
+
+### ESP32‑S3 UI 与遥测映射（摘要）
+
+- UI 实现位于 `firmware/digital/src/ui`，当前布局大致为：
+  - 左侧三张主卡片：主电压/主电流/主功率，对应 `FastStatus` 中选取的 main voltage/current/power；
+  - 右上角电压对：REMOTE 与 LOCAL 电压，`REMOTE_ACTIVE` 置位时以远端为主，否则 REMOTE 显示 `--.--` 且条形图归零；
+  - 右中部电流对：CH1/CH2 电流条，映射 `i_local_ma` 与 `i_remote_ma`；
+  - 底部 5 行状态文本：运行时间、两路散热片温度、MCU 温度以及故障概要（`FAULT OK` 或 `FAULT 0xXXXXXXXX`）。
+- Telemetry 模型在后台持续积分 `energy_wh`，当前 UI 尚未单独绘制该值，但已在 `UiSnapshot` 中保留字段，便于后续扩展或上位机导出。
+- UI 不直接控制任何安全逻辑，仅反映 `FastStatus` 内容；控制路径通过上文的 SetPoint/SoftReset/SetEnable 完成。
+- 风扇 PWM / Tach 控制虽然在引脚与协议层预留了钩子，但当前固件尚未实现相应驱动与控制逻辑。
 
 ### 联调与期望日志
 
 1. 先刷写 STM32 固件（analog），确认 probe 与供电正常；再刷写 ESP32‑S3 固件并打开监视串口。
 2. 在 ESP32‑S3 监视窗口中应看到：
-   - `LoadLynx digital alive; initializing local peripherals`（本地外设初始化）
-   - `UART link task starting`（串口任务启动）
-   - 随着链路稳定，周期出现 `fast_status ok (count=...)` 以及周期性的 UI 刷新日志（如有）。
-3. 如无 `fast_status ok` 日志或 UART/协议错误计数持续增加，请检查：
-   - 板间隔离器与引脚方向（见 `docs/interfaces/uart-link.md`）。
-   - 双端波特率/引脚是否一致（G431 使用 USART3 PC10/PC11；S3 使用 UART1 GPIO17/18）。
-   - G431 侧是否正常启动并打印 `LoadLynx analog alive; streaming mock FAST_STATUS frames`。
+   - `LoadLynx digital firmware version: ...`；
+   - `LoadLynx digital alive; initializing local peripherals`（本地外设初始化）；
+   - `spawning uart link task (UHCI DMA)` 与 `SetPoint TX task starting`；
+   - 随着链路稳定，周期出现 `fast_status ok (count=...)` 与 `stats: fast_status_ok=...` 等行。
+3. 在 G431 RTT 日志中应看到：
+   - `LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)`；
+   - VREFBUF/ADC 校准信息与周期性的 `sense: v_loc=...` 行；
+   - SoftReset、CalWrite、SetEnable、fault latch 等事件日志。
+4. 如长时间看不到 `fast_status ok` 或 UART/协议错误计数持续增加，请检查：
+   - 板间隔离器与引脚方向（见 `docs/interfaces/uart-link.md`）；
+   - 双端波特率/引脚是否一致（G431 使用 USART3 PC10/PC11；S3 使用 UART1 GPIO17/18）；
+   - G431 侧是否正常启动并打印上述初始化/遥测日志。
 
-当前链路已经实现 SLIP/CBOR/CRC 的最小可用版本，后续消息集与可靠性（ACK/重试/心跳）将按 `docs/interfaces/uart-link.md` 中的协议规划逐步扩展。
+当前链路已实现 `HELLO`、`FAST_STATUS`、`SET_POINT + ACK`、`SoftReset`、`SetEnable` 与单块 `CalWrite` 的 v0 最小闭环，其余消息类型与带宽规划见 `docs/interfaces/uart-link.md`。
 
-## 5. STM32G431 模拟板：电压/电流采样与 CC 恒流（0.5 A/通道测试版）
+## 5. STM32G431 模拟板：ADC 采样、CC 恒流与保护（当前实现）
 
-本节针对 `firmware/analog/`（STM32G431）侧的基础功能规划：在不引入复杂协议与 UI 交互的前提下，先打通本地电压/电流采样链路，并实现“固定 0.5 A/通道”的 CC 恒流模式，用于功率板与环路的 Bring‑up。
+本节简要描述 `firmware/analog/src/main.rs` 的当前架构。更细的协议字段与热设计仍以 `docs/interfaces/uart-link.md` 与 `docs/thermal/*` 为准。
 
-### 5.1 目标与边界
+### 5.1 启动流程与外设初始化
 
-- 功能目标
-  - 建立稳定的 ADC 采样路径：
-    - 采样每个通道的负载电流（分流电阻 → ADC）。
-    - 采样负载端电压（分压 → ADC）。
-    - 预留若干通道给温度/电源监控（NTC、VBUS/VIN 等），但当前阶段只保证接口打通。
-  - 在 MCU 侧提供简单 CC 功能：
-    - 上电后使用固定 setpoint=0.5 A/通道（测试阶段常量），通过 DAC/设定路径驱动模拟 CC 环路。
-    - 提供基础的过流/过压/过温保护钩子（先做检测与报警，再逐步完善关断策略）。
-- 范围与假设
-  - CC 闭环主带宽由板上运放 + 分流电阻构成的模拟环路提供（参见 `docs/boards/analog-board.md` 与 `docs/components/opamps/selection.md`）；MCU 仅负责设定与监督，不直接做高速数字环路。
-  - ADC、DAC 资源按 `loadlynx.ioc` 当前配置使用（ADC1/ADC2、DAC1），具体通道/引脚映射在实现阶段根据网表与 CubeMX 再细化到代码。
+- 使用 Embassy executor，仅保留一个 `main` 任务配合一个 UART RX 任务：
+  - 在 `main` 中初始化时钟、VREFBUF、ADC1/ADC2、DAC1、USART3、负载使能 GPIO（`LOAD_EN_CTL/LOAD_EN_TS`）以及板载 LED。
+  - 将 `LOAD_EN_CTL` 与 `LOAD_EN_TS` 拉高，使 CC 通道处于“硬件允许输出但由固件 gating”的状态。
+  - 通过 VREFBUF CSR 配置将内部基准设置到约 2.9 V 档位，为 ADC/DAC 提供稳定参考。
+- 启动 UART 环形缓冲接收与 `uart_setpoint_rx_task` 后，主循环进入 20 Hz 采样与 FastStatus 发送节奏。
 
-### 5.2 硬件路径梳理（基于现有文档）
+### 5.2 采样路径与 FastStatus 字段
 
-- 电流采样
-  - 分流电阻 Kelvin 接入 ADC（`docs/boards/analog-board.md`）；假定每个功率通道均有独立分流+运放。
-  - 至少一组 ADC 通道用于差分或带增益的电流采样（`loadlynx.ioc` 中 ADC2 存在差分配置）。
-- 电压采样
-  - 负载端电压通过分压 + RC 接入 ADC1 单端通道，用于：
-    - 显示与日志（远/近端电压）。
-    - 检测是否进入“电压钳位”区（为后续 CV/CP 模式预留）。
-- DAC 与设定路径
-  - DAC1 输出作为运放 / 比较环路的电流设定基准，驱动 NMOS 栅极缓冲（参见 TPS22810 + OPA2365 相关文档）。
-  - 固件侧以“电流设定（安培）→ DAC 码值”的一阶线性模型进行标定，系数从实测中回填。
-- 保护与监控
-  - 内部通道：利用 Vref、Vbat、温度传感器用于自校准与监控供电/结温。
-  - 外部通道：预留 NTC 采样通道，用于后续实现热降额与关断逻辑。
+每个 FastStatus 周期内，主循环完成：
 
-### 5.3 固件架构与任务划分
+- **参考电压与 5 V 轨**
+  - 多次采样 VrefInt 计算当前 `vref_mv`，用于将其余 ADC 原码转换为 mV/mA。
+  - 采样 `_5V_SNS` 得到模拟板 5 V 轨电压 `v_5v_mv`。
+- **电流与电压**
+  - 采样 `CUR1_SNS`/`CUR2_SNS`，根据硬件增益关系将测得电压换算为 `i_local_ma`/`i_remote_ma`（约等于 `2 × V_CUR[mV]`，覆盖 0–5 A 测试范围）。
+  - 采样 `V_NR_SNS`（近端）与 `V_RMT_SNS`（远端），结合差分放大器缩放系数得到 `v_local_mv`/`v_remote_mv`。
+  - 计算瞬时功率 `calc_p_mw = i_local_ma * v_local_mv / 1000`。
+- **温度**
+  - 采样两路 NTC（`TS1/TS2`）并通过 Steinhart–Hart 近似转换为 `sink_core_temp_mc` 与 `sink_exhaust_temp_mc`（单位 m°C）。
+  - 使用片上温度传感器得到 `mcu_temp_mc`，同样以 m°C 上报。
+- **远端 sense 判定**
+  - 对 `v_remote_mv` 做范围与饱和检查：0.5–55 V 且 ADC 原码远离 0 与满量程。
+  - 满足条件的连续 3 帧置位 `STATE_FLAG_REMOTE_ACTIVE`，失败连续 2 帧清除，形成 3 帧进入 / 2 帧退出的软判定。
+- **链路健康指示**
+  - 基于 `LAST_RX_GOOD_MS` 与 300 ms 超时时间计算 `link_fault`：
+    - 正常时 `STATE_FLAG_LINK_GOOD` 置位且 LED 熄灭；
+    - 超时则 LED 以约 2 Hz 闪烁，仅作为链路健康指示，不直接参与 enable gating。
 
-现状：`firmware/analog/src/main.rs` 仅实现 UART3 Echo，未使用 `Spawner` 与 Embassy 任务模型。
+### 5.3 使能 gating 与恒流控制
 
-规划中的任务划分（Embassy executor）：
+- 目标电流由数字板通过 `SetPoint` 下发，存入 `TARGET_I_LOCAL_MA`，单位 mA。
+- 有效出力条件为：
 
-1. `main` 启动阶段
-   - 初始化时钟、GPIO、ADC1/ADC2、DAC1、USART3。
-   - 启动以下异步任务：
-     - `adc_sampler_task`：周期性采样所有监控通道。
-     - `cc_supervisor_task`：基于采样结果与 setpoint 执行 CC 监督与限幅。
-     - `uart_telemetry_task`：通过 UART3 输出最小调试信息（电流/电压快照、告警）。
+  ```text
+  effective_enable_with_fault =
+      ENABLE_REQUESTED && CAL_READY && (FAULT_FLAGS == 0);
+  ```
 
-2. `adc_sampler_task`
-   - 使用 Embassy 的 ADC 驱动对一组通道轮询采样，形成结构化数据：
-     - `I_sense[ch]`：每个通道的电流原始码值。
-     - `V_load[ch]`：每个通道的负载电压原始码值。
-     - `T_ntc[ch]` / `V_in` / `V_ref`：按需要追加。
-   - 采样周期：先以“数百 Hz–几 kHz”级别轮询（具体频率根据后续环路/噪声测试再定），通过 `embassy_time::Ticker` 或定时触发机制实现。
-   - 对每个通道做简单的滑动平均/中值滤波，减小噪声对保护逻辑的瞬时触发。
+- 当上述条件不满足时，主循环强制目标电流为 0 mA，并将 DAC 输出拉到对应零点。
+- 当条件满足时：
+  - 将 `TARGET_I_LOCAL_MA` 限制在 `[0, 5_000]` mA 的安全区间；
+  - 按线性比例将目标电流映射为 DAC 码值（0.5 A → `CC_0P5A_DAC_CODE_CH1`），并更新 DAC CH1；
+  - 计算 `dac_headroom_mv = vref_mv - V_DAC`，用于观察环路是否即将打满。
 
-3. `cc_supervisor_task`
-   - 维护每个通道的目标电流 `I_set[ch]`，当前阶段固定为 0.5 A。
-   - 将 `I_set[ch]` 通过线性映射转换为 DAC 码值：
-     - `dac_code[ch] = k_gain[ch] * I_set[ch] + k_offset[ch]`。
-     - `k_gain / k_offset` 在 Bring‑up 阶段通过实测标定后写入常量或查表。
-   - 对 DAC 输出添加限幅与斜率限制：
-     - 限幅：确保 DAC 输出不超过功率级允许的最大电流/电压。
-     - 斜率限制：后续支持从 0 A → 目标电流的软启动，避免瞬时电流阶跃。
-   - 基于采样值实现基础保护：
-     - 过流：若 `I_sense[ch]` 明显高于目标且持续一定时间，拉低对应通道设定（甚至硬关断）。
-     - 过压：若 `V_load[ch]` 超过设计上限，降低设定或关断通道。
-     - 过温：若 NTC 显示温度超限，执行降额（降低 setpoint）或整体关断。
+主循环同时计算闭环误差 `loop_error = target_i_local_ma - i_local_ma` 并写入 FastStatus，供数字侧 UI 与诊断使用。
 
-4. `uart_telemetry_task`
-   - 维持当前的 UART3 链路，用于：
-     - 周期输出简短状态行（如 `CH1: 0.50A 12.0V OK`）。
-     - 输出告警事件（OV/OC/OT）。
-   - 当前阶段仍然可以保持简单 Echo 功能，便于上位机简单交互；后续再按 `docs/interfaces/uart-link.md` 替换为正式协议。
+### 5.4 故障检测与 SoftReset safing
 
-### 5.4 实现步骤（建议开发顺序）
+- **故障判定与锁存**
+  - 使用协议 crate 中的 4 个 fault bit：
+    - `FAULT_OVERCURRENT`：`i_local_ma > 5.5 A` 近似；
+    - `FAULT_OVERVOLTAGE`：`v_local_mv > 55 V`；
+    - `FAULT_MCU_OVER_TEMP`：`mcu_temp_mc > 110 °C`；
+    - `FAULT_SINK_OVER_TEMP`：`sink_core_temp_mc > 100 °C`。
+  - 一旦任意条件触发即将对应 bit OR 进 `FAULT_FLAGS`，并通过日志打印首次 latch；`FAULT_FLAGS` 在 FastStatus 中原样上报。
+  - `FAULT_FLAGS != 0` 会参与 `effective_enable_with_fault` 计算，将目标电流强制压到 0 mA，实现“故障即刻失能”的兜底保护。
+- **软复位 safing（数字侧触发）**
+  - 数字板通过 `SoftReset` 消息请求模拟侧清空状态；模拟侧收到请求后：
+    1. 拉低 `LOAD_EN_CTL/LOAD_EN_TS`，硬件上断开功率级；
+    2. 将目标电流与 DAC 输出清零，清除 `FAULT_FLAGS`；
+    3. 稍作延时后重新拉高 `LOAD_EN_*` 以允许重新上电；
+    4. 重发一次 `HELLO`，供数字侧确认版本并重新握手；
+    5. 等待新的 `SetEnable(true)` 与 `SetPoint` 重新建立闭环。
 
-1. **基础外设初始化**
-   - 在 G431 固件中初始化 ADC1/ADC2 与 DAC1，确认可对任意单通道进行采样与输出。
-   - 通过 UART3 打印单通道的原始 ADC 码值与 DAC 输出对应的实际电流/电压，完成“单点”连通性验证。
-2. **多通道采样与数据结构**
-   - 定义 `ChannelConfig` / `ChannelState` 结构体，包含：
-     - ADC 通道索引、DAC 通道索引。
-     - 标定系数（A/LSB、V/LSB）。
-   - 在 `adc_sampler_task` 中轮询多通道，并将结果写入 `ChannelState`。
-3. **固定 0.5 A CC 模式**
-   - 在上电初始化后，默认把所有通道的 `I_set[ch]` 置为 0.5 A，并通过 DAC 输出对应码值。
-   - 通过长时间运行（数十分钟）观察散热与稳定性，结合 `docs/thermal/*` 文档评估是否需要降额。
-4. **保护与限幅**
-   - 基于实测数据确定过流/过压/过温阈值，先实现“告警不关断”，再逐步加入关断/降额逻辑。
-5. **对接数字板与 UI**
-   - 在模拟侧确认 CC 0.5 A 测试稳定后，再通过 UART 协议与 ESP32‑S3 对接，将 setpoint/测量值纳入 UI 与上位机控制。
+### 5.5 历史 Bring‑up 规划（简述）
 
-以上设计作为 G431 模拟板电压/电流采样及固定 0.5 A 恒流 Bring‑up 的基础规划，后续若硬件参数或环路补偿有更新，请同步修订本节（特别是 ADC/DAC 通道映射与标定模型）。
+早期版本中，G431 侧仅实现 UART Echo 与固定 0.5 A 输出，规划是拆分为 `adc_sampler_task`、`cc_supervisor_task` 与 `uart_telemetry_task` 三个 Embassy 任务。本节前述当前实现已经在单任务主循环中落地了绝大部分规划要点（ADC 采样、恒流设定、基础保护与 FastStatus 遥测），后续若需要多通道扩展或更复杂的环路控制，可在此基础上再拆分任务与结构。
 
