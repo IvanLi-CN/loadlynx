@@ -24,9 +24,10 @@ use embassy_time::{Instant, Timer};
 use libm::logf;
 use loadlynx_protocol::{
     CRC_LEN, Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello,
-    MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_set_enable_frame,
-    decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
-    encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame, slip_encode,
+    MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_cal_write_frame,
+    decode_set_enable_frame, decode_set_point_frame, decode_soft_reset_frame,
+    encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame,
+    slip_encode,
 };
 use static_cell::StaticCell;
 
@@ -111,6 +112,8 @@ const TARGET_I_MAX_MA: i32 = 5_000;
 // - 采样/遥测主循环在每次迭代中读取该值，用于计算 DAC 目标码与 loop_error。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(true);
+// 标定是否已加载完成。仅在接收到至少一帧有效 CalWrite 后置为 true。
+static CAL_READY: AtomicBool = AtomicBool::new(false);
 // 最近一次成功接收到来自数字板的协议帧（SetPoint/SoftReset/SetEnable）的时间戳（ms）。
 // LED1 闪烁逻辑基于该时间差实现“当前是否通信异常”的粗略指示。
 static LAST_RX_GOOD_MS: AtomicU32 = AtomicU32::new(0);
@@ -122,7 +125,10 @@ static LAST_SOFT_RESET_REASON: AtomicU8 = AtomicU8::new(0);
 static LAST_SETPOINT_SEQ_VALID: AtomicBool = AtomicBool::new(false);
 static LAST_SETPOINT_SEQ: AtomicU8 = AtomicU8::new(0);
 static QUIET_UNTIL_MS: AtomicU32 = AtomicU32::new(0);
-const RAW_DUMP_BYTES: usize = 256;
+// UART RX debug dump window (bytes). Set to 0 to avoid swallowing the initial
+// control frames (SoftReset / CalWrite / SetEnable) before the SLIP decoder
+// starts normal processing.
+const RAW_DUMP_BYTES: usize = 0;
 
 static UART_TX_SHARED: StaticCell<Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>> =
     StaticCell::new();
@@ -490,12 +496,14 @@ async fn main(_spawner: Spawner) -> ! {
         let calc_p_mw =
             ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
 
-        // 远端 SetEnable gating：仅在 enable_requested=true 时才允许使用远端
-        // 目标电流；被关闭时 DAC 目标强制为 0 mA。
+        // 远端 SetEnable + 标定 gating：仅在 enable_requested=true 且 cal_ready=true
+        // 时才允许使用远端目标电流；否则 DAC 目标强制为 0 mA。
         let enable_requested = ENABLE_REQUESTED.load(Ordering::Relaxed);
+        let cal_ready = CAL_READY.load(Ordering::Relaxed);
+        let effective_enable = enable_requested && cal_ready;
 
         // 按目标电流线性缩放 DAC 码。标定点：0.5 A → CC_0P5A_DAC_CODE_CH1。
-        let mut target_i_local_ma = if enable_requested {
+        let mut target_i_local_ma = if effective_enable {
             TARGET_I_LOCAL_MA.load(Ordering::Relaxed)
         } else {
             0
@@ -540,14 +548,14 @@ async fn main(_spawner: Spawner) -> ! {
         if !link_fault {
             state_flags |= STATE_FLAG_LINK_GOOD;
         }
-        if enable_requested {
+        if effective_enable {
             state_flags |= STATE_FLAG_ENABLED;
         }
         let status = FastStatus {
             uptime_ms,
             mode: 1, // 简单视为 CC 模式
             state_flags,
-            enable: enable_requested,
+            enable: effective_enable,
             target_value: target_i_local_ma,
             i_local_ma,
             i_remote_ma,
@@ -878,6 +886,37 @@ async fn uart_setpoint_rx_task(
                                                         Ordering::Relaxed,
                                                     );
                                                     LINK_EVER_GOOD.store(true, Ordering::Relaxed);
+                                                }
+                                                Err(ProtocolError::UnsupportedMessage(_)) => {
+                                                    match decode_cal_write_frame(&frame) {
+                                                        Ok((_hdr, cal)) => {
+                                                            let prev = CAL_READY
+                                                                .swap(true, Ordering::Relaxed);
+                                                            info!(
+                                                                "CalWrite received: index={} cal_ready={} (prev={})",
+                                                                cal.index,
+                                                                CAL_READY.load(
+                                                                    Ordering::Relaxed
+                                                                ),
+                                                                prev,
+                                                            );
+                                                            LAST_RX_GOOD_MS.store(
+                                                                timestamp_ms() as u32,
+                                                                Ordering::Relaxed,
+                                                            );
+                                                            LINK_EVER_GOOD
+                                                                .store(true, Ordering::Relaxed);
+                                                        }
+                                                        Err(err) => {
+                                                            warn!(
+                                                                "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                                err,
+                                                                frame.len(),
+                                                                &frame[..frame.len().min(8)],
+                                                            );
+                                                            decoder.reset();
+                                                        }
+                                                    }
                                                 }
                                                 Err(err) => {
                                                     warn!(

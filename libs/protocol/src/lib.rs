@@ -34,6 +34,10 @@ pub const MSG_GET_STATUS: u8 = 0x24;
 /// Soft-reset request/ack handshake initiated by the digital side to reset
 /// analog-side state without power-cycling.
 pub const MSG_SOFT_RESET: u8 = 0x26;
+/// Calibration write message: S3 (digital) → G431 (analog).
+pub const MSG_CAL_WRITE: u8 = 0x30;
+/// Reserved for future calibration readback support.
+pub const MSG_CAL_READ: u8 = 0x31;
 
 pub const SLIP_END: u8 = 0xC0;
 pub const SLIP_ESC: u8 = 0xDB;
@@ -194,6 +198,26 @@ pub struct SetEnable {
     pub enable: bool,
 }
 
+/// Minimal single-block calibration write payload.
+///
+/// This is intentionally small and opaque for now; the digital side owns the
+/// layout of `payload`. The analog side only gates enable based on successful
+/// receipt of at least one `CalWrite` block.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default)]
+#[cbor(map)]
+pub struct CalWrite {
+    /// Chunk index for future multi-block support. For now only 0 is used.
+    #[n(0)]
+    pub index: u8,
+    /// Opaque 32-byte payload owned by the digital side.
+    #[n(1)]
+    pub payload: [u8; 32],
+    /// Optional inner CRC for the payload (e.g. CRC16 over index+payload).
+    #[n(2)]
+    pub crc: u16,
+}
+
 /// Optional GetStatus request used by the digital side to ask for an immediate
 /// FastStatus update. The `request_id` field is reserved for correlating a
 /// future reply; it is currently unused by the firmware.
@@ -350,6 +374,48 @@ pub fn encode_set_point_frame(
         let mut cursor = Cursor::new(payload_slice);
         let mut encoder = minicbor::Encoder::new(&mut cursor);
         encoder.encode(setpoint).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
+/// Encode a `CalWrite` payload into a binary frame with header and CRC.
+pub fn encode_cal_write_frame(
+    seq: u8,
+    cal: &CalWrite,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = 0;
+    out[2] = seq;
+    out[3] = MSG_CAL_WRITE;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(cal).map_err(map_encode_err)?;
         cursor.position()
     };
     if payload_len > u16::MAX as usize {
@@ -538,6 +604,17 @@ pub fn decode_set_enable_frame(frame: &[u8]) -> Result<(FrameHeader, SetEnable),
     let mut decoder = minicbor::Decoder::new(payload);
     let cmd: SetEnable = decoder.decode().map_err(map_decode_err)?;
     Ok((header, cmd))
+}
+
+/// Decode a `CalWrite` frame.
+pub fn decode_cal_write_frame(frame: &[u8]) -> Result<(FrameHeader, CalWrite), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_CAL_WRITE {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let cal: CalWrite = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, cal))
 }
 
 /// Decode a GetStatus frame.

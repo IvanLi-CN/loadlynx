@@ -46,10 +46,11 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    CRC_LEN, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_FAST_STATUS, MSG_HELLO,
-    MSG_SET_POINT, MSG_SOFT_RESET, SetEnable, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
-    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_soft_reset_frame,
-    encode_set_enable_frame, encode_set_point_frame, encode_soft_reset_frame, slip_encode,
+    CalWrite, CRC_LEN, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_CAL_WRITE,
+    MSG_FAST_STATUS, MSG_HELLO, MSG_SET_POINT, MSG_SOFT_RESET, SetEnable, SetPoint, SlipDecoder,
+    SoftReset, SoftResetReason, crc16_ccitt_false, decode_fast_status_frame, decode_frame,
+    decode_hello_frame, decode_soft_reset_frame, encode_cal_write_frame, encode_set_enable_frame,
+    encode_set_point_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -1533,6 +1534,50 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     cooperative_delay_ms(300).await;
 
     let mut seq: u8 = 1;
+
+    // 冷启动后先发送一次 CalWrite(index=0) 标定块，用于解锁模拟侧 CAL gating。
+    let mut cal = CalWrite {
+        index: 0,
+        payload: [0u8; 32],
+        crc: 0,
+    };
+    // 内部 CRC：沿用协议层 crc16_ccitt_false(index+payload)。
+    {
+        let mut buf = [0u8; 33];
+        buf[0] = cal.index;
+        buf[1..].copy_from_slice(&cal.payload);
+        cal.crc = crc16_ccitt_false(&buf);
+    }
+
+    match encode_cal_write_frame(seq, &cal, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "CalWrite(index={}, msg=0x{:02x}) frame sent seq={} len={} slip_len={}",
+                        cal.index, MSG_CAL_WRITE, seq, frame_len, slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "CalWrite short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!("CalWrite uart write error for seq={}: {:?}", seq, err);
+                }
+            },
+            Err(err) => {
+                warn!("CalWrite slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!("encode_cal_write_frame error: {:?}", err);
+        }
+    }
+    seq = seq.wrapping_add(1);
 
     // 启动链路后发送一次 SetEnable(true)，用于拉起模拟侧输出 gating。
     let enable_cmd = SetEnable { enable: true };
