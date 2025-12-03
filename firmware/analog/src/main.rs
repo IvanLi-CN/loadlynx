@@ -80,6 +80,11 @@ const ADC_FULL_SCALE: u32 = 4095;
 // 该地址存放的是在 VREF+ = VREF_CALIB_MV 条件下测得的 VrefInt ADC 原始码（12bit）。
 const VREFINT_CAL_ADDR: *const u16 = 0x1FFF_75AA as *const u16;
 
+// 远端 sense 软判定阈值：电压范围与 ADC 饱和裕度。
+const REMOTE_V_MIN_MV: i32 = 500;
+const REMOTE_V_MAX_MV: i32 = 55_000;
+const ADC_SAT_MARGIN: u16 = 32;
+
 // 近端 / 远端电压测量的缩放关系来自网表中 OPA2365 差分放大器：
 //
 // 远端（V_RMT_P / V_RMT_N）：
@@ -360,6 +365,11 @@ async fn main(_spawner: Spawner) -> ! {
 
     let mut last_link_fault = false;
 
+    // 远端 sense 判定状态（3 帧进入 / 2 帧退出）。
+    let mut remote_active: bool = false;
+    let mut remote_good_streak: u8 = 0;
+    let mut remote_bad_streak: u8 = 0;
+
     loop {
         info!("main loop top");
         if SOFT_RESET_PENDING.swap(false, Ordering::SeqCst) {
@@ -481,6 +491,42 @@ async fn main(_spawner: Spawner) -> ! {
         let v_local_mv = (v_nr_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
         let v_remote_mv = (v_rmt_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
 
+        // 远端电压软判定：仅在电压处于合理范围且 ADC 原码未接近饱和时认为“看起来正常”。
+        let remote_abs_mv = if v_remote_mv < 0 {
+            -v_remote_mv
+        } else {
+            v_remote_mv
+        };
+        let remote_in_range =
+            remote_abs_mv >= REMOTE_V_MIN_MV && remote_abs_mv <= REMOTE_V_MAX_MV;
+
+        let not_saturated = v_rmt_sns_code > ADC_SAT_MARGIN
+            && v_rmt_sns_code < (ADC_FULL_SCALE as u16 - ADC_SAT_MARGIN);
+
+        let remote_ok = remote_in_range && not_saturated;
+
+        if remote_ok {
+            remote_good_streak = remote_good_streak.saturating_add(1);
+            remote_bad_streak = 0;
+            if !remote_active && remote_good_streak >= 3 {
+                remote_active = true;
+                info!(
+                    "remote sense became ACTIVE (v_remote_mv={}mV, code={})",
+                    v_remote_mv, v_rmt_sns_code
+                );
+            }
+        } else {
+            remote_bad_streak = remote_bad_streak.saturating_add(1);
+            remote_good_streak = 0;
+            if remote_active && remote_bad_streak >= 2 {
+                remote_active = false;
+                info!(
+                    "remote sense became INACTIVE (v_remote_mv={}mV, code={})",
+                    v_remote_mv, v_rmt_sns_code
+                );
+            }
+        }
+
         // 模拟板 5V 轨电压：R25=75k (5V→5V_SNS)，R26=10k (5V_SNS→GND)
         //   V_5V_SNS = 5V * 10 / (75+10) = 5V * 10/85
         //   V_5V     = V_5V_SNS * (75+10)/10 = V_5V_SNS * 8.5
@@ -544,7 +590,10 @@ async fn main(_spawner: Spawner) -> ! {
         let mcu_temp_mc: i32 = g4_internal_mcu_temp_to_mc(mcu_temp_code);
 
         // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
-        let mut state_flags = STATE_FLAG_REMOTE_ACTIVE;
+        let mut state_flags = 0u32;
+        if remote_active {
+            state_flags |= STATE_FLAG_REMOTE_ACTIVE;
+        }
         if !link_fault {
             state_flags |= STATE_FLAG_LINK_GOOD;
         }

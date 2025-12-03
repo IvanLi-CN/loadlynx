@@ -198,10 +198,15 @@ pub fn render_partial(
     if mask.bars {
         // Bars are driven from remote/local voltage and currents; reuse the
         // existing helpers to redraw the bars over the existing background.
+        let remote_bar = if curr.remote_active {
+            curr.remote_voltage / 40.0
+        } else {
+            0.0
+        };
         draw_mirror_bar(
             &mut canvas,
             8 + 34,
-            curr.remote_voltage / 40.0,
+            remote_bar,
             curr.local_voltage / 40.0,
         );
         draw_mirror_bar(
@@ -245,10 +250,15 @@ fn draw_main_metric(
 
 fn draw_voltage_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, right_value: &str) {
     draw_pair_header(canvas, ("REMOTE", left_value), ("LOCAL", right_value), 8);
+    let remote_bar = if data.remote_active {
+        data.remote_voltage / 40.0
+    } else {
+        0.0
+    };
     draw_mirror_bar(
         canvas,
         8 + 34,
-        data.remote_voltage / 40.0,
+        remote_bar,
         data.local_voltage / 40.0,
     );
 }
@@ -609,6 +619,7 @@ pub struct UiSnapshot {
     pub sink_exhaust_temp: f32,
     pub mcu_temp: f32,
     pub energy_wh: f32,
+    pub remote_active: bool,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -637,6 +648,7 @@ impl UiSnapshot {
             sink_exhaust_temp: 38.1,
             mcu_temp: 35.0,
             energy_wh: 125.4,
+            remote_active: true,
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),
@@ -654,7 +666,12 @@ impl UiSnapshot {
         self.main_current_text = format_value(self.main_current, 2);
         self.main_power_text = format_value(self.main_power, 1);
 
-        self.remote_voltage_text = format_pair_value(self.remote_voltage, 'V');
+        if self.remote_active {
+            self.remote_voltage_text = format_pair_value(self.remote_voltage, 'V');
+        } else {
+            self.remote_voltage_text.clear();
+            let _ = self.remote_voltage_text.push_str("--.--");
+        }
         self.local_voltage_text = format_pair_value(self.local_voltage, 'V');
         self.ch1_current_text = format_pair_value(self.ch1_current, 'A');
         self.ch2_current_text = format_pair_value(self.ch2_current, 'A');

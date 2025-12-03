@@ -55,6 +55,10 @@ use loadlynx_protocol::{
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
+const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
+const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
+const STATE_FLAG_ENABLED: u32 = 1 << 2;
+
 mod ui;
 use ui::UiSnapshot;
 
@@ -417,11 +421,15 @@ impl TelemetryModel {
     }
 
     fn update_from_status(&mut self, status: &FastStatus) {
-        // 主电压使用本地 sense（v_local_mv），右侧列则分别显示 remote/local，
-        // 以避免左侧大卡片和右侧“REMOTE”列完全重复。
-        let main_voltage = status.v_local_mv as f32 / 1000.0;
+        let remote_active = (status.state_flags & STATE_FLAG_REMOTE_ACTIVE) != 0;
+
         let remote_voltage = status.v_remote_mv as f32 / 1000.0;
         let local_voltage = status.v_local_mv as f32 / 1000.0;
+        let main_voltage = if remote_active {
+            remote_voltage
+        } else {
+            local_voltage
+        };
         let i_local = status.i_local_ma as f32 / 1000.0;
         let i_remote = status.i_remote_ma as f32 / 1000.0;
         let power_w = status.calc_p_mw as f32 / 1000.0;
@@ -429,6 +437,7 @@ impl TelemetryModel {
         self.snapshot.main_voltage = main_voltage;
         self.snapshot.remote_voltage = remote_voltage;
         self.snapshot.local_voltage = local_voltage;
+        self.snapshot.remote_active = remote_active;
         self.snapshot.main_current = i_local;
         self.snapshot.ch1_current = i_local;
         self.snapshot.ch2_current = i_remote;
