@@ -39,6 +39,16 @@ pub const MSG_CAL_WRITE: u8 = 0x30;
 /// Reserved for future calibration readback support.
 pub const MSG_CAL_READ: u8 = 0x31;
 
+/// Fault bitmask definitions shared between analog and digital firmware.
+///
+/// These bits live in `FastStatus.fault_flags` and represent latched protection
+/// conditions detected on the analog board. Once set, they remain asserted
+/// until cleared by a SoftReset handshake.
+pub const FAULT_OVERCURRENT: u32 = 1 << 0;
+pub const FAULT_OVERVOLTAGE: u32 = 1 << 1;
+pub const FAULT_MCU_OVER_TEMP: u32 = 1 << 2;
+pub const FAULT_SINK_OVER_TEMP: u32 = 1 << 3;
+
 pub const SLIP_END: u8 = 0xC0;
 pub const SLIP_ESC: u8 = 0xDB;
 pub const SLIP_ESC_END: u8 = 0xDC;
@@ -397,11 +407,7 @@ pub fn encode_set_point_frame(
 }
 
 /// Encode a `CalWrite` payload into a binary frame with header and CRC.
-pub fn encode_cal_write_frame(
-    seq: u8,
-    cal: &CalWrite,
-    out: &mut [u8],
-) -> Result<usize, Error> {
+pub fn encode_cal_write_frame(seq: u8, cal: &CalWrite, out: &mut [u8]) -> Result<usize, Error> {
     if out.len() < HEADER_LEN + CRC_LEN {
         return Err(Error::BufferTooSmall);
     }

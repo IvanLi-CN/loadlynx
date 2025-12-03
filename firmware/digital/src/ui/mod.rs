@@ -203,12 +203,7 @@ pub fn render_partial(
         } else {
             0.0
         };
-        draw_mirror_bar(
-            &mut canvas,
-            8 + 34,
-            remote_bar,
-            curr.local_voltage / 40.0,
-        );
+        draw_mirror_bar(&mut canvas, 8 + 34, remote_bar, curr.local_voltage / 40.0);
         draw_mirror_bar(
             &mut canvas,
             96 + 34,
@@ -255,12 +250,7 @@ fn draw_voltage_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, r
     } else {
         0.0
     };
-    draw_mirror_bar(
-        canvas,
-        8 + 34,
-        remote_bar,
-        data.local_voltage / 40.0,
-    );
+    draw_mirror_bar(canvas, 8 + 34, remote_bar, data.local_voltage / 40.0);
 }
 
 fn draw_current_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, right_value: &str) {
@@ -523,6 +513,22 @@ fn append_u32<const N: usize>(buf: &mut String<N>, mut value: u32) {
     }
 }
 
+fn append_u32_hex<const N: usize>(buf: &mut String<N>, mut value: u32) {
+    // Append a u32 as 8-digit uppercase hexadecimal (zero-padded).
+    let mut tmp = [b'0'; 8];
+    for i in (0..8).rev() {
+        let nibble = (value & 0xF) as u8;
+        tmp[i] = match nibble {
+            0..=9 => b'0' + nibble,
+            _ => b'A' + (nibble - 10),
+        };
+        value >>= 4;
+    }
+    for b in &tmp {
+        let _ = buf.push(*b as char);
+    }
+}
+
 fn append_frac<const N: usize>(buf: &mut String<N>, mut value: u32, digits: u8) {
     // 以固定位数输出小数部分，必要时左侧补零。
     let mut tmp = [b'0'; 4];
@@ -620,6 +626,7 @@ pub struct UiSnapshot {
     pub mcu_temp: f32,
     pub energy_wh: f32,
     pub remote_active: bool,
+    pub fault_flags: u32,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -649,6 +656,7 @@ impl UiSnapshot {
             mcu_temp: 35.0,
             energy_wh: 125.4,
             remote_active: true,
+            fault_flags: 0,
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),
@@ -699,12 +707,15 @@ impl UiSnapshot {
         append_temp_1dp(&mut mcu, self.mcu_temp);
         let _ = mcu.push('C');
 
-        let mut energy = String::<20>::new();
-        let _ = energy.push_str("ENERGY ");
-        append_temp_1dp(&mut energy, self.energy_wh);
-        let _ = energy.push_str("Wh");
+        let mut fault = String::<20>::new();
+        if self.fault_flags == 0 {
+            let _ = fault.push_str("FAULT OK");
+        } else {
+            let _ = fault.push_str("FAULT 0x");
+            append_u32_hex(&mut fault, self.fault_flags);
+        }
 
-        [run, core, exhaust, mcu, energy]
+        [run, core, exhaust, mcu, fault]
     }
 
     pub fn status_lines(&self) -> [String<20>; 5] {

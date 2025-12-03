@@ -23,8 +23,9 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use libm::logf;
 use loadlynx_protocol::{
-    CRC_LEN, Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello,
-    MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_cal_write_frame,
+    CRC_LEN, Error as ProtocolError, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
+    FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello, MSG_SET_POINT,
+    SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_cal_write_frame,
     decode_set_enable_frame, decode_set_point_frame, decode_soft_reset_frame,
     encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame,
     slip_encode,
@@ -110,6 +111,12 @@ const DAC_CAL_REF_I_MA: i32 = 500;
 const TARGET_I_MIN_MA: i32 = 0;
 const TARGET_I_MAX_MA: i32 = 5_000;
 
+// Basic protection thresholds (units: mA, mV, m°C).
+const OC_LIMIT_MA: i32 = 5_500; // 过流阈值（略高于 TARGET_I_MAX_MA）
+const OV_LIMIT_MV: i32 = 55_000; // 过压阈值（与文档 55V 对齐）
+const MCU_TEMP_LIMIT_MC: i32 = 110_000; // 110 °C
+const SINK_TEMP_LIMIT_MC: i32 = 100_000; // 100 °C
+
 // 由数字板通过 SetPoint 消息更新的电流设定（mA）。
 //
 // - 初始值为 DEFAULT_TARGET_I_LOCAL_MA（1.0 A）。
@@ -130,6 +137,9 @@ static LAST_SOFT_RESET_REASON: AtomicU8 = AtomicU8::new(0);
 static LAST_SETPOINT_SEQ_VALID: AtomicBool = AtomicBool::new(false);
 static LAST_SETPOINT_SEQ: AtomicU8 = AtomicU8::new(0);
 static QUIET_UNTIL_MS: AtomicU32 = AtomicU32::new(0);
+
+// Latched protection faults reported via FastStatus and used to gate output.
+static FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
 // UART RX debug dump window (bytes). Set to 0 to avoid swallowing the initial
 // control frames (SoftReset / CalWrite / SetEnable) before the SLIP decoder
 // starts normal processing.
@@ -497,8 +507,7 @@ async fn main(_spawner: Spawner) -> ! {
         } else {
             v_remote_mv
         };
-        let remote_in_range =
-            remote_abs_mv >= REMOTE_V_MIN_MV && remote_abs_mv <= REMOTE_V_MAX_MV;
+        let remote_in_range = remote_abs_mv >= REMOTE_V_MIN_MV && remote_abs_mv <= REMOTE_V_MAX_MV;
 
         let not_saturated = v_rmt_sns_code > ADC_SAT_MARGIN
             && v_rmt_sns_code < (ADC_FULL_SCALE as u16 - ADC_SAT_MARGIN);
@@ -542,14 +551,51 @@ async fn main(_spawner: Spawner) -> ! {
         let calc_p_mw =
             ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
 
+        // TS1: NTC on heatsink core between MOSFETs → MOS/sink core temperature.
+        // TS2: NTC near heatsink exhaust/side wall → exhaust/case temperature.
+        let sink_core_temp_mc: i32 = ntc_mv_to_mc(ts1_mv);
+        let sink_exhaust_temp_mc: i32 = ntc_mv_to_mc(ts2_mv);
+        let mcu_temp_mc: i32 = g4_internal_mcu_temp_to_mc(mcu_temp_code);
+
+        // --- Fault detection ---
+        let mut new_faults: u32 = 0;
+
+        if i_local_ma > OC_LIMIT_MA {
+            new_faults |= FAULT_OVERCURRENT;
+        }
+        if v_local_mv > OV_LIMIT_MV {
+            new_faults |= FAULT_OVERVOLTAGE;
+        }
+        if mcu_temp_mc > MCU_TEMP_LIMIT_MC {
+            new_faults |= FAULT_MCU_OVER_TEMP;
+        }
+        if sink_core_temp_mc > SINK_TEMP_LIMIT_MC {
+            new_faults |= FAULT_SINK_OVER_TEMP;
+        }
+
+        if new_faults != 0 {
+            let prev = FAULT_FLAGS.fetch_or(new_faults, Ordering::Relaxed);
+            let combined = prev | new_faults;
+            if combined != prev {
+                warn!(
+                    "protection fault latched: new=0x{:08x} combined=0x{:08x}",
+                    new_faults, combined
+                );
+            }
+        }
+
+        let fault_flags = FAULT_FLAGS.load(Ordering::Relaxed);
+        let has_fault = fault_flags != 0;
+
         // 远端 SetEnable + 标定 gating：仅在 enable_requested=true 且 cal_ready=true
         // 时才允许使用远端目标电流；否则 DAC 目标强制为 0 mA。
         let enable_requested = ENABLE_REQUESTED.load(Ordering::Relaxed);
         let cal_ready = CAL_READY.load(Ordering::Relaxed);
         let effective_enable = enable_requested && cal_ready;
+        let effective_enable_with_fault = effective_enable && !has_fault;
 
         // 按目标电流线性缩放 DAC 码。标定点：0.5 A → CC_0P5A_DAC_CODE_CH1。
-        let mut target_i_local_ma = if effective_enable {
+        let mut target_i_local_ma = if effective_enable_with_fault {
             TARGET_I_LOCAL_MA.load(Ordering::Relaxed)
         } else {
             0
@@ -583,12 +629,6 @@ async fn main(_spawner: Spawner) -> ! {
             loop_error
         );
 
-        // TS1: NTC on heatsink core between MOSFETs → MOS/sink core temperature.
-        // TS2: NTC near heatsink exhaust/side wall → exhaust/case temperature.
-        let sink_core_temp_mc: i32 = ntc_mv_to_mc(ts1_mv);
-        let sink_exhaust_temp_mc: i32 = ntc_mv_to_mc(ts2_mv);
-        let mcu_temp_mc: i32 = g4_internal_mcu_temp_to_mc(mcu_temp_code);
-
         // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
         let mut state_flags = 0u32;
         if remote_active {
@@ -597,14 +637,14 @@ async fn main(_spawner: Spawner) -> ! {
         if !link_fault {
             state_flags |= STATE_FLAG_LINK_GOOD;
         }
-        if effective_enable {
+        if effective_enable_with_fault {
             state_flags |= STATE_FLAG_ENABLED;
         }
         let status = FastStatus {
             uptime_ms,
             mode: 1, // 简单视为 CC 模式
             state_flags,
-            enable: effective_enable,
+            enable: effective_enable_with_fault,
             target_value: target_i_local_ma,
             i_local_ma,
             i_remote_ma,
@@ -616,7 +656,7 @@ async fn main(_spawner: Spawner) -> ! {
             sink_core_temp_mc,
             sink_exhaust_temp_mc,
             mcu_temp_mc,
-            fault_flags: 0,
+            fault_flags,
         };
 
         if ENABLE_FAST_STATUS_TX {
@@ -668,6 +708,11 @@ async fn apply_soft_reset_safing(
 
     load_en_ctl.set_high();
     load_en_ts.set_high();
+
+    // Clear any latched protection faults; digital side is expected to re-arm
+    // the load explicitly after observing a clean state.
+    FAULT_FLAGS.store(0, Ordering::Relaxed);
+    info!("fault flags cleared on soft reset");
 
     info!(
         "soft reset applied: reason={:?}, target set to {} mA (DAC code={}), load re-enabled",
@@ -944,9 +989,7 @@ async fn uart_setpoint_rx_task(
                                                             info!(
                                                                 "CalWrite received: index={} cal_ready={} (prev={})",
                                                                 cal.index,
-                                                                CAL_READY.load(
-                                                                    Ordering::Relaxed
-                                                                ),
+                                                                CAL_READY.load(Ordering::Relaxed),
                                                                 prev,
                                                             );
                                                             LAST_RX_GOOD_MS.store(

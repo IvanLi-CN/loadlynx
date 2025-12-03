@@ -46,7 +46,7 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    CalWrite, CRC_LEN, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_CAL_WRITE,
+    CRC_LEN, CalWrite, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_CAL_WRITE,
     MSG_FAST_STATUS, MSG_HELLO, MSG_SET_POINT, MSG_SOFT_RESET, SetEnable, SetPoint, SlipDecoder,
     SoftReset, SoftResetReason, crc16_ccitt_false, decode_fast_status_frame, decode_frame,
     decode_hello_frame, decode_soft_reset_frame, encode_cal_write_frame, encode_set_enable_frame,
@@ -162,6 +162,7 @@ static LINK_UP: AtomicBool = AtomicBool::new(false);
 static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
 static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_SETPOINT_GATE_WARN_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_FAULT_LOG_MS: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 fn now_ms32() -> u32 {
@@ -445,6 +446,7 @@ impl TelemetryModel {
         self.snapshot.sink_core_temp = status.sink_core_temp_mc as f32 / 1000.0;
         self.snapshot.sink_exhaust_temp = status.sink_exhaust_temp_mc as f32 / 1000.0;
         self.snapshot.mcu_temp = status.mcu_temp_mc as f32 / 1000.0;
+        self.snapshot.fault_flags = status.fault_flags;
 
         write_runtime(&mut self.snapshot.run_time, status.uptime_ms);
 
@@ -531,6 +533,16 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
     let mut guard = telemetry.lock().await;
     guard.update_from_status(status);
     LAST_TARGET_VALUE_FROM_STATUS.store(status.target_value, Ordering::Relaxed);
+
+    let fault_flags = status.fault_flags;
+    if fault_flags != 0 {
+        let now = now_ms32();
+        let last = LAST_FAULT_LOG_MS.load(Ordering::Relaxed);
+        if now.wrapping_sub(last) >= 1_000 {
+            LAST_FAULT_LOG_MS.store(now, Ordering::Relaxed);
+            warn!("analog fault flags set: 0x{:08x}", fault_flags);
+        }
+    }
 }
 
 fn protocol_error_str(err: &loadlynx_protocol::Error) -> &'static str {
