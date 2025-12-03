@@ -46,10 +46,10 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    CRC_LEN, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_FAST_STATUS, MSG_SET_POINT,
-    MSG_SOFT_RESET, SetPoint, SlipDecoder, SoftReset, SoftResetReason, decode_fast_status_frame,
-    decode_frame, decode_soft_reset_frame, encode_set_point_frame, encode_soft_reset_frame,
-    slip_encode,
+    CRC_LEN, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_FAST_STATUS, MSG_HELLO,
+    MSG_SET_POINT, MSG_SOFT_RESET, SetEnable, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
+    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_soft_reset_frame,
+    encode_set_enable_frame, encode_set_point_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -153,6 +153,10 @@ static SETPOINT_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static SETPOINT_ACK_PENDING: AtomicBool = AtomicBool::new(false);
 static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
+static LINK_UP: AtomicBool = AtomicBool::new(false);
+static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
+static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_SETPOINT_GATE_WARN_MS: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 fn now_ms32() -> u32 {
@@ -1020,8 +1024,37 @@ async fn feed_decoder(
 
                 match decode_frame(&frame) {
                     Ok((header, _payload)) => match header.msg {
+                        MSG_HELLO => match decode_hello_frame(&frame) {
+                            Ok((_hdr, hello)) => {
+                                record_link_activity();
+                                let first = !HELLO_SEEN.swap(true, Ordering::Relaxed);
+                                if first {
+                                    LINK_UP.store(true, Ordering::Relaxed);
+                                }
+                                if first {
+                                    info!(
+                                        "HELLO received from analog (link up): proto_ver={} fw_ver=0x{:08x}",
+                                        hello.protocol_version, hello.fw_version
+                                    );
+                                } else {
+                                    info!(
+                                        "HELLO received again from analog: proto_ver={} fw_ver=0x{:08x}",
+                                        hello.protocol_version, hello.fw_version
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
+                                decoder.reset();
+                            }
+                        },
                         MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
                             Ok((_hdr, status)) => {
+                                record_link_activity();
                                 apply_fast_status(telemetry, &status).await;
                                 let total =
                                     FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
@@ -1048,6 +1081,7 @@ async fn feed_decoder(
                         },
                         MSG_SET_POINT => {
                             if header.flags & FLAG_IS_ACK != 0 {
+                                record_link_activity();
                                 handle_setpoint_ack(&header);
                             } else {
                                 // For now we do not expect SetPoint requests on the digital side.
@@ -1055,7 +1089,10 @@ async fn feed_decoder(
                             }
                         }
                         MSG_SOFT_RESET => match decode_soft_reset_frame(&frame) {
-                            Ok((hdr, reset)) => handle_soft_reset_frame(&hdr, &reset),
+                            Ok((hdr, reset)) => {
+                                record_link_activity();
+                                handle_soft_reset_frame(&hdr, &reset);
+                            }
                             Err(err) => {
                                 PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
                                 rate_limited_proto_warn(
@@ -1088,6 +1125,11 @@ async fn feed_decoder(
 
 fn record_uart_error() {
     UART_RX_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_link_activity() {
+    let now = now_ms32();
+    LAST_GOOD_FRAME_MS.store(now, Ordering::Relaxed);
 }
 
 fn handle_setpoint_ack(header: &FrameHeader) {
@@ -1439,6 +1481,22 @@ async fn stats_task() {
                 "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}",
                 ok, de, df, ut, sp_tx, sp_ack, sp_retx, sp_timeout
             );
+
+            // Link health: derive LINK_UP from the age of the last successfully
+            // processed frame. A gap >300 ms is treated as link down.
+            let now_ms32 = now_ms32();
+            let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
+            let age_ms = now_ms32.wrapping_sub(last_good);
+            let prev_up = LINK_UP.load(Ordering::Relaxed);
+            let link_now = last_good != 0 && age_ms <= 300;
+            if link_now != prev_up {
+                LINK_UP.store(link_now, Ordering::Relaxed);
+                if link_now {
+                    info!("link up (last_good_frame_age={} ms)", age_ms);
+                } else {
+                    warn!("link down (no frames for {} ms)", age_ms);
+                }
+            }
         }
     }
 }
@@ -1475,6 +1533,42 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     cooperative_delay_ms(300).await;
 
     let mut seq: u8 = 1;
+
+    // 启动链路后发送一次 SetEnable(true)，用于拉起模拟侧输出 gating。
+    let enable_cmd = SetEnable { enable: true };
+    match encode_set_enable_frame(seq, &enable_cmd, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "SetEnable(true) frame sent seq={} len={} slip_len={}",
+                        seq, frame_len, slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "SetEnable(true) short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "SetEnable(true) uart write error for seq={}: {:?}",
+                        seq, err
+                    );
+                }
+            },
+            Err(err) => {
+                warn!("SetEnable(true) slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!("SetEnable(true) encode_set_enable_frame error: {:?}", err);
+        }
+    }
+    seq = seq.wrapping_add(1);
+
     let mut pending: Option<Pending> = None;
     let mut last_sent_target: Option<i32> = None;
     let mut last_sent_ms: u32 = now_ms32();
@@ -1519,19 +1613,38 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                 send_reason = "latest-value-preempt";
                 pending = None; // drop old pending; latest值优先
             }
-        } else if last_sent_target
-            .map(|t| t != desired_target)
-            .unwrap_or(true)
-            && now.saturating_sub(last_sent_ms) >= SETPOINT_TX_PERIOD_MS
-        {
+        } else if now.saturating_sub(last_sent_ms) >= SETPOINT_TX_PERIOD_MS {
             should_send_new = true;
-            send_reason = "target-change";
+            if last_sent_target
+                .map(|t| t != desired_target)
+                .unwrap_or(true)
+            {
+                send_reason = "target-change";
+            } else {
+                send_reason = "periodic";
+            }
         } else if mismatch_streak >= 3 {
             should_send_new = true;
             send_reason = "telemetry-mismatch";
         }
 
         if should_send_new {
+            // Gate 新 SetPoint：仅在链路就绪时才允许发送；HELLO 仅作附加信息。
+            if !LINK_UP.load(Ordering::Relaxed) {
+                let now_ms = now;
+                let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
+                if now_ms.wrapping_sub(last_gate) >= 1_000 {
+                    LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
+                    warn!(
+                        "SetPoint TX gated (link_up=false, hello_seen={}, target={} mA)",
+                        HELLO_SEEN.load(Ordering::Relaxed),
+                        desired_target
+                    );
+                }
+                // 保留现有 pending/ACK 状态，仅抑制新指令。
+                continue;
+            }
+
             let send_seq = seq;
             seq = seq.wrapping_add(1);
             let ack_baseline = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);

@@ -17,7 +17,9 @@ pub const FLAG_IS_ACK: u8 = 0x02;
 pub const FLAG_IS_NACK: u8 = 0x04;
 pub const FLAG_IS_RESP: u8 = 0x08;
 
+pub const MSG_HELLO: u8 = 0x01;
 pub const MSG_FAST_STATUS: u8 = 0x10;
+pub const MSG_FAULT: u8 = 0x11;
 /// SetPoint message: S3 (digital) → G431 (analog)
 ///
 /// This is a minimal control message used to steer the analog board's
@@ -25,6 +27,10 @@ pub const MSG_FAST_STATUS: u8 = 0x10;
 /// interpreted as a signed 32-bit integer to leave room for future
 /// extensions (e.g. negative values for sink/source modes).
 pub const MSG_SET_POINT: u8 = 0x22;
+pub const MSG_SET_ENABLE: u8 = 0x20;
+pub const MSG_SET_MODE: u8 = 0x21;
+pub const MSG_SET_LIMITS: u8 = 0x23;
+pub const MSG_GET_STATUS: u8 = 0x24;
 /// Soft-reset request/ack handshake initiated by the digital side to reset
 /// analog-side state without power-cycling.
 pub const MSG_SOFT_RESET: u8 = 0x26;
@@ -165,6 +171,40 @@ pub struct SoftReset {
     pub timestamp_ms: u32,
 }
 
+/// One-shot HELLO message sent from the analog side to announce protocol/firmware
+/// version after power-on or soft-reset safing.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default)]
+#[cbor(map)]
+pub struct Hello {
+    /// Protocol version understood by the sender.
+    #[n(0)]
+    pub protocol_version: u8,
+    /// Compact firmware version identifier (implementation-defined).
+    #[n(1)]
+    pub fw_version: u32,
+}
+
+/// Simple enable/disable control from the digital side to the analog side.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default)]
+#[cbor(map)]
+pub struct SetEnable {
+    #[n(0)]
+    pub enable: bool,
+}
+
+/// Optional GetStatus request used by the digital side to ask for an immediate
+/// FastStatus update. The `request_id` field is reserved for correlating a
+/// future reply; it is currently unused by the firmware.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default)]
+#[cbor(map)]
+pub struct GetStatus {
+    #[n(0)]
+    pub request_id: u8,
+}
+
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
@@ -200,6 +240,45 @@ pub fn encode_fast_status_frame(
         let mut cursor = Cursor::new(payload_slice);
         let mut encoder = minicbor::Encoder::new(&mut cursor);
         encoder.encode(status).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
+/// Encode a HELLO frame announcing protocol/firmware version from the analog
+/// side. This is typically sent once after power-on or soft-reset safing.
+pub fn encode_hello_frame(seq: u8, hello: &Hello, out: &mut [u8]) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = 0;
+    out[2] = seq;
+    out[3] = MSG_HELLO;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(hello).map_err(map_encode_err)?;
         cursor.position()
     };
     if payload_len > u16::MAX as usize {
@@ -293,6 +372,83 @@ pub fn encode_set_point_frame(
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
+/// Encode a SetEnable control frame from the digital side to the analog side.
+pub fn encode_set_enable_frame(seq: u8, cmd: &SetEnable, out: &mut [u8]) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = 0;
+    out[2] = seq;
+    out[3] = MSG_SET_ENABLE;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(cmd).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
+/// Encode a GetStatus control frame from the digital side. The analog side may
+/// respond by sending an immediate FastStatus frame.
+pub fn encode_get_status_frame(seq: u8, req: &GetStatus, out: &mut [u8]) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = 0;
+    out[2] = seq;
+    out[3] = MSG_GET_STATUS;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(req).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
 /// Encode a soft-reset frame. Requests set `is_ack=false`; acknowledgements
 /// set `is_ack=true`. Requests automatically set `FLAG_ACK_REQ` to request a
 /// reply from the analog side.
@@ -349,6 +505,17 @@ pub fn decode_fast_status_frame(frame: &[u8]) -> Result<(FrameHeader, FastStatus
     Ok((header, status))
 }
 
+/// Decode a HELLO frame and return its header and payload.
+pub fn decode_hello_frame(frame: &[u8]) -> Result<(FrameHeader, Hello), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_HELLO {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let hello: Hello = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, hello))
+}
+
 /// Decode a `SetPoint` frame. Callers are expected to have obtained `frame`
 /// either from `decode_frame` + message ID filtering, or from a SLIP decoder
 /// that yields full binary frames.
@@ -360,6 +527,28 @@ pub fn decode_set_point_frame(frame: &[u8]) -> Result<(FrameHeader, SetPoint), E
     let mut decoder = minicbor::Decoder::new(payload);
     let setpoint: SetPoint = decoder.decode().map_err(map_decode_err)?;
     Ok((header, setpoint))
+}
+
+/// Decode a SetEnable frame.
+pub fn decode_set_enable_frame(frame: &[u8]) -> Result<(FrameHeader, SetEnable), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_SET_ENABLE {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let cmd: SetEnable = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, cmd))
+}
+
+/// Decode a GetStatus frame.
+pub fn decode_get_status_frame(frame: &[u8]) -> Result<(FrameHeader, GetStatus), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_GET_STATUS {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let req: GetStatus = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, req))
 }
 
 /// Decode a soft-reset frame (request or ACK). Callers should inspect

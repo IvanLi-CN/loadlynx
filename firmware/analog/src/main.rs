@@ -23,10 +23,10 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use libm::logf;
 use loadlynx_protocol::{
-    CRC_LEN, Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
-    MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_set_point_frame,
-    decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame,
-    encode_soft_reset_frame, slip_encode,
+    CRC_LEN, Error as ProtocolError, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello,
+    MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_set_enable_frame,
+    decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
+    encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 
@@ -40,10 +40,16 @@ bind_interrupts!(struct Irqs {
 
 // 模拟板 FAST_STATUS 发送周期：20 Hz → 1000/20 ms = 50 ms
 const FAST_STATUS_PERIOD_MS: u64 = 1000 / 20;
+// 若超过该时间（ms）未收到任何来自数字板的有效控制帧，则认为链路当前异常。
+const LINK_DEAD_TIMEOUT_MS: u32 = 300;
 // 调试开关：如需只验证数字板→模拟板的 SetPoint 路径，可暂时关闭 FAST_STATUS TX。
 const ENABLE_FAST_STATUS_TX: bool = true;
+// Compact firmware identifier exported via HELLO; currently a simple placeholder
+// that can be refined to encode semver/git describe in future revisions.
+const HELLO_FW_VERSION: u32 = 0;
 const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
+const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
 // DAC1 → CC1 环路：0.5 A 设计值对应的 DAC 码。
 // 物理链路（v4.1 vs v4.2，对应网表与 INA193 / OPA2365 手册）：
@@ -104,6 +110,13 @@ const TARGET_I_MAX_MA: i32 = 5_000;
 // - uart_setpoint_rx_task 解析 SetPoint 帧并写入该原子量；
 // - 采样/遥测主循环在每次迭代中读取该值，用于计算 DAC 目标码与 loop_error。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
+static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(true);
+// 最近一次成功接收到来自数字板的协议帧（SetPoint/SoftReset/SetEnable）的时间戳（ms）。
+// LED1 闪烁逻辑基于该时间差实现“当前是否通信异常”的粗略指示。
+static LAST_RX_GOOD_MS: AtomicU32 = AtomicU32::new(0);
+// 是否曾经见过至少一帧来自数字板的有效控制消息（SetPoint / SoftReset / SetEnable）。
+// 仅用于后续扩展统计，不再单独驱动 LED 指示。
+static LINK_EVER_GOOD: AtomicBool = AtomicBool::new(false);
 static SOFT_RESET_PENDING: AtomicBool = AtomicBool::new(false);
 static LAST_SOFT_RESET_REASON: AtomicU8 = AtomicU8::new(0);
 static LAST_SETPOINT_SEQ_VALID: AtomicBool = AtomicBool::new(false);
@@ -197,6 +210,18 @@ async fn main(_spawner: Spawner) -> ! {
     let mut load_en_ts = Output::new(p.PB14, Level::High, Speed::Low);
     load_en_ctl.set_high();
     load_en_ts.set_high();
+
+    // 板载状态 LED1：PB3 对应 LEDK1（阴极），低电平点亮、默认熄灭。
+    let mut led1 = Output::new(p.PB3, Level::High, Speed::Low);
+    led1.set_high();
+
+    // 上电自检：闪烁 LED1 若干次，方便确认硬件连线正常。
+    for _ in 0..4 {
+        led1.set_low();
+        Timer::after_millis(100).await;
+        led1.set_high();
+        Timer::after_millis(100).await;
+    }
 
     // UART3：与数字板交互的链路，115200 8N1。
     let mut uart_cfg = UartConfig::default();
@@ -296,10 +321,115 @@ async fn main(_spawner: Spawner) -> ! {
     let mut raw_frame = [0u8; 192];
     let mut slip_frame = [0u8; 384];
 
+    // 上电后发送一次 HELLO，携带最小协议/固件信息，供数字侧建立链路状态。
+    let hello = Hello {
+        protocol_version: loadlynx_protocol::PROTOCOL_VERSION,
+        fw_version: HELLO_FW_VERSION,
+    };
+    match encode_hello_frame(seq, &hello, &mut raw_frame) {
+        Ok(frame_len) => match slip_encode(&raw_frame[..frame_len], &mut slip_frame) {
+            Ok(slip_len) => {
+                let mut tx = uart_tx_shared.lock().await;
+                match tx.write(&slip_frame[..slip_len]).await {
+                    Ok(_) => {
+                        info!(
+                            "HELLO sent: seq={} proto_ver={} fw_ver=0x{:08x}",
+                            seq, hello.protocol_version, hello.fw_version
+                        );
+                        seq = seq.wrapping_add(1);
+                    }
+                    Err(err) => {
+                        warn!("HELLO write error: {:?}", err);
+                    }
+                }
+            }
+            Err(err) => {
+                warn!("HELLO slip encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!("HELLO encode error: {:?}", err);
+        }
+    }
+
+    let mut last_link_fault = false;
+
     loop {
         info!("main loop top");
         if SOFT_RESET_PENDING.swap(false, Ordering::SeqCst) {
             apply_soft_reset_safing(&mut dac, &mut load_en_ctl, &mut load_en_ts).await;
+
+            // 在软复位 safing 完成后重新发送 HELLO，提示数字侧重新握手。
+            let hello = Hello {
+                protocol_version: loadlynx_protocol::PROTOCOL_VERSION,
+                fw_version: HELLO_FW_VERSION,
+            };
+            match encode_hello_frame(seq, &hello, &mut raw_frame) {
+                Ok(frame_len) => match slip_encode(&raw_frame[..frame_len], &mut slip_frame) {
+                    Ok(slip_len) => {
+                        let mut tx = uart_tx_shared.lock().await;
+                        match tx.write(&slip_frame[..slip_len]).await {
+                            Ok(_) => {
+                                info!(
+                                    "HELLO re-sent after soft_reset: seq={} proto_ver={} fw_ver=0x{:08x}",
+                                    seq, hello.protocol_version, hello.fw_version
+                                );
+                                seq = seq.wrapping_add(1);
+                            }
+                            Err(err) => {
+                                warn!("HELLO(after soft_reset) write error: {:?}", err);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!("HELLO(after soft_reset) slip encode error: {:?}", err);
+                    }
+                },
+                Err(err) => {
+                    warn!("HELLO(after soft_reset) encode error: {:?}", err);
+                }
+            }
+        }
+
+        // 通信健康监控：基于“最近一次收到有效控制帧”的时间戳判断当前是否通信异常。
+        //
+        // - 在上电后的一小段宽限期（LINK_DEAD_TIMEOUT_MS）内，允许链路尚未建立；
+        // - 若自上次收到 SetPoint / SoftReset / SetEnable 起超过 LINK_DEAD_TIMEOUT_MS
+        //   未再看到任何控制帧，则认为当前处于“通信异常”状态，让 LED1 闪烁；
+        // - 一旦重新收到有效控制帧，则视作恢复正常，LED1 熄灭。
+        let now_ms = timestamp_ms() as u32;
+        let last_rx = LAST_RX_GOOD_MS.load(Ordering::Relaxed);
+        let link_fault = if last_rx == 0 {
+            now_ms > LINK_DEAD_TIMEOUT_MS
+        } else {
+            now_ms.wrapping_sub(last_rx) > LINK_DEAD_TIMEOUT_MS
+        };
+
+        if link_fault != last_link_fault {
+            if link_fault {
+                warn!(
+                    "link fault: no control frames from digital for >{} ms (last_rx_ms={})",
+                    LINK_DEAD_TIMEOUT_MS, last_rx
+                );
+            } else {
+                info!(
+                    "link recovered: control frame seen recently (last_rx_ms={})",
+                    last_rx
+                );
+            }
+            last_link_fault = link_fault;
+        }
+
+        if link_fault {
+            // 以约 2 Hz 频率闪烁：利用 uptime_ms（50 ms tick），每 250 ms 翻转一次。
+            if (uptime_ms / 250) % 2 == 0 {
+                led1.set_low();
+            } else {
+                led1.set_high();
+            }
+        } else {
+            // 链路看起来正常时保持灭灯。
+            led1.set_high();
         }
 
         // --- 采样所有相关 ADC 通道（阻塞读取） ---
@@ -360,8 +490,16 @@ async fn main(_spawner: Spawner) -> ! {
         let calc_p_mw =
             ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
 
+        // 远端 SetEnable gating：仅在 enable_requested=true 时才允许使用远端
+        // 目标电流；被关闭时 DAC 目标强制为 0 mA。
+        let enable_requested = ENABLE_REQUESTED.load(Ordering::Relaxed);
+
         // 按目标电流线性缩放 DAC 码。标定点：0.5 A → CC_0P5A_DAC_CODE_CH1。
-        let mut target_i_local_ma = TARGET_I_LOCAL_MA.load(Ordering::Relaxed);
+        let mut target_i_local_ma = if enable_requested {
+            TARGET_I_LOCAL_MA.load(Ordering::Relaxed)
+        } else {
+            0
+        };
         if target_i_local_ma < TARGET_I_MIN_MA {
             target_i_local_ma = TARGET_I_MIN_MA;
         }
@@ -398,11 +536,18 @@ async fn main(_spawner: Spawner) -> ! {
         let mcu_temp_mc: i32 = g4_internal_mcu_temp_to_mc(mcu_temp_code);
 
         // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
+        let mut state_flags = STATE_FLAG_REMOTE_ACTIVE;
+        if !link_fault {
+            state_flags |= STATE_FLAG_LINK_GOOD;
+        }
+        if enable_requested {
+            state_flags |= STATE_FLAG_ENABLED;
+        }
         let status = FastStatus {
             uptime_ms,
             mode: 1, // 简单视为 CC 模式
-            state_flags: STATE_FLAG_REMOTE_ACTIVE | STATE_FLAG_LINK_GOOD,
-            enable: true,
+            state_flags,
+            enable: enable_requested,
             target_value: target_i_local_ma,
             i_local_ma,
             i_remote_ma,
@@ -446,6 +591,10 @@ async fn apply_soft_reset_safing(
     load_en_ts: &mut Output<'static>,
 ) {
     let reason = SoftResetReason::from(LAST_SOFT_RESET_REASON.load(Ordering::Relaxed));
+
+    // Drop remote enable on soft reset; the digital side is expected to
+    // explicitly re-arm via SetEnable after handshake completes.
+    ENABLE_REQUESTED.store(false, Ordering::Relaxed);
 
     load_en_ctl.set_low();
     load_en_ts.set_low();
@@ -686,6 +835,10 @@ async fn uart_setpoint_rx_task(
                                         );
                                     }
 
+                                    // 任意有效 SetPoint 帧均视作“通信正常”活动，用于链路健康统计。
+                                    LAST_RX_GOOD_MS.store(timestamp_ms() as u32, Ordering::Relaxed);
+                                    LINK_EVER_GOOD.store(true, Ordering::Relaxed);
+
                                     // ACK regardless of whether it was a duplicate to keep sender state in sync.
                                     send_setpoint_ack(
                                         hdr.seq,
@@ -706,6 +859,36 @@ async fn uart_setpoint_rx_task(
                                                 reset,
                                             )
                                             .await;
+                                            // soft_reset 请求同样视为有效通信活动。
+                                            LAST_RX_GOOD_MS
+                                                .store(timestamp_ms() as u32, Ordering::Relaxed);
+                                            LINK_EVER_GOOD.store(true, Ordering::Relaxed);
+                                        }
+                                        Err(ProtocolError::UnsupportedMessage(_)) => {
+                                            match decode_set_enable_frame(&frame) {
+                                                Ok((_hdr, cmd)) => {
+                                                    let prev = ENABLE_REQUESTED
+                                                        .swap(cmd.enable, Ordering::Relaxed);
+                                                    info!(
+                                                        "SetEnable received: enable={} (prev={})",
+                                                        cmd.enable, prev
+                                                    );
+                                                    LAST_RX_GOOD_MS.store(
+                                                        timestamp_ms() as u32,
+                                                        Ordering::Relaxed,
+                                                    );
+                                                    LINK_EVER_GOOD.store(true, Ordering::Relaxed);
+                                                }
+                                                Err(err) => {
+                                                    warn!(
+                                                        "set_enable decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                        err,
+                                                        frame.len(),
+                                                        &frame[..frame.len().min(8)],
+                                                    );
+                                                    decoder.reset();
+                                                }
+                                            }
                                         }
                                         Err(err) => {
                                             warn!(
