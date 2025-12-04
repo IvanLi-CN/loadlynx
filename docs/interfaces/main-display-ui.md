@@ -48,6 +48,7 @@
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,44)-(314,50)`，中心 x=256 |
 | Current pair | 左列 CH1 `4.20 A`，右列 CH2 `3.50 A` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 同上 | 左列起点 (198,96)，右列起点 (258,96) |
 | Current mirror bar | 0 A 居中，上限 5 A/通道 | — | 轨道 `#1C2638`，填充 `#4CC9F0` | 长条 `(198,132)-(314,138)`，中心 x=256 |
+| CC set current line | 文本 “SET” + 右对齐设定电流值 “12.00A” | SmallFont 标签 + SmallFont 数值（状态值字体族，与 CH1/CH2 一致） | 标签 `#6D7FA4`，数值 `#DFE7FF` | 标签起点 `(198,156)`，数值右对齐至 x=314（绘制前测量文本宽度，计算 `value_x = 314 − text_width`） |
 | Run status line | “RUN 01:32:10” | SmallFont | `#DFE7FF` | Baseline at `(198,200)` |
 | Temperature line | “TEMP 37.8°C” | SmallFont | `#DFE7FF` | Baseline at `(198,214)` |
 | Energy line | “ENERGY 125.4Wh” | SmallFont | `#DFE7FF` | Baseline at `(198,228)` |
@@ -90,6 +91,7 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
 2. **Right status**
    - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 30 V`.
    - Channel bars = `clamp(I_actual / I_rating)`（默认：CH1 5 A，CH2 5 A，对应两路 5 A 额定功率通道；总目标电流 <2 A 时 CH2 预期为 0 A，≥2 A 时两路条形图预期近似对称）。
+   - CC 设定电流一行（“SET  12.00A”）展示当前 CC 模式下的目标总电流：数值来自数字板当前的 CC setpoint（非测量值），单位固定为 A，格式为 4 位数 + 单位（例如 `0.50A`, `12.0A`, `25.0A`），始终右对齐至 x=314，刷新频率与左列电流设定更新节奏一致（推荐 10–20 Hz 或在 setpoint 变化事件时立即更新）。
    - Runtime + energy update at 2 Hz, temperature at 5 Hz. Keep color semantics fixed for muscle memory.
 
 ## Interaction Hooks

@@ -516,6 +516,12 @@ impl TelemetryModel {
     /// This is used by the display task to drive partial, character-aware
     /// updates on top of the existing framebuffer diff logic.
     fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask) {
+        // 将当前编码器位置转换为 CC 模式下的目标总电流（A），用于右侧 “SET I” 文本。
+        let steps = ENCODER_VALUE.load(Ordering::Relaxed);
+        let raw_ma = steps.saturating_mul(ENCODER_STEP_MA);
+        let clamped_ma = clamp_target_ma(raw_ma);
+        self.snapshot.set_current_a = clamped_ma as f32 / 1000.0;
+
         // Keep all display strings in sync with the latest numeric values so
         // the UI layer can render based purely on preformatted text. This is
         // intentionally called from the display task (UI context), not from the
@@ -543,6 +549,7 @@ impl TelemetryModel {
 
             if prev.ch1_current_text != current.ch1_current_text
                 || prev.ch2_current_text != current.ch2_current_text
+                || prev.set_current_text != current.set_current_text
             {
                 mask.current_pair = true;
             }

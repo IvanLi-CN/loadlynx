@@ -128,6 +128,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.ch1_current_text.as_str(),
         data.ch2_current_text.as_str(),
     );
+    draw_set_current(&mut canvas, data.set_current_text.as_str());
     draw_telemetry(&mut canvas, data);
 
     if DEBUG_OVERLAY {
@@ -205,6 +206,7 @@ pub fn render_partial(
         let ch1_text = curr.ch1_current_text.as_str();
         let ch2_text = curr.ch2_current_text.as_str();
         draw_current_pair(&mut canvas, curr, ch1_text, ch2_text);
+        draw_set_current(&mut canvas, curr.set_current_text.as_str());
     }
 
     if mask.telemetry_lines {
@@ -282,6 +284,21 @@ fn draw_current_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, r
         data.ch1_current / 5.0,
         data.ch2_current / 5.0,
     );
+}
+
+fn small_text_width(text: &str, spacing: i32) -> i32 {
+    let glyph = SMALL_FONT.width() as i32 + spacing;
+    (text.chars().count() as i32) * glyph
+}
+
+fn draw_set_current(canvas: &mut Canvas, text: &str) {
+    // CC 模式设定电流行："SET I" + 右对齐的设定值。
+    let baseline = 156;
+    draw_small_text(canvas, "SET I", 198, baseline, rgb(0x6d7fa4), 0);
+
+    let width = small_text_width(text, 0);
+    let value_x = 314 - width;
+    draw_small_text(canvas, text, value_x, baseline, rgb(0xdfe7ff), 0);
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -641,6 +658,7 @@ pub struct UiSnapshot {
     pub local_voltage: f32,
     pub ch1_current: f32,
     pub ch2_current: f32,
+    pub set_current_a: f32,
     pub run_time: String<16>,
     pub sink_core_temp: f32,
     pub sink_exhaust_temp: f32,
@@ -657,6 +675,7 @@ pub struct UiSnapshot {
     pub local_voltage_text: String<6>,
     pub ch1_current_text: String<6>,
     pub ch2_current_text: String<6>,
+    pub set_current_text: String<6>,
     pub status_lines: [String<20>; 5],
 }
 
@@ -672,6 +691,7 @@ impl UiSnapshot {
             local_voltage: 24.47,
             ch1_current: 4.20,
             ch2_current: 3.50,
+            set_current_a: 12.00,
             run_time,
             sink_core_temp: 42.3,
             sink_exhaust_temp: 38.1,
@@ -687,6 +707,7 @@ impl UiSnapshot {
             local_voltage_text: String::new(),
             ch1_current_text: String::new(),
             ch2_current_text: String::new(),
+            set_current_text: String::new(),
             status_lines: Default::default(),
         }
     }
@@ -706,6 +727,7 @@ impl UiSnapshot {
         self.local_voltage_text = format_pair_value(self.local_voltage, 'V');
         self.ch1_current_text = format_pair_value(self.ch1_current, 'A');
         self.ch2_current_text = format_pair_value(self.ch2_current, 'A');
+        self.set_current_text = format_pair_value(self.set_current_a, 'A');
 
         self.status_lines = self.compute_status_lines();
     }
