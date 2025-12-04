@@ -26,9 +26,9 @@ use loadlynx_protocol::{
     CRC_LEN, Error as ProtocolError, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
     FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello, MSG_SET_POINT,
     SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_cal_write_frame,
-    decode_set_enable_frame, decode_set_point_frame, decode_soft_reset_frame,
-    encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame,
-    slip_encode,
+    decode_limit_profile_frame, decode_set_enable_frame, decode_set_point_frame,
+    decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame,
+    encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 
@@ -147,6 +147,28 @@ const RAW_DUMP_BYTES: usize = 0;
 
 static UART_TX_SHARED: StaticCell<Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>> =
     StaticCell::new();
+
+#[derive(Copy, Clone)]
+struct LimitProfileLocal {
+    max_i_ma: i32,
+    max_p_mw: u32,
+    ovp_mv: i32,
+    temp_trip_mc: i32,
+    thermal_derate_pct: u8,
+}
+
+// Latest software-configured limits from the digital side. Defaults align with
+// existing hard limits so that behavior remains unchanged until a profile is
+// received.
+static LIMIT_PROFILE: Mutex<CriticalSectionRawMutex, LimitProfileLocal> = Mutex::new(
+    LimitProfileLocal {
+        max_i_ma: TARGET_I_MAX_MA,
+        max_p_mw: 250_000,
+        ovp_mv: OV_LIMIT_MV,
+        temp_trip_mc: SINK_TEMP_LIMIT_MC,
+        thermal_derate_pct: 100,
+    },
+);
 
 fn timestamp_ms() -> u64 {
     Instant::now().as_millis() as u64
@@ -608,6 +630,29 @@ async fn main(_spawner: Spawner) -> ! {
         if target_i_local_ma > TARGET_I_MAX_MA {
             target_i_local_ma = TARGET_I_MAX_MA;
         }
+        // 在硬限基础上应用来自数字板的电流软限与 thermal_derate_pct。
+        {
+            let limits = LIMIT_PROFILE.lock().await;
+            let derate_pct = limits.thermal_derate_pct.min(100);
+            let mut derated_max_i = limits
+                .max_i_ma
+                .saturating_mul(derate_pct as i32)
+                / 100;
+            derated_max_i = derated_max_i.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
+
+            if target_i_local_ma > derated_max_i {
+                target_i_local_ma = derated_max_i;
+            }
+
+            // v0：仅在功率超过软限时打印告警，不触发故障或主动降额。
+            if calc_p_mw > limits.max_p_mw {
+                warn!(
+                    "soft power limit exceeded: calc_p={}mW max_p={}mW (no action in v0)",
+                    calc_p_mw, limits.max_p_mw
+                );
+            }
+            // ovp_mv 与 temp_trip_mc 当前仅存储，后续任务可扩展提前告警/提前 trip 行为。
+        }
         let dac_code = ((CC_0P5A_DAC_CODE_CH1 as i32) * target_i_local_ma / DAC_CAL_REF_I_MA)
             .clamp(0, ADC_FULL_SCALE as i32) as u16;
         dac.ch1().set(DacValue::Bit12Right(dac_code));
@@ -984,15 +1029,26 @@ async fn uart_setpoint_rx_task(
                                                     LINK_EVER_GOOD.store(true, Ordering::Relaxed);
                                                 }
                                                 Err(ProtocolError::UnsupportedMessage(_)) => {
-                                                    match decode_cal_write_frame(&frame) {
-                                                        Ok((_hdr, cal)) => {
-                                                            let prev = CAL_READY
-                                                                .swap(true, Ordering::Relaxed);
+                                                    match decode_limit_profile_frame(&frame) {
+                                                        Ok((_hdr, profile)) => {
+                                                            {
+                                                                let mut limits =
+                                                                    LIMIT_PROFILE.lock().await;
+                                                                limits.max_i_ma = profile.max_i_ma;
+                                                                limits.max_p_mw = profile.max_p_mw;
+                                                                limits.ovp_mv = profile.ovp_mv;
+                                                                limits.temp_trip_mc =
+                                                                    profile.temp_trip_mc;
+                                                                limits.thermal_derate_pct =
+                                                                    profile.thermal_derate_pct;
+                                                            }
                                                             info!(
-                                                                "CalWrite received: index={} cal_ready={} (prev={})",
-                                                                cal.index,
-                                                                CAL_READY.load(Ordering::Relaxed),
-                                                                prev,
+                                                                "LimitProfile received: max_i={}mA max_p={}mW ovp={}mV temp_trip={}mC derate={}%",
+                                                                profile.max_i_ma,
+                                                                profile.max_p_mw,
+                                                                profile.ovp_mv,
+                                                                profile.temp_trip_mc,
+                                                                profile.thermal_derate_pct
                                                             );
                                                             LAST_RX_GOOD_MS.store(
                                                                 timestamp_ms() as u32,
@@ -1001,9 +1057,48 @@ async fn uart_setpoint_rx_task(
                                                             LINK_EVER_GOOD
                                                                 .store(true, Ordering::Relaxed);
                                                         }
+                                                        Err(ProtocolError::UnsupportedMessage(
+                                                            _,
+                                                        )) => {
+                                                            match decode_cal_write_frame(&frame) {
+                                                                Ok((_hdr, cal)) => {
+                                                                    let prev = CAL_READY.swap(
+                                                                        true,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                    info!(
+                                                                        "CalWrite received: index={} cal_ready={} (prev={})",
+                                                                        cal.index,
+                                                                        CAL_READY.load(
+                                                                            Ordering::Relaxed
+                                                                        ),
+                                                                        prev,
+                                                                    );
+                                                                    LAST_RX_GOOD_MS.store(
+                                                                        timestamp_ms() as u32,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                    LINK_EVER_GOOD.store(
+                                                                        true,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                }
+                                                                Err(err) => {
+                                                                    warn!(
+                                                                        "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                                        err,
+                                                                        frame.len(),
+                                                                        &frame[..frame
+                                                                            .len()
+                                                                            .min(8)],
+                                                                    );
+                                                                    decoder.reset();
+                                                                }
+                                                            }
+                                                        }
                                                         Err(err) => {
                                                             warn!(
-                                                                "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                                "LimitProfile decode error {:?} (len={}, head={=[u8]:#04x})",
                                                                 err,
                                                                 frame.len(),
                                                                 &frame[..frame.len().min(8)],

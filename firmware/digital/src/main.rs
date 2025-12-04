@@ -46,10 +46,11 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    CRC_LEN, CalWrite, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, MSG_CAL_WRITE,
-    MSG_FAST_STATUS, MSG_HELLO, MSG_SET_POINT, MSG_SOFT_RESET, SetEnable, SetPoint, SlipDecoder,
-    SoftReset, SoftResetReason, crc16_ccitt_false, decode_fast_status_frame, decode_frame,
-    decode_hello_frame, decode_soft_reset_frame, encode_cal_write_frame, encode_set_enable_frame,
+    CRC_LEN, CalWrite, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, LimitProfile,
+    MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO, MSG_LIMIT_PROFILE, MSG_SET_POINT, MSG_SOFT_RESET,
+    SetEnable, SetPoint, SlipDecoder, SoftReset, SoftResetReason, crc16_ccitt_false,
+    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_soft_reset_frame,
+    encode_cal_write_frame, encode_limit_profile_frame, encode_set_enable_frame,
     encode_set_point_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
@@ -110,6 +111,14 @@ const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 const TARGET_I_MIN_MA: i32 = 0;
 const TARGET_I_MAX_MA: i32 = 5_000;
 const ENCODER_MAX_STEPS: i32 = TARGET_I_MAX_MA / ENCODER_STEP_MA;
+// 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
+const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
+    max_i_ma: TARGET_I_MAX_MA,
+    max_p_mw: 250_000,
+    ovp_mv: 55_000,
+    temp_trip_mc: 100_000,
+    thermal_derate_pct: 100,
+};
 const ENABLE_UART_UHCI_DMA: bool = true;
 // SetPoint 可靠传输：ACK 等待与退避重传（最新值优先）。
 const SETPOINT_ACK_TIMEOUT_MS: u32 = 40;
@@ -1825,6 +1834,48 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
         },
         Err(err) => {
             warn!("SetEnable(true) encode_set_enable_frame error: {:?}", err);
+        }
+    }
+    seq = seq.wrapping_add(1);
+
+    // 在握手完成后发送一次静态 LimitProfile v0，供模拟板建立软件软限。
+    match encode_limit_profile_frame(seq, &LIMIT_PROFILE_DEFAULT, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "LimitProfile v0 sent (msg=0x{:02x}): max_i={}mA max_p={}mW ovp={}mV temp_trip={}mC derate={}%, seq={} len={} slip_len={}",
+                        MSG_LIMIT_PROFILE,
+                        LIMIT_PROFILE_DEFAULT.max_i_ma,
+                        LIMIT_PROFILE_DEFAULT.max_p_mw,
+                        LIMIT_PROFILE_DEFAULT.ovp_mv,
+                        LIMIT_PROFILE_DEFAULT.temp_trip_mc,
+                        LIMIT_PROFILE_DEFAULT.thermal_derate_pct,
+                        seq,
+                        frame_len,
+                        slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "LimitProfile v0 short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "LimitProfile v0 uart write error for seq={}: {:?}",
+                        seq, err
+                    );
+                }
+            },
+            Err(err) => {
+                warn!("LimitProfile v0 slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!("LimitProfile v0 encode_limit_profile_frame error: {:?}", err);
         }
     }
     seq = seq.wrapping_add(1);
