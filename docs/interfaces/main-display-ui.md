@@ -89,7 +89,7 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
    - Decimal dot: draw a filled 6×6 square at `y = glyph_baseline − 8` so it lines up with the mock.
 2. **Right status**
    - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 30 V`.
-   - Channel bars = `clamp(I_actual / I_rating)` (defaults: CH1 12 A, CH2 6 A).
+   - Channel bars = `clamp(I_actual / I_rating)`（默认：CH1 5 A，CH2 5 A，对应两路 5 A 额定功率通道；总目标电流 <2 A 时 CH2 预期为 0 A，≥2 A 时两路条形图预期近似对称）。
    - Runtime + energy update at 2 Hz, temperature at 5 Hz. Keep color semantics fixed for muscle memory.
 
 ## Interaction Hooks

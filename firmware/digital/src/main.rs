@@ -479,13 +479,15 @@ impl TelemetryModel {
         };
         let i_local = status.i_local_ma as f32 / 1000.0;
         let i_remote = status.i_remote_ma as f32 / 1000.0;
+        let i_total = i_local + i_remote;
         let power_w = status.calc_p_mw as f32 / 1000.0;
 
         self.snapshot.main_voltage = main_voltage;
         self.snapshot.remote_voltage = remote_voltage;
         self.snapshot.local_voltage = local_voltage;
         self.snapshot.remote_active = remote_active;
-        self.snapshot.main_current = i_local;
+        // 左侧主电流显示：两通道合计电流；右侧 CH1/CH2 各自显示单通道电流。
+        self.snapshot.main_current = i_total;
         self.snapshot.ch1_current = i_local;
         self.snapshot.ch2_current = i_remote;
         self.snapshot.main_power = power_w;
@@ -1875,7 +1877,10 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
             }
         },
         Err(err) => {
-            warn!("LimitProfile v0 encode_limit_profile_frame error: {:?}", err);
+            warn!(
+                "LimitProfile v0 encode_limit_profile_frame error: {:?}",
+                err
+            );
         }
     }
     seq = seq.wrapping_add(1);

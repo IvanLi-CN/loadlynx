@@ -53,7 +53,7 @@ const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
-// DAC1 → CC1 环路：0.5 A 设计值对应的 DAC 码。
+// DAC1 → CC 环路：0.5 A 设计值对应的 DAC 码。
 // 物理链路（v4.1 vs v4.2，对应网表与 INA193 / OPA2365 手册）：
 //   - v4.1：Rsense = 25 mΩ，INA193 固定增益 20 V/V：
 //       V_CUR1 ≈ 20 * 0.025 Ω * I = 0.5 * I [V/A]
@@ -66,6 +66,8 @@ const STATE_FLAG_ENABLED: u32 = 1 << 2;
 //   I = 0.5 A → V_CUR1 ≈ 0.25 V
 //   CODE_0p5A ≈ 0.25 / 2.9 * 4095 ≈ 353
 const CC_0P5A_DAC_CODE_CH1: u16 = 353;
+// 当前固件假定两路 CC 通道在 0.5 A 标定点的 DAC 码相同；如后续量产需要分别标定，可独立调整。
+const CC_0P5A_DAC_CODE_CH2: u16 = CC_0P5A_DAC_CODE_CH1;
 
 // ADC 公共参数（G431 12bit ADC）。
 // 电压换算遵循 STM32G4 官方推荐流程：
@@ -117,11 +119,16 @@ const OV_LIMIT_MV: i32 = 55_000; // 过压阈值（与文档 55V 对齐）
 const MCU_TEMP_LIMIT_MC: i32 = 110_000; // 110 °C
 const SINK_TEMP_LIMIT_MC: i32 = 100_000; // 100 °C
 
-// 由数字板通过 SetPoint 消息更新的电流设定（mA）。
+// 通道调度阈值：总目标电流 < 2 A 时仅驱动通道 1；≥ 2 A 时两通道近似均分。
+const I_SHARE_THRESHOLD_MA: i32 = 2_000;
+
+// 由数字板通过 SetPoint 消息更新的电流设定（mA，视为“两通道合计目标电流”）。
 //
 // - 初始值为 DEFAULT_TARGET_I_LOCAL_MA（1.0 A）。
 // - uart_setpoint_rx_task 解析 SetPoint 帧并写入该原子量；
-// - 采样/遥测主循环在每次迭代中读取该值，用于计算 DAC 目标码与 loop_error。
+// - 采样/遥测主循环在每次迭代中读取该值，并按 I_SHARE_THRESHOLD_MA 决定单/双通道：
+//   - I_total < 2 A：仅驱动通道 1（CH1），CH2 目标为 0；
+//   - I_total ≥ 2 A：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(true);
 // 标定是否已加载完成。仅在接收到至少一帧有效 CalWrite 后置为 true。
@@ -160,15 +167,14 @@ struct LimitProfileLocal {
 // Latest software-configured limits from the digital side. Defaults align with
 // existing hard limits so that behavior remains unchanged until a profile is
 // received.
-static LIMIT_PROFILE: Mutex<CriticalSectionRawMutex, LimitProfileLocal> = Mutex::new(
-    LimitProfileLocal {
+static LIMIT_PROFILE: Mutex<CriticalSectionRawMutex, LimitProfileLocal> =
+    Mutex::new(LimitProfileLocal {
         max_i_ma: TARGET_I_MAX_MA,
         max_p_mw: 250_000,
         ovp_mv: OV_LIMIT_MV,
         temp_trip_mc: SINK_TEMP_LIMIT_MC,
         thermal_derate_pct: 100,
-    },
-);
+    });
 
 fn timestamp_ms() -> u64 {
     Instant::now().as_millis() as u64
@@ -247,8 +253,8 @@ async fn main(_spawner: Spawner) -> ! {
     }
 
     // 暂时直接闭合 TPS22810 负载开关：PB13=LOAD_EN_CTL，PB14=LOAD_EN_TS。
-    // 逻辑：LOAD_EN = LOAD_EN_CTL AND LOAD_EN_TS。为简单起见，两路都拉高，
-    // 只启用硬件恒流通道 1（DAC_CH1 设为 0.5A 目标，DAC_CH2=0）。
+    // 逻辑：LOAD_EN = LOAD_EN_CTL AND LOAD_EN_TS。上电后两路都拉高，由固件
+    // 根据目标电流决定是“仅通道 1”还是“两通道并联”（见 I_SHARE_THRESHOLD_MA）。
     let mut load_en_ctl = Output::new(p.PB13, Level::High, Speed::Low);
     let mut load_en_ts = Output::new(p.PB14, Level::High, Speed::Low);
     load_en_ctl.set_high();
@@ -346,17 +352,28 @@ async fn main(_spawner: Spawner) -> ! {
     let mut ts1 = p.PB0.degrade_adc();
     let mut ts2 = p.PB1.degrade_adc();
 
-    // DAC1：PA4/PA5 → CH1/CH2，当前仅启用 CH1 恒流，CH2 置零。
+    // DAC1：PA4/PA5 → CH1/CH2。上电默认按总目标电流应用通道调度：
+    //   - I_total < 2 A：仅 CH1 有输出，CH2=0；
+    //   - I_total ≥ 2 A：CH1/CH2 近似均分。
     let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
-    let init_dac_code = ((CC_0P5A_DAC_CODE_CH1 as i32) * DEFAULT_TARGET_I_LOCAL_MA
-        / DAC_CAL_REF_I_MA)
+    let init_total_i_ma = DEFAULT_TARGET_I_LOCAL_MA;
+    let (init_ch1_ma, init_ch2_ma) = if init_total_i_ma < I_SHARE_THRESHOLD_MA {
+        (init_total_i_ma, 0)
+    } else {
+        let half = init_total_i_ma / 2;
+        let rem = init_total_i_ma - 2 * half;
+        (half + rem, half)
+    };
+    let init_dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * init_ch1_ma / DAC_CAL_REF_I_MA)
         .clamp(0, ADC_FULL_SCALE as i32) as u16;
-    dac.ch1().set(DacValue::Bit12Right(init_dac_code));
-    dac.ch2().set(DacValue::Bit12Right(0));
+    let init_dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * init_ch2_ma / DAC_CAL_REF_I_MA)
+        .clamp(0, ADC_FULL_SCALE as i32) as u16;
+    dac.ch1().set(DacValue::Bit12Right(init_dac_code_ch1));
+    dac.ch2().set(DacValue::Bit12Right(init_dac_code_ch2));
 
     info!(
-        "CC setpoint CH1: default target {} mA (DAC code = {})",
-        DEFAULT_TARGET_I_LOCAL_MA, init_dac_code
+        "CC setpoint: default total target {} mA (CH1={} mA, CH2={} mA, DAC1={}, DAC2={})",
+        init_total_i_ma, init_ch1_ma, init_ch2_ma, init_dac_code_ch1, init_dac_code_ch2
     );
 
     let mut seq: u8 = 0;
@@ -567,11 +584,17 @@ async fn main(_spawner: Spawner) -> ! {
         //   - v4.1：Rsense=25 mΩ，INA193 G=20 → V_CUR ≈ 0.5 * I [V/A]
         //   - v4.2：Rsense=50 mΩ，OPA2365 G=10 → V_CUR ≈ 0.5 * I [V/A]
         //   I[mA] ≈ 2 * V_CUR[mV] 适用于两版硬件。
-        let i_local_ma = (2 * cur1_sns_mv) as i32;
-        let i_remote_ma = (2 * cur2_sns_mv) as i32;
+        //
+        // 约定：
+        //   - i_ch1_ma 使用 CUR1_SNS，对应功率通道 1；
+        //   - i_ch2_ma 使用 CUR2_SNS，对应功率通道 2；
+        //   - i_total_ma = i_ch1_ma + i_ch2_ma，用于功率估算与闭环误差计算。
+        let i_ch1_ma = (2 * cur1_sns_mv) as i32;
+        let i_ch2_ma = (2 * cur2_sns_mv) as i32;
+        let i_total_ma = i_ch1_ma.saturating_add(i_ch2_ma);
 
         let calc_p_mw =
-            ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
+            ((i_total_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
 
         // 实物板确认：TS2 (R40) 靠近 MOSFET / 散热片热点；TS1 (R39) 更靠近出风口/侧壁。
         // 约定：
@@ -584,7 +607,7 @@ async fn main(_spawner: Spawner) -> ! {
         // --- Fault detection ---
         let mut new_faults: u32 = 0;
 
-        if i_local_ma > OC_LIMIT_MA {
+        if i_ch1_ma > OC_LIMIT_MA {
             new_faults |= FAULT_OVERCURRENT;
         }
         if v_local_mv > OV_LIMIT_MV {
@@ -618,30 +641,27 @@ async fn main(_spawner: Spawner) -> ! {
         let effective_enable = enable_requested && cal_ready;
         let effective_enable_with_fault = effective_enable && !has_fault;
 
-        // 按目标电流线性缩放 DAC 码。标定点：0.5 A → CC_0P5A_DAC_CODE_CH1。
-        let mut target_i_local_ma = if effective_enable_with_fault {
+        // 目标总电流（两通道合计，单位 mA）。标定点：0.5 A → CC_0P5A_DAC_CODE_CHx。
+        let mut target_i_total_ma = if effective_enable_with_fault {
             TARGET_I_LOCAL_MA.load(Ordering::Relaxed)
         } else {
             0
         };
-        if target_i_local_ma < TARGET_I_MIN_MA {
-            target_i_local_ma = TARGET_I_MIN_MA;
+        if target_i_total_ma < TARGET_I_MIN_MA {
+            target_i_total_ma = TARGET_I_MIN_MA;
         }
-        if target_i_local_ma > TARGET_I_MAX_MA {
-            target_i_local_ma = TARGET_I_MAX_MA;
+        if target_i_total_ma > TARGET_I_MAX_MA {
+            target_i_total_ma = TARGET_I_MAX_MA;
         }
         // 在硬限基础上应用来自数字板的电流软限与 thermal_derate_pct。
         {
             let limits = LIMIT_PROFILE.lock().await;
             let derate_pct = limits.thermal_derate_pct.min(100);
-            let mut derated_max_i = limits
-                .max_i_ma
-                .saturating_mul(derate_pct as i32)
-                / 100;
+            let mut derated_max_i = limits.max_i_ma.saturating_mul(derate_pct as i32) / 100;
             derated_max_i = derated_max_i.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
 
-            if target_i_local_ma > derated_max_i {
-                target_i_local_ma = derated_max_i;
+            if target_i_total_ma > derated_max_i {
+                target_i_total_ma = derated_max_i;
             }
 
             // v0：仅在功率超过软限时打印告警，不触发故障或主动降额。
@@ -653,26 +673,50 @@ async fn main(_spawner: Spawner) -> ! {
             }
             // ovp_mv 与 temp_trip_mc 当前仅存储，后续任务可扩展提前告警/提前 trip 行为。
         }
-        let dac_code = ((CC_0P5A_DAC_CODE_CH1 as i32) * target_i_local_ma / DAC_CAL_REF_I_MA)
-            .clamp(0, ADC_FULL_SCALE as i32) as u16;
-        dac.ch1().set(DacValue::Bit12Right(dac_code));
 
-        // DAC 头间裕度：VREF - V_DAC（便于检查 CC 裁剪空间）
-        let dac_v_mv = (dac_code as u32) * vref_mv / ADC_FULL_SCALE;
-        let dac_headroom_mv = (vref_mv.saturating_sub(dac_v_mv)) as u16;
+        // 按总目标电流拆分两路通道：
+        //
+        // - I_total < I_SHARE_THRESHOLD_MA：仅 CH1 承担全部电流，CH2=0；
+        // - I_total ≥ I_SHARE_THRESHOLD_MA：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
+        let (target_ch1_ma, target_ch2_ma) = if !effective_enable_with_fault {
+            (0, 0)
+        } else if target_i_total_ma < I_SHARE_THRESHOLD_MA {
+            (target_i_total_ma, 0)
+        } else {
+            let half = target_i_total_ma / 2;
+            let rem = target_i_total_ma - 2 * half;
+            (half + rem, half)
+        };
+
+        let dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * target_ch1_ma / DAC_CAL_REF_I_MA)
+            .clamp(0, ADC_FULL_SCALE as i32) as u16;
+        let dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * target_ch2_ma / DAC_CAL_REF_I_MA)
+            .clamp(0, ADC_FULL_SCALE as i32) as u16;
+        dac.ch1().set(DacValue::Bit12Right(dac_code_ch1));
+        dac.ch2().set(DacValue::Bit12Right(dac_code_ch2));
+
+        // DAC 头间裕度：VREF - max(V_DAC1, V_DAC2)（便于检查任一通道是否接近打满）。
+        let dac_v1_mv = (dac_code_ch1 as u32) * vref_mv / ADC_FULL_SCALE;
+        let dac_v2_mv = (dac_code_ch2 as u32) * vref_mv / ADC_FULL_SCALE;
+        let dac_v_max_mv = dac_v1_mv.max(dac_v2_mv);
+        let dac_headroom_mv = (vref_mv.saturating_sub(dac_v_max_mv)) as u16;
 
         // 目标恒流（远端设定，单位 mA），用于 loop_error 与 UI 显示。
-        let loop_error = target_i_local_ma - i_local_ma;
+        let loop_error = target_i_total_ma - i_total_ma;
 
         info!(
-            "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_loc={}mA i_rmt={}mA target={}mA dac={} loop_err={}",
+            "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_ch1={}mA i_ch2={}mA i_total={}mA target_total={}mA ch1_target={}mA ch2_target={}mA dac1={} dac2={} loop_err={}",
             v_local_mv,
             v_remote_mv,
             v_5v_mv,
-            i_local_ma,
-            i_remote_ma,
-            target_i_local_ma,
-            dac_code,
+            i_ch1_ma,
+            i_ch2_ma,
+            i_total_ma,
+            target_i_total_ma,
+            target_ch1_ma,
+            target_ch2_ma,
+            dac_code_ch1,
+            dac_code_ch2,
             loop_error
         );
 
@@ -692,9 +736,11 @@ async fn main(_spawner: Spawner) -> ! {
             mode: 1, // 简单视为 CC 模式
             state_flags,
             enable: effective_enable_with_fault,
-            target_value: target_i_local_ma,
-            i_local_ma,
-            i_remote_ma,
+            // target_value 表示两通道合计目标电流（mA）。
+            target_value: target_i_total_ma,
+            // i_local_ma / i_remote_ma 对应通道 1 / 通道 2 实测电流。
+            i_local_ma: i_ch1_ma,
+            i_remote_ma: i_ch2_ma,
             v_local_mv,
             v_remote_mv,
             calc_p_mw,
@@ -743,13 +789,15 @@ async fn apply_soft_reset_safing(
     load_en_ctl.set_low();
     load_en_ts.set_low();
 
-    // SOFT_RESET：清零目标电流，等待数字板重新下发 SetPoint。
-    let reset_target = 0;
-    TARGET_I_LOCAL_MA.store(reset_target, Ordering::Relaxed);
-    let reset_dac_code = ((CC_0P5A_DAC_CODE_CH1 as i32) * reset_target / DAC_CAL_REF_I_MA)
+    // SOFT_RESET：清零总目标电流，等待数字板重新下发 SetPoint。
+    let reset_target_total = 0;
+    TARGET_I_LOCAL_MA.store(reset_target_total, Ordering::Relaxed);
+    let reset_dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * reset_target_total / DAC_CAL_REF_I_MA)
         .clamp(0, ADC_FULL_SCALE as i32) as u16;
-    dac.ch1().set(DacValue::Bit12Right(reset_dac_code));
-    dac.ch2().set(DacValue::Bit12Right(0));
+    let reset_dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * reset_target_total / DAC_CAL_REF_I_MA)
+        .clamp(0, ADC_FULL_SCALE as i32) as u16;
+    dac.ch1().set(DacValue::Bit12Right(reset_dac_code_ch1));
+    dac.ch2().set(DacValue::Bit12Right(reset_dac_code_ch2));
 
     Timer::after_millis(5).await;
 
@@ -762,8 +810,8 @@ async fn apply_soft_reset_safing(
     info!("fault flags cleared on soft reset");
 
     info!(
-        "soft reset applied: reason={:?}, target set to {} mA (DAC code={}), load re-enabled",
-        reason, reset_target, reset_dac_code
+        "soft reset applied: reason={:?}, total target set to {} mA (DAC1={} DAC2={}), load re-enabled",
+        reason, reset_target_total, reset_dac_code_ch1, reset_dac_code_ch2
     );
 }
 
@@ -1088,9 +1136,8 @@ async fn uart_setpoint_rx_task(
                                                                         "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
                                                                         err,
                                                                         frame.len(),
-                                                                        &frame[..frame
-                                                                            .len()
-                                                                            .min(8)],
+                                                                        &frame
+                                                                            [..frame.len().min(8)],
                                                                     );
                                                                     decoder.reset();
                                                                 }

@@ -108,9 +108,11 @@ pub struct FastStatus {
 /// Minimal control payload for adjusting the analog board's current setpoint.
 ///
 /// The value is expressed in milliamps (mA). The analog firmware treats this
-/// as the target *local* sink current for channel 1. The digital side is
-/// responsible for clamping the value to a sane range for the current
-/// hardware (e.g. 0‒1000 mA).
+/// as the target *total* sink current across all active channels. It is
+/// responsible for internally distributing the total current between the
+/// available channels (e.g. single‑channel below a threshold, dual‑channel
+/// sharing above it). The digital side is responsible for clamping the value
+/// to a sane range for the current hardware (e.g. 0‒5000 mA for a 5 A design).
 #[derive(Debug, Clone, Copy, Encode, Decode, Default)]
 #[cbor(map)]
 pub struct SetPoint {
@@ -122,7 +124,7 @@ pub struct SetPoint {
 /// Software-configurable limits reported by the digital side.
 ///
 /// Units:
-/// - max_i_ma: mA (software current limit for local sink current)
+/// - max_i_ma: mA (software current limit for total sink current across all channels)
 /// - max_p_mw: mW (software power limit)
 /// - ovp_mv: mV (soft overvoltage threshold)
 /// - temp_trip_mc: milli-degrees Celsius for sink temperature trip

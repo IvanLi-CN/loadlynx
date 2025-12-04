@@ -73,7 +73,7 @@
   - 0x12 `SLOW_HOUSEKEEPING`：慢速供电/诊断帧；尚未实现，仅用于容量规划。
   - 0x20 `SetEnable`：S3→G431，布尔使能；当前固件已实现 v0，用于配合 `CAL_READY` 与 `FAULT_FLAGS` 做出力 gating。
   - 0x21 `SetMode`：S3→G431，模式切换（CC/CV/CP/CR）；尚未实现，仅在协议常量中预留。
-  - 0x22 `SetPoint`：S3→G431，恒流设定值（mA，带 ACK）；当前固件已实现 v0 单通道版本，由 `setpoint_tx_task` 实现 ACK 等待与退避重传。
+  - 0x22 `SetPoint`：S3→G431，恒流设定值（mA，带 ACK）；当前固件已实现 v0 版本，将 `target_i_ma` 视为**两通道合计目标电流**，由 G431 在本地按“<2 A 单通道、≥2 A 双通道近似均分”的策略在 CH1/CH2 间拆分电流，由 `setpoint_tx_task` 实现 ACK 等待与退避重传。
   - 0x23 `SetLimits`/`LIMIT_PROFILE`：S3→G431，功率/电流/温度限值；尚未实现，未来用于热降额与风扇协同。
   - 0x24 `GetStatus`：S3→G431，请求立即返回一帧 FastStatus；协议 crate 中已有类型与编码函数，但固件尚未在运行路径中使用。
   - 0x26 `SoftReset`：S3↔G431，软复位请求/确认；当前固件已实现 v0，使用同一 ID 配合 `FLAG_ACK_REQ/FLAG_IS_ACK` 区分请求与 ACK。
@@ -128,7 +128,7 @@
 
 | 数据块 | 字段概要 | 单帧字节 | 更新频率 | 估算带宽 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `SET_POINT` (0x22) | `seq`、`target_i_ma`（mA，单通道 CC 设定值） | ≈18 B | 当前固件：10 Hz（编码器驱动）；规划：50–100 Hz | 0.9 kB/s ≈ 7.2 kbps（按 50 Hz 规划估算；当前 10 Hz 实际带宽约为其 1/5） | 当前固件已实现 v0：单通道恒流设定，全部要求 ACK；数字侧在 `setpoint_tx_task` 中实现 ACK 等待、退避重传与“最新值优先”，模拟侧应用后回 `FLAG_IS_ACK` 空载帧，并在 FastStatus 中回显 `target_value` |
+| `SET_POINT` (0x22) | `seq`、`target_i_ma`（mA，两通道合计 CC 设定值） | ≈18 B | 当前固件：10 Hz（编码器驱动）；规划：50–100 Hz | 0.9 kB/s ≈ 7.2 kbps（按 50 Hz 规划估算；当前 10 Hz 实际带宽约为其 1/5） | 当前固件已实现 v0：总电流恒流设定，全部要求 ACK；G431 将 `target_i_ma` clamp 到 `[0,5_000]` mA，并按 `<2 A 单通道、≥2 A 双通道近似均分` 在 CH1/CH2 间拆分目标电流；数字侧在 `setpoint_tx_task` 中实现 ACK 等待、退避重传与“最新值优先”，模拟侧应用后回 `FLAG_IS_ACK` 空载帧，并在 FastStatus 中回显 `target_value`（即总目标电流） |
 | `LIMIT_PROFILE` (0x23) | `max_i`、`max_p`、`ovp_mv`、`temp_trip`、`thermal_derate`、预留 | ≈20 B | 0.2–1 Hz（用户修改时） | ≤20 B/s ≈ 0.16 kbps | 每次下发表征最大允许功率/电流的参数，并附 ESP 根据风扇控制计算出的 `thermal_derate`，便于版本化；当前固件尚未实现此帧，风扇控制仅在文档与协议层预留 |
 | `CONTROL_CMD` (0x20/0x24/0x25 等) | `SetEnable`、`ModeSwitch`、`GetStatus`、`FaultClear` 等短指令 | 8–12 B | 0–20 Hz（按键/脚本触发） | ≤160 B/s ≈ 1.3 kbps | 均带 ACK_REQ，失败可按 5/10/20 ms 退避重试；当前固件仅实际使用 `SetEnable(0x20)`，其余命令仍在规划中 |
 | `SOFT_RESET` (0x26) | `reason`（u8，0=manual、1=fw_update、2=ui_recover、3=link_recover）、`timestamp_ms` | 6 B | 上电后一次；或 UI/脚本按需触发（<0.2 Hz） | ≈1.2 B/s | 数字侧通过 `SoftReset` 请求模拟侧软复位：G431 进入安全态并清空状态，然后以同 ID、带 `FLAG_IS_ACK` 的帧确认；当前固件已实现 v0 版本，数字侧在 ACK 缺失时给出警告但仍继续后续握手 |
@@ -189,17 +189,19 @@
 
 ### 近/远端电压与双电流采样
 
-- **采样对**：STM32G431 的 ADC 同时采集本地 Kelvin 点与远端 Sense 线的一对电压（`v_local_mv`、`v_remote_mv`），以及两路电流（`i_local_ma`、`i_remote_ma`）。其中：
-  - `i_local` 来源于主功率分流器，覆盖 0–15 A 区间，作为闭环控制主量；
-  - `i_remote` 来源于辅助分流/霍尔传感，可覆盖低电流精度或第二通道（视硬件装配），主要提供 UI/记录与一致性校验。
+- **采样对**：STM32G431 的 ADC 同时采集本地 Kelvin 点与远端 Sense 线的一对电压（`v_local_mv`、`v_remote_mv`），以及两路电流（`i_local_ma`、`i_remote_ma`）。当前 v4.2 硬件装配下：
+  - `i_local` 来源于 CH1 主功率分流器，覆盖 0–6 A 区间，对应功率通道 1；
+  - `i_remote` 来源于 CH2 分流器，对应功率通道 2；
+  - 总电流 `i_total_ma = i_local_ma + i_remote_ma`，用于功率估算与闭环误差计算。
 - **远端电压判定**：远端 Sense 线可能未接入，被动浮空时读数不可用。G431 按以下规则决定是否采用远端值：
   1. 监测 `sense_remote_present`（硬件通过 FPC 检测或差分防呆）：仅当该信号有效时才尝试使用远端值；
   2. 验证远端差分在允许范围内（0.5–55 V）且绝对值未饱和（ADC 原码不接近 0 或满量程）；
   3. 连续 3 帧满足条件即置位 `state_flags[REMOTE_SENSE_ACTIVE]`，闭环输出、电压显示均以 `v_remote` 为准；
   4. 任一条件失败则在 2 帧内退出远端模式，回退至 `v_local` 并清除标志。
-- **字段含义**：
-  - `v_local_mv`/`i_local_ma` 始终反映板载测点，供日志/诊断使用；
-  - `v_remote_mv`/`i_remote_ma` 仅在 `REMOTE_SENSE_ACTIVE=1` 时用于控制，否则 UI 仍可显示（但会叠加“未连接”提示）。
+-- **字段含义**：
+  - `v_local_mv` 始终反映板载 Kelvin 测点电压，供日志/诊断使用；
+  - `v_remote_mv` 仅在 `REMOTE_SENSE_ACTIVE=1` 时用于控制，否则 UI 仍可显示（但会叠加“未连接”提示）；
+  - `i_local_ma`/`i_remote_ma` 分别反映 CH1/CH2 实测电流：在 `<2 A` 总目标区间内，预期 `i_remote_ma≈0`；在 `≥2 A` 区间，两路电流预期近似均分，总电流约为二者之和。
 - **UI 映射**：ESP32‑S3 根据 `state_flags` 决定右侧“REMOTE/LOCAL” 卡片的强调态；若远端失效，则 REMOTE 显示 `--.--` 并提示用户检查 Sense 线。
 
 ### 散热片温度传感器布点

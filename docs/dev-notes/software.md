@@ -77,8 +77,8 @@
   - 初始化时钟、VREFBUF、ADC1/ADC2、DAC1、USART3、`LOAD_EN_CTL/LOAD_EN_TS` 与板载 LED 后进入循环；
   - 每 50 ms：
     - 通过 VrefInt 计算当前 `vref_mv`；
-    - 采样本地/远端电压、电流、5 V 轨、电源温度、两路 NTC 与 MCU 内部温度；
-    - 根据传感器换算得到 `v_local_mv`/`v_remote_mv`、`i_local_ma`/`i_remote_ma`、`calc_p_mw`、三路温度与 `dac_headroom_mv`；
+    - 采样本地/远端电压、两路电流、5 V 轨、电源温度、两路 NTC 与 MCU 内部温度；
+    - 根据传感器换算得到 `v_local_mv`/`v_remote_mv`、`i_local_ma`/`i_remote_ma`（分别对应功率通道 CH1/CH2）、`calc_p_mw`（基于 `i_total_ma = i_local_ma + i_remote_ma`）、三路温度与 `dac_headroom_mv`；
     - 做远端 sense 判定：电压在 0.5–55 V 且 ADC 原码远离饱和，3 帧进入 / 2 帧退出，驱动 `STATE_FLAG_REMOTE_ACTIVE`；
     - 基于 `LAST_RX_GOOD_MS` 与 300 ms 超时时间计算链路是否健康，超时则认为 link fault：LED1 以约 2 Hz 闪烁，并在 FastStatus 的 `state_flags` 中清除 `STATE_FLAG_LINK_GOOD`；
     - 结合 `ENABLE_REQUESTED`、`CAL_READY` 与 `FAULT_FLAGS` 计算 `effective_enable_with_fault`，据此决定目标电流与 DAC 输出；
@@ -89,7 +89,7 @@
 `uart_setpoint_rx_task` 在独立任务中消费 USART3 RX 环缓冲，逐帧解析控制消息：
 
 - `MSG_SET_POINT`：
-  - 成功解析后更新 `TARGET_I_LOCAL_MA`，并记录 `LAST_SETPOINT_SEQ`；
+  - 成功解析后更新 `TARGET_I_LOCAL_MA`（视为“总目标电流”，两通道合计，单位 mA），并记录 `LAST_SETPOINT_SEQ`；
   - 对首次或新 `seq` 应用 setpoint，重复 `seq` 视为重传只回 ACK 不改目标（幂等）；
   - 通过 `encode_ack_only_frame(MSG_SET_POINT)` 立即返回 ACK，数字侧基于 `FLAG_IS_ACK` 驱动重传状态机。
 - `MSG_SOFT_RESET`：
@@ -111,7 +111,9 @@
 - UI 实现位于 `firmware/digital/src/ui`，当前布局大致为：
   - 左侧三张主卡片：主电压/主电流/主功率，对应 `FastStatus` 中选取的 main voltage/current/power；
   - 右上角电压对：REMOTE 与 LOCAL 电压，`REMOTE_ACTIVE` 置位时以远端为主，否则 REMOTE 显示 `--.--` 且条形图归零；
-  - 右中部电流对：CH1/CH2 电流条，映射 `i_local_ma` 与 `i_remote_ma`；
+  - 右中部电流对：CH1/CH2 电流条，映射 `i_local_ma` 与 `i_remote_ma`，其中：
+    - 总目标电流 <2 A 时，CH2 预期为 0 A（仅 CH1 工作）；
+    - 总目标电流 ≥2 A 时，CH1/CH2 预期近似各承担一半电流（允许少量不平衡与采样误差）；
   - 底部 5 行状态文本：运行时间、两路散热片温度、MCU 温度以及故障概要（`FAULT OK` 或 `FAULT 0xXXXXXXXX`）。
 - Telemetry 模型在后台持续积分 `energy_wh`，当前 UI 尚未单独绘制该值，但已在 `UiSnapshot` 中保留字段，便于后续扩展或上位机导出。
 - UI 不直接控制任何安全逻辑，仅反映 `FastStatus` 内容；控制路径通过上文的 SetPoint/SoftReset/SetEnable 完成。
@@ -158,7 +160,7 @@
 - **电流与电压**
   - 采样 `CUR1_SNS`/`CUR2_SNS`，根据硬件增益关系将测得电压换算为 `i_local_ma`/`i_remote_ma`（约等于 `2 × V_CUR[mV]`，覆盖 0–5 A 测试范围）。
   - 采样 `V_NR_SNS`（近端）与 `V_RMT_SNS`（远端），结合差分放大器缩放系数得到 `v_local_mv`/`v_remote_mv`。
-  - 计算瞬时功率 `calc_p_mw = i_local_ma * v_local_mv / 1000`。
+  - 计算瞬时功率 `calc_p_mw = i_total_ma * v_local_mv / 1000`，其中 `i_total_ma = i_local_ma + i_remote_ma`。
 - **温度**
   - 采样两路 NTC（`TS1/TS2`）并通过 Steinhart–Hart 近似转换为 `sink_core_temp_mc` 与 `sink_exhaust_temp_mc`（单位 m°C）。
   - 使用片上温度传感器得到 `mcu_temp_mc`，同样以 m°C 上报。
@@ -170,9 +172,11 @@
     - 正常时 `STATE_FLAG_LINK_GOOD` 置位且 LED 熄灭；
     - 超时则 LED 以约 2 Hz 闪烁，仅作为链路健康指示，不直接参与 enable gating。
 
-### 5.3 使能 gating 与恒流控制
+### 5.3 使能 gating 与恒流控制（单/双通道调度）
 
-- 目标电流由数字板通过 `SetPoint` 下发，存入 `TARGET_I_LOCAL_MA`，单位 mA。
+- 目标电流由数字板通过 `SetPoint` 下发，存入 `TARGET_I_LOCAL_MA`，单位 mA，语义为：
+  - **两通道合计目标电流** `I_total`（而非单通道电流）；
+  - 数字侧通过本地常量将该值 clamp 在 `[0, 5_000]` mA 区间，analog 侧再次按 `TARGET_I_MIN/MAX_MA` 与 `LimitProfile.max_i_ma` 做二次约束。
 - 有效出力条件为：
 
   ```text
@@ -180,19 +184,59 @@
       ENABLE_REQUESTED && CAL_READY && (FAULT_FLAGS == 0);
   ```
 
-- 当上述条件不满足时，主循环强制目标电流为 0 mA，并将 DAC 输出拉到对应零点。
+- 当上述条件不满足时，主循环强制总目标电流为 0 mA，并将 DAC1/2 输出拉到对应零点。
 - 当条件满足时：
-  - 将 `TARGET_I_LOCAL_MA` 限制在 `[0, 5_000]` mA 的安全区间；
-  - 按线性比例将目标电流映射为 DAC 码值（0.5 A → `CC_0P5A_DAC_CODE_CH1`），并更新 DAC CH1；
-  - 计算 `dac_headroom_mv = vref_mv - V_DAC`，用于观察环路是否即将打满。
+  1. 从原子量读取总目标电流并做范围约束：
 
-主循环同时计算闭环误差 `loop_error = target_i_local_ma - i_local_ma` 并写入 FastStatus，供数字侧 UI 与诊断使用。
+     ```text
+     I_total = clamp(TARGET_I_LOCAL_MA, TARGET_I_MIN_MA, TARGET_I_MAX_MA);
+     I_total = clamp(I_total, 0, LimitProfile.max_i_ma * thermal_derate_pct/100);
+     ```
+
+  2. 按阈值 `I_SHARE_THRESHOLD_MA = 2_000 mA` 决定单/双通道模式：
+
+     ```text
+     if I_total < 2 000 mA:
+         I_CH1_target = I_total
+         I_CH2_target = 0
+     else:
+         half = I_total / 2
+         rem  = I_total - 2*half      // 0 或 1
+         I_CH1_target = half + rem    // 如有奇数 mA 由 CH1 多承担 1 mA
+         I_CH2_target = half
+     ```
+
+  3. 将两路目标电流分别映射到 DAC 码值（标定点均为 0.5 A → `CC_0P5A_DAC_CODE_CHx`）：
+
+     ```text
+     dac_ch1 = CC_0P5A_DAC_CODE_CH1 * I_CH1_target / 500 mA
+     dac_ch2 = CC_0P5A_DAC_CODE_CH2 * I_CH2_target / 500 mA
+     ```
+
+  4. 计算 DAC 头间裕度：
+
+     ```text
+     V_DAC1 = dac_ch1 / 4095 * vref_mv
+     V_DAC2 = dac_ch2 / 4095 * vref_mv
+     dac_headroom_mv = vref_mv - max(V_DAC1, V_DAC2)
+     ```
+
+- 实际功率估算与闭环误差：
+
+  - 总电流 `i_total_ma = i_local_ma + i_remote_ma`（分别对应 CH1/CH2 实测电流）；
+  - `calc_p_mw = i_total_ma * v_local_mv / 1000`；
+  - `loop_error = I_total - i_total_ma`。
+
+主循环将上述量写入 FastStatus，其中：
+
+- `target_value` = `I_total`（两通道合计目标电流）；
+- `i_local_ma` / `i_remote_ma` = CH1 / CH2 实测电流。
 
 ### 5.4 故障检测与 SoftReset safing
 
 - **故障判定与锁存**
   - 使用协议 crate 中的 4 个 fault bit：
-    - `FAULT_OVERCURRENT`：`i_local_ma > 5.5 A` 近似；
+    - `FAULT_OVERCURRENT`：基于电流检测（当前实现仍以 CH1 电流 `i_local_ma` 与 5.5 A 近似阈值为准）；
     - `FAULT_OVERVOLTAGE`：`v_local_mv > 55 V`；
     - `FAULT_MCU_OVER_TEMP`：`mcu_temp_mc > 110 °C`；
     - `FAULT_SINK_OVER_TEMP`：`sink_core_temp_mc > 100 °C`。
@@ -208,5 +252,4 @@
 
 ### 5.5 历史 Bring‑up 规划（简述）
 
-早期版本中，G431 侧仅实现 UART Echo 与固定 0.5 A 输出，规划是拆分为 `adc_sampler_task`、`cc_supervisor_task` 与 `uart_telemetry_task` 三个 Embassy 任务。本节前述当前实现已经在单任务主循环中落地了绝大部分规划要点（ADC 采样、恒流设定、基础保护与 FastStatus 遥测），后续若需要多通道扩展或更复杂的环路控制，可在此基础上再拆分任务与结构。
-
+早期版本中，G431 侧仅实现 UART Echo 与固定 0.5 A 输出，规划是拆分为 `adc_sampler_task`、`cc_supervisor_task` 与 `uart_telemetry_task` 三个 Embassy 任务。本节前述当前实现已经在单任务主循环中落地了绝大部分规划要点（ADC 采样、恒流设定、基础保护与 FastStatus 遥测），并在此基础上实现了“两通道合流”的恒流控制策略（<2 A 单通道、≥2 A 双通道近似均分）。后续若需要更复杂的环路控制（例如按温度/老化动态调整通道配比、在特定模式下强制单通道运行等），可在现有结构上再拆分任务与状态机。
