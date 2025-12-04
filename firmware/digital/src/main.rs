@@ -1660,6 +1660,11 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     let mut last_sent_target: Option<i32> = None;
     let mut last_sent_ms: u32 = now_ms32();
     let mut mismatch_streak: u8 = 0;
+    // Track how long we've been stuck in AnalogState::CalMissing so we can
+    // log and opportunistically retry the CalWrite/SetEnable handshake.
+    let mut calmissing_since_ms: Option<u32> = None;
+    let mut last_calmissing_warn_ms: u32 = 0;
+    let mut last_calmissing_handshake_ms: u32 = 0;
 
     loop {
         yield_now().await;
@@ -1735,6 +1740,9 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
             let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
             match analog_state {
                 AnalogState::Faulted => {
+                    // Leaving CalMissing; reset stuck timer.
+                    calmissing_since_ms = None;
+
                     let now_ms = now;
                     let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
                     if now_ms.wrapping_sub(last_gate) >= 1_000 {
@@ -1750,9 +1758,141 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                         LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
                         warn!("SetPoint TX gated: analog not ready (calibration missing?)");
                     }
+
+                    // Record when we first entered CalMissing.
+                    let since = calmissing_since_ms.get_or_insert(now_ms);
+                    let stuck_ms = now_ms.wrapping_sub(*since);
+
+                    // After a short grace period, emit a rate-limited diagnostic and
+                    // retry the SoftReset + CalWrite + SetEnable handshake to recover
+                    // from a potentially dropped calibration write.
+                    if stuck_ms >= 2_000 {
+                        if now_ms.wrapping_sub(last_calmissing_warn_ms) >= 5_000 {
+                            last_calmissing_warn_ms = now_ms;
+                            warn!(
+                                "analog stuck in CalMissing (link_up=true, fault_flags=0, enable=false, stuck_ms={})",
+                                stuck_ms
+                            );
+                        }
+
+                        if now_ms.wrapping_sub(last_calmissing_handshake_ms) >= 5_000 {
+                            last_calmissing_handshake_ms = now_ms;
+                            warn!(
+                                "retrying SoftReset + CalWrite + SetEnable handshake due to CalMissing"
+                            );
+
+                            // SoftReset re-handshake: use a fresh seq to keep framing sane.
+                            let soft_reset_seq = seq;
+                            seq = seq.wrapping_add(1);
+                            let soft_reset_acked = send_soft_reset_handshake(
+                                &mut uhci_tx,
+                                soft_reset_seq,
+                                &mut raw,
+                                &mut slip,
+                            )
+                            .await;
+                            if !soft_reset_acked {
+                                warn!(
+                                    "soft_reset re-handshake: ack missing; continuing with CalWrite+SetEnable"
+                                );
+                            }
+
+                            // Re-send a minimal CalWrite(index=0) block.
+                            let mut cal = CalWrite {
+                                index: 0,
+                                payload: [0u8; 32],
+                                crc: 0,
+                            };
+                            let mut buf = [0u8; 33];
+                            buf[0] = cal.index;
+                            buf[1..].copy_from_slice(&cal.payload);
+                            cal.crc = crc16_ccitt_false(&buf);
+
+                            let cal_seq = seq;
+                            match encode_cal_write_frame(cal_seq, &cal, &mut raw) {
+                                Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+                                    Ok(slip_len) => {
+                                        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                                            Ok(written) if written == slip_len => {
+                                                let _ = uhci_tx.uart_tx.flush_async().await;
+                                                info!(
+                                                    "CalWrite(index={}, msg=0x{:02x}) frame re-sent seq={} len={} slip_len={}",
+                                                    cal.index, MSG_CAL_WRITE, cal_seq, frame_len, slip_len
+                                                );
+                                            }
+                                            Ok(written) => {
+                                                warn!(
+                                                    "CalWrite re-send short write {} < {} (seq={})",
+                                                    written, slip_len, cal_seq
+                                                );
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "CalWrite re-send uart write error for seq={}: {:?}",
+                                                    cal_seq, err
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!("CalWrite re-send slip_encode error: {:?}", err);
+                                    }
+                                },
+                                Err(err) => {
+                                    warn!("encode_cal_write_frame (retry) error: {:?}", err);
+                                }
+                            }
+                            seq = seq.wrapping_add(1);
+
+                            // Re-send SetEnable(true) to re-arm ENABLE_REQUESTED on analog.
+                            let enable_seq = seq;
+                            let enable_cmd = SetEnable { enable: true };
+                            match encode_set_enable_frame(enable_seq, &enable_cmd, &mut raw) {
+                                Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+                                    Ok(slip_len) => {
+                                        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                                            Ok(written) if written == slip_len => {
+                                                let _ = uhci_tx.uart_tx.flush_async().await;
+                                                info!(
+                                                    "SetEnable(true) frame re-sent seq={} len={} slip_len={}",
+                                                    enable_seq, frame_len, slip_len
+                                                );
+                                            }
+                                            Ok(written) => {
+                                                warn!(
+                                                    "SetEnable(true) re-send short write {} < {} (seq={})",
+                                                    written, slip_len, enable_seq
+                                                );
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "SetEnable(true) re-send uart write error for seq={}: {:?}",
+                                                    enable_seq, err
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!("SetEnable(true) re-send slip_encode error: {:?}", err);
+                                    }
+                                },
+                                Err(err) => {
+                                    warn!(
+                                        "SetEnable(true) re-send encode_set_enable_frame error: {:?}",
+                                        err
+                                    );
+                                }
+                            }
+                            seq = seq.wrapping_add(1);
+                        }
+                    }
+
                     continue;
                 }
-                AnalogState::Offline | AnalogState::Ready => {}
+                AnalogState::Offline | AnalogState::Ready => {
+                    // Leaving CalMissing; reset stuck timer.
+                    calmissing_since_ms = None;
+                }
             }
 
             let send_seq = seq;
