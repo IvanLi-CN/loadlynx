@@ -710,6 +710,8 @@ impl UiSnapshot {
         self.status_lines = self.compute_status_lines();
     }
 
+    // CORE = NTC near MOSFETs (Tag1 / TS2 / R40, `sink_core_temp_mc`)
+    // SINK = NTC near exhaust/side wall (Tag2 / TS1 / R39, `sink_exhaust_temp_mc`)
     fn compute_status_lines(&self) -> [String<20>; 5] {
         let mut run = String::<20>::new();
         let _ = run.push_str("RUN ");

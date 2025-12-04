@@ -551,10 +551,12 @@ async fn main(_spawner: Spawner) -> ! {
         let calc_p_mw =
             ((i_local_ma as i64 * v_local_mv as i64) / 1_000).clamp(0, u32::MAX as i64) as u32;
 
-        // TS1: NTC on heatsink core between MOSFETs → MOS/sink core temperature.
-        // TS2: NTC near heatsink exhaust/side wall → exhaust/case temperature.
-        let sink_core_temp_mc: i32 = ntc_mv_to_mc(ts1_mv);
-        let sink_exhaust_temp_mc: i32 = ntc_mv_to_mc(ts2_mv);
+        // 实物板确认：TS2 (R40) 靠近 MOSFET / 散热片热点；TS1 (R39) 更靠近出风口/侧壁。
+        // 约定：
+        // - sink_core_temp_mc 始终表示“靠 MOS 的 NTC”（CORE，TS2/R40）
+        // - sink_exhaust_temp_mc 表示“靠外壳/出风口一侧的 NTC”（SINK/EXHAUST，TS1/R39）
+        let sink_core_temp_mc: i32 = ntc_mv_to_mc(ts2_mv);
+        let sink_exhaust_temp_mc: i32 = ntc_mv_to_mc(ts1_mv);
         let mcu_temp_mc: i32 = g4_internal_mcu_temp_to_mc(mcu_temp_code);
 
         // --- Fault detection ---

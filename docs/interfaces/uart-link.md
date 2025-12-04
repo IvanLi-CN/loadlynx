@@ -204,8 +204,8 @@
 
 ### 散热片温度传感器布点
 
-- **Tag1 — `sink_core_temp_mc`**：10 k NTC 贴附在两颗 MOSFET 之间的铝散热片中心，处于风洞内部但远离直接出风位置，用于捕捉 FET 热源附近的最高温度。闭环降额、温度保护以此为主依据。
-- **Tag2 — `sink_exhaust_temp_mc`**：同规格 NTC 固定在散热片侧面、靠近出风口但避开风直接吹拂（位于“吹不到风”的壳体侧壁），反映整体热质量/外壳温度，辅助判断风扇异常或环境散热不佳。
+- **Tag1 — `sink_core_temp_mc`**：靠近 MOSFET / 散热片热点一侧的 10 k NTC（实物板为 TS2 / R40，贴附在两颗 MOSFET 之间的铝散热片中心，处于风洞内部但远离直接出风位置），用于捕捉 FET 热源附近的最高温度。闭环降额、温度保护以此为主依据。
+- **Tag2 — `sink_exhaust_temp_mc`**：位于散热片外侧/出风口附近的同规格 NTC（实物板为 TS1 / R39，固定在散热片侧面、靠近出风口但避开风直接吹拂，位于“吹不到风”的壳体侧壁），反映整体热质量/外壳温度，辅助判断风扇异常或环境散热不佳。
 - **遥测语义**：`FAST_STATUS` 同时上报两个通道，ESP 可以：
   - 对 `sink_core_temp_mc` 设快速阈值（如 90 °C 降额、100 °C 触发故障）。
   - 对 `sink_exhaust_temp_mc` 设较慢积分阈值，检测风扇停转或壳体散热恶化（若核心温度正常但侧温持续上升，提示风道堵塞）。
@@ -220,7 +220,7 @@
 - **硬件归属**：PWM（`FAN_PWM`）与转速反馈（`FAN_TACH`）均接在 ESP32‑S3（`GPIO39/40`，参考 `docs/interfaces/pinmaps/esp32-s3.md:81-82`），STM32G431 仅通过温度/功率遥测提供输入。
 - **控制路径**：
   1. G431 在 `FAST_STATUS` 内上报 `sink_core_temp_mc`、`sink_exhaust_temp_mc`、功率与负载信息。
-  2. S3 根据这些数据执行风扇曲线（或闭环 PID），直接生成 PWM，占空比与 `thermal_derate`（0–100%，写入 `LIMIT_PROFILE`）并保存在自身 EEPROM。
+  2. S3 根据这些数据执行风扇曲线（或闭环 PID），直接生成 PWM、占空比与 `thermal_derate`（0–100%，写入 `LIMIT_PROFILE`）并保存在自身 EEPROM。其中风扇控制主要依据 CORE NTC（Tag1 / TS2 / R40，对应 `sink_core_temp_mc`）；EXHAUST NTC（Tag2 / TS1 / R39，对应 `sink_exhaust_temp_mc`）用于判断风道/壳体散热情况（例如风道堵塞或风扇异常等扩展逻辑）。
   3. 当散热不足时，S3 降低 `thermal_derate` → 通过 `LIMIT_PROFILE` 或即时 `CONTROL_CMD` 告知 G431：最大允许功率/电流需要降额。
 - **遥测协同**：
   - STM32 不再上报 `fan_pwm`/`fan_rpm` 字段；此类数据由 ESP32 本地记录，可通过 UI 或上位机直接读取 ESP 端日志。
