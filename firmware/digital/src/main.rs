@@ -115,6 +115,23 @@ const ENABLE_UART_UHCI_DMA: bool = true;
 const SETPOINT_ACK_TIMEOUT_MS: u32 = 40;
 const SETPOINT_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
 
+// Fan PWM control (ESP32‑S3 本地，根据 G431 上报的 sink_core_temp + 功率驱动风扇占空比)。
+// 数值集中在此处，便于后续调参。
+const FAN_PWM_FREQUENCY_KHZ: u32 = 25; // 20–25 kHz 区间内，避开可闻频率
+const FAN_DUTY_DEFAULT_PCT: u8 = 40; // 上电默认占空比，保证有一定风量
+const FAN_DUTY_MIN_PCT: u8 = 15; // 温度进入控制区后的保底转速
+const FAN_DUTY_MID_PCT: u8 = 70; // T_core=FAN_TEMP_HIGH_C 时的占空比
+const FAN_DUTY_MAX_PCT: u8 = 100; // 高温段全速
+const FAN_TEMP_STOP_C: f32 = 30.0; // 低功率时允许停转的温度阈值
+const FAN_TEMP_LOW_C: f32 = 30.0; // 控制曲线起点（>= 此温度进入最小转速区）
+const FAN_TEMP_HIGH_C: f32 = 55.0; // 线性拉升结束点
+const FAN_LOG_HIGH_TEMP_C: f32 = 65.0; // 进入高温区时重点打印一次
+const FAN_CONTROL_PERIOD_MS: u32 = 200; // 5 Hz 控制周期
+const FAN_DUTY_UPDATE_THRESHOLD_PCT: u8 = 5; // 小于该差值则忽略，减小抖动
+const FAN_LOG_DUTY_DELTA_LARGE_PCT: u8 = 20; // 占空比变化超过该阈值时可打印日志
+const FAN_LOG_COOLDOWN_MS: u32 = 5_000; // fan 日志限频
+const FAN_POWER_LOW_W: f32 = 5.0; // sink 功率低于该值时允许在低温下停转
+
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 #[repr(align(32))]
 struct Align32<T>(T);
@@ -124,6 +141,8 @@ static PREVIOUS_FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = Static
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
+static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
@@ -175,6 +194,23 @@ fn timestamp_ms() -> u64 {
 }
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
+
+/// Hook to release PAD‑JTAG so MTCK/MTDO (GPIO39/40) can be used for FAN_PWM/FAN_TACH.
+///
+/// On ESP32‑S3, the recommended way in ESP‑IDF is to disable the PAD‑JTAG
+/// mapping (e.g. via esp_apptrace APIs or EFUSE_DIS_PAD_JTAG). This firmware
+/// currently runs directly on `esp-hal` without linking the full ESP‑IDF
+/// runtime, so we rely on the GPIO/LEDC configuration below to re‑purpose
+/// GPIO39 as a PWM output and keep GPIO40 reserved for future tach input.
+///
+/// If the project later adopts `esp-idf-sys`, a proper IDF call can be wired
+/// in here so that all unsafe interaction stays confined to this function.
+fn disable_pad_jtag_for_fan_pins() {
+    info!(
+        "PAD-JTAG: preparing MTCK/MTDO (GPIO39/40) for FAN_PWM/FAN_TACH use; \
+         relying on GPIO reconfiguration (no esp-idf runtime linked)"
+    );
+}
 
 // 简单异步任务（未启用时间驱动，使用合作式让出）
 #[embassy_executor::task]
@@ -523,6 +559,37 @@ impl TelemetryModel {
     }
 }
 
+fn compute_fan_duty_pct(temp_c: f32, main_power_w: f32) -> u8 {
+    // 简单分段线性曲线：
+    //   低功率 & T_core <= FAN_TEMP_STOP_C → 0%（可停转）
+    //   其他情况下：
+    //     T_core <= FAN_TEMP_LOW_C  → FAN_DUTY_MIN_PCT
+    //   FAN_TEMP_LOW_C..FAN_TEMP_HIGH_C 线性插值到 FAN_DUTY_MID_PCT
+    //   T_core >= FAN_TEMP_HIGH_C → FAN_DUTY_MAX_PCT
+    if !temp_c.is_finite() {
+        return FAN_DUTY_DEFAULT_PCT;
+    }
+
+    let low_power = main_power_w < FAN_POWER_LOW_W;
+    if low_power && temp_c <= FAN_TEMP_STOP_C {
+        return 0;
+    }
+
+    if temp_c <= FAN_TEMP_LOW_C {
+        FAN_DUTY_MIN_PCT
+    } else if temp_c > FAN_TEMP_HIGH_C {
+        FAN_DUTY_MAX_PCT
+    } else {
+        let span = FAN_TEMP_HIGH_C - FAN_TEMP_LOW_C;
+        let frac = ((temp_c - FAN_TEMP_LOW_C) / span).clamp(0.0, 1.0);
+        let duty_min = FAN_DUTY_MIN_PCT as f32;
+        let duty_mid = FAN_DUTY_MID_PCT as f32;
+        let duty = duty_min + frac * (duty_mid - duty_min);
+        let duty = duty.clamp(FAN_DUTY_MIN_PCT as f32, FAN_DUTY_MAX_PCT as f32);
+        duty as u8
+    }
+}
+
 fn write_runtime(target: &mut heapless::String<16>, uptime_ms: u32) {
     target.clear();
     let total_seconds = uptime_ms / 1000;
@@ -530,6 +597,77 @@ fn write_runtime(target: &mut heapless::String<16>, uptime_ms: u32) {
     let minutes = (total_seconds % 3600) / 60;
     let seconds = total_seconds % 60;
     let _ = core::fmt::write(target, format_args!("{hours:02}:{minutes:02}:{seconds:02}"));
+}
+
+#[embassy_executor::task]
+async fn fan_task(
+    telemetry: &'static TelemetryMutex,
+    fan_channel: &'static ledc_channel::Channel<'static, LowSpeed>,
+) {
+    info!(
+        "fan task starting (period_ms={}, temp_low={}C, temp_high={}C, duty_min={}%, duty_mid={}%, duty_max={}%)",
+        FAN_CONTROL_PERIOD_MS,
+        FAN_TEMP_LOW_C,
+        FAN_TEMP_HIGH_C,
+        FAN_DUTY_MIN_PCT,
+        FAN_DUTY_MID_PCT,
+        FAN_DUTY_MAX_PCT,
+    );
+
+    // 上电时设置一个安全默认占空比，避免完全静音导致热惯性过大。
+    fan_channel
+        .set_duty(FAN_DUTY_DEFAULT_PCT)
+        .expect("fan duty init");
+
+    let mut last_duty_pct: u8 = FAN_DUTY_DEFAULT_PCT;
+    let mut last_log_duty_pct: u8 = FAN_DUTY_DEFAULT_PCT;
+    let mut last_log_ms: u32 = now_ms32();
+
+    loop {
+        let (core_temp_c, exhaust_temp_c, main_power_w) = {
+            let guard = telemetry.lock().await;
+            let core = guard.snapshot.sink_core_temp;
+            let exhaust = guard.snapshot.sink_exhaust_temp;
+            let power = guard.snapshot.main_power;
+            (core, exhaust, power)
+        };
+
+        let target_duty_pct = compute_fan_duty_pct(core_temp_c, main_power_w);
+        let diff = if target_duty_pct > last_duty_pct {
+            target_duty_pct - last_duty_pct
+        } else {
+            last_duty_pct - target_duty_pct
+        };
+
+        if diff >= FAN_DUTY_UPDATE_THRESHOLD_PCT {
+            fan_channel
+                .set_duty(target_duty_pct)
+                .expect("fan duty update");
+
+            let now = now_ms32();
+            let log_diff = if target_duty_pct > last_log_duty_pct {
+                target_duty_pct - last_log_duty_pct
+            } else {
+                last_log_duty_pct - target_duty_pct
+            };
+            let high_temp = core_temp_c >= FAN_LOG_HIGH_TEMP_C;
+            if high_temp
+                || (log_diff >= FAN_LOG_DUTY_DELTA_LARGE_PCT
+                    && now.wrapping_sub(last_log_ms) >= FAN_LOG_COOLDOWN_MS)
+            {
+                info!(
+                    "fan duty update: T_core={}C T_exhaust={}C duty={}%",
+                    core_temp_c, exhaust_temp_c, target_duty_pct
+                );
+                last_log_duty_pct = target_duty_pct;
+                last_log_ms = now;
+            }
+
+            last_duty_pct = target_duty_pct;
+        }
+
+        cooperative_delay_ms(FAN_CONTROL_PERIOD_MS).await;
+    }
 }
 
 async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
@@ -1248,6 +1386,10 @@ fn main() -> ! {
     info!("LoadLynx digital firmware version: {}", FW_VERSION);
     info!("LoadLynx digital alive; initializing local peripherals");
 
+    // 禁用 PAD‑JTAG，将 MTCK/MTDO (GPIO39/40) 释放为普通 GPIO，
+    // 以便下文配置 FAN_PWM/FAN_TACH（GPIO40 仅预留，不在本任务中使用）。
+    disable_pad_jtag_for_fan_pins();
+
     // GPIO34 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
     let alg_en_pin = peripherals.GPIO34;
     let mut alg_en = Output::new(alg_en_pin, Level::Low, OutputConfig::default());
@@ -1260,6 +1402,9 @@ fn main() -> ! {
     let dc_pin = peripherals.GPIO10;
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
+    let fan_pwm_pin = peripherals.GPIO39; // MTCK / FAN_PWM（PAD‑JTAG 已在启动早期释放）
+    // NOTE: GPIO40 (MTDO) is wired to FAN_TACH and intentionally left unused here;
+    // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
 
     // 配置 SPI2 并启用 DMA：收缩 DMA 缓冲区以降低一次搬运的负载。
@@ -1312,6 +1457,30 @@ fn main() -> ! {
         .expect("backlight channel");
     let backlight_channel = BACKLIGHT_CHANNEL.init(backlight_channel);
     backlight_channel.set_duty(80).expect("backlight duty set");
+
+    // FAN_PWM: 低速 LEDC 通道，恒定 20–25 kHz 频率，由 fan_task 周期性更新占空比。
+    let mut fan_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer1);
+    fan_timer
+        .configure(ledc_timer::config::Config {
+            duty: ledc_timer::config::Duty::Duty10Bit,
+            clock_source: ledc_timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(FAN_PWM_FREQUENCY_KHZ),
+        })
+        .expect("fan timer");
+    let fan_timer = FAN_TIMER.init(fan_timer);
+
+    let mut fan_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel1, fan_pwm_pin);
+    fan_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*fan_timer,
+            duty_pct: FAN_DUTY_DEFAULT_PCT,
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("fan channel");
+    let fan_channel = FAN_CHANNEL.init(fan_channel);
+    fan_channel
+        .set_duty(FAN_DUTY_DEFAULT_PCT)
+        .expect("fan duty default");
 
     let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
     let prev_framebuffer = &mut PREVIOUS_FRAMEBUFFER
@@ -1471,6 +1640,10 @@ fn main() -> ! {
         spawner
             .spawn(display_task(resources, telemetry))
             .expect("display_task spawn");
+        info!("spawning fan task");
+        spawner
+            .spawn(fan_task(telemetry, fan_channel))
+            .expect("fan_task spawn");
         if ENABLE_UART_LINK_TASK {
             if ENABLE_UART_UHCI_DMA {
                 let uhci_rx = uhci_rx_opt.take().expect("uhci rx missing");
@@ -1817,7 +1990,11 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                                                 let _ = uhci_tx.uart_tx.flush_async().await;
                                                 info!(
                                                     "CalWrite(index={}, msg=0x{:02x}) frame re-sent seq={} len={} slip_len={}",
-                                                    cal.index, MSG_CAL_WRITE, cal_seq, frame_len, slip_len
+                                                    cal.index,
+                                                    MSG_CAL_WRITE,
+                                                    cal_seq,
+                                                    frame_len,
+                                                    slip_len
                                                 );
                                             }
                                             Ok(written) => {
@@ -1873,7 +2050,10 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                                         }
                                     }
                                     Err(err) => {
-                                        warn!("SetEnable(true) re-send slip_encode error: {:?}", err);
+                                        warn!(
+                                            "SetEnable(true) re-send slip_encode error: {:?}",
+                                            err
+                                        );
                                     }
                                 },
                                 Err(err) => {
