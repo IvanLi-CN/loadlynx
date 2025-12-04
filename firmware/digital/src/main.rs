@@ -60,7 +60,7 @@ const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
 mod ui;
-use ui::UiSnapshot;
+use ui::{AnalogState, UiSnapshot};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -130,6 +130,7 @@ static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = St
 static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
 type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
+static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
 
 #[cfg(not(feature = "mock_setpoint"))]
 struct EncoderPins {
@@ -447,6 +448,8 @@ impl TelemetryModel {
         self.snapshot.sink_exhaust_temp = status.sink_exhaust_temp_mc as f32 / 1000.0;
         self.snapshot.mcu_temp = status.mcu_temp_mc as f32 / 1000.0;
         self.snapshot.fault_flags = status.fault_flags;
+        let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+        self.snapshot.analog_state = analog_state;
 
         write_runtime(&mut self.snapshot.run_time, status.uptime_ms);
 
@@ -530,11 +533,28 @@ fn write_runtime(target: &mut heapless::String<16>, uptime_ms: u32) {
 }
 
 async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    let fault_flags = status.fault_flags;
+    let enabled = status.enable;
+    let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
+
+    // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
+    // 避免模拟侧未完全实现 LINK_GOOD 时 UI 误报 OFFLINE。
+    let state = if !link_up && !link_flag {
+        AnalogState::Offline
+    } else if fault_flags != 0 {
+        AnalogState::Faulted
+    } else if enabled {
+        AnalogState::Ready
+    } else {
+        AnalogState::CalMissing
+    };
+    ANALOG_STATE.store(state as u8, Ordering::Relaxed);
+
     let mut guard = telemetry.lock().await;
     guard.update_from_status(status);
     LAST_TARGET_VALUE_FROM_STATUS.store(status.target_value, Ordering::Relaxed);
 
-    let fault_flags = status.fault_flags;
     if fault_flags != 0 {
         let now = now_ms32();
         let last = LAST_FAULT_LOG_MS.load(Ordering::Relaxed);
@@ -1517,6 +1537,7 @@ async fn stats_task() {
                     info!("link up (last_good_frame_age={} ms)", age_ms);
                 } else {
                     warn!("link down (no frames for {} ms)", age_ms);
+                    ANALOG_STATE.store(AnalogState::Offline as u8, Ordering::Relaxed);
                 }
             }
         }
@@ -1709,6 +1730,29 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                 }
                 // 保留现有 pending/ACK 状态，仅抑制新指令。
                 continue;
+            }
+
+            let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+            match analog_state {
+                AnalogState::Faulted => {
+                    let now_ms = now;
+                    let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
+                    if now_ms.wrapping_sub(last_gate) >= 1_000 {
+                        LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
+                        warn!("SetPoint TX gated: analog fault (state=FAULTED)");
+                    }
+                    continue;
+                }
+                AnalogState::CalMissing => {
+                    let now_ms = now;
+                    let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
+                    if now_ms.wrapping_sub(last_gate) >= 1_000 {
+                        LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
+                        warn!("SetPoint TX gated: analog not ready (calibration missing?)");
+                    }
+                    continue;
+                }
+                AnalogState::Offline | AnalogState::Ready => {}
             }
 
             let send_seq = seq;

@@ -11,6 +11,27 @@ use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
 use self::fonts::{SEVEN_SEG_FONT, SMALL_FONT};
 
+#[repr(u8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum AnalogState {
+    Offline = 0,
+    CalMissing = 1,
+    Faulted = 2,
+    Ready = 3,
+}
+
+impl AnalogState {
+    pub fn from_u8(raw: u8) -> Self {
+        match raw {
+            x if x == AnalogState::Offline as u8 => AnalogState::Offline,
+            x if x == AnalogState::CalMissing as u8 => AnalogState::CalMissing,
+            x if x == AnalogState::Faulted as u8 => AnalogState::Faulted,
+            x if x == AnalogState::Ready as u8 => AnalogState::Ready,
+            _ => AnalogState::Offline,
+        }
+    }
+}
+
 const LOGICAL_WIDTH: i32 = 320;
 const LOGICAL_HEIGHT: i32 = 240;
 const DEBUG_OVERLAY: bool = false;
@@ -627,6 +648,7 @@ pub struct UiSnapshot {
     pub energy_wh: f32,
     pub remote_active: bool,
     pub fault_flags: u32,
+    pub analog_state: AnalogState,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -657,6 +679,7 @@ impl UiSnapshot {
             energy_wh: 125.4,
             remote_active: true,
             fault_flags: 0,
+            analog_state: AnalogState::Ready,
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),
@@ -707,15 +730,29 @@ impl UiSnapshot {
         append_temp_1dp(&mut mcu, self.mcu_temp);
         let _ = mcu.push('C');
 
-        let mut fault = String::<20>::new();
-        if self.fault_flags == 0 {
-            let _ = fault.push_str("FAULT OK");
+        let mut analog = String::<20>::new();
+        if self.fault_flags != 0 || self.analog_state == AnalogState::Faulted {
+            let _ = analog.push_str("ANLG FAULT 0x");
+            append_u32_hex(&mut analog, self.fault_flags);
         } else {
-            let _ = fault.push_str("FAULT 0x");
-            append_u32_hex(&mut fault, self.fault_flags);
+            match self.analog_state {
+                AnalogState::Offline => {
+                    let _ = analog.push_str("ANLG OFFLINE");
+                }
+                AnalogState::CalMissing => {
+                    let _ = analog.push_str("ANLG CAL?");
+                }
+                AnalogState::Ready => {
+                    let _ = analog.push_str("ANLG READY");
+                }
+                AnalogState::Faulted => {
+                    // Already handled by the fault_flags branch above.
+                    let _ = analog.push_str("ANLG FAULT");
+                }
+            }
         }
 
-        [run, core, exhaust, mcu, fault]
+        [run, core, exhaust, mcu, analog]
     }
 
     pub fn status_lines(&self) -> [String<20>; 5] {
