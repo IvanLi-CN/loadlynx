@@ -1,0 +1,35 @@
+{
+  "name": "loadlynx-web",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node scripts/write-version.mjs && vite",
+    "build": "tsc -b && vite build && node scripts/write-version.mjs",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "lint": "biome lint .",
+    "format": "biome format --write .",
+    "check": "biome check .",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.3.8",
+    "@playwright/test": "^1.57.0",
+    "@types/node": "^24.10.1",
+    "@types/react": "^19.2.5",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.1",
+    "lefthook": "^2.0.4",
+    "playwright": "^1.57.0",
+    "typescript": "~5.9.3",
+    "vite": "^7.2.4"
+  },
+  "engines": {
+    "bun": ">=1.0.0"
+  }
+}
