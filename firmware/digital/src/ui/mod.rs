@@ -11,6 +11,27 @@ use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
 use self::fonts::{SEVEN_SEG_FONT, SMALL_FONT};
 
+#[repr(u8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum AnalogState {
+    Offline = 0,
+    CalMissing = 1,
+    Faulted = 2,
+    Ready = 3,
+}
+
+impl AnalogState {
+    pub fn from_u8(raw: u8) -> Self {
+        match raw {
+            x if x == AnalogState::Offline as u8 => AnalogState::Offline,
+            x if x == AnalogState::CalMissing as u8 => AnalogState::CalMissing,
+            x if x == AnalogState::Faulted as u8 => AnalogState::Faulted,
+            x if x == AnalogState::Ready as u8 => AnalogState::Ready,
+            _ => AnalogState::Offline,
+        }
+    }
+}
+
 const LOGICAL_WIDTH: i32 = 320;
 const LOGICAL_HEIGHT: i32 = 240;
 const DEBUG_OVERLAY: bool = false;
@@ -107,6 +128,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.ch1_current_text.as_str(),
         data.ch2_current_text.as_str(),
     );
+    draw_set_current(&mut canvas, data.set_current_text.as_str());
     draw_telemetry(&mut canvas, data);
 
     if DEBUG_OVERLAY {
@@ -172,10 +194,7 @@ pub fn render_partial(
 
     if mask.voltage_pair {
         // 清理右侧电压对所占区域的背景，再重绘标题和条形图。
-        canvas.fill_rect(
-            Rect::new(190, 8, LOGICAL_WIDTH, 96),
-            rgb(0x080f19),
-        );
+        canvas.fill_rect(Rect::new(190, 8, LOGICAL_WIDTH, 96), rgb(0x080f19));
         let remote_text = curr.remote_voltage_text.as_str();
         let local_text = curr.local_voltage_text.as_str();
         draw_voltage_pair(&mut canvas, curr, remote_text, local_text);
@@ -183,13 +202,11 @@ pub fn render_partial(
 
     if mask.current_pair {
         // 清理右侧电流对所占区域的背景，再重绘标题和条形图。
-        canvas.fill_rect(
-            Rect::new(190, 96, LOGICAL_WIDTH, 180),
-            rgb(0x080f19),
-        );
+        canvas.fill_rect(Rect::new(190, 96, LOGICAL_WIDTH, 180), rgb(0x080f19));
         let ch1_text = curr.ch1_current_text.as_str();
         let ch2_text = curr.ch2_current_text.as_str();
         draw_current_pair(&mut canvas, curr, ch1_text, ch2_text);
+        draw_set_current(&mut canvas, curr.set_current_text.as_str());
     }
 
     if mask.telemetry_lines {
@@ -204,12 +221,12 @@ pub fn render_partial(
     if mask.bars {
         // Bars are driven from remote/local voltage and currents; reuse the
         // existing helpers to redraw the bars over the existing background.
-        draw_mirror_bar(
-            &mut canvas,
-            8 + 34,
-            curr.remote_voltage / 40.0,
-            curr.local_voltage / 40.0,
-        );
+        let remote_bar = if curr.remote_active {
+            curr.remote_voltage / 40.0
+        } else {
+            0.0
+        };
+        draw_mirror_bar(&mut canvas, 8 + 34, remote_bar, curr.local_voltage / 40.0);
         draw_mirror_bar(
             &mut canvas,
             96 + 34,
@@ -221,10 +238,7 @@ pub fn render_partial(
 
 /// 在左上角叠加显示 FPS 信息。
 /// 参数 `fps` 通常来自 display_task 中按 500ms 窗口统计得到的整数 FPS。
-pub fn render_fps_overlay(
-    frame: &mut RawFrameBuf<Rgb565, &mut [u8]>,
-    fps: u32,
-) {
+pub fn render_fps_overlay(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, fps: u32) {
     let bytes = frame.as_mut_bytes();
     let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
@@ -254,12 +268,12 @@ fn draw_main_metric(
 
 fn draw_voltage_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, right_value: &str) {
     draw_pair_header(canvas, ("REMOTE", left_value), ("LOCAL", right_value), 8);
-    draw_mirror_bar(
-        canvas,
-        8 + 34,
-        data.remote_voltage / 40.0,
-        data.local_voltage / 40.0,
-    );
+    let remote_bar = if data.remote_active {
+        data.remote_voltage / 40.0
+    } else {
+        0.0
+    };
+    draw_mirror_bar(canvas, 8 + 34, remote_bar, data.local_voltage / 40.0);
 }
 
 fn draw_current_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, right_value: &str) {
@@ -270,6 +284,21 @@ fn draw_current_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, r
         data.ch1_current / 5.0,
         data.ch2_current / 5.0,
     );
+}
+
+fn small_text_width(text: &str, spacing: i32) -> i32 {
+    let glyph = SMALL_FONT.width() as i32 + spacing;
+    (text.chars().count() as i32) * glyph
+}
+
+fn draw_set_current(canvas: &mut Canvas, text: &str) {
+    // CC 模式设定电流行："SET I" + 右对齐的设定值。
+    let baseline = 156;
+    draw_small_text(canvas, "SET I", 198, baseline, rgb(0x6d7fa4), 0);
+
+    let width = small_text_width(text, 0);
+    let value_x = 314 - width;
+    draw_small_text(canvas, text, value_x, baseline, rgb(0xdfe7ff), 0);
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -522,6 +551,22 @@ fn append_u32<const N: usize>(buf: &mut String<N>, mut value: u32) {
     }
 }
 
+fn append_u32_hex<const N: usize>(buf: &mut String<N>, mut value: u32) {
+    // Append a u32 as 8-digit uppercase hexadecimal (zero-padded).
+    let mut tmp = [b'0'; 8];
+    for i in (0..8).rev() {
+        let nibble = (value & 0xF) as u8;
+        tmp[i] = match nibble {
+            0..=9 => b'0' + nibble,
+            _ => b'A' + (nibble - 10),
+        };
+        value >>= 4;
+    }
+    for b in &tmp {
+        let _ = buf.push(*b as char);
+    }
+}
+
 fn append_frac<const N: usize>(buf: &mut String<N>, mut value: u32, digits: u8) {
     // 以固定位数输出小数部分，必要时左侧补零。
     let mut tmp = [b'0'; 4];
@@ -613,11 +658,15 @@ pub struct UiSnapshot {
     pub local_voltage: f32,
     pub ch1_current: f32,
     pub ch2_current: f32,
+    pub set_current_a: f32,
     pub run_time: String<16>,
     pub sink_core_temp: f32,
     pub sink_exhaust_temp: f32,
     pub mcu_temp: f32,
     pub energy_wh: f32,
+    pub remote_active: bool,
+    pub fault_flags: u32,
+    pub analog_state: AnalogState,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -626,6 +675,7 @@ pub struct UiSnapshot {
     pub local_voltage_text: String<6>,
     pub ch1_current_text: String<6>,
     pub ch2_current_text: String<6>,
+    pub set_current_text: String<6>,
     pub status_lines: [String<20>; 5],
 }
 
@@ -641,11 +691,15 @@ impl UiSnapshot {
             local_voltage: 24.47,
             ch1_current: 4.20,
             ch2_current: 3.50,
+            set_current_a: 12.00,
             run_time,
             sink_core_temp: 42.3,
             sink_exhaust_temp: 38.1,
             mcu_temp: 35.0,
             energy_wh: 125.4,
+            remote_active: true,
+            fault_flags: 0,
+            analog_state: AnalogState::Ready,
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),
@@ -653,6 +707,7 @@ impl UiSnapshot {
             local_voltage_text: String::new(),
             ch1_current_text: String::new(),
             ch2_current_text: String::new(),
+            set_current_text: String::new(),
             status_lines: Default::default(),
         }
     }
@@ -663,14 +718,22 @@ impl UiSnapshot {
         self.main_current_text = format_value(self.main_current, 2);
         self.main_power_text = format_value(self.main_power, 1);
 
-        self.remote_voltage_text = format_pair_value(self.remote_voltage, 'V');
+        if self.remote_active {
+            self.remote_voltage_text = format_pair_value(self.remote_voltage, 'V');
+        } else {
+            self.remote_voltage_text.clear();
+            let _ = self.remote_voltage_text.push_str("--.--");
+        }
         self.local_voltage_text = format_pair_value(self.local_voltage, 'V');
         self.ch1_current_text = format_pair_value(self.ch1_current, 'A');
         self.ch2_current_text = format_pair_value(self.ch2_current, 'A');
+        self.set_current_text = format_pair_value(self.set_current_a, 'A');
 
         self.status_lines = self.compute_status_lines();
     }
 
+    // CORE = NTC near MOSFETs (Tag1 / TS2 / R40, `sink_core_temp_mc`)
+    // SINK = NTC near exhaust/side wall (Tag2 / TS1 / R39, `sink_exhaust_temp_mc`)
     fn compute_status_lines(&self) -> [String<20>; 5] {
         let mut run = String::<20>::new();
         let _ = run.push_str("RUN ");
@@ -691,12 +754,29 @@ impl UiSnapshot {
         append_temp_1dp(&mut mcu, self.mcu_temp);
         let _ = mcu.push('C');
 
-        let mut energy = String::<20>::new();
-        let _ = energy.push_str("ENERGY ");
-        append_temp_1dp(&mut energy, self.energy_wh);
-        let _ = energy.push_str("Wh");
+        let mut analog = String::<20>::new();
+        if self.fault_flags != 0 || self.analog_state == AnalogState::Faulted {
+            let _ = analog.push_str("ANLG FAULT 0x");
+            append_u32_hex(&mut analog, self.fault_flags);
+        } else {
+            match self.analog_state {
+                AnalogState::Offline => {
+                    let _ = analog.push_str("ANLG OFFLINE");
+                }
+                AnalogState::CalMissing => {
+                    let _ = analog.push_str("ANLG CAL?");
+                }
+                AnalogState::Ready => {
+                    let _ = analog.push_str("ANLG READY");
+                }
+                AnalogState::Faulted => {
+                    // Already handled by the fault_flags branch above.
+                    let _ = analog.push_str("ANLG FAULT");
+                }
+            }
+        }
 
-        [run, core, exhaust, mcu, energy]
+        [run, core, exhaust, mcu, analog]
     }
 
     pub fn status_lines(&self) -> [String<20>; 5] {

@@ -19,10 +19,10 @@ embedded-hal-nb = "1.0"
 nb = "1.1"
 heapless = "0.8"
 embassy-sync = { version = "0.5" }
-loadlynx-protocol = { path = "../../libs/protocol" }
+loadlynx-protocol = { path = "../../libs/protocol", features = ["defmt"] }
 
 # HAL + Embassy integration for ESP32-S3
-esp-hal = { version = "=1.0.0-rc.1", features = ["esp32s3", "rt", "unstable", "defmt"] }
+esp-hal = { version = "=1.0.0", features = ["esp32s3", "rt", "unstable", "defmt"] }
 
 # Logging & panic/backtrace on ESP (defmt over espflash)
 esp-println = { version = "0.16", default-features = false, features = ["esp32s3", "uart", "defmt-espflash"] }
@@ -40,7 +40,7 @@ panic = "abort"
 
 [profile.release]
 opt-level = "s"
-debug = false
+debug = 2
 debug-assertions = false
 overflow-checks = false
 codegen-units = 1
@@ -52,3 +52,4 @@ panic = "abort"
 default = ["enable_analog_5v_on_boot", "esp32s3"]
 enable_analog_5v_on_boot = []
 esp32s3 = []
+mock_setpoint = []

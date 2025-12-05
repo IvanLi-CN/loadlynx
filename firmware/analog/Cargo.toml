@@ -22,9 +22,12 @@ embassy-stm32 = { version = "0.4", features = [
   "memory-x",
   "exti",
 ] }
+embassy-sync = { version = "0.5", features = ["defmt"] }
 embassy-embedded-hal = { version = "0.5" }
 embassy-futures = { version = "0.1" }
-loadlynx-protocol = { path = "../../libs/protocol" }
+loadlynx-protocol = { path = "../../libs/protocol", features = ["defmt"] }
+stm32-metapac = { version = "18.0.0", features = ["stm32g431cb"] }
+libm = "0.2.8"
 
 [profile.dev]
 codegen-units = 1

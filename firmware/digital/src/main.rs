@@ -2,7 +2,7 @@
 #![no_main]
 
 use core::convert::Infallible;
-use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Executor;
 use embassy_futures::yield_now;
@@ -27,21 +27,41 @@ use esp_hal::{
         timer::{self as ledc_timer, TimerIFace as _},
     },
     main,
-    spi::{Mode, master::{Config as SpiConfig, Spi, SpiDmaBus}},
+    spi::{
+        Mode,
+        master::{Config as SpiConfig, Spi, SpiDmaBus},
+    },
     time::Rate,
 };
+
+#[cfg(not(feature = "mock_setpoint"))]
+use esp_hal::gpio::{Input, InputConfig, Pull};
+
+#[cfg(not(feature = "mock_setpoint"))]
+use esp_hal::pcnt::{self, Pcnt, channel};
 // Async is already in scope via `use esp_hal::{ self as hal, Async, ... }`
 // UART async API (`embedded-io`) provides awaitable reads; leveraged below
 use lcd_async::{
     Builder, interface::SpiInterface, models::ST7789, options::Orientation,
     raw_framebuf::RawFrameBuf,
 };
-use loadlynx_protocol::{FastStatus, SlipDecoder, decode_fast_status_frame};
+use loadlynx_protocol::{
+    CRC_LEN, CalWrite, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, LimitProfile,
+    MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO, MSG_LIMIT_PROFILE, MSG_SET_POINT, MSG_SOFT_RESET,
+    SetEnable, SetPoint, SlipDecoder, SoftReset, SoftResetReason, crc16_ccitt_false,
+    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_soft_reset_frame,
+    encode_cal_write_frame, encode_limit_profile_frame, encode_set_enable_frame,
+    encode_set_point_frame, encode_soft_reset_frame, slip_encode,
+};
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
+const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
+const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
+const STATE_FLAG_ENABLED: u32 = 1 << 2;
+
 mod ui;
-use ui::UiSnapshot;
+use ui::{AnalogState, UiSnapshot};
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
@@ -55,7 +75,7 @@ const TPS82130_ENABLE_DELAY_MS: u32 = 10;
 const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33;
 // 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
 // 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
-const DISPLAY_CHUNK_ROWS: usize = 8; // 再缩短单事务
+const DISPLAY_CHUNK_ROWS: usize = 4; // 再缩短单事务，降低单次 SPI 占用
 const DISPLAY_CHUNK_YIELD_LOOPS: usize = 6; // 增大让出次数
 const DISPLAY_DIRTY_MERGE_GAP_ROWS: usize = 8; // 适度扩大合并间隙，减少 SPI 往返
 const DISPLAY_DIRTY_SPAN_FALLBACK: usize = 12; // 脏区 span 过多时退回整帧推送
@@ -69,14 +89,57 @@ const FRAME_LOG_POINTS: [(usize, usize); 3] = [
 const ENABLE_DISPLAY_SPI_UPDATES: bool = true;
 // 调试开关：正常运行应为 true，仅在单独验证 UI 或其它外设时才临时关闭 UART 链路任务。
 const ENABLE_UART_LINK_TASK: bool = true;
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
+const ENCODER_COUNTS_PER_STEP: i16 = 4; // quadrature: four edges per detent
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
+const ENCODER_POLL_YIELD_LOOPS: usize = 200; // cooperative delay between polls
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
+const ENCODER_DEBOUNCE_POLLS: u8 = 3; // simple stable-change debounce for button
+#[cfg_attr(feature = "mock_setpoint", allow(dead_code))]
+const ENCODER_FILTER_CYCLES: u16 = 800; // ≈10 µs @ 80 MHz APB, filters encoder bounce
 
 // UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
-const UART_BAUD: u32 = 230_400;
+const UART_BAUD: u32 = 115_200;
 const UART_RX_FIFO_FULL_THRESHOLD: u16 = 120;
-const UART_RX_TIMEOUT_SYMS: u8 = 10;
-const FAST_STATUS_SLIP_CAPACITY: usize = 1024; // revert to previous stable capacity
-const UART_DMA_BUF_LEN: usize = 512; // 测试更小 chunk，减少栈压力
+const UART_RX_TIMEOUT_SYMS: u8 = 12;
+const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段/截断
+// UART DMA 环形缓冲长度（同时作为 UHCI chunk_limit），与 SLIP 容量对齐以减少分段。
+const UART_DMA_BUF_LEN: usize = 1536;
+// SetPoint 发送频率：降到 10Hz（100ms）以减轻模拟侧 UART 压力
+const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
+const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
+const TARGET_I_MIN_MA: i32 = 0;
+const TARGET_I_MAX_MA: i32 = 5_000;
+const ENCODER_MAX_STEPS: i32 = TARGET_I_MAX_MA / ENCODER_STEP_MA;
+// 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
+const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
+    max_i_ma: TARGET_I_MAX_MA,
+    max_p_mw: 250_000,
+    ovp_mv: 55_000,
+    temp_trip_mc: 100_000,
+    thermal_derate_pct: 100,
+};
 const ENABLE_UART_UHCI_DMA: bool = true;
+// SetPoint 可靠传输：ACK 等待与退避重传（最新值优先）。
+const SETPOINT_ACK_TIMEOUT_MS: u32 = 40;
+const SETPOINT_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
+
+// Fan PWM control (ESP32‑S3 本地，根据 G431 上报的 sink_core_temp + 功率驱动风扇占空比)。
+// 数值集中在此处，便于后续调参。
+const FAN_PWM_FREQUENCY_KHZ: u32 = 25; // 20–25 kHz 区间内，避开可闻频率
+const FAN_DUTY_DEFAULT_PCT: u8 = 40; // 上电默认占空比，保证有一定风量
+const FAN_DUTY_MIN_PCT: u8 = 15; // 温度进入控制区后的保底转速
+const FAN_DUTY_MID_PCT: u8 = 70; // T_core=FAN_TEMP_HIGH_C 时的占空比
+const FAN_DUTY_MAX_PCT: u8 = 100; // 高温段全速
+const FAN_TEMP_STOP_C: f32 = 30.0; // 低功率时允许停转的温度阈值
+const FAN_TEMP_LOW_C: f32 = 30.0; // 控制曲线起点（>= 此温度进入最小转速区）
+const FAN_TEMP_HIGH_C: f32 = 55.0; // 线性拉升结束点
+const FAN_LOG_HIGH_TEMP_C: f32 = 65.0; // 进入高温区时重点打印一次
+const FAN_CONTROL_PERIOD_MS: u32 = 200; // 5 Hz 控制周期
+const FAN_DUTY_UPDATE_THRESHOLD_PCT: u8 = 5; // 小于该差值则忽略，减小抖动
+const FAN_LOG_DUTY_DELTA_LARGE_PCT: u8 = 20; // 占空比变化超过该阈值时可打印日志
+const FAN_LOG_COOLDOWN_MS: u32 = 5_000; // fan 日志限频
+const FAN_POWER_LOW_W: f32 = 5.0; // sink 功率低于该值时允许在低温下停转
 
 static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 #[repr(align(32))]
@@ -87,19 +150,48 @@ static PREVIOUS_FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = Static
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
+static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
+#[cfg(not(feature = "mock_setpoint"))]
+static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
 type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
+static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
+
+#[cfg(not(feature = "mock_setpoint"))]
+struct EncoderPins {
+    a: Input<'static>,
+    b: Input<'static>,
+}
+
+#[cfg(not(feature = "mock_setpoint"))]
+static ENCODER_PINS: StaticCell<EncoderPins> = StaticCell::new();
 
 // --- Telemetry & diagnostics -------------------------------------------------
 static UART_RX_ERR_TOTAL: AtomicU32 = AtomicU32::new(0);
 static PROTO_DECODE_ERRS: AtomicU32 = AtomicU32::new(0);
+static PROTO_FRAMING_DROPS: AtomicU32 = AtomicU32::new(0);
 static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
+static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
+static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETPOINT_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
+static SETPOINT_ACK_PENDING: AtomicBool = AtomicBool::new(false);
+static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
+static LINK_UP: AtomicBool = AtomicBool::new(false);
+static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
+static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_SETPOINT_GATE_WARN_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_FAULT_LOG_MS: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
 fn now_ms32() -> u32 {
@@ -111,6 +203,23 @@ fn timestamp_ms() -> u64 {
 }
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
+
+/// Hook to release PAD‑JTAG so MTCK/MTDO (GPIO39/40) can be used for FAN_PWM/FAN_TACH.
+///
+/// On ESP32‑S3, the recommended way in ESP‑IDF is to disable the PAD‑JTAG
+/// mapping (e.g. via esp_apptrace APIs or EFUSE_DIS_PAD_JTAG). This firmware
+/// currently runs directly on `esp-hal` without linking the full ESP‑IDF
+/// runtime, so we rely on the GPIO/LEDC configuration below to re‑purpose
+/// GPIO39 as a PWM output and keep GPIO40 reserved for future tach input.
+///
+/// If the project later adopts `esp-idf-sys`, a proper IDF call can be wired
+/// in here so that all unsafe interaction stays confined to this function.
+fn disable_pad_jtag_for_fan_pins() {
+    info!(
+        "PAD-JTAG: preparing MTCK/MTDO (GPIO39/40) for FAN_PWM/FAN_TACH use; \
+         relying on GPIO reconfiguration (no esp-idf runtime linked)"
+    );
+}
 
 // 简单异步任务（未启用时间驱动，使用合作式让出）
 #[embassy_executor::task]
@@ -129,6 +238,206 @@ async fn diag_task() {
     info!("Display diag task alive");
     loop {
         for _ in 0..2000 {
+            yield_now().await;
+        }
+    }
+}
+
+async fn cooperative_delay_ms(ms: u32) {
+    let start = now_ms32();
+    loop {
+        let elapsed = now_ms32().wrapping_sub(start);
+        if elapsed >= ms {
+            break;
+        }
+        yield_now().await;
+    }
+}
+
+#[cfg(feature = "mock_setpoint")]
+const MOCK_STEP_MA: i32 = 100;
+#[cfg(feature = "mock_setpoint")]
+// Calibrated so the cooperative scheduler yields an effective ~80 ms cadence on hardware.
+const MOCK_STEP_MS: u32 = 74;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_PEAK_MA: i32 = 2000;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_PEAK_HOLD_MS: u32 = 4_600;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_PERIOD_MS: u32 = 9_200;
+
+#[cfg(feature = "mock_setpoint")]
+const MOCK_STEPS_TO_PEAK: i32 = MOCK_PEAK_MA / MOCK_STEP_MA;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_RAMP_UP_MS: u32 = (MOCK_STEPS_TO_PEAK as u32) * MOCK_STEP_MS;
+#[cfg(feature = "mock_setpoint")]
+const MOCK_SCRIPT_LEN: usize =
+    1 + MOCK_STEPS_TO_PEAK as usize + 1 + MOCK_STEPS_TO_PEAK as usize + 1;
+
+#[cfg(feature = "mock_setpoint")]
+const fn build_mock_script() -> [(u32, i32); MOCK_SCRIPT_LEN] {
+    let mut script = [(0u32, 0i32); MOCK_SCRIPT_LEN];
+
+    // t=0, ch1 = 0 mA
+    let mut idx = 0usize;
+    script[idx] = (0, 0);
+    idx += 1;
+
+    // Ramp up: 0 -> 2A @ +100 mA every 80 ms
+    let mut step = 1i32;
+    while step <= MOCK_STEPS_TO_PEAK {
+        script[idx] = ((step as u32) * MOCK_STEP_MS, step * MOCK_STEP_MA);
+        idx += 1;
+        step += 1;
+    }
+
+    // Hold at peak for 5 s
+    script[idx] = (MOCK_RAMP_UP_MS + MOCK_PEAK_HOLD_MS, MOCK_PEAK_MA);
+    idx += 1;
+
+    // Ramp down: 2A -> 0 @ -100 mA every 80 ms
+    let mut down_step = 1i32;
+    while down_step <= MOCK_STEPS_TO_PEAK {
+        script[idx] = (
+            MOCK_RAMP_UP_MS + MOCK_PEAK_HOLD_MS + (down_step as u32) * MOCK_STEP_MS,
+            MOCK_PEAK_MA - down_step * MOCK_STEP_MA,
+        );
+        idx += 1;
+        down_step += 1;
+    }
+
+    // Bottom hold to complete a 10 s period
+    script[idx] = (MOCK_PERIOD_MS, 0);
+    script
+}
+
+#[cfg(feature = "mock_setpoint")]
+const MOCK_SETPOINT_SCRIPT: [(u32, i32); MOCK_SCRIPT_LEN] = build_mock_script();
+
+#[cfg(feature = "mock_setpoint")]
+const MOCK_SCRIPT_LOOP: bool = true;
+
+#[cfg(feature = "mock_setpoint")]
+#[embassy_executor::task]
+async fn mock_setpoint_task() {
+    info!(
+        "mock setpoint task running (0->2A->0, step={} mA every {} ms, hold={} ms, period {} ms, entries={}, loop={})",
+        MOCK_STEP_MA,
+        MOCK_STEP_MS,
+        MOCK_PEAK_HOLD_MS,
+        MOCK_PERIOD_MS,
+        MOCK_SETPOINT_SCRIPT.len(),
+        MOCK_SCRIPT_LOOP
+    );
+
+    loop {
+        let mut last_t = 0u32;
+        for (idx, &(t_ms, target_ma)) in MOCK_SETPOINT_SCRIPT.iter().enumerate() {
+            let delta = t_ms.saturating_sub(last_t);
+            if delta > 0 {
+                cooperative_delay_ms(delta).await;
+            }
+            last_t = t_ms;
+            let steps = target_ma / ENCODER_STEP_MA;
+            ENCODER_VALUE.store(steps, Ordering::SeqCst);
+            info!(
+                "mock setpoint script: step={} t={} ms target={} mA (steps={})",
+                idx, t_ms, target_ma, steps
+            );
+        }
+
+        if !MOCK_SCRIPT_LOOP {
+            break;
+        }
+    }
+}
+
+#[cfg(not(feature = "mock_setpoint"))]
+#[embassy_executor::task]
+async fn encoder_task(
+    _unit: &'static pcnt::unit::Unit<'static, 0>,
+    counter: pcnt::unit::Counter<'static, 0>,
+    button: Input<'static>,
+) {
+    info!(
+        "encoder task starting (GPIO1=ENC_A, GPIO2=ENC_B, GPIO0=ENC_SW active-low, counts_per_step={})",
+        ENCODER_COUNTS_PER_STEP
+    );
+
+    let mut last_count = counter.get();
+    let mut residual: i16 = 0;
+    let mut last_button = button.is_low();
+    let mut debounce: u8 = 0;
+
+    loop {
+        let count = counter.get();
+        let delta = count.wrapping_sub(last_count);
+        if delta != 0 {
+            last_count = count;
+            residual = residual.wrapping_add(delta);
+
+            while residual >= ENCODER_COUNTS_PER_STEP || residual <= -ENCODER_COUNTS_PER_STEP {
+                let phys_step = if residual > 0 { 1 } else { -1 };
+                residual -= phys_step * ENCODER_COUNTS_PER_STEP;
+
+                // Reverse logical direction to match panel orientation (CW increments).
+                let logical_step = -phys_step;
+                let mut prev_steps = ENCODER_VALUE.load(Ordering::SeqCst);
+                let (old_steps, new_steps) = loop {
+                    let candidate = (prev_steps + logical_step as i32).clamp(0, ENCODER_MAX_STEPS);
+                    match ENCODER_VALUE.compare_exchange(
+                        prev_steps,
+                        candidate,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    ) {
+                        Ok(old) => break (old, candidate),
+                        Err(cur) => prev_steps = cur,
+                    }
+                };
+
+                if new_steps != old_steps {
+                    if logical_step > 0 {
+                        info!(
+                            "encoder cw: value={} ({} mA)",
+                            new_steps,
+                            new_steps * ENCODER_STEP_MA
+                        );
+                    } else {
+                        info!(
+                            "encoder ccw: value={} ({} mA)",
+                            new_steps,
+                            new_steps * ENCODER_STEP_MA
+                        );
+                    }
+                } else if (new_steps == 0 && logical_step < 0)
+                    || (new_steps == ENCODER_MAX_STEPS && logical_step > 0)
+                {
+                    info!(
+                        "encoder at limit: value={} ({} mA)",
+                        new_steps,
+                        new_steps * ENCODER_STEP_MA
+                    );
+                }
+            }
+        }
+
+        let pressed = button.is_low();
+        if pressed != last_button {
+            debounce = debounce.saturating_add(1);
+            if debounce >= ENCODER_DEBOUNCE_POLLS {
+                last_button = pressed;
+                debounce = 0;
+                if pressed {
+                    ENCODER_VALUE.store(0, Ordering::SeqCst);
+                    info!("encoder button pressed: value reset to 0");
+                }
+            }
+        } else {
+            debounce = 0;
+        }
+
+        for _ in 0..ENCODER_POLL_YIELD_LOOPS {
             yield_now().await;
         }
     }
@@ -159,25 +468,35 @@ impl TelemetryModel {
     }
 
     fn update_from_status(&mut self, status: &FastStatus) {
-        // 主电压使用本地 sense（v_local_mv），右侧列则分别显示 remote/local，
-        // 以避免左侧大卡片和右侧“REMOTE”列完全重复。
-        let main_voltage = status.v_local_mv as f32 / 1000.0;
+        let remote_active = (status.state_flags & STATE_FLAG_REMOTE_ACTIVE) != 0;
+
         let remote_voltage = status.v_remote_mv as f32 / 1000.0;
         let local_voltage = status.v_local_mv as f32 / 1000.0;
+        let main_voltage = if remote_active {
+            remote_voltage
+        } else {
+            local_voltage
+        };
         let i_local = status.i_local_ma as f32 / 1000.0;
         let i_remote = status.i_remote_ma as f32 / 1000.0;
+        let i_total = i_local + i_remote;
         let power_w = status.calc_p_mw as f32 / 1000.0;
 
         self.snapshot.main_voltage = main_voltage;
         self.snapshot.remote_voltage = remote_voltage;
         self.snapshot.local_voltage = local_voltage;
-        self.snapshot.main_current = i_local;
+        self.snapshot.remote_active = remote_active;
+        // 左侧主电流显示：两通道合计电流；右侧 CH1/CH2 各自显示单通道电流。
+        self.snapshot.main_current = i_total;
         self.snapshot.ch1_current = i_local;
         self.snapshot.ch2_current = i_remote;
         self.snapshot.main_power = power_w;
         self.snapshot.sink_core_temp = status.sink_core_temp_mc as f32 / 1000.0;
         self.snapshot.sink_exhaust_temp = status.sink_exhaust_temp_mc as f32 / 1000.0;
         self.snapshot.mcu_temp = status.mcu_temp_mc as f32 / 1000.0;
+        self.snapshot.fault_flags = status.fault_flags;
+        let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+        self.snapshot.analog_state = analog_state;
 
         write_runtime(&mut self.snapshot.run_time, status.uptime_ms);
 
@@ -197,6 +516,12 @@ impl TelemetryModel {
     /// This is used by the display task to drive partial, character-aware
     /// updates on top of the existing framebuffer diff logic.
     fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask) {
+        // 将当前编码器位置转换为 CC 模式下的目标总电流（A），用于右侧 “SET I” 文本。
+        let steps = ENCODER_VALUE.load(Ordering::Relaxed);
+        let raw_ma = steps.saturating_mul(ENCODER_STEP_MA);
+        let clamped_ma = clamp_target_ma(raw_ma);
+        self.snapshot.set_current_a = clamped_ma as f32 / 1000.0;
+
         // Keep all display strings in sync with the latest numeric values so
         // the UI layer can render based purely on preformatted text. This is
         // intentionally called from the display task (UI context), not from the
@@ -224,6 +549,7 @@ impl TelemetryModel {
 
             if prev.ch1_current_text != current.ch1_current_text
                 || prev.ch2_current_text != current.ch2_current_text
+                || prev.set_current_text != current.set_current_text
             {
                 mask.current_pair = true;
             }
@@ -251,6 +577,37 @@ impl TelemetryModel {
     }
 }
 
+fn compute_fan_duty_pct(temp_c: f32, main_power_w: f32) -> u8 {
+    // 简单分段线性曲线：
+    //   低功率 & T_core <= FAN_TEMP_STOP_C → 0%（可停转）
+    //   其他情况下：
+    //     T_core <= FAN_TEMP_LOW_C  → FAN_DUTY_MIN_PCT
+    //   FAN_TEMP_LOW_C..FAN_TEMP_HIGH_C 线性插值到 FAN_DUTY_MID_PCT
+    //   T_core >= FAN_TEMP_HIGH_C → FAN_DUTY_MAX_PCT
+    if !temp_c.is_finite() {
+        return FAN_DUTY_DEFAULT_PCT;
+    }
+
+    let low_power = main_power_w < FAN_POWER_LOW_W;
+    if low_power && temp_c <= FAN_TEMP_STOP_C {
+        return 0;
+    }
+
+    if temp_c <= FAN_TEMP_LOW_C {
+        FAN_DUTY_MIN_PCT
+    } else if temp_c > FAN_TEMP_HIGH_C {
+        FAN_DUTY_MAX_PCT
+    } else {
+        let span = FAN_TEMP_HIGH_C - FAN_TEMP_LOW_C;
+        let frac = ((temp_c - FAN_TEMP_LOW_C) / span).clamp(0.0, 1.0);
+        let duty_min = FAN_DUTY_MIN_PCT as f32;
+        let duty_mid = FAN_DUTY_MID_PCT as f32;
+        let duty = duty_min + frac * (duty_mid - duty_min);
+        let duty = duty.clamp(FAN_DUTY_MIN_PCT as f32, FAN_DUTY_MAX_PCT as f32);
+        duty as u8
+    }
+}
+
 fn write_runtime(target: &mut heapless::String<16>, uptime_ms: u32) {
     target.clear();
     let total_seconds = uptime_ms / 1000;
@@ -260,9 +617,108 @@ fn write_runtime(target: &mut heapless::String<16>, uptime_ms: u32) {
     let _ = core::fmt::write(target, format_args!("{hours:02}:{minutes:02}:{seconds:02}"));
 }
 
+#[embassy_executor::task]
+async fn fan_task(
+    telemetry: &'static TelemetryMutex,
+    fan_channel: &'static ledc_channel::Channel<'static, LowSpeed>,
+) {
+    info!(
+        "fan task starting (period_ms={}, temp_low={}C, temp_high={}C, duty_min={}%, duty_mid={}%, duty_max={}%)",
+        FAN_CONTROL_PERIOD_MS,
+        FAN_TEMP_LOW_C,
+        FAN_TEMP_HIGH_C,
+        FAN_DUTY_MIN_PCT,
+        FAN_DUTY_MID_PCT,
+        FAN_DUTY_MAX_PCT,
+    );
+
+    // 上电时设置一个安全默认占空比，避免完全静音导致热惯性过大。
+    fan_channel
+        .set_duty(FAN_DUTY_DEFAULT_PCT)
+        .expect("fan duty init");
+
+    let mut last_duty_pct: u8 = FAN_DUTY_DEFAULT_PCT;
+    let mut last_log_duty_pct: u8 = FAN_DUTY_DEFAULT_PCT;
+    let mut last_log_ms: u32 = now_ms32();
+
+    loop {
+        let (core_temp_c, exhaust_temp_c, main_power_w) = {
+            let guard = telemetry.lock().await;
+            let core = guard.snapshot.sink_core_temp;
+            let exhaust = guard.snapshot.sink_exhaust_temp;
+            let power = guard.snapshot.main_power;
+            (core, exhaust, power)
+        };
+
+        let target_duty_pct = compute_fan_duty_pct(core_temp_c, main_power_w);
+        let diff = if target_duty_pct > last_duty_pct {
+            target_duty_pct - last_duty_pct
+        } else {
+            last_duty_pct - target_duty_pct
+        };
+
+        if diff >= FAN_DUTY_UPDATE_THRESHOLD_PCT {
+            fan_channel
+                .set_duty(target_duty_pct)
+                .expect("fan duty update");
+
+            let now = now_ms32();
+            let log_diff = if target_duty_pct > last_log_duty_pct {
+                target_duty_pct - last_log_duty_pct
+            } else {
+                last_log_duty_pct - target_duty_pct
+            };
+            let high_temp = core_temp_c >= FAN_LOG_HIGH_TEMP_C;
+            if high_temp
+                || (log_diff >= FAN_LOG_DUTY_DELTA_LARGE_PCT
+                    && now.wrapping_sub(last_log_ms) >= FAN_LOG_COOLDOWN_MS)
+            {
+                info!(
+                    "fan duty update: T_core={}C T_exhaust={}C duty={}%",
+                    core_temp_c, exhaust_temp_c, target_duty_pct
+                );
+                last_log_duty_pct = target_duty_pct;
+                last_log_ms = now;
+            }
+
+            last_duty_pct = target_duty_pct;
+        }
+
+        cooperative_delay_ms(FAN_CONTROL_PERIOD_MS).await;
+    }
+}
+
 async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    let fault_flags = status.fault_flags;
+    let enabled = status.enable;
+    let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
+
+    // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
+    // 避免模拟侧未完全实现 LINK_GOOD 时 UI 误报 OFFLINE。
+    let state = if !link_up && !link_flag {
+        AnalogState::Offline
+    } else if fault_flags != 0 {
+        AnalogState::Faulted
+    } else if enabled {
+        AnalogState::Ready
+    } else {
+        AnalogState::CalMissing
+    };
+    ANALOG_STATE.store(state as u8, Ordering::Relaxed);
+
     let mut guard = telemetry.lock().await;
     guard.update_from_status(status);
+    LAST_TARGET_VALUE_FROM_STATUS.store(status.target_value, Ordering::Relaxed);
+
+    if fault_flags != 0 {
+        let now = now_ms32();
+        let last = LAST_FAULT_LOG_MS.load(Ordering::Relaxed);
+        if now.wrapping_sub(last) >= 1_000 {
+            LAST_FAULT_LOG_MS.store(now, Ordering::Relaxed);
+            warn!("analog fault flags set: 0x{:08x}", fault_flags);
+        }
+    }
 }
 
 fn protocol_error_str(err: &loadlynx_protocol::Error) -> &'static str {
@@ -441,14 +897,10 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
             let frame_idx = DISPLAY_FRAME_COUNT
                 .fetch_add(1, Ordering::Relaxed)
                 .wrapping_add(1);
-            let log_this_frame =
-                frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
+            let log_this_frame = frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
             if log_this_frame {
                 // 短期内每帧打印，之后按固定间隔抽样。
-                info!(
-                    "display: rendering frame {} (dt_ms={})",
-                    frame_idx, dt_ms
-                );
+                info!("display: rendering frame {} (dt_ms={})", frame_idx, dt_ms);
             }
 
             // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
@@ -748,31 +1200,121 @@ async fn feed_decoder(
 ) {
     for &byte in bytes {
         match decoder.push(byte) {
-            Ok(Some(frame)) => match decode_fast_status_frame(&frame) {
-                Ok((header, status)) => {
-                    apply_fast_status(telemetry, &status).await;
-                    let total = FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                    // 默认每 32 帧打印一次成功节奏，用于长时间验收
-                    if total % 32 == 0 {
-                        let display_running = DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
-                        info!(
-                            "fast_status ok (count={}, display_running={})",
-                            total, display_running
-                        );
-                    }
-                    // 严格只在完整 SLIP 帧结束符后才解码，上述分支已满足
-                    let _ = header; // keep header verified even if unused further
-                }
-                Err(err) => {
-                    PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
-                    rate_limited_proto_warn(protocol_error_str(&err), frame.len());
+            Ok(Some(frame)) => {
+                // Ignore obvious noise: SLIP frame shorter than header+CRC cannot be valid.
+                if frame.len() < HEADER_LEN + CRC_LEN {
                     decoder.reset();
+                    continue;
                 }
-            },
+
+                // Fast-path framing sanity: drop frames whose declared length does not
+                // match the actual SLIP payload to avoid surfacing spurious
+                // `payload length mismatch` decode errors when bytes are truncated in
+                // transit.
+                let declared_payload_len = u16::from_le_bytes([frame[4], frame[5]]) as usize;
+                let expected_total = HEADER_LEN + declared_payload_len + CRC_LEN;
+                if expected_total != frame.len() {
+                    let drops = PROTO_FRAMING_DROPS.fetch_add(1, Ordering::Relaxed) + 1;
+                    rate_limited_framing_warn(frame.len(), declared_payload_len, drops);
+                    decoder.reset();
+                    continue;
+                }
+
+                match decode_frame(&frame) {
+                    Ok((header, _payload)) => match header.msg {
+                        MSG_HELLO => match decode_hello_frame(&frame) {
+                            Ok((_hdr, hello)) => {
+                                record_link_activity();
+                                let first = !HELLO_SEEN.swap(true, Ordering::Relaxed);
+                                if first {
+                                    LINK_UP.store(true, Ordering::Relaxed);
+                                }
+                                if first {
+                                    info!(
+                                        "HELLO received from analog (link up): proto_ver={} fw_ver=0x{:08x}",
+                                        hello.protocol_version, hello.fw_version
+                                    );
+                                } else {
+                                    info!(
+                                        "HELLO received again from analog: proto_ver={} fw_ver=0x{:08x}",
+                                        hello.protocol_version, hello.fw_version
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
+                                decoder.reset();
+                            }
+                        },
+                        MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
+                            Ok((_hdr, status)) => {
+                                record_link_activity();
+                                apply_fast_status(telemetry, &status).await;
+                                let total =
+                                    FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+                                if total % 32 == 0 {
+                                    let display_running =
+                                        DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
+                                    info!(
+                                        "fast_status ok (count={}, display_running={}, i_local_ma={} mA, target_value={} mA)",
+                                        total,
+                                        display_running,
+                                        status.i_local_ma,
+                                        status.target_value
+                                    );
+                                }
+                            }
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
+                                decoder.reset();
+                            }
+                        },
+                        MSG_SET_POINT => {
+                            if header.flags & FLAG_IS_ACK != 0 {
+                                record_link_activity();
+                                handle_setpoint_ack(&header);
+                            } else {
+                                // For now we do not expect SetPoint requests on the digital side.
+                                rate_limited_proto_warn("unexpected setpoint frame", None);
+                            }
+                        }
+                        MSG_SOFT_RESET => match decode_soft_reset_frame(&frame) {
+                            Ok((hdr, reset)) => {
+                                record_link_activity();
+                                handle_soft_reset_frame(&hdr, &reset);
+                            }
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
+                                decoder.reset();
+                            }
+                        },
+                        _ => {
+                            rate_limited_proto_warn("unsupported msg", Some(frame.as_slice()));
+                        }
+                    },
+                    Err(err) => {
+                        PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                        rate_limited_proto_warn(protocol_error_str(&err), Some(frame.as_slice()));
+                        decoder.reset();
+                    }
+                }
+            }
             Ok(None) => {}
             Err(err) => {
                 PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
-                rate_limited_proto_warn(protocol_error_str(&err), 0);
+                rate_limited_proto_warn(protocol_error_str(&err), None);
                 decoder.reset();
             }
         }
@@ -781,6 +1323,33 @@ async fn feed_decoder(
 
 fn record_uart_error() {
     UART_RX_ERR_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+fn record_link_activity() {
+    let now = now_ms32();
+    LAST_GOOD_FRAME_MS.store(now, Ordering::Relaxed);
+}
+
+fn handle_setpoint_ack(header: &FrameHeader) {
+    SETPOINT_LAST_ACK_SEQ.store(header.seq, Ordering::Relaxed);
+    SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+    let total = SETPOINT_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    info!(
+        "setpoint ack received: seq={} flags=0x{:02x} len={} (ack_total={})",
+        header.seq, header.flags, header.len, total
+    );
+}
+
+fn handle_soft_reset_frame(header: &FrameHeader, reset: &SoftReset) {
+    if header.flags & FLAG_IS_ACK != 0 {
+        SOFT_RESET_ACKED.store(true, Ordering::Relaxed);
+        info!(
+            "soft_reset ACK received: seq={} reason={:?} ts_ms={}",
+            header.seq, reset.reason, reset.timestamp_ms
+        );
+    } else {
+        warn!("soft_reset request received from analog side; ignoring");
+    }
 }
 
 fn rate_limited_uart_warn<E: defmt::Format>(err: &E) {
@@ -793,15 +1362,37 @@ fn rate_limited_uart_warn<E: defmt::Format>(err: &E) {
     }
 }
 
-fn rate_limited_proto_warn(kind: &str, len: usize) {
+fn rate_limited_proto_warn(kind: &str, frame: Option<&[u8]>) {
     let now = now_ms32();
     let last = LAST_PROTO_WARN_MS.load(Ordering::Relaxed);
     if now.wrapping_sub(last) >= 2000 {
         LAST_PROTO_WARN_MS.store(now, Ordering::Relaxed);
         let cnt = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
+        let len = frame.map(|f| f.len()).unwrap_or(0);
+        let mut head_buf = [0u8; 8];
+        let head = frame.map(|f| {
+            let head_len = f.len().min(head_buf.len());
+            head_buf[..head_len].copy_from_slice(&f[..head_len]);
+            &head_buf[..head_len]
+        });
         warn!(
-            "protocol decode error ({}), frame_len={} [total={}]; resetting",
-            kind, len, cnt
+            "protocol decode error ({}), frame_len={}, head={:02x} [total={}]; resetting",
+            kind,
+            len,
+            head.unwrap_or(&[]),
+            cnt
+        );
+    }
+}
+
+fn rate_limited_framing_warn(frame_len: usize, declared_payload_len: usize, drops: u32) {
+    let now = now_ms32();
+    let last = LAST_PROTO_WARN_MS.load(Ordering::Relaxed);
+    if now.wrapping_sub(last) >= 2000 {
+        LAST_PROTO_WARN_MS.store(now, Ordering::Relaxed);
+        warn!(
+            "protocol framing drop (payload length mismatch): frame_len={} declared_payload_len={} total_drop={}",
+            frame_len, declared_payload_len, drops
         );
     }
 }
@@ -812,6 +1403,10 @@ fn main() -> ! {
 
     info!("LoadLynx digital firmware version: {}", FW_VERSION);
     info!("LoadLynx digital alive; initializing local peripherals");
+
+    // 禁用 PAD‑JTAG，将 MTCK/MTDO (GPIO39/40) 释放为普通 GPIO，
+    // 以便下文配置 FAN_PWM/FAN_TACH（GPIO40 仅预留，不在本任务中使用）。
+    disable_pad_jtag_for_fan_pins();
 
     // GPIO34 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
     let alg_en_pin = peripherals.GPIO34;
@@ -825,20 +1420,21 @@ fn main() -> ! {
     let dc_pin = peripherals.GPIO10;
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
+    let fan_pwm_pin = peripherals.GPIO39; // MTCK / FAN_PWM（PAD‑JTAG 已在启动早期释放）
+    // NOTE: GPIO40 (MTDO) is wired to FAN_TACH and intentionally left unused here;
+    // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
 
-    // 配置 SPI2 并启用 DMA：使用固定大小的 DMA 缓冲区，HAL 会在内部按片段搬运。
-    // 单块显示数据约 15KB（32 行 × 480B/行），远小于 HAL 支持的 ~32KB 限制。
-    // 为降低内存占用与复杂度，使用较小的 DMA 缓冲（4KB 级别）。
-    // HAL 会根据描述符自动分段搬运更大的显示块。
-    let (rx_buf, rx_desc, tx_buf, tx_desc) = esp_hal::dma_buffers!(8190);
+    // 配置 SPI2 并启用 DMA：收缩 DMA 缓冲区以降低一次搬运的负载。
+    // 4 行（4*240*2=1920B）以内的块可以覆盖单次传输，DMA 缓冲 2048B 足够。
+    let (rx_buf, rx_desc, tx_buf, tx_desc) = esp_hal::dma_buffers!(2048);
     let dma_rx_buf = DmaRxBuf::new(rx_desc, rx_buf).expect("dma rx buf");
     let dma_tx_buf = DmaTxBuf::new(tx_desc, tx_buf).expect("dma tx buf");
 
     let spi = Spi::new(
         spi_peripheral,
         SpiConfig::default()
-            .with_frequency(Rate::from_mhz(80))
+            .with_frequency(Rate::from_mhz(40)) // 降低 SPI 频率以减少总线/栈压力
             .with_mode(Mode::_0),
     )
     .expect("spi init")
@@ -880,6 +1476,30 @@ fn main() -> ! {
     let backlight_channel = BACKLIGHT_CHANNEL.init(backlight_channel);
     backlight_channel.set_duty(80).expect("backlight duty set");
 
+    // FAN_PWM: 低速 LEDC 通道，恒定 20–25 kHz 频率，由 fan_task 周期性更新占空比。
+    let mut fan_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer1);
+    fan_timer
+        .configure(ledc_timer::config::Config {
+            duty: ledc_timer::config::Duty::Duty10Bit,
+            clock_source: ledc_timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(FAN_PWM_FREQUENCY_KHZ),
+        })
+        .expect("fan timer");
+    let fan_timer = FAN_TIMER.init(fan_timer);
+
+    let mut fan_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel1, fan_pwm_pin);
+    fan_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*fan_timer,
+            duty_pct: FAN_DUTY_DEFAULT_PCT,
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("fan channel");
+    let fan_channel = FAN_CHANNEL.init(fan_channel);
+    fan_channel
+        .set_duty(FAN_DUTY_DEFAULT_PCT)
+        .expect("fan duty default");
+
     let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
     let prev_framebuffer = &mut PREVIOUS_FRAMEBUFFER
         .init_with(|| Align32([0; FRAMEBUFFER_LEN]))
@@ -895,6 +1515,50 @@ fn main() -> ! {
     });
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
+
+    #[cfg(not(feature = "mock_setpoint"))]
+    let (encoder_button, encoder_unit, encoder_counter) = {
+        let encoder_cfg = InputConfig::default().with_pull(Pull::Up);
+        let encoder_pins = ENCODER_PINS.init(EncoderPins {
+            a: Input::new(peripherals.GPIO1, encoder_cfg),
+            b: Input::new(peripherals.GPIO2, encoder_cfg),
+        });
+        let encoder_button = Input::new(peripherals.GPIO0, encoder_cfg);
+
+        // Hardware quadrature decoding via PCNT unit0.
+        let pcnt = PCNT.init(Pcnt::new(peripherals.PCNT));
+        let encoder_unit = &pcnt.unit0;
+
+        let filter_cycles = ENCODER_FILTER_CYCLES.min(1023u16);
+        encoder_unit
+            .set_filter(Some(filter_cycles))
+            .expect("encoder filter");
+        encoder_unit.clear();
+
+        let enc_a = encoder_pins.a.peripheral_input();
+        let enc_b = encoder_pins.b.peripheral_input();
+
+        let ch0 = &encoder_unit.channel0;
+        ch0.set_ctrl_signal(enc_a.clone());
+        ch0.set_edge_signal(enc_b.clone());
+        ch0.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+        ch0.set_input_mode(channel::EdgeMode::Increment, channel::EdgeMode::Decrement);
+
+        let ch1 = &encoder_unit.channel1;
+        ch1.set_ctrl_signal(enc_b);
+        ch1.set_edge_signal(enc_a);
+        ch1.set_ctrl_mode(channel::CtrlMode::Reverse, channel::CtrlMode::Keep);
+        ch1.set_input_mode(channel::EdgeMode::Decrement, channel::EdgeMode::Increment);
+
+        encoder_unit.resume();
+        let encoder_counter = encoder_unit.counter.clone();
+        info!(
+            "encoder pcnt configured (unit0, filter_cycles={}, counts_per_step={})",
+            filter_cycles, ENCODER_COUNTS_PER_STEP
+        );
+
+        (encoder_button, encoder_unit, encoder_counter)
+    };
 
     const ENABLE_ANALOG_5V_ON_BOOT: bool = cfg!(feature = "enable_analog_5v_on_boot");
     if ENABLE_ANALOG_5V_ON_BOOT {
@@ -931,6 +1595,7 @@ fn main() -> ! {
     // 选择 UART 接收模式：默认启用 UHCI DMA 环形搬运，A/B 时可切换为 async no-DMA。
     let mut uart_async: Option<Uart<'static, Async>> = None;
     let mut uhci_rx_opt: Option<uhci::UhciRx<'static, Async>> = None;
+    let mut uhci_tx_opt: Option<uhci::UhciTx<'static, Async>> = None;
     let mut uhci_dma_buf_opt: Option<DmaRxBuf> = None;
 
     if ENABLE_UART_UHCI_DMA {
@@ -952,8 +1617,9 @@ fn main() -> ! {
             .expect("uhci tx cfg");
         uhci.set_uart_config(&uart_cfg).expect("uhci set cfg");
 
-        let (uhci_rx, _uhci_tx) = uhci.split();
+        let (uhci_rx, uhci_tx) = uhci.split();
         uhci_rx_opt = Some(uhci_rx);
+        uhci_tx_opt = Some(uhci_tx);
         uhci_dma_buf_opt = Some(dma_rx);
     } else {
         let uart = Uart::new(peripherals.UART1, uart_cfg)
@@ -972,10 +1638,30 @@ fn main() -> ! {
         spawner.spawn(ticker()).expect("ticker spawn");
         info!("spawning diag task");
         spawner.spawn(diag_task()).expect("diag_task spawn");
+
+        #[cfg(not(feature = "mock_setpoint"))]
+        {
+            info!("spawning encoder task");
+            spawner
+                .spawn(encoder_task(encoder_unit, encoder_counter, encoder_button))
+                .expect("encoder_task spawn");
+        }
+
+        #[cfg(feature = "mock_setpoint")]
+        {
+            info!("spawning mock setpoint task");
+            spawner
+                .spawn(mock_setpoint_task())
+                .expect("mock_setpoint_task spawn");
+        }
         info!("spawning display task");
         spawner
             .spawn(display_task(resources, telemetry))
             .expect("display_task spawn");
+        info!("spawning fan task");
+        spawner
+            .spawn(fan_task(telemetry, fan_channel))
+            .expect("fan_task spawn");
         if ENABLE_UART_LINK_TASK {
             if ENABLE_UART_UHCI_DMA {
                 let uhci_rx = uhci_rx_opt.take().expect("uhci rx missing");
@@ -996,6 +1682,14 @@ fn main() -> ! {
         }
         info!("spawning stats task");
         spawner.spawn(stats_task()).expect("stats_task spawn");
+        if let Some(uhci_tx) = uhci_tx_opt.take() {
+            info!("spawning setpoint tx task (UHCI TX, 20Hz fixed target)");
+            spawner
+                .spawn(setpoint_tx_task(uhci_tx))
+                .expect("setpoint_tx_task spawn");
+        } else {
+            warn!("setpoint tx task not started (UHCI TX unavailable)");
+        }
     })
 }
 
@@ -1010,11 +1704,636 @@ async fn stats_task() {
             last_ms = now;
             let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
+            let df = PROTO_FRAMING_DROPS.load(Ordering::Relaxed);
             let ut = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
+            let sp_tx = SETPOINT_TX_TOTAL.load(Ordering::Relaxed);
+            let sp_ack = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+            let sp_retx = SETPOINT_RETX_TOTAL.load(Ordering::Relaxed);
+            let sp_timeout = SETPOINT_TIMEOUT_TOTAL.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, uart_rx_err_total={}",
-                ok, de, ut
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}",
+                ok, de, df, ut, sp_tx, sp_ack, sp_retx, sp_timeout
+            );
+
+            // Link health: derive LINK_UP from the age of the last successfully
+            // processed frame. A gap >300 ms is treated as link down.
+            let now_ms32 = now_ms32();
+            let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
+            let age_ms = now_ms32.wrapping_sub(last_good);
+            let prev_up = LINK_UP.load(Ordering::Relaxed);
+            let link_now = last_good != 0 && age_ms <= 300;
+            if link_now != prev_up {
+                LINK_UP.store(link_now, Ordering::Relaxed);
+                if link_now {
+                    info!("link up (last_good_frame_age={} ms)", age_ms);
+                } else {
+                    warn!("link down (no frames for {} ms)", age_ms);
+                    ANALOG_STATE.store(AnalogState::Offline as u8, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+}
+
+/// SetPoint 发送任务：20 Hz（或按需要），带 ACK 等待与退避重传，最新值优先。
+#[embassy_executor::task]
+async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
+    info!(
+        "SetPoint TX task starting (ack_timeout={} ms, backoff={:?})",
+        SETPOINT_ACK_TIMEOUT_MS, SETPOINT_RETRY_BACKOFF_MS
+    );
+
+    #[derive(Clone, Copy)]
+    struct Pending {
+        seq: u8,
+        target_i_ma: i32,
+        attempts: u8, // includes initial send
+        ack_total_at_send: u32,
+        deadline_ms: u32,
+    }
+
+    let mut raw = [0u8; 64];
+    let mut slip = [0u8; 192];
+
+    // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
+    let soft_reset_seq: u8 = 0;
+    let soft_reset_acked =
+        send_soft_reset_handshake(&mut uhci_tx, soft_reset_seq, &mut raw, &mut slip).await;
+    if !soft_reset_acked {
+        warn!("soft_reset ack missing within retry window; continuing after quiet gap");
+    }
+
+    // 更长的静默让模拟侧 UART 启动稳定，避免一上电被突发刷屏。
+    cooperative_delay_ms(300).await;
+
+    let mut seq: u8 = 1;
+
+    // 冷启动后先发送一次 CalWrite(index=0) 标定块，用于解锁模拟侧 CAL gating。
+    let mut cal = CalWrite {
+        index: 0,
+        payload: [0u8; 32],
+        crc: 0,
+    };
+    // 内部 CRC：沿用协议层 crc16_ccitt_false(index+payload)。
+    {
+        let mut buf = [0u8; 33];
+        buf[0] = cal.index;
+        buf[1..].copy_from_slice(&cal.payload);
+        cal.crc = crc16_ccitt_false(&buf);
+    }
+
+    match encode_cal_write_frame(seq, &cal, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "CalWrite(index={}, msg=0x{:02x}) frame sent seq={} len={} slip_len={}",
+                        cal.index, MSG_CAL_WRITE, seq, frame_len, slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "CalWrite short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!("CalWrite uart write error for seq={}: {:?}", seq, err);
+                }
+            },
+            Err(err) => {
+                warn!("CalWrite slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!("encode_cal_write_frame error: {:?}", err);
+        }
+    }
+    seq = seq.wrapping_add(1);
+
+    // 启动链路后发送一次 SetEnable(true)，用于拉起模拟侧输出 gating。
+    let enable_cmd = SetEnable { enable: true };
+    match encode_set_enable_frame(seq, &enable_cmd, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "SetEnable(true) frame sent seq={} len={} slip_len={}",
+                        seq, frame_len, slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "SetEnable(true) short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "SetEnable(true) uart write error for seq={}: {:?}",
+                        seq, err
+                    );
+                }
+            },
+            Err(err) => {
+                warn!("SetEnable(true) slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!("SetEnable(true) encode_set_enable_frame error: {:?}", err);
+        }
+    }
+    seq = seq.wrapping_add(1);
+
+    // 在握手完成后发送一次静态 LimitProfile v0，供模拟板建立软件软限。
+    match encode_limit_profile_frame(seq, &LIMIT_PROFILE_DEFAULT, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "LimitProfile v0 sent (msg=0x{:02x}): max_i={}mA max_p={}mW ovp={}mV temp_trip={}mC derate={}%, seq={} len={} slip_len={}",
+                        MSG_LIMIT_PROFILE,
+                        LIMIT_PROFILE_DEFAULT.max_i_ma,
+                        LIMIT_PROFILE_DEFAULT.max_p_mw,
+                        LIMIT_PROFILE_DEFAULT.ovp_mv,
+                        LIMIT_PROFILE_DEFAULT.temp_trip_mc,
+                        LIMIT_PROFILE_DEFAULT.thermal_derate_pct,
+                        seq,
+                        frame_len,
+                        slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "LimitProfile v0 short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "LimitProfile v0 uart write error for seq={}: {:?}",
+                        seq, err
+                    );
+                }
+            },
+            Err(err) => {
+                warn!("LimitProfile v0 slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!(
+                "LimitProfile v0 encode_limit_profile_frame error: {:?}",
+                err
             );
         }
+    }
+    seq = seq.wrapping_add(1);
+
+    let mut pending: Option<Pending> = None;
+    let mut last_sent_target: Option<i32> = None;
+    let mut last_sent_ms: u32 = now_ms32();
+    let mut mismatch_streak: u8 = 0;
+    // Track how long we've been stuck in AnalogState::CalMissing so we can
+    // log and opportunistically retry the CalWrite/SetEnable handshake.
+    let mut calmissing_since_ms: Option<u32> = None;
+    let mut last_calmissing_warn_ms: u32 = 0;
+    let mut last_calmissing_handshake_ms: u32 = 0;
+
+    loop {
+        yield_now().await;
+        let now = now_ms32();
+        let desired_target =
+            clamp_target_ma(ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA);
+        let observed_target = LAST_TARGET_VALUE_FROM_STATUS.load(Ordering::Relaxed);
+
+        if observed_target == desired_target {
+            mismatch_streak = 0;
+        } else {
+            mismatch_streak = mismatch_streak.saturating_add(1);
+        }
+
+        // Check for ACK arrival on the current pending seq.
+        let ack_hit = if let Some(p) = pending.as_ref() {
+            let ack_total = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+            let ack_seq = SETPOINT_LAST_ACK_SEQ.load(Ordering::Relaxed);
+            ack_total != p.ack_total_at_send && ack_seq == p.seq
+        } else {
+            false
+        };
+        if ack_hit {
+            if let Some(p) = pending.take() {
+                SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+                last_sent_target = Some(p.target_i_ma);
+                last_sent_ms = now;
+            }
+            continue;
+        }
+
+        // Pre-empt with latest value if target changed while waiting.
+        let mut should_send_new = false;
+        let mut send_reason = "periodic";
+        if let Some(p) = pending.as_ref() {
+            if p.target_i_ma != desired_target {
+                should_send_new = true;
+                send_reason = "latest-value-preempt";
+                pending = None; // drop old pending; latest值优先
+            }
+        } else if now.saturating_sub(last_sent_ms) >= SETPOINT_TX_PERIOD_MS {
+            should_send_new = true;
+            if last_sent_target
+                .map(|t| t != desired_target)
+                .unwrap_or(true)
+            {
+                send_reason = "target-change";
+            } else {
+                send_reason = "periodic";
+            }
+        } else if mismatch_streak >= 3 {
+            should_send_new = true;
+            send_reason = "telemetry-mismatch";
+        }
+
+        if should_send_new {
+            // Gate 新 SetPoint：仅在链路就绪时才允许发送；HELLO 仅作附加信息。
+            if !LINK_UP.load(Ordering::Relaxed) {
+                let now_ms = now;
+                let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
+                if now_ms.wrapping_sub(last_gate) >= 1_000 {
+                    LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
+                    warn!(
+                        "SetPoint TX gated (link_up=false, hello_seen={}, target={} mA)",
+                        HELLO_SEEN.load(Ordering::Relaxed),
+                        desired_target
+                    );
+                }
+                // 保留现有 pending/ACK 状态，仅抑制新指令。
+                continue;
+            }
+
+            let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+            match analog_state {
+                AnalogState::Faulted => {
+                    // Leaving CalMissing; reset stuck timer.
+                    calmissing_since_ms = None;
+
+                    let now_ms = now;
+                    let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
+                    if now_ms.wrapping_sub(last_gate) >= 1_000 {
+                        LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
+                        warn!("SetPoint TX gated: analog fault (state=FAULTED)");
+                    }
+                    continue;
+                }
+                AnalogState::CalMissing => {
+                    let now_ms = now;
+                    let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
+                    if now_ms.wrapping_sub(last_gate) >= 1_000 {
+                        LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
+                        warn!("SetPoint TX gated: analog not ready (calibration missing?)");
+                    }
+
+                    // Record when we first entered CalMissing.
+                    let since = calmissing_since_ms.get_or_insert(now_ms);
+                    let stuck_ms = now_ms.wrapping_sub(*since);
+
+                    // After a short grace period, emit a rate-limited diagnostic and
+                    // retry the SoftReset + CalWrite + SetEnable handshake to recover
+                    // from a potentially dropped calibration write.
+                    if stuck_ms >= 2_000 {
+                        if now_ms.wrapping_sub(last_calmissing_warn_ms) >= 5_000 {
+                            last_calmissing_warn_ms = now_ms;
+                            warn!(
+                                "analog stuck in CalMissing (link_up=true, fault_flags=0, enable=false, stuck_ms={})",
+                                stuck_ms
+                            );
+                        }
+
+                        if now_ms.wrapping_sub(last_calmissing_handshake_ms) >= 5_000 {
+                            last_calmissing_handshake_ms = now_ms;
+                            warn!(
+                                "retrying SoftReset + CalWrite + SetEnable handshake due to CalMissing"
+                            );
+
+                            // SoftReset re-handshake: use a fresh seq to keep framing sane.
+                            let soft_reset_seq = seq;
+                            seq = seq.wrapping_add(1);
+                            let soft_reset_acked = send_soft_reset_handshake(
+                                &mut uhci_tx,
+                                soft_reset_seq,
+                                &mut raw,
+                                &mut slip,
+                            )
+                            .await;
+                            if !soft_reset_acked {
+                                warn!(
+                                    "soft_reset re-handshake: ack missing; continuing with CalWrite+SetEnable"
+                                );
+                            }
+
+                            // Re-send a minimal CalWrite(index=0) block.
+                            let mut cal = CalWrite {
+                                index: 0,
+                                payload: [0u8; 32],
+                                crc: 0,
+                            };
+                            let mut buf = [0u8; 33];
+                            buf[0] = cal.index;
+                            buf[1..].copy_from_slice(&cal.payload);
+                            cal.crc = crc16_ccitt_false(&buf);
+
+                            let cal_seq = seq;
+                            match encode_cal_write_frame(cal_seq, &cal, &mut raw) {
+                                Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+                                    Ok(slip_len) => {
+                                        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                                            Ok(written) if written == slip_len => {
+                                                let _ = uhci_tx.uart_tx.flush_async().await;
+                                                info!(
+                                                    "CalWrite(index={}, msg=0x{:02x}) frame re-sent seq={} len={} slip_len={}",
+                                                    cal.index,
+                                                    MSG_CAL_WRITE,
+                                                    cal_seq,
+                                                    frame_len,
+                                                    slip_len
+                                                );
+                                            }
+                                            Ok(written) => {
+                                                warn!(
+                                                    "CalWrite re-send short write {} < {} (seq={})",
+                                                    written, slip_len, cal_seq
+                                                );
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "CalWrite re-send uart write error for seq={}: {:?}",
+                                                    cal_seq, err
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!("CalWrite re-send slip_encode error: {:?}", err);
+                                    }
+                                },
+                                Err(err) => {
+                                    warn!("encode_cal_write_frame (retry) error: {:?}", err);
+                                }
+                            }
+                            seq = seq.wrapping_add(1);
+
+                            // Re-send SetEnable(true) to re-arm ENABLE_REQUESTED on analog.
+                            let enable_seq = seq;
+                            let enable_cmd = SetEnable { enable: true };
+                            match encode_set_enable_frame(enable_seq, &enable_cmd, &mut raw) {
+                                Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+                                    Ok(slip_len) => {
+                                        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                                            Ok(written) if written == slip_len => {
+                                                let _ = uhci_tx.uart_tx.flush_async().await;
+                                                info!(
+                                                    "SetEnable(true) frame re-sent seq={} len={} slip_len={}",
+                                                    enable_seq, frame_len, slip_len
+                                                );
+                                            }
+                                            Ok(written) => {
+                                                warn!(
+                                                    "SetEnable(true) re-send short write {} < {} (seq={})",
+                                                    written, slip_len, enable_seq
+                                                );
+                                            }
+                                            Err(err) => {
+                                                warn!(
+                                                    "SetEnable(true) re-send uart write error for seq={}: {:?}",
+                                                    enable_seq, err
+                                                );
+                                            }
+                                        }
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            "SetEnable(true) re-send slip_encode error: {:?}",
+                                            err
+                                        );
+                                    }
+                                },
+                                Err(err) => {
+                                    warn!(
+                                        "SetEnable(true) re-send encode_set_enable_frame error: {:?}",
+                                        err
+                                    );
+                                }
+                            }
+                            seq = seq.wrapping_add(1);
+                        }
+                    }
+
+                    continue;
+                }
+                AnalogState::Offline | AnalogState::Ready => {
+                    // Leaving CalMissing; reset stuck timer.
+                    calmissing_since_ms = None;
+                }
+            }
+
+            let send_seq = seq;
+            seq = seq.wrapping_add(1);
+            let ack_baseline = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+            if send_setpoint_frame(
+                &mut uhci_tx,
+                send_seq,
+                desired_target,
+                &mut raw,
+                &mut slip,
+                send_reason,
+            )
+            .await
+            {
+                SETPOINT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
+                let deadline = now.saturating_add(SETPOINT_ACK_TIMEOUT_MS);
+                last_sent_target = Some(desired_target);
+                last_sent_ms = now;
+                pending = Some(Pending {
+                    seq: send_seq,
+                    target_i_ma: desired_target,
+                    attempts: 1,
+                    ack_total_at_send: ack_baseline,
+                    deadline_ms: deadline,
+                });
+            } else {
+                SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+            }
+        } else if let Some(mut p) = pending.take() {
+            // Timeout + retry path
+            if now >= p.deadline_ms {
+                if (p.attempts as usize) <= SETPOINT_RETRY_BACKOFF_MS.len() {
+                    let backoff_ms = SETPOINT_RETRY_BACKOFF_MS[(p.attempts - 1) as usize];
+                    let ack_baseline = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
+                    let send_seq = p.seq;
+                    if send_setpoint_frame(
+                        &mut uhci_tx,
+                        send_seq,
+                        p.target_i_ma,
+                        &mut raw,
+                        &mut slip,
+                        "retx",
+                    )
+                    .await
+                    {
+                        SETPOINT_RETX_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        p.attempts = p.attempts.saturating_add(1);
+                        p.ack_total_at_send = ack_baseline;
+                        p.deadline_ms = now.saturating_add(backoff_ms);
+                        last_sent_ms = now;
+                        pending = Some(p);
+                    } else {
+                        SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+                        pending = None;
+                    }
+                } else {
+                    SETPOINT_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        "setpoint ack timeout after {} attempts (seq={}, target={} mA)",
+                        p.attempts, p.seq, p.target_i_ma
+                    );
+                    SETPOINT_ACK_PENDING.store(false, Ordering::Release);
+                    pending = None;
+                }
+            } else {
+                pending = Some(p);
+            }
+        }
+
+        cooperative_delay_ms(10).await;
+    }
+}
+
+fn clamp_target_ma(v: i32) -> i32 {
+    v.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA)
+}
+
+async fn send_setpoint_frame(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    target_i_ma: i32,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) -> bool {
+    let setpoint = SetPoint { target_i_ma };
+
+    let frame_len = match encode_set_point_frame(seq, &setpoint, raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: encode_set_point_frame error: {:?}", ctx, err);
+            return false;
+        }
+    };
+
+    let slip_len = match slip_encode(&raw[..frame_len], slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: slip_encode error: {:?}", ctx, err);
+            return false;
+        }
+    };
+
+    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+        Ok(written) if written == slip_len => {
+            let _ = uhci_tx.uart_tx.flush_async().await;
+            SETPOINT_ACK_PENDING.store(true, Ordering::Release);
+            info!(
+                "{}: setpoint frame sent seq={} target={} mA len={} slip_len={}",
+                ctx, seq, target_i_ma, frame_len, slip_len
+            );
+            true
+        }
+        Ok(written) => {
+            warn!(
+                "{}: short write {} < {} (seq={}, target={} mA)",
+                ctx, written, slip_len, seq, target_i_ma
+            );
+            false
+        }
+        Err(err) => {
+            warn!(
+                "{}: uart write error for setpoint seq={}: {:?}",
+                ctx, seq, err
+            );
+            false
+        }
+    }
+}
+async fn send_soft_reset_handshake(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+) -> bool {
+    if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+        return true;
+    }
+
+    let reset = SoftReset {
+        reason: SoftResetReason::FirmwareUpdate,
+        timestamp_ms: now_ms32(),
+    };
+
+    for attempt in 0..3 {
+        if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let frame_len = match encode_soft_reset_frame(seq, &reset, false, raw) {
+            Ok(len) => len,
+            Err(err) => {
+                warn!("soft_reset encode error: {:?}", err);
+                break;
+            }
+        };
+        let slip_len = match slip_encode(&raw[..frame_len], slip) {
+            Ok(len) => len,
+            Err(err) => {
+                warn!("soft_reset slip encode error: {:?}", err);
+                break;
+            }
+        };
+
+        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+            Ok(written) if written == slip_len => {
+                let _ = uhci_tx.uart_tx.flush_async().await;
+                info!(
+                    "soft_reset req sent (attempt={}, seq={}, reason={:?}, ts_ms={})",
+                    attempt + 1,
+                    seq,
+                    reset.reason,
+                    reset.timestamp_ms
+                );
+            }
+            Ok(written) => {
+                warn!(
+                    "soft_reset short write: written={} len={} (seq={})",
+                    written, slip_len, seq
+                );
+            }
+            Err(err) => {
+                warn!("soft_reset write error: {:?}", err);
+            }
+        }
+
+        if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+            break;
+        }
+        cooperative_delay_ms(150).await;
+    }
+
+    if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+        info!("soft_reset ack received; continuing link init");
+        true
+    } else {
+        warn!("soft_reset ack not received after retries; proceed with caution");
+        false
     }
 }

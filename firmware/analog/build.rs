@@ -22,7 +22,7 @@ fn main() {
     let pkg_ver = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
     let git_info = git_describe().unwrap_or_else(|| "git unknown".to_string());
-     let src_hash = source_digest()
+    let src_hash = source_digest()
         .map(|h| format!("src 0x{h:016x}"))
         .unwrap_or_else(|| "src unknown".to_string());
 
@@ -55,11 +55,7 @@ fn repo_root_from_manifest() -> Option<PathBuf> {
 fn git_head_path() -> Option<PathBuf> {
     let repo_root = repo_root_from_manifest()?;
     let head = repo_root.join(".git/HEAD");
-    if head.exists() {
-        Some(head)
-    } else {
-        None
-    }
+    if head.exists() { Some(head) } else { None }
 }
 
 fn git_describe() -> Option<String> {
@@ -76,11 +72,7 @@ fn git_describe() -> Option<String> {
     }
 
     let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if s.is_empty() {
-        None
-    } else {
-        Some(s)
-    }
+    if s.is_empty() { None } else { Some(s) }
 }
 
 fn source_digest() -> Option<u64> {
