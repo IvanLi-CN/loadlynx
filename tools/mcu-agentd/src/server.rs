@@ -204,6 +204,11 @@ async fn handle_request(
         ClientRequest::SetPort { mcu, path } => {
             port_cache::write_port(paths, mcu.clone(), path.to_string_lossy().as_ref())?;
             let ts = clock.now();
+            // Hot-restart monitor so new port takes effect immediately.
+            stop_monitor(paths, state, &mcu).await.ok();
+            if let Err(e) = start_monitor_if_cached(paths, state, &mcu, &ts).await {
+                eprintln!("monitor restart after set-port failed: {e:#}");
+            }
             Ok(ClientResponse::ok(
                 json!({"ts": ts.iso(), "mcu": mcu, "path": path}),
             ))
@@ -263,7 +268,13 @@ async fn handle_request(
                 Some(effective_tail),
             )?;
             let sessions_payload = if sessions {
-                query_session_logs(paths, &entries, effective_tail)?
+                query_session_logs(
+                    paths,
+                    &entries,
+                    since.as_deref(),
+                    until.as_deref(),
+                    Some(effective_tail),
+                )?
             } else {
                 json!([])
             };
@@ -379,13 +390,12 @@ async fn flash_mcu(
     ts: &Timestamp,
 ) -> Result<serde_json::Value> {
     stop_monitor(paths, state, mcu).await.ok();
-    // Ensure ELF exists/builds; we need the path for flash.
     let elf_path = ensure_elf(paths, mcu, elf).await?;
-    let cmd = match mcu {
+    let res = match mcu {
         McuKind::Digital => {
             let port = require_port(paths, McuKind::Digital)?;
-            let mut c = Command::new("espflash");
-            c.arg("flash")
+            let mut cmd = Command::new("espflash");
+            cmd.arg("flash")
                 .arg(&elf_path)
                 .arg("--chip")
                 .arg("esp32s3")
@@ -399,21 +409,33 @@ async fn flash_mcu(
                 .arg("--ignore_app_descriptor")
                 .arg("--non-interactive")
                 .arg("--skip-update-check");
-            c
+            run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?
         }
         McuKind::Analog => {
             let probe = require_port(paths, McuKind::Analog)?;
-            let mut c = Command::new("probe-rs");
-            c.arg("download")
-                .arg("--chip")
-                .arg("STM32G431CB")
-                .arg("--probe")
-                .arg(probe)
-                .arg(&elf_path);
-            c
+            // Retry STM32G4 flash when probe-rs reports the USB interface is busy.
+            let mut attempt = 0usize;
+            loop {
+                let mut cmd = Command::new("probe-rs");
+                cmd.arg("download")
+                    .arg("--chip")
+                    .arg("STM32G431CB")
+                    .arg("--probe")
+                    .arg(probe.clone())
+                    .arg(&elf_path);
+                let res_try = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
+                if res_try.status == 0
+                    || attempt >= 2
+                    || !session_has_usb_claim_error(&res_try.session_file)
+                {
+                    break res_try;
+                }
+                attempt += 1;
+                // Give the OS/probe a bit of time to release the USB interfaces.
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
         }
     };
-    let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
     write_meta(paths, mcu, ts, "flash", &res)?;
     if res.status != 0 {
         return Err(anyhow!(
@@ -439,29 +461,55 @@ async fn reset_mcu(
     ts: &Timestamp,
 ) -> Result<serde_json::Value> {
     stop_monitor(paths, state, mcu).await.ok();
-    let cmd = match mcu {
+    let mut res = match mcu {
         McuKind::Digital => {
             let port = require_port(paths, McuKind::Digital)?;
-            let mut c = Command::new("espflash");
-            c.arg("reset")
+            let mut cmd = Command::new("espflash");
+            cmd.arg("reset")
                 .arg("--chip")
                 .arg("esp32s3")
                 .arg("--port")
                 .arg(port);
-            c
+            run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?
         }
         McuKind::Analog => {
             let probe = require_port(paths, McuKind::Analog)?;
-            let mut c = Command::new("probe-rs");
-            c.arg("reset")
-                .arg("--chip")
-                .arg("STM32G431CB")
-                .arg("--probe")
-                .arg(probe);
-            c
+            // Retry STM32G4 reset on transient USB/probe busy errors.
+            let mut attempt = 0usize;
+            loop {
+                let mut cmd = Command::new("probe-rs");
+                cmd.arg("reset")
+                    .arg("--chip")
+                    .arg("STM32G431CB")
+                    .arg("--probe")
+                    .arg(probe.clone());
+                let res_try =
+                    run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
+                if res_try.status == 0
+                    || attempt >= 2
+                    || !session_has_usb_claim_error(&res_try.session_file)
+                {
+                    break res_try;
+                }
+                attempt += 1;
+                tokio::time::sleep(Duration::from_millis(300)).await;
+            }
         }
     };
-    let res = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
+
+    // If Analog reset still reports "interfaces are claimed" after retries, treat this
+    // as a soft success and let the subsequent start_monitor_if_cached() perform a fresh
+    // probe-rs run, which will reset the MCU anyway. This avoids surfacing a hard error
+    // to the CLI when the only failure is the probe's USB interface claiming.
+    if matches!(mcu, McuKind::Analog)
+        && res.status != 0
+        && session_has_usb_claim_error(&res.session_file)
+    {
+        eprintln!(
+            "warn: analog reset hit USB interface claimed, proceeding with monitor restart"
+        );
+        res.status = 0;
+    }
     write_meta(paths, mcu, ts, "reset", &res)?;
     if res.status != 0 {
         return Err(anyhow!(
@@ -623,9 +671,11 @@ fn query_logs(
 fn query_session_logs(
     _paths: &Paths,
     meta_entries: &serde_json::Value,
-    tail: usize,
+    since: Option<&str>,
+    until: Option<&str>,
+    tail: Option<usize>,
 ) -> Result<serde_json::Value> {
-    let mut sessions = Vec::new();
+    let mut results = Vec::new();
     let arr = meta_entries.as_array().cloned().unwrap_or_default();
     for entry in arr {
         if let Some(sess_path) = entry.get("session").and_then(|s| s.as_str()) {
@@ -633,16 +683,11 @@ fn query_session_logs(
             if !p.exists() {
                 continue;
             }
-            let file = File::open(&p)?;
-            let reader = BufReader::new(file);
-            let mut buf: Vec<String> = reader.lines().filter_map(Result::ok).collect();
-            if buf.len() > tail {
-                buf = buf.split_off(buf.len() - tail);
-            }
-            sessions.push(json!({"session": p, "lines": buf}));
+            let lines = read_session(&p, since, until, tail)?;
+            results.push(json!({"session": p, "lines": lines}));
         }
     }
-    Ok(serde_json::Value::Array(sessions))
+    Ok(serde_json::Value::Array(results))
 }
 
 async fn start_cached_monitors(paths: &Paths, state: &DaemonState, clock: &Clock) -> Result<()> {
@@ -799,4 +844,50 @@ fn latest_log(paths: &Paths, mcu: &McuKind, _elf: Option<&PathBuf>) -> Result<Pa
     latest
         .map(|(_, p)| p)
         .ok_or_else(|| anyhow!("no logs found for {:?}", mcu))
+}
+
+fn session_has_usb_claim_error(path: &PathBuf) -> bool {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        let needles = [
+            "could not be opened for exclusive access",
+            "interfaces are claimed",
+        ];
+        needles.iter().any(|n| text.contains(n))
+    } else {
+        false
+    }
+}
+
+fn read_session(path: &PathBuf, since: Option<&str>, until: Option<&str>, tail: Option<usize>) -> Result<Vec<String>> {
+    let file = File::open(path)?;
+    let reader = BufReader::new(file);
+    let mut lines: Vec<String> = reader
+        .lines()
+        .filter_map(|l| l.ok())
+        .filter(|l| session_ts_ok_json(l, since, until))
+        .collect();
+    if let Some(n) = tail {
+        if lines.len() > n {
+            lines = lines.split_off(lines.len() - n);
+        }
+    }
+    Ok(lines)
+}
+
+fn session_ts_ok_json(line: &str, since: Option<&str>, until: Option<&str>) -> bool {
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+        if let Some(ts) = v.get("ts").and_then(|t| t.as_str()) {
+            if let Some(s) = since {
+                if ts < s {
+                    return false;
+                }
+            }
+            if let Some(u) = until {
+                if ts > u {
+                    return false;
+                }
+            }
+        }
+    }
+    true
 }
