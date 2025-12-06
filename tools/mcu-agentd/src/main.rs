@@ -56,7 +56,7 @@ enum Cmd {
     Flash {
         #[arg(value_enum)]
         mcu: McuOpt,
-        /// ELF path; if omitted, auto-builds default target.
+        /// ELF path; if omitted, use the default release ELF (fails if it has not been built yet).
         elf: Option<PathBuf>,
         /// ESP32 after-reset policy (analog ignores).
         #[arg(long, default_value = "no-reset", value_enum)]
@@ -71,7 +71,7 @@ enum Cmd {
     Monitor {
         #[arg(value_enum)]
         mcu: McuOpt,
-        /// Optional ELF path; if missing, auto-builds default.
+        /// Optional ELF path (reserved for future use; normally omit and rely on the default ELF).
         elf: Option<PathBuf>,
         /// Reset MCU before monitoring to capture a fresh boot log.
         #[arg(long)]

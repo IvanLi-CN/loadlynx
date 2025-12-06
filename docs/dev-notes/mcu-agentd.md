@@ -14,17 +14,17 @@
 - 运行策略：
   - 构建 → 按需烧录 → 复位/日志分离；烧录默认不自动长时间运行，只在 monitor/attach 时启动目标。
   - Analog 端严格版本门控以保护 Flash；Digital 端依赖 `espflash --skip` 机制减少重复写入。
-- 日志目录：元数据与会话日志写入 `logs/agentd/`（新）；兼容同步镜像到 `tmp/agent-logs/` 方便现有脚本。
+- 日志目录：元数据与会话日志写入 `logs/agentd/`；`tmp/agent-logs/` 仅作为兼容占位目录保留（当前实现不再主动同步镜像）。
 
 ## 3. 命令面（当前）
 
-- `start | stop | status`：管理守护；返回 PID、锁状态、当前时间、活跃会话。通常通过 `just agentd start|stop|status` 或 `just agentd-start/agentd-stop/agentd-status` 调用。
+- `start | stop | status`：管理守护；返回 PID、socket 路径以及当前时间。通常通过 `just agentd start|stop|status` 或 `just agentd-start/agentd-stop/agentd-status` 调用。
 - `set-port <mcu> [PATH]` / `get-port <mcu>` / `list-ports <mcu>`：`mcu ∈ {digital,analog}`。读写 `.esp32-port` / `.stm32-port` 缓存；列举可用端口/探针。`set-port` 在 PATH 省略时会进入交互式选择。
-- `flash --mcu <mcu> [ELF] [--after {no-reset|hard-reset}]`：烧录固件但不自动长时间运行；digital 支持 `--after` 控制 espflash 的 reset 策略（analog 忽略该参数）。ELF 省略时会自动构建默认 target。
-- `reset --mcu {digital,analog}`：仅复位 MCU，不烧录；复位结果写入 meta 日志（必要时附短日志窗口）。
-- `monitor --mcu {digital,analog} [--elf PATH] [--reset] [--duration DUR] [--lines N]`：拉起/附着到一段日志会话。`--reset` 会在监视前触发一次 `reset` 并等待新的会话文件出现；`--duration` 使用 humansize 时长（如 `30s`/`2m`，0 表示不按时间截断），`--lines` 控制从会话尾部截取的最大行数（0 表示不限）。
-- `logs --mcu {digital,analog,all} [--since RFC3339] [--until RFC3339] [--tail N] [--sessions]`：按时间/数量筛选元数据（meta 日志）；`--sessions` 为 true 时附带按会话聚合的日志片段（每个会话单独 tail N 行）。
-- 构建兜底：`--elf` 缺省时自动调用 `make d-build` 或 `make a-build` 生成默认 ELF；构建结果对齐 `tmp/{digital,analog}-fw-version.txt`。
+- `flash <mcu> [ELF] [--after {no-reset|hard-reset}]`：烧录固件但不自动长时间运行；`mcu ∈ {digital,analog}`。digital 支持 `--after` 控制 espflash 的 reset 策略（analog 忽略该参数）。`ELF` 省略时使用默认 release ELF 路径；若该文件不存在则报错，提示先构建或显式提供 `ELF`。
+- `reset <mcu>`：仅复位 MCU，不烧录；复位结果写入 meta 日志（必要时附短日志窗口），Analog 端在部分 “interfaces are claimed” 情况下会视为软成功并继续重启 monitor。
+- `monitor <mcu> [ELF] [--reset] [--duration DUR] [--lines N]`：拉起/附着到一段日志会话。`--reset` 会在监视前触发一次 `reset` 并等待新的会话文件出现；`--duration` 使用 humansize 时长（如 `30s`/`2m`，0 表示不按时间截断），`--lines` 控制从会话中输出的最大行数（0 表示不限）。目前 `ELF` 仅作为预留位置，实际监视基于守护端已配置的默认 ELF。
+- `logs <mcu|all> [--since RFC3339] [--until RFC3339] [--tail N] [--sessions]`：按时间/数量筛选元数据（meta 日志）；`--sessions` 为 true 时附带按会话聚合的日志片段（每个会话单独 tail N 行）。`--tail` 省略时使用守护配置中的默认值（当前为 200）。
+- 构建兜底（规划中）：当前实现不会自动调用 `make a-build` / `make d-build`，而是直接报错并要求用户先构建或提供显式 `ELF`；未来如需要可在守护层引入可选的自动构建逻辑。
 
 ## 4. 底层命令选择
 
@@ -53,14 +53,14 @@
   - Digital：`./.esp32-port`
   - Analog：`./.stm32-port`（`.stm32-probe` 仅作为旧版本遗留缓存的迁移来源：当 `.stm32-port` 不存在时读取其值写回新文件并删除旧文件）
 - `set-port` 会验证目标存在；`list-ports` 读取 `scripts/ensure_esp32_port.sh` / `probe-rs list` 输出并过滤唯一项。
-- 客户端命令均可通过 `--port` / `--probe` 显式覆盖缓存。
+- 当前 agentd CLI 不再暴露 `--port` / `--probe` 覆盖选项，端口/探针选择完全由缓存文件与 helper 脚本负责。
 
 ## 7. 版本门控与构建兜底
 
-- 版本文件：沿用现有生成文件 `tmp/analog-fw-version.txt`、`tmp/digital-fw-version.txt`；守护在构建后读取。
-- Analog 烧录决策：比较 `tmp/analog-fw-version.txt` 与 `tmp/analog-fw-last-flashed.txt`，不同则执行 `flash`，成功后更新 last-flashed。
-- Digital 烧录决策：直接执行 `espflash flash ...`，依赖其跳过未变分区；仍记录版本到元数据。
-- 构建兜底：当命令缺省 `--elf` 时触发 `make a-build` / `make d-build`（PROFILE 默认 release，可由配置/命令覆盖）。
+- 版本文件：沿用现有生成文件 `tmp/analog-fw-version.txt`、`tmp/digital-fw-version.txt`，供日志与后续版本门控使用。
+- Analog 烧录决策（规划中）：设计上预留了 `tmp/analog-fw-last-flashed.txt` 等文件用于比较版本并避免重复烧录，但当前实现尚未启用该门控逻辑。
+- Digital 烧录决策：直接执行 `espflash flash ...`，依赖其自身的 “未变分区跳过” 机制；仍记录版本到元数据。
+- 构建兜底（规划中）：目前当命令缺省 `ELF` 时仅尝试使用默认 release ELF 路径；如文件不存在则报错并提示用户自行运行 `make a-build` / `make d-build`（或等价的 `just` 配方），未来可根据需要在守护层加入自动构建能力。
 
 ## 8. 日志与时间戳
 
