@@ -58,7 +58,7 @@ impl Server {
 
         let clock = Clock::new();
         let listener = UnixListener::bind(&paths.sock)?;
-        println!("mcu-agentd listening at {:?}", paths.sock);
+        println!("loadlynx-agentd listening at {:?}", paths.sock);
         let running = Arc::new(AtomicBool::new(true));
         // start background monitors if ports cached
         start_cached_monitors(&paths, &state, &clock).await.ok();

@@ -1,5 +1,5 @@
 [package]
-name = "mcu-agentd"
+name = "loadlynx-agentd"
 version = "0.1.0"
 edition = "2024"
 

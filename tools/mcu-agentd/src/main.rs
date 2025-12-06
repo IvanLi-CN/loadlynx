@@ -19,9 +19,9 @@ use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
 use tokio::time::{Duration, Instant};
 
-/// MCU agentd – single-instance helper for LoadLynx boards (ESP32-S3 + STM32G431).
+/// LoadLynx agentd – single-instance helper for LoadLynx boards (ESP32-S3 + STM32G431).
 #[derive(Parser, Debug)]
-#[command(name = "mcu-agentd", version)]
+#[command(name = "loadlynx-agentd", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

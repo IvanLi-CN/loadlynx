@@ -16,8 +16,7 @@ pub struct Paths {
     pub mon_digital: PathBuf,
     pub mon_analog: PathBuf,
     pub esp32_port: PathBuf,
-    pub stm32_probe: PathBuf,
-    pub stm32_legacy: PathBuf,
+    pub stm32_port: PathBuf,
     pub analog_fw_version: PathBuf,
     pub analog_last_flashed: PathBuf,
     pub digital_fw_version: PathBuf,
@@ -38,8 +37,7 @@ impl Paths {
         let mon_digital = logs_dir.join("digital/monitor");
         let mon_analog = logs_dir.join("analog/monitor");
         let esp32_port = root.join(".esp32-port");
-        let stm32_probe = root.join(".stm32-probe");
-        let stm32_legacy = root.join(".stm32-port");
+        let stm32_port = root.join(".stm32-port");
         let analog_fw_version = root.join("tmp/analog-fw-version.txt");
         let analog_last_flashed = root.join("tmp/analog-fw-last-flashed.txt");
         let digital_fw_version = root.join("tmp/digital-fw-version.txt");
@@ -57,8 +55,7 @@ impl Paths {
             mon_digital,
             mon_analog,
             esp32_port,
-            stm32_probe,
-            stm32_legacy,
+            stm32_port,
             analog_fw_version,
             analog_last_flashed,
             digital_fw_version,
