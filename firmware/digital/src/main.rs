@@ -204,6 +204,28 @@ fn timestamp_ms() -> u64 {
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
 
+fn log_wifi_config() {
+    // These values are injected at compile time by firmware/digital/build.rs.
+    let ssid = env!("LOADLYNX_WIFI_SSID");
+    let hostname = option_env!("LOADLYNX_WIFI_HOSTNAME");
+    let static_ip = option_env!("LOADLYNX_WIFI_STATIC_IP");
+    let netmask = option_env!("LOADLYNX_WIFI_NETMASK");
+    let gateway = option_env!("LOADLYNX_WIFI_GATEWAY");
+    let dns = option_env!("LOADLYNX_WIFI_DNS");
+    let psk_present = option_env!("LOADLYNX_WIFI_PSK").is_some();
+
+    info!(
+        "Wi-Fi config: ssid=\"{}\", hostname={:?}, static_ip={:?}, netmask={:?}, gateway={:?}, dns={:?}, psk_present={}",
+        ssid,
+        hostname,
+        static_ip,
+        netmask,
+        gateway,
+        dns,
+        psk_present
+    );
+}
+
 /// Hook to release PAD‑JTAG so MTCK/MTDO (GPIO39/40) can be used for FAN_PWM/FAN_TACH.
 ///
 /// On ESP32‑S3, the recommended way in ESP‑IDF is to disable the PAD‑JTAG
@@ -1402,6 +1424,7 @@ fn main() -> ! {
     let peripherals = hal::init(hal::Config::default());
 
     info!("LoadLynx digital firmware version: {}", FW_VERSION);
+    log_wifi_config();
     info!("LoadLynx digital alive; initializing local peripherals");
 
     // 禁用 PAD‑JTAG，将 MTCK/MTDO (GPIO39/40) 释放为普通 GPIO，
