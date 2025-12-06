@@ -119,9 +119,9 @@ a-probes:
 a-run-pick:
 	./scripts/select_stm32_probe.sh a-run $(if $(PROFILE),PROFILE=$(PROFILE),)
 
-# explicit reselection: forget cached probe and pick again
+# explicit reselection: forget cached analog port/probe and pick again
 a-select-probe select-probe:
-	rm -f .stm32-probe
+	rm -f .stm32-port .stm32-probe
 	./scripts/select_stm32_probe.sh
 
 # Always-out-of-date phony dependency

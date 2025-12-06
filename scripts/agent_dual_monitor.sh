@@ -35,14 +35,16 @@ Usage: scripts/agent_dual_monitor.sh [--timeout SECONDS] [--profile {release|dev
 Environment:
   PROFILE         Build profile (defaults to 'release').
   PROBE           Optional explicit STM32 debug probe selector; otherwise
-                  .stm32-probe / auto-selection is used.
+                  .stm32-port / auto-selection is used（若仅存在旧版
+                  .stm32-probe，将在首次使用时迁移到 .stm32-port）。
   PORT            Optional explicit ESP32-S3 serial port; otherwise auto
                   selection via espflash is used.
 
 Behavior:
   - Selects a digital serial port (ESP32-S3) non-interactively.
   - Selects an analog debug probe (STM32G431) non-interactively, honoring
-    .stm32-probe if present.
+    .stm32-port as the canonical cache. If only legacy .stm32-probe is
+    present, its value is migrated once into .stm32-port.
   - Starts digital reset-attach logging first, then analog reset-attach
     logging, each bounded by --timeout seconds.
   - Immediately returns after spawning both sessions.
@@ -156,7 +158,19 @@ select_probe() {
     }
     has_token() { tokens | grep -Fxq "$1"; }
 
-    local repo_cache="$REPO_ROOT/.stm32-probe"
+    local cache_file="$REPO_ROOT/.stm32-port"
+    local legacy_file="$REPO_ROOT/.stm32-probe"
+
+    # 0) Legacy migration: if .stm32-port is absent but .stm32-probe exists,
+    #    copy its value over and drop the legacy file.
+    if [ ! -f "$cache_file" ] && [ -f "$legacy_file" ]; then
+        local legacy
+        legacy=$(cat "$legacy_file" 2>/dev/null || true)
+        rm -f "$legacy_file" || true
+        if [ -n "$legacy" ]; then
+            echo "$legacy" > "$cache_file"
+        fi
+    fi
 
     # 1) Explicit PROBE env
     if [ "${PROBE:-}" != "" ] && has_token "$PROBE"; then
@@ -171,9 +185,9 @@ select_probe() {
     fi
 
     # 3) Cached selector (if still present)
-    if [ -f "$repo_cache" ]; then
+    if [ -f "$cache_file" ]; then
         local cached
-        cached=$(cat "$repo_cache" 2>/dev/null || true)
+        cached=$(cat "$cache_file" 2>/dev/null || true)
         if [ "$cached" != "" ] && has_token "$cached"; then
             echo "$cached"
             return 0

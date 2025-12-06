@@ -42,7 +42,15 @@ SELECTOR=$(echo "$SEL_LINE" | sed -E 's/.*-- ([^ ]+).*/\1/')
 
 # cache selection in repo root for future runs
 REPO_ROOT=$(cd "$(dirname "$0")/.." && pwd)
-echo "$SELECTOR" > "$REPO_ROOT/.stm32-probe"
+CACHE_FILE="$REPO_ROOT/.stm32-port"
+LEGACY_FILE="$REPO_ROOT/.stm32-probe"
+
+echo "$SELECTOR" > "$CACHE_FILE"
+
+# Best-effort cleanup: once we have a .stm32-port, drop any legacy cache.
+if [ -f "$LEGACY_FILE" ]; then
+  rm -f "$LEGACY_FILE" || true
+fi
 
 if [ $# -gt 0 ]; then
   TARGET="$1"; shift || true

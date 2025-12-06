@@ -13,7 +13,9 @@ set -euo pipefail
 # This script is intended to be non-interactive. Probe selection follows:
 #   1) Respect explicit PROBE env (if present and currently connected).
 #   2) Respect PORT env alias (if present and currently connected).
-#   3) Reuse cached selector from .stm32-probe (if still connected).
+#   3) Reuse cached selector from .stm32-port (if still connected).
+#      If .stm32-port is absent but legacy .stm32-probe exists, migrate
+#      its value into .stm32-port once and delete .stm32-probe.
 #   4) If exactly one ST-Link is present, use it.
 #   5) If exactly one probe is present, use it.
 #   6) Otherwise, fail with an error (no interactive selection).
@@ -107,7 +109,19 @@ select_probe() {
     }
     has_token() { tokens | grep -Fxq "$1"; }
 
-    local repo_cache="$REPO_ROOT/.stm32-probe"
+    local cache_file="$REPO_ROOT/.stm32-port"
+    local legacy_file="$REPO_ROOT/.stm32-probe"
+
+    # 0) Legacy migration: if .stm32-port is absent but .stm32-probe exists,
+    #    copy its value over and drop the legacy file.
+    if [ ! -f "$cache_file" ] && [ -f "$legacy_file" ]; then
+        local legacy
+        legacy=$(cat "$legacy_file" 2>/dev/null || true)
+        rm -f "$legacy_file" || true
+        if [ -n "$legacy" ]; then
+            echo "$legacy" > "$cache_file"
+        fi
+    fi
 
     # 1) Explicit PROBE env
     if [ "${PROBE:-}" != "" ] && has_token "$PROBE"; then
@@ -122,9 +136,9 @@ select_probe() {
     fi
 
     # 3) Cached selector (if still present)
-    if [ -f "$repo_cache" ]; then
+    if [ -f "$cache_file" ]; then
         local cached
-        cached=$(cat "$repo_cache" 2>/dev/null || true)
+        cached=$(cat "$cache_file" 2>/dev/null || true)
         if [ "$cached" != "" ] && has_token "$cached"; then
             echo "$cached"
             return 0
