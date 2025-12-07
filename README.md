@@ -76,13 +76,20 @@ scripts/flash_s3.sh --release --port /dev/tty.usbserial-xxxx
 
 ### MCU Agent 守护进程
 
-`tools/mcu-agentd` 已提供 Just 配方，便于以 release 方式运行/配置串口：
+`tools/mcu-agentd` 提供单实例守护与 CLI（二进制名 `loadlynx-agentd`），根目录下的 Just 配方包装了常见子命令，便于以 release 方式运行与配置端口/探针缓存：
 
 ```sh
-just agentd start                 # 启动后台守护
-just agentd status                # 查询状态
-just agentd stop                  # 停止
-just agentd set-port analog /dev/tty.usbserial-xxxx
+just agentd-start                       # 启动后台守护
+just agentd-status                      # 查询状态
+just agentd-stop                        # 停止
+
+# 设置端口/探针缓存（写入仓根 .esp32-port / .stm32-port）
+just agentd set-port digital /dev/cu.usbserial-xxxx
+just agentd set-port analog 0483:3748:SERIAL   # 例：ST-Link VID:PID:SER
+
+# 查看当前缓存
+just agentd-get-port digital
+just agentd-get-port analog
 ```
 
 ## 目录结构

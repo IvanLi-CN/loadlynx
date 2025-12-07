@@ -8,25 +8,23 @@
 
 ## 2. 设计概览
 
-- 语言/框架：Rust（tokio + clap），独立二进制 crate，工程位置 `tools/mcu-agentd/`。
+- 语言/框架：Rust（tokio + clap），独立二进制 crate，工程位置 `tools/mcu-agentd/`，二进制名 `loadlynx-agentd`（通过 Just 配方 `just agentd ...` 调用）。
 - 实例模型：单可执行兼具守护与客户端；Unix socket + 锁文件保证单实例；每 MCU 独立资源锁防止串口/探针争用。
-- 端口/探针缓存：仓根 `.esp32-port`、`.stm32-probe`（兼容 `.stm32-port` 别名）；提供 set/get/list；默认沿用 `scripts/ensure_esp32_port.sh` 与 `scripts/ensure_stm32_probe.sh` 的筛选规则。
+- 端口/探针缓存：仓根 `.esp32-port`（digital）、`.stm32-port`（analog）。旧版遗留的 `.stm32-probe` 若存在，仅在 `.stm32-port` 缺失时作为迁移来源：读取其值、写入 `.stm32-port` 后删除旧文件。提供 set/get/list；默认沿用 `scripts/ensure_esp32_port.sh` 与 `scripts/ensure_stm32_probe.sh` 的筛选规则（后者内部已切换到 `.stm32-port`）。
 - 运行策略：
   - 构建 → 按需烧录 → 复位/日志分离；烧录默认不自动长时间运行，只在 monitor/attach 时启动目标。
   - Analog 端严格版本门控以保护 Flash；Digital 端依赖 `espflash --skip` 机制减少重复写入。
-- 日志目录：元数据与会话日志写入 `logs/agentd/`（新）；兼容同步镜像到 `tmp/agent-logs/` 方便现有脚本。
+- 日志目录：元数据与会话日志写入 `logs/agentd/`；`tmp/agent-logs/` 仅作为兼容占位目录保留（当前实现不再主动同步镜像）。
 
-## 3. 命令面（初版）
+## 3. 命令面（当前）
 
-- `start | stop | status`：管理守护；返回 PID、锁状态、当前时间、活跃会话。
-- `set-port --mcu {digital,analog} --path PATH` / `get-port --mcu ...` / `list-ports --mcu ...`：读写 `.esp32-port` / `.stm32-probe` 缓存；列举可用端口/探针。
-- `flash --mcu digital --elf PATH [--after no-reset|hard-reset]`
-- `flash --mcu analog --elf PATH`
-- `reset --mcu {digital,analog}`：复位后写入元事件（必要时附短日志窗口）。
-- `monitor --mcu digital [--elf PATH] [--timeout SEC]`：相当于 `make d-run`（flash+monitor），可指定日志时长。
-- `attach --mcu analog [--elf PATH] [--timeout SEC]`：相当于 `make a-reset-attach`，受版本门控。
-- `logs --mcu {digital,analog,all} [--since RFC3339] [--until RFC3339] [--tail N]`：按时间/数量筛选元数据或会话日志。
-- 构建兜底：`--elf` 缺省时自动调用 `make d-build` 或 `make a-build` 生成默认 ELF；构建结果对齐 `tmp/{digital,analog}-fw-version.txt`。
+- `start | stop | status`：管理守护；返回 PID、socket 路径以及当前时间。通常通过 `just agentd start|stop|status` 或 `just agentd-start/agentd-stop/agentd-status` 调用。
+- `set-port <mcu> [PATH]` / `get-port <mcu>` / `list-ports <mcu>`：`mcu ∈ {digital,analog}`。读写 `.esp32-port` / `.stm32-port` 缓存；列举可用端口/探针。`set-port` 在 PATH 省略时会进入交互式选择。
+- `flash <mcu> [ELF] [--after {no-reset|hard-reset}]`：烧录固件但不自动长时间运行；`mcu ∈ {digital,analog}`。digital 支持 `--after` 控制 espflash 的 reset 策略（analog 忽略该参数）。`ELF` 省略时使用默认 release ELF 路径；若该文件不存在则报错，提示先构建或显式提供 `ELF`。
+- `reset <mcu>`：仅复位 MCU，不烧录；复位结果写入 meta 日志（必要时附短日志窗口），Analog 端在部分 “interfaces are claimed” 情况下会视为软成功并继续重启 monitor。
+- `monitor <mcu> [ELF] [--reset] [--duration DUR] [--lines N]`：拉起/附着到一段日志会话。`--reset` 会在监视前触发一次 `reset` 并等待新的会话文件出现；`--duration` 使用 humansize 时长（如 `30s`/`2m`，0 表示不按时间截断），`--lines` 控制从会话中输出的最大行数（0 表示不限）。目前 `ELF` 仅作为预留位置，实际监视基于守护端已配置的默认 ELF。
+- `logs <mcu|all> [--since RFC3339] [--until RFC3339] [--tail N] [--sessions]`：按时间/数量筛选元数据（meta 日志）；`--sessions` 为 true 时附带按会话聚合的日志片段（每个会话单独 tail N 行）。`--tail` 省略时使用守护配置中的默认值（当前为 200）。
+- 构建兜底（规划中）：当前实现不会自动调用 `make a-build` / `make d-build`，而是直接报错并要求用户先构建或提供显式 `ELF`；未来如需要可在守护层引入可选的自动构建逻辑。
 
 ## 4. 底层命令选择
 
@@ -40,12 +38,12 @@
   - 烧录：`probe-rs download --chip STM32G431CB --probe <cache> <elf>`（不复位）
   - 监视：`probe-rs run --chip STM32G431CB --probe <cache> --log-format defmt <elf>`（或 `reset-attach` 变体）
   - 复位：`probe-rs reset --chip STM32G431CB --probe <cache>`
-  - 探针选择：沿用 `.stm32-probe` 缓存；若无缓存则按唯一 ST-Link/唯一探针自动选择，否则报错并提示运行 `scripts/select_stm32_probe.sh` 一次。
+  - 探针选择：沿用 `.stm32-port` 缓存；若仅存在旧版 `.stm32-probe`，在无 `.stm32-port` 时作为一次性迁移来源。若仍无缓存则按唯一 ST-Link/唯一探针自动选择，否则报错并提示运行 `scripts/select_stm32_probe.sh` 一次。
 
 ## 5. 单实例与资源锁
 
-- 锁文件：`tmp/mcu-agentd.lock` 控制单实例；守护启动时获取，客户端通过 Unix socket 连接。
-- Socket：`tmp/mcu-agentd.sock`，权限 600；客户端命令经 socket 发送，守护处理。
+- 锁文件：`logs/agentd/agentd.lock` 控制单实例；守护启动时获取，客户端通过 Unix socket 连接。
+- Socket：`logs/agentd/agentd.sock`，权限 600；客户端命令经 socket 发送，守护处理。
 - MCU 级资源锁：`/tmp/loadlynx-mcu-agentd-{analog|digital}.lock`，确保串口/探针操作不交叉。
 - 进程模型：守护持久化；客户端为短进程。守护异常退出时在心跳中标注，下一次启动尝试清理陈旧锁。
 
@@ -53,16 +51,16 @@
 
 - 文件：
   - Digital：`./.esp32-port`
-  - Analog：`./.stm32-probe`（兼容读取 `./.stm32-port` 如存在）
+  - Analog：`./.stm32-port`（`.stm32-probe` 仅作为旧版本遗留缓存的迁移来源：当 `.stm32-port` 不存在时读取其值写回新文件并删除旧文件）
 - `set-port` 会验证目标存在；`list-ports` 读取 `scripts/ensure_esp32_port.sh` / `probe-rs list` 输出并过滤唯一项。
-- 客户端命令均可通过 `--port` / `--probe` 显式覆盖缓存。
+- 当前 agentd CLI 不再暴露 `--port` / `--probe` 覆盖选项，端口/探针选择完全由缓存文件与 helper 脚本负责。
 
 ## 7. 版本门控与构建兜底
 
-- 版本文件：沿用现有生成文件 `tmp/analog-fw-version.txt`、`tmp/digital-fw-version.txt`；守护在构建后读取。
-- Analog 烧录决策：比较 `tmp/analog-fw-version.txt` 与 `tmp/analog-fw-last-flashed.txt`，不同则执行 `flash`，成功后更新 last-flashed。
-- Digital 烧录决策：直接执行 `espflash flash ...`，依赖其跳过未变分区；仍记录版本到元数据。
-- 构建兜底：当命令缺省 `--elf` 时触发 `make a-build` / `make d-build`（PROFILE 默认 release，可由配置/命令覆盖）。
+- 版本文件：沿用现有生成文件 `tmp/analog-fw-version.txt`、`tmp/digital-fw-version.txt`，供日志与后续版本门控使用。
+- Analog 烧录决策（规划中）：设计上预留了 `tmp/analog-fw-last-flashed.txt` 等文件用于比较版本并避免重复烧录，但当前实现尚未启用该门控逻辑。
+- Digital 烧录决策：直接执行 `espflash flash ...`，依赖其自身的 “未变分区跳过” 机制；仍记录版本到元数据。
+- 构建兜底（规划中）：目前当命令缺省 `ELF` 时仅尝试使用默认 release ELF 路径；如文件不存在则报错并提示用户自行运行 `make a-build` / `make d-build`（或等价的 `just` 配方），未来可根据需要在守护层加入自动构建能力。
 
 ## 8. 日志与时间戳
 
@@ -71,7 +69,7 @@
   ```json
   {"ts":"2025-11-23T14:05:31.842-08:00","mono_ms":124422,"mcu":"digital","event":"flash","elf":".../digital/target/xtensa-esp32s3/release/digital","port":"/dev/cu.usbmodemXYZ","status":"ok","code":0,"duration_ms":8123,"op_id":"op-20251123-1405-digital-1"}
   ```
-- 会话日志：`logs/agentd/{analog,digital}/YYYYMMDD_HHMMSS.session.log`；行前缀为 NDJSON 元数据 + 原始 defmt/串口行。按 `--timeout` 控制时长；默认同步一份到 `tmp/agent-logs/` 便于现有流程。
+- 会话日志：`logs/agentd/{analog,digital}/YYYYMMDD_HHMMSS.session.log`；行前缀为 NDJSON 元数据 + 原始 defmt/串口行。按 monitor 子命令传入的 `--duration` / `--lines` 控制截取窗口；默认同步一份到 `tmp/agent-logs/` 便于现有流程。
 - 心跳：守护每 60s 写入 `{event:"heartbeat", active_sessions:[...]}` 到元日志。
 
 ## 9. 配置与环境
@@ -92,7 +90,7 @@
 | 功能 | 描述 | 验收标准 | 状态 | 备注 |
 | --- | --- | --- | --- | --- |
 | 单实例守护 | 锁文件+Unix socket；start/stop/status 可用 | 第二实例返回 already running；status 显示 PID/活跃会话 | 待开发 |  |
-| 端口/探针缓存 | 读写 `.esp32-port`、`.stm32-probe` | set/get/list 正确读写并验证存在 | 待开发 | 兼容 `.stm32-port` 读取 |
+| 端口/探针缓存 | 读写 `.esp32-port`、`.stm32-port` | set/get/list 正确读写并验证存在 | 待开发 | `.stm32-probe` 仅作为旧缓存迁移来源 |
 | 烧录 ESP32 | `espflash flash` 默认 `--after no-reset` | 返回 ts/耗时；未变区域被跳过 | 待开发 |  |
 | 烧录 STM32 | `probe-rs download` 不复位 | 返回 ts/耗时；版本门控生效 | 待开发 |  |
 | 复位控制 | per MCU 调用 espflash/probe-rs reset | 元事件记录 ts/code；可选短日志 | 待开发 |  |
