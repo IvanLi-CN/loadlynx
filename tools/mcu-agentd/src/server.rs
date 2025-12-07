@@ -461,7 +461,7 @@ async fn reset_mcu(
     ts: &Timestamp,
 ) -> Result<serde_json::Value> {
     stop_monitor(paths, state, mcu).await.ok();
-    let mut res = match mcu {
+    let res = match mcu {
         McuKind::Digital => {
             let port = require_port(paths, McuKind::Digital)?;
             let mut cmd = Command::new("espflash");
@@ -474,7 +474,10 @@ async fn reset_mcu(
         }
         McuKind::Analog => {
             let probe = require_port(paths, McuKind::Analog)?;
-            // Retry STM32G4 reset on transient USB/probe busy errors.
+            // Retry STM32G4 reset on transient USB/probe busy errors and a known
+            // CMSIS-DAP "Info" glitch where the command ID in the response does
+            // not match the sent command ID. In both cases a short delay and
+            // retry usually succeed.
             let mut attempt = 0usize;
             loop {
                 let mut cmd = Command::new("probe-rs");
@@ -483,32 +486,43 @@ async fn reset_mcu(
                     .arg("STM32G431CB")
                     .arg("--probe")
                     .arg(probe.clone());
-                let res_try =
-                    run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
-                if res_try.status == 0
-                    || attempt >= 2
-                    || !session_has_usb_claim_error(&res_try.session_file)
-                {
+                let res_try = run_mcu_cmd(paths, mcu, ts, cmd, None, None, None, None).await?;
+
+                let has_usb_claim = session_has_usb_claim_error(&res_try.session_file);
+                let has_cmsisdap_info = session_has_cmsisdap_info_error(&res_try.session_file);
+
+                // Success: return immediately.
+                if res_try.status == 0 {
                     break res_try;
                 }
-                attempt += 1;
-                tokio::time::sleep(Duration::from_millis(300)).await;
+
+                // For known transient probe issues (USB interface claimed or CMSIS-DAP
+                // Info mismatch), retry a couple of times before giving up.
+                if (has_usb_claim || has_cmsisdap_info) && attempt < 2 {
+                    attempt += 1;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    continue;
+                }
+
+                // Non-retryable error (or retries exhausted): surface the last result.
+                break res_try;
             }
         }
     };
 
-    // If Analog reset still reports "interfaces are claimed" after retries, treat this
-    // as a soft success and let the subsequent start_monitor_if_cached() perform a fresh
-    // probe-rs run, which will reset the MCU anyway. This avoids surfacing a hard error
-    // to the CLI when the only failure is the probe's USB interface claiming.
-    if matches!(mcu, McuKind::Analog)
-        && res.status != 0
-        && session_has_usb_claim_error(&res.session_file)
-    {
-        eprintln!(
-            "warn: analog reset hit USB interface claimed, proceeding with monitor restart"
-        );
-        res.status = 0;
+    // For Analog, if we still see probe/USB issues after retries, emit a warning but
+    // keep the non-zero status so the CLI sees a hard failure. The helpers only try to
+    // classify known transient errors; they must not turn them into soft successes.
+    if matches!(mcu, McuKind::Analog) && res.status != 0 {
+        if session_has_usb_claim_error(&res.session_file) {
+            eprintln!(
+                "warn: analog reset hit USB interface claimed, retries exhausted; reporting failure"
+            );
+        } else if session_has_cmsisdap_info_error(&res.session_file) {
+            eprintln!(
+                "warn: analog reset hit CMSIS-DAP Info error, retries exhausted; reporting failure"
+            );
+        }
     }
     write_meta(paths, mcu, ts, "reset", &res)?;
     if res.status != 0 {
@@ -858,7 +872,29 @@ fn session_has_usb_claim_error(path: &PathBuf) -> bool {
     }
 }
 
-fn read_session(path: &PathBuf, since: Option<&str>, until: Option<&str>, tail: Option<usize>) -> Result<Vec<String>> {
+fn session_has_cmsisdap_info_error(path: &PathBuf) -> bool {
+    if let Ok(text) = std::fs::read_to_string(path) {
+        // Typical probe-rs CMSIS-DAP Info glitch sequence:
+        //   Error: Failed to open probe: Failed to open the debug probe.
+        //   Caused by:
+        //     0: An error which is specific to the debug probe in use occurred.
+        //     1: Error handling CMSIS-DAP command Info.
+        //     2: Command ID in response (0x2) does not match sent command ID (Info - 0x0).
+        text.contains("Error handling CMSIS-DAP command Info")
+            && text.contains(
+                "Command ID in response (0x2) does not match sent command ID (Info - 0x0)",
+            )
+    } else {
+        false
+    }
+}
+
+fn read_session(
+    path: &PathBuf,
+    since: Option<&str>,
+    until: Option<&str>,
+    tail: Option<usize>,
+) -> Result<Vec<String>> {
     let file = File::open(path)?;
     let reader = BufReader::new(file);
     let mut lines: Vec<String> = reader
