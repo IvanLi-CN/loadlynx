@@ -1,0 +1,12 @@
+pre-commit:
+  parallel: true
+  commands:
+    fmt:
+      glob: "*.{rs}"
+      run: bash scripts/format_staged.sh
+      stage_fixed: true
+
+commit-msg:
+  commands:
+    commitlint:
+      run: npx commitlint --edit {1}

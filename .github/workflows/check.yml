@@ -1,0 +1,67 @@
+name: Code Check
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'firmware/analog/**'
+      - 'libs/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'firmware/analog/**'
+      - 'libs/**'
+      - '.github/workflows/**'
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code (no submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Install Rust toolchain (STM32G431, thumbv7em-none-eabihf)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.90
+          components: rustfmt, clippy, rust-src, llvm-tools-preview
+          targets: thumbv7em-none-eabihf
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            firmware/analog/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: Check code formatting (analog)
+        working-directory: firmware/analog
+        run: cargo fmt --all -- --check
+
+      - name: Check code formatting (protocol lib)
+        working-directory: libs/protocol
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy for analog (deny warnings)
+        working-directory: firmware/analog
+        run: cargo clippy --bins --no-deps --target thumbv7em-none-eabihf -- -D warnings
+
+      - name: Build analog firmware (release)
+        working-directory: firmware/analog
+        run: cargo build --release --target thumbv7em-none-eabihf
+
+      - name: Check analog ELF artifact
+        run: |
+          ARTIFACT=firmware/analog/target/thumbv7em-none-eabihf/release/analog
+          if [ ! -f "$ARTIFACT" ]; then
+            echo "Build failed: ELF not found at $ARTIFACT" && exit 1
+          fi
+          echo "Build successful: size $(stat -c%s "$ARTIFACT" 2>/dev/null || stat -f%z "$ARTIFACT") bytes"
