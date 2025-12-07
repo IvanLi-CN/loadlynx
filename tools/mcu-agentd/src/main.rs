@@ -6,7 +6,7 @@ mod process;
 mod server;
 mod timefmt;
 
-use anyhow::{Result, bail, anyhow};
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use dialoguer::{Select, theme::ColorfulTheme};
 use model::{ClientRequest, McuKind};
@@ -235,8 +235,7 @@ hint: 检查 logs/agentd 目录以及 sock 文件的所有者与权限。",
             print_and_exit(&resp)?;
         }
         Cmd::Reset { mcu } => {
-            let resp =
-                client_send_with_autostart(ClientRequest::Reset { mcu: mcu.into() }).await?;
+            let resp = client_send_with_autostart(ClientRequest::Reset { mcu: mcu.into() }).await?;
             print_and_exit(&resp)?;
         }
         Cmd::Monitor {
@@ -266,9 +265,10 @@ hint: 检查 logs/agentd 目录以及 sock 文件的所有者与权限。",
                 };
 
                 // Reset via daemon (auto-start if needed).
-                let reset_resp =
-                    client_send_with_autostart(ClientRequest::Reset { mcu: mcu_kind.clone() })
-                        .await?;
+                let reset_resp = client_send_with_autostart(ClientRequest::Reset {
+                    mcu: mcu_kind.clone(),
+                })
+                .await?;
                 if !reset_resp.ok {
                     return print_and_exit(&reset_resp);
                 }
@@ -289,8 +289,7 @@ hint: 检查 logs/agentd 目录以及 sock 文件的所有者与权限。",
                     })
                     .await?;
                     if resp.ok {
-                        if let Some(path_str) = resp.payload.get("path").and_then(|p| p.as_str())
-                        {
+                        if let Some(path_str) = resp.payload.get("path").and_then(|p| p.as_str()) {
                             let cand = PathBuf::from(path_str);
                             let is_new = match &prev_path {
                                 Some(prev) => &cand != prev,
@@ -308,7 +307,8 @@ hint: 检查 logs/agentd 目录以及 sock 文件的所有者与权限。",
                 let path = new_path.ok_or_else(|| {
                     anyhow!(
                         "no new session log for {:?} after reset (last: {:?})",
-                        mcu_kind, prev_path
+                        mcu_kind,
+                        prev_path
                     )
                 })?;
                 tail_file(path, duration, lines, true).await?;
