@@ -6,7 +6,7 @@ mod process;
 mod server;
 mod timefmt;
 
-use anyhow::{Result, bail};
+use anyhow::{Result, anyhow, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use dialoguer::{Select, theme::ColorfulTheme};
 use model::{ClientRequest, McuKind};
@@ -17,11 +17,11 @@ use std::path::PathBuf;
 use std::process::exit;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncSeekExt, BufReader};
-use tokio::time::{Duration, Instant};
+use tokio::time::{Duration as TokioDuration, Instant, sleep};
 
-/// MCU agentd – single-instance helper for LoadLynx boards (ESP32-S3 + STM32G431).
+/// LoadLynx agentd – single-instance helper for LoadLynx boards (ESP32-S3 + STM32G431).
 #[derive(Parser, Debug)]
-#[command(name = "mcu-agentd", version)]
+#[command(name = "loadlynx-agentd", version)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -56,7 +56,7 @@ enum Cmd {
     Flash {
         #[arg(value_enum)]
         mcu: McuOpt,
-        /// ELF path; if omitted, auto-builds default target.
+        /// ELF path; if omitted, use the default release ELF (fails if it has not been built yet).
         elf: Option<PathBuf>,
         /// ESP32 after-reset policy (analog ignores).
         #[arg(long, default_value = "no-reset", value_enum)]
@@ -71,8 +71,11 @@ enum Cmd {
     Monitor {
         #[arg(value_enum)]
         mcu: McuOpt,
-        /// Optional ELF path; if missing, auto-builds default.
+        /// Optional ELF path (reserved for future use; normally omit and rely on the default ELF).
         elf: Option<PathBuf>,
+        /// Reset MCU before monitoring to capture a fresh boot log.
+        #[arg(long)]
+        reset: bool,
         /// Auto-stop after duration, e.g. 30s/2m/1h (0 = unlimited).
         #[arg(long, value_parser = humantime::parse_duration, default_value = "0")]
         duration: std::time::Duration,
@@ -150,19 +153,62 @@ async fn main() -> Result<()> {
             let resp = Server::try_stop().await?;
             print_and_exit(&resp)?;
         }
-        Cmd::Status => match Server::client_send(ClientRequest::Status).await {
-            Ok(resp) => println!("{}", serde_json::to_string_pretty(&resp)?),
-            Err(e) => {
-                eprintln!("status: not running ({e})");
+        Cmd::Status => {
+            // Try to give a more actionable error message instead of a generic "not running".
+            let paths = paths::Paths::new().ok();
+            match Server::client_send(ClientRequest::Status).await {
+                Ok(resp) => println!("{}", serde_json::to_string_pretty(&resp)?),
+                Err(e) => {
+                    if let Some(ioe) = e.downcast_ref::<std::io::Error>() {
+                        use std::io::ErrorKind::*;
+                        if let Some(p) = paths {
+                            let sock = &p.sock;
+                            match ioe.kind() {
+                                NotFound => {
+                                    eprintln!(
+                                        "status: agentd socket {:?} not found: {}.\n  \
+hint: daemon 未在运行，或者 logs/agentd 被手动清理导致 sock 丢失；通常可用 `just agentd-start` 重新启动。\n  \
+若你在 daemon 运行时删除了该目录，可能还残留旧的 loadlynx-agentd 进程，需要先杀掉进程再重启。",
+                                        sock, ioe
+                                    );
+                                }
+                                ConnectionRefused | BrokenPipe | ConnectionReset => {
+                                    eprintln!(
+                                        "status: 无法连接到 agentd {:?}: {} (连接被拒绝/中断)。\n  \
+hint: daemon 正在启动、已崩溃或刚退出，可尝试 `just agentd-start` 重启。",
+                                        sock, ioe
+                                    );
+                                }
+                                PermissionDenied => {
+                                    eprintln!(
+                                        "status: 访问 agentd socket {:?} 权限不足: {}。\n  \
+hint: 检查 logs/agentd 目录以及 sock 文件的所有者与权限。",
+                                        sock, ioe
+                                    );
+                                }
+                                _ => {
+                                    eprintln!(
+                                        "status: 查询 agentd 状态失败 (socket {:?}): {:#}",
+                                        sock, e
+                                    );
+                                }
+                            }
+                        } else {
+                            eprintln!("status: 查询 agentd 状态失败: {:#}", e);
+                        }
+                    } else {
+                        eprintln!("status: 查询 agentd 状态失败: {:#}", e);
+                    }
+                }
             }
-        },
+        }
         Cmd::SetPort { mcu, path } => {
             let mcu_kind: McuKind = mcu.clone().into();
             let p = match path {
                 Some(p) => p,
                 None => interactive_select_port(mcu_kind.clone()).await?,
             };
-            let resp = Server::client_send(ClientRequest::SetPort {
+            let resp = client_send_with_autostart(ClientRequest::SetPort {
                 mcu: mcu_kind,
                 path: p,
             })
@@ -170,15 +216,17 @@ async fn main() -> Result<()> {
             print_and_exit(&resp)?;
         }
         Cmd::GetPort { mcu } => {
-            let resp = Server::client_send(ClientRequest::GetPort { mcu: mcu.into() }).await?;
+            let resp =
+                client_send_with_autostart(ClientRequest::GetPort { mcu: mcu.into() }).await?;
             print_and_exit(&resp)?;
         }
         Cmd::ListPorts { mcu } => {
-            let resp = Server::client_send(ClientRequest::ListPorts { mcu: mcu.into() }).await?;
+            let resp =
+                client_send_with_autostart(ClientRequest::ListPorts { mcu: mcu.into() }).await?;
             print_and_exit(&resp)?;
         }
         Cmd::Flash { mcu, elf, after } => {
-            let resp = Server::client_send(ClientRequest::Flash {
+            let resp = client_send_with_autostart(ClientRequest::Flash {
                 mcu: mcu.into(),
                 elf,
                 after: Some(after.into()),
@@ -187,30 +235,102 @@ async fn main() -> Result<()> {
             print_and_exit(&resp)?;
         }
         Cmd::Reset { mcu } => {
-            let resp = Server::client_send(ClientRequest::Reset { mcu: mcu.into() }).await?;
+            let resp = client_send_with_autostart(ClientRequest::Reset { mcu: mcu.into() }).await?;
             print_and_exit(&resp)?;
         }
         Cmd::Monitor {
             mcu,
             elf,
+            reset,
             duration,
             lines,
         } => {
-            let resp = Server::client_send(ClientRequest::Monitor {
-                mcu: mcu.into(),
-                elf,
-                duration: if duration.as_millis() == 0 {
-                    None
-                } else {
-                    Some(duration.as_millis() as u64)
-                },
-                lines: if lines == 0 { None } else { Some(lines) },
-            })
-            .await?;
-            print_and_exit(&resp)?;
-            if resp.ok {
+            let mcu_kind: McuKind = mcu.into();
+            if reset {
+                // Capture current latest log before reset (may be absent).
+                let prev_path = match client_send_with_autostart(ClientRequest::Monitor {
+                    mcu: mcu_kind.clone(),
+                    elf: None,
+                    duration: None,
+                    lines: None,
+                })
+                .await
+                {
+                    Ok(resp) if resp.ok => resp
+                        .payload
+                        .get("path")
+                        .and_then(|p| p.as_str())
+                        .map(PathBuf::from),
+                    _ => None,
+                };
+
+                // Reset via daemon (auto-start if needed).
+                let reset_resp = client_send_with_autostart(ClientRequest::Reset {
+                    mcu: mcu_kind.clone(),
+                })
+                .await?;
+                if !reset_resp.ok {
+                    return print_and_exit(&reset_resp);
+                }
+
+                // Wait for a new log file to appear.
+                let timeout = TokioDuration::from_secs(5);
+                let deadline = Instant::now() + timeout;
+                let mut new_path: Option<PathBuf> = None;
+                loop {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    let resp = client_send_with_autostart(ClientRequest::Monitor {
+                        mcu: mcu_kind.clone(),
+                        elf: None,
+                        duration: None,
+                        lines: None,
+                    })
+                    .await?;
+                    if resp.ok {
+                        if let Some(path_str) = resp.payload.get("path").and_then(|p| p.as_str()) {
+                            let cand = PathBuf::from(path_str);
+                            let is_new = match &prev_path {
+                                Some(prev) => &cand != prev,
+                                None => true,
+                            };
+                            if is_new {
+                                new_path = Some(cand);
+                                break;
+                            }
+                        }
+                    }
+                    sleep(TokioDuration::from_millis(100)).await;
+                }
+
+                let path = new_path.ok_or_else(|| {
+                    anyhow!(
+                        "no new session log for {:?} after reset (last: {:?})",
+                        mcu_kind,
+                        prev_path
+                    )
+                })?;
+                tail_file(path, duration, lines, true).await?;
+            } else {
+                let resp = client_send_with_autostart(ClientRequest::Monitor {
+                    mcu: mcu_kind.clone(),
+                    elf,
+                    duration: if duration.as_millis() == 0 {
+                        None
+                    } else {
+                        Some(duration.as_millis() as u64)
+                    },
+                    lines: if lines == 0 { None } else { Some(lines) },
+                })
+                .await?;
+                if !resp.ok {
+                    return print_and_exit(&resp);
+                }
                 if let Some(path) = resp.payload.get("path").and_then(|p| p.as_str()) {
-                    tail_file(PathBuf::from(path), duration, lines).await?;
+                    tail_file(PathBuf::from(path), duration, lines, false).await?;
+                } else {
+                    eprintln!("monitor: daemon did not return a log path");
                 }
             }
         }
@@ -221,7 +341,7 @@ async fn main() -> Result<()> {
             tail,
             sessions,
         } => {
-            let resp = Server::client_send(ClientRequest::Logs {
+            let resp = client_send_with_autostart(ClientRequest::Logs {
                 mcu: mcu.into(),
                 since,
                 until,
@@ -263,18 +383,27 @@ impl From<OptionAfter> for model::AfterPolicy {
     }
 }
 
-async fn tail_file(path: PathBuf, duration: std::time::Duration, lines: usize) -> Result<()> {
+async fn tail_file(
+    path: PathBuf,
+    duration: std::time::Duration,
+    lines: usize,
+    from_start: bool,
+) -> Result<()> {
     if !path.exists() {
         eprintln!("monitor: log file not found: {:?}", path);
         return Ok(());
     }
     let mut file = File::open(&path).await?;
-    file.seek(std::io::SeekFrom::End(0)).await?;
+    if from_start {
+        file.seek(std::io::SeekFrom::Start(0)).await?;
+    } else {
+        file.seek(std::io::SeekFrom::End(0)).await?;
+    }
     let mut reader = BufReader::new(file).lines();
     let deadline = if duration.as_millis() == 0 {
         None
     } else {
-        Some(Instant::now() + Duration::from_millis(duration.as_millis() as u64))
+        Some(Instant::now() + TokioDuration::from_millis(duration.as_millis() as u64))
     };
     let mut remaining = if lines == 0 { None } else { Some(lines) };
     loop {
@@ -305,7 +434,7 @@ async fn tail_file(path: PathBuf, duration: std::time::Duration, lines: usize) -
                 }
             }
             None => {
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                sleep(TokioDuration::from_millis(100)).await;
             }
         }
     }
@@ -395,6 +524,53 @@ async fn interactive_select_port(mcu: McuKind) -> Result<PathBuf> {
                 .map(|s| s.trim().split_whitespace().next().unwrap_or(s.trim()))
                 .unwrap_or(selected);
             Ok(PathBuf::from(id))
+        }
+    }
+}
+
+// Try sending to daemon; if socket is missing or connection refused, auto-start and retry a few times.
+async fn client_send_with_autostart(req: ClientRequest) -> Result<model::ClientResponse> {
+    let paths = paths::Paths::new()?;
+    let sock = paths.sock.clone();
+    match Server::client_send(req.clone()).await {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            let (is_enoent, is_refused) = match e.downcast_ref::<std::io::Error>() {
+                Some(ioe) => (
+                    ioe.kind() == std::io::ErrorKind::NotFound,
+                    matches!(
+                        ioe.kind(),
+                        std::io::ErrorKind::ConnectionRefused
+                            | std::io::ErrorKind::BrokenPipe
+                            | std::io::ErrorKind::ConnectionReset
+                    ),
+                ),
+                None => (false, false),
+            };
+            if !(is_enoent || is_refused) {
+                return Err(e);
+            }
+            // auto-start daemon then retry once
+            Server::spawn_background().await?;
+            sleep(TokioDuration::from_millis(150)).await;
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                match Server::client_send(req.clone()).await {
+                    Ok(r) => return Ok(r),
+                    Err(_e) if attempts < 5 => {
+                        sleep(TokioDuration::from_millis(150)).await;
+                        continue;
+                    }
+                    Err(e) => {
+                        return Err(anyhow!(
+                            "agentd not reachable at {:?}: {}. Try `just agentd-start` or check permissions (logs/agentd).",
+                            sock,
+                            e
+                        ));
+                    }
+                }
+            }
         }
     }
 }

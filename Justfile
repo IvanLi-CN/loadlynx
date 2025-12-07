@@ -78,7 +78,7 @@ d-clean:
 
 # --- Agent daemon passthrough (tools/mcu-agentd) ---------------------------
 
-# Generic agentd passthrough (release)
+# Generic loadlynx-agentd passthrough (release)
 agentd +args:
   cd tools/mcu-agentd && cargo run --release -- {{args}}
 
