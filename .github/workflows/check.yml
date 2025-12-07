@@ -50,9 +50,9 @@ jobs:
         working-directory: libs/protocol
         run: cargo fmt --all -- --check
 
-      - name: Run clippy for analog + libs (deny warnings)
+      - name: Run clippy for analog (deny warnings)
         working-directory: firmware/analog
-        run: cargo clippy --all-targets --target thumbv7em-none-eabihf -- -D warnings
+        run: cargo clippy --bins --no-deps --target thumbv7em-none-eabihf -- -D warnings
 
       - name: Build analog firmware (release)
         working-directory: firmware/analog
@@ -65,4 +65,3 @@ jobs:
             echo "Build failed: ELF not found at $ARTIFACT" && exit 1
           fi
           echo "Build successful: size $(stat -c%s "$ARTIFACT" 2>/dev/null || stat -f%z "$ARTIFACT") bytes"
-

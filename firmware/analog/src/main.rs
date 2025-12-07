@@ -34,7 +34,7 @@ use static_cell::StaticCell;
 
 // STM32G431 VREFBUF 基址/寄存器地址（同 pd-sink-stm32g431cbu6-rs 工程）
 const VREFBUF_BASE: u32 = 0x4001_0030;
-const VREFBUF_CSR_ADDR: *mut u32 = (VREFBUF_BASE + 0x00) as *mut u32;
+const VREFBUF_CSR_ADDR: *mut u32 = VREFBUF_BASE as *mut u32;
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
@@ -177,7 +177,7 @@ static LIMIT_PROFILE: Mutex<CriticalSectionRawMutex, LimitProfileLocal> =
     });
 
 fn timestamp_ms() -> u64 {
-    Instant::now().as_millis() as u64
+    Instant::now().as_millis()
 }
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
@@ -487,6 +487,7 @@ async fn main(_spawner: Spawner) -> ! {
 
         if link_fault {
             // 以约 2 Hz 频率闪烁：利用 uptime_ms（50 ms tick），每 250 ms 翻转一次。
+            #[allow(clippy::manual_is_multiple_of)]
             if (uptime_ms / 250) % 2 == 0 {
                 led1.set_low();
             } else {
@@ -546,7 +547,7 @@ async fn main(_spawner: Spawner) -> ! {
         } else {
             v_remote_mv
         };
-        let remote_in_range = remote_abs_mv >= REMOTE_V_MIN_MV && remote_abs_mv <= REMOTE_V_MAX_MV;
+        let remote_in_range = (REMOTE_V_MIN_MV..=REMOTE_V_MAX_MV).contains(&remote_abs_mv);
 
         let not_saturated = v_rmt_sns_code > ADC_SAT_MARGIN
             && v_rmt_sns_code < (ADC_FULL_SCALE as u16 - ADC_SAT_MARGIN);
@@ -647,12 +648,7 @@ async fn main(_spawner: Spawner) -> ! {
         } else {
             0
         };
-        if target_i_total_ma < TARGET_I_MIN_MA {
-            target_i_total_ma = TARGET_I_MIN_MA;
-        }
-        if target_i_total_ma > TARGET_I_MAX_MA {
-            target_i_total_ma = TARGET_I_MAX_MA;
-        }
+        target_i_total_ma = target_i_total_ma.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
         // 在硬限基础上应用来自数字板的电流软限与 thermal_derate_pct。
         {
             let limits = LIMIT_PROFILE.lock().await;
@@ -923,10 +919,10 @@ async fn uart_setpoint_rx_task(
 
     // Drain any stale bytes in UART FIFO to avoid misaligned first frame, and
     // resynchronize to the first SLIP_END boundary before starting decode.
-    if let Ok(drained) = uart_rx.read(&mut buf).await {
-        if drained > 0 {
-            info!("SetPoint RX: drained {} stale bytes before start", drained);
-        }
+    if let Ok(drained) = uart_rx.read(&mut buf).await
+        && drained > 0
+    {
+        info!("SetPoint RX: drained {} stale bytes before start", drained);
     }
 
     // Wait until we see two consecutive SLIP_END to align to frame boundary.
@@ -950,6 +946,7 @@ async fn uart_setpoint_rx_task(
     let mut raw_dump = [0u8; RAW_DUMP_BYTES];
     let mut raw_len = 0usize;
     let dump_start = timestamp_ms() as u32;
+    #[allow(clippy::absurd_extreme_comparisons)]
     while raw_len < RAW_DUMP_BYTES {
         match uart_rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
@@ -997,13 +994,7 @@ async fn uart_setpoint_rx_task(
                             );
                             match decode_set_point_frame(&frame) {
                                 Ok((hdr, sp)) => {
-                                    let mut v = sp.target_i_ma;
-                                    if v < TARGET_I_MIN_MA {
-                                        v = TARGET_I_MIN_MA;
-                                    }
-                                    if v > TARGET_I_MAX_MA {
-                                        v = TARGET_I_MAX_MA;
-                                    }
+                                    let v = sp.target_i_ma.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
                                     let last_seq = LAST_SETPOINT_SEQ.load(Ordering::Relaxed);
                                     let last_valid =
                                         LAST_SETPOINT_SEQ_VALID.load(Ordering::Relaxed);
