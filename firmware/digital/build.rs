@@ -228,10 +228,7 @@ fn load_env_file(path: &std::path::Path) -> std::collections::HashMap<String, St
     map
 }
 
-fn get_wifi_cfg(
-    key: &str,
-    file_cfg: &std::collections::HashMap<String, String>,
-) -> Option<String> {
+fn get_wifi_cfg(key: &str, file_cfg: &std::collections::HashMap<String, String>) -> Option<String> {
     if let Ok(v) = env::var(key) {
         let v = v.trim();
         if !v.is_empty() {

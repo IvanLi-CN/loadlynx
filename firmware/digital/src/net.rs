@@ -543,6 +543,28 @@ async fn handle_http_connection(
 
     let mut body = String::new();
 
+    // Handle CORS preflight early for any API v1 endpoint. Browsers will send
+    // an OPTIONS request when non-simple headers are used (e.g. JSON).
+    if method == "OPTIONS" {
+        if path.starts_with("/api/v1/") {
+            // Empty body is fine; write_http_response already emits the
+            // CORS headers we need. Use 200 to satisfy strict preflight
+            // checks that expect an \"OK\" status.
+            write_http_response(socket, version, "200 OK", "").await?;
+            return Ok(());
+        }
+
+        write_error_body(
+            &mut body,
+            "INVALID_REQUEST",
+            "unsupported OPTIONS path",
+            false,
+            None,
+        );
+        write_http_response(socket, version, "400 Bad Request", &body).await?;
+        return Ok(());
+    }
+
     match (method, path) {
         ("GET", "/api/v1/ping") | ("GET", "/health") => {
             body.push_str(r#"{"ok":true}"#);
@@ -644,16 +666,28 @@ async fn write_http_response(
     status_line: &str,
     body: &str,
 ) -> Result<(), embassy_net::tcp::Error> {
+    // Minimal CORS support to allow the LoadLynx web console (running on a
+    // separate origin during development) to access the HTTP API.
+    const CORS_ALLOW_ORIGIN: &str = "*";
+    const CORS_ALLOW_METHODS: &str = "GET, PUT, OPTIONS";
+    const CORS_ALLOW_HEADERS: &str = "Content-Type";
+
     let mut head = String::new();
     let _ = core::write!(
         &mut head,
         "{} {}\r\n\
          Content-Type: application/json; charset=utf-8\r\n\
+         Access-Control-Allow-Origin: {}\r\n\
+         Access-Control-Allow-Methods: {}\r\n\
+         Access-Control-Allow-Headers: {}\r\n\
          Connection: close\r\n\
          Content-Length: {}\r\n\
          \r\n",
         version,
         status_line,
+        CORS_ALLOW_ORIGIN,
+        CORS_ALLOW_METHODS,
+        CORS_ALLOW_HEADERS,
         body.as_bytes().len()
     );
     socket.write(head.as_bytes()).await?;
