@@ -6,9 +6,14 @@ import type {
   Identity,
 } from "./types.ts";
 
-// Mock backend is the default for local development. Real HTTP backend is
-// enabled only when VITE_USE_HTTP_BACKEND is explicitly set to "true".
-const USE_HTTP_BACKEND = import.meta.env.VITE_USE_HTTP_BACKEND === "true";
+// Mock backend is enabled on a per-device basis. Devices whose baseUrl starts
+// with "mock://" use the in-memory backend when ENABLE_MOCK is true; all other
+// devices use the real HTTP backend.
+export const ENABLE_MOCK = import.meta.env.VITE_ENABLE_MOCK_BACKEND !== "false";
+
+export function isMockBaseUrl(baseUrl: string): boolean {
+  return ENABLE_MOCK && baseUrl.startsWith("mock://");
+}
 
 export interface HttpApiErrorInit {
   status: number;
@@ -316,14 +321,14 @@ async function mockUpdateCc(
 }
 
 export async function getIdentity(baseUrl: string): Promise<Identity> {
-  if (!USE_HTTP_BACKEND) {
+  if (isMockBaseUrl(baseUrl)) {
     return mockGetIdentity(baseUrl);
   }
   return httpJson<Identity>(baseUrl, "/api/v1/identity");
 }
 
 export async function getStatus(baseUrl: string): Promise<FastStatusView> {
-  if (!USE_HTTP_BACKEND) {
+  if (isMockBaseUrl(baseUrl)) {
     return mockGetStatus(baseUrl);
   }
   interface FastStatusHttpResponse {
@@ -349,7 +354,7 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
 }
 
 export async function getCc(baseUrl: string): Promise<CcControlView> {
-  if (!USE_HTTP_BACKEND) {
+  if (isMockBaseUrl(baseUrl)) {
     return mockGetCc(baseUrl);
   }
   return httpJson<CcControlView>(baseUrl, "/api/v1/cc");
@@ -359,7 +364,7 @@ export async function updateCc(
   baseUrl: string,
   payload: CcUpdateRequest,
 ): Promise<CcControlView> {
-  if (!USE_HTTP_BACKEND) {
+  if (isMockBaseUrl(baseUrl)) {
     return mockUpdateCc(baseUrl, payload);
   }
 

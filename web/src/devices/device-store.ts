@@ -1,3 +1,5 @@
+import { ENABLE_MOCK } from "../api/client.ts";
+
 export interface StoredDevice {
   id: string;
   name: string;
@@ -9,10 +11,17 @@ const STORAGE_KEY = "loadlynx.devices";
 const DEFAULT_DEVICES: StoredDevice[] = [
   {
     id: "llx-dev-001",
-    name: "Mock LoadLynx #1",
-    baseUrl: "http://localhost:25219",
+    name: "Demo Device #1",
+    baseUrl: "mock://demo-1",
   },
 ];
+
+function getDefaultDevices(): StoredDevice[] {
+  if (!ENABLE_MOCK) {
+    return [];
+  }
+  return DEFAULT_DEVICES;
+}
 
 function isBrowser(): boolean {
   return (
@@ -22,17 +31,17 @@ function isBrowser(): boolean {
 
 export function loadDevices(): StoredDevice[] {
   if (!isBrowser()) {
-    return DEFAULT_DEVICES;
+    return getDefaultDevices();
   }
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
     if (!raw) {
-      return DEFAULT_DEVICES;
+      return getDefaultDevices();
     }
     const parsed = JSON.parse(raw) as unknown;
     if (!Array.isArray(parsed)) {
-      return DEFAULT_DEVICES;
+      return getDefaultDevices();
     }
 
     const devices: StoredDevice[] = [];
@@ -52,10 +61,20 @@ export function loadDevices(): StoredDevice[] {
       }
     }
 
-    return devices.length > 0 ? devices : DEFAULT_DEVICES;
+    const normalized = ENABLE_MOCK
+      ? devices
+      : devices.filter(
+          (device) => !device.baseUrl.toLowerCase().startsWith("mock://"),
+        );
+
+    if (normalized.length > 0) {
+      return normalized;
+    }
+
+    return getDefaultDevices();
   } catch {
     // If parsing fails, fall back to a safe default.
-    return DEFAULT_DEVICES;
+    return getDefaultDevices();
   }
 }
 

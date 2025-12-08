@@ -1,10 +1,11 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useMemo } from "react";
-import { isHttpApiError } from "../api/client.ts";
+import { useMemo, useState } from "react";
+import { ENABLE_MOCK, isHttpApiError } from "../api/client.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
 import {
   useAddDeviceMutation,
+  useAddRealDeviceMutation,
   useDeviceIdentity,
   useDevicesQuery,
 } from "../devices/hooks.ts";
@@ -13,6 +14,11 @@ export function DevicesRoute() {
   const queryClient = useQueryClient();
   const devicesQuery = useDevicesQuery();
   const addDeviceMutation = useAddDeviceMutation();
+  const addRealDeviceMutation = useAddRealDeviceMutation();
+
+  const [newDeviceName, setNewDeviceName] = useState("");
+  const [newDeviceBaseUrl, setNewDeviceBaseUrl] = useState("");
+  const [addDeviceError, setAddDeviceError] = useState<string | null>(null);
 
   const devices: StoredDevice[] = useMemo(
     () => devicesQuery.data ?? [],
@@ -20,6 +26,7 @@ export function DevicesRoute() {
   );
 
   const isMutating = addDeviceMutation.isPending;
+  const isAddingReal = addRealDeviceMutation.isPending;
 
   return (
     <div
@@ -46,51 +53,209 @@ export function DevicesRoute() {
             color: "#9ca3af",
           }}
         >
-          Manage known devices for the LoadLynx network console. When the HTTP
-          backend is enabled, each device is probed via{" "}
-          <code>/api/v1/identity</code> to show live status.
+          Manage known devices for the LoadLynx network console. Each device is
+          probed via <code>/api/v1/identity</code> to show live status.
         </p>
       </header>
 
-      <div
-        style={{
-          display: "flex",
-          gap: "0.75rem",
-          alignItems: "center",
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => {
-            addDeviceMutation.mutate(undefined, {
+      <form
+        onSubmit={(event) => {
+          event.preventDefault();
+          const name = newDeviceName.trim();
+          const baseUrl = newDeviceBaseUrl.trim();
+
+          if (!name || !baseUrl) {
+            setAddDeviceError("Name and base URL are required.");
+            return;
+          }
+
+          const lowerBaseUrl = baseUrl.toLowerCase();
+          if (
+            !lowerBaseUrl.startsWith("http://") &&
+            !lowerBaseUrl.startsWith("https://")
+          ) {
+            setAddDeviceError("Base URL must start with http:// or https://.");
+            return;
+          }
+
+          setAddDeviceError(null);
+          addRealDeviceMutation.mutate(
+            { name, baseUrl },
+            {
               onSuccess: () => {
+                setNewDeviceName("");
+                setNewDeviceBaseUrl("");
                 // Keep any stale query instances (e.g. from other tabs) in sync.
                 queryClient.invalidateQueries({ queryKey: ["devices"] });
               },
-            });
-          }}
-          disabled={isMutating}
+            },
+          );
+        }}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          gap: "0.5rem",
+          padding: "0.75rem 0.9rem",
+          borderRadius: "0.75rem",
+          border: "1px solid #1f2937",
+          backgroundColor: "#020617",
+        }}
+      >
+        <div
           style={{
-            padding: "0.5rem 0.9rem",
-            borderRadius: "0.375rem",
-            border: "1px solid #4b5563",
-            backgroundColor: "#111827",
-            color: "#e5e7eb",
-            fontSize: "0.9rem",
-            cursor: isMutating ? "wait" : "pointer",
+            display: "flex",
+            flexWrap: "wrap",
+            gap: "0.75rem",
+            alignItems: "flex-end",
           }}
         >
-          {isMutating ? "Adding device..." : "Add mock device"}
-        </button>
-        <span
+          <label
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.25rem",
+              flex: "1 1 160px",
+              minWidth: "0",
+            }}
+          >
+            <span
+              style={{
+                fontSize: "0.8rem",
+                color: "#9ca3af",
+              }}
+            >
+              Device name
+            </span>
+            <input
+              type="text"
+              value={newDeviceName}
+              onChange={(event) => setNewDeviceName(event.target.value)}
+              placeholder="My LoadLynx"
+              style={{
+                padding: "0.4rem 0.5rem",
+                borderRadius: "0.375rem",
+                border: "1px solid #374151",
+                backgroundColor: "#020617",
+                color: "#e5e7eb",
+                fontSize: "0.9rem",
+              }}
+            />
+          </label>
+          <label
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.25rem",
+              flex: "2 1 220px",
+              minWidth: "0",
+            }}
+          >
+            <span
+              style={{
+                fontSize: "0.8rem",
+                color: "#9ca3af",
+              }}
+            >
+              Base URL
+            </span>
+            <input
+              type="text"
+              value={newDeviceBaseUrl}
+              onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
+              placeholder="http://192.168.1.100"
+              style={{
+                padding: "0.4rem 0.5rem",
+                borderRadius: "0.375rem",
+                border: "1px solid #374151",
+                backgroundColor: "#020617",
+                color: "#e5e7eb",
+                fontSize: "0.9rem",
+              }}
+            />
+          </label>
+          <button
+            type="submit"
+            disabled={isAddingReal}
+            style={{
+              padding: "0.5rem 0.9rem",
+              borderRadius: "0.375rem",
+              border: "1px solid #4b5563",
+              backgroundColor: "#111827",
+              color: "#e5e7eb",
+              fontSize: "0.9rem",
+              cursor: isAddingReal ? "wait" : "pointer",
+              whiteSpace: "nowrap",
+            }}
+          >
+            {isAddingReal ? "Adding..." : "Add device"}
+          </button>
+        </div>
+        {addDeviceError ? (
+          <p
+            style={{
+              margin: 0,
+              fontSize: "0.8rem",
+              color: "#f97316",
+            }}
+          >
+            {addDeviceError}
+          </p>
+        ) : (
+          <p
+            style={{
+              margin: 0,
+              fontSize: "0.8rem",
+              color: "#6b7280",
+            }}
+          >
+            Add one or more devices by name and HTTP base URL. Each device will
+            be probed via <code>/api/v1/identity</code>.
+          </p>
+        )}
+      </form>
+
+      {ENABLE_MOCK ? (
+        <div
           style={{
-            fontSize: "0.8rem",
-            color: "#6b7280",
+            display: "flex",
+            gap: "0.75rem",
+            alignItems: "center",
           }}
         >
-          Adds a hard-coded mock device entry backed by in-memory API state.
-        </span>
-      </div>
+          <button
+            type="button"
+            onClick={() => {
+              addDeviceMutation.mutate(undefined, {
+                onSuccess: () => {
+                  // Keep any stale query instances (e.g. from other tabs) in sync.
+                  queryClient.invalidateQueries({ queryKey: ["devices"] });
+                },
+              });
+            }}
+            disabled={isMutating}
+            style={{
+              padding: "0.5rem 0.9rem",
+              borderRadius: "0.375rem",
+              border: "1px solid #4b5563",
+              backgroundColor: "#111827",
+              color: "#e5e7eb",
+              fontSize: "0.9rem",
+              cursor: isMutating ? "wait" : "pointer",
+            }}
+          >
+            {isMutating ? "Adding device..." : "Add demo device"}
+          </button>
+          <span
+            style={{
+              fontSize: "0.8rem",
+              color: "#6b7280",
+            }}
+          >
+            Adds a built-in demo device backed by an in-memory backend (for
+            development).
+          </span>
+        </div>
+      ) : null}
 
       <section
         aria-label="Known devices"
@@ -120,9 +285,15 @@ export function DevicesRoute() {
               color: "#9ca3af",
             }}
           >
-            No devices yet. Use the{" "}
-            <strong style={{ fontWeight: 500 }}>Add mock device</strong> action
-            above to seed a test entry.
+            {ENABLE_MOCK ? (
+              <>
+                No devices yet. Use the{" "}
+                <strong style={{ fontWeight: 500 }}>Add demo device</strong>{" "}
+                action above to seed a demo entry.
+              </>
+            ) : (
+              <>No devices yet. Add one or more real devices to begin.</>
+            )}
           </p>
         ) : (
           <table

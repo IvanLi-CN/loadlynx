@@ -54,7 +54,7 @@ export function AppLayout() {
               color: "#9ca3af",
             }}
           >
-            Network device manager &amp; CC control (mock)
+            Network device manager &amp; CC control
           </p>
         </div>
 
@@ -96,7 +96,7 @@ export function AppLayout() {
               <option>
                 {currentDevice
                   ? `${currentDevice.name} (${currentDevice.id})`
-                  : "No device selected (mock selector)"}
+                  : "No device selected (device selector)"}
               </option>
             </select>
           </label>

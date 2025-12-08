@@ -173,8 +173,8 @@ export function DeviceCcRoute() {
           }}
         >
           The requested device ID <code>{deviceId}</code> does not exist in the
-          local mock registry. Please return to the device list and add or
-          select a device.
+          local registry. Please return to the device list and add or select a
+          device.
         </p>
         <div>
           <Link
@@ -280,7 +280,7 @@ export function DeviceCcRoute() {
               color: "#9ca3af",
             }}
           >
-            Shared control surface for all operating modes. This mock focuses on
+            Shared control surface for all operating modes. This view focuses on
             CC behaviour while keeping the layout aligned with the hardware main
             display.
           </p>
@@ -605,7 +605,7 @@ export function DeviceCcRoute() {
                     fontSize: "0.78rem",
                   }}
                 >
-                  (mocked SetEnable)
+                  (current firmware maps disable to a zero setpoint)
                 </span>
               </span>
             </label>
