@@ -1,8 +1,13 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo } from "react";
+import { isHttpApiError } from "../api/client.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
-import { useAddDeviceMutation, useDevicesQuery } from "../devices/hooks.ts";
+import {
+  useAddDeviceMutation,
+  useDeviceIdentity,
+  useDevicesQuery,
+} from "../devices/hooks.ts";
 
 export function DevicesRoute() {
   const queryClient = useQueryClient();
@@ -41,8 +46,9 @@ export function DevicesRoute() {
             color: "#9ca3af",
           }}
         >
-          Manage known devices for the LoadLynx network console. This page is
-          fully mock-backed for now.
+          Manage known devices for the LoadLynx network console. When the HTTP
+          backend is enabled, each device is probed via{" "}
+          <code>/api/v1/identity</code> to show live status.
         </p>
       </header>
 
@@ -137,61 +143,13 @@ export function DevicesRoute() {
                 <th style={{ padding: "0.4rem 0.25rem" }}>Name</th>
                 <th style={{ padding: "0.4rem 0.25rem" }}>Device ID</th>
                 <th style={{ padding: "0.4rem 0.25rem" }}>Base URL</th>
-                <th style={{ padding: "0.4rem 0.25rem" }} />
+                <th style={{ padding: "0.4rem 0.25rem" }}>Status</th>
+                <th style={{ padding: "0.4rem 0.25rem" }}>Actions</th>
               </tr>
             </thead>
             <tbody>
               {devices.map((device) => (
-                <tr
-                  key={device.id}
-                  style={{
-                    borderBottom: "1px solid #0f172a",
-                  }}
-                >
-                  <td style={{ padding: "0.4rem 0.25rem" }}>{device.name}</td>
-                  <td
-                    style={{
-                      padding: "0.4rem 0.25rem",
-                      fontFamily:
-                        "ui-monospace, SFMono-Regular, Menlo, monospace",
-                    }}
-                  >
-                    {device.id}
-                  </td>
-                  <td
-                    style={{
-                      padding: "0.4rem 0.25rem",
-                      fontFamily:
-                        "ui-monospace, SFMono-Regular, Menlo, monospace",
-                      fontSize: "0.8rem",
-                    }}
-                  >
-                    {device.baseUrl}
-                  </td>
-                  <td
-                    style={{
-                      padding: "0.4rem 0.25rem",
-                      textAlign: "right",
-                    }}
-                  >
-                    <Link
-                      to="/$deviceId/cc"
-                      params={{ deviceId: device.id }}
-                      style={{
-                        display: "inline-flex",
-                        alignItems: "center",
-                        padding: "0.3rem 0.7rem",
-                        borderRadius: "999px",
-                        border: "1px solid #4b5563",
-                        textDecoration: "none",
-                        color: "#e5e7eb",
-                        fontSize: "0.8rem",
-                      }}
-                    >
-                      Open CC Control
-                    </Link>
-                  </td>
-                </tr>
+                <DeviceRow key={device.id} device={device} />
               ))}
             </tbody>
           </table>
@@ -202,3 +160,151 @@ export function DevicesRoute() {
 }
 
 export default DevicesRoute;
+
+function DeviceRow(props: { device: StoredDevice }) {
+  const { device } = props;
+  const identityQuery = useDeviceIdentity(device);
+
+  const identity = identityQuery.data;
+  const error: unknown = identityQuery.error;
+
+  let statusLabel = "Checking...";
+  let statusColor = "#6b7280";
+  let statusDetail: string | null = null;
+
+  if (identityQuery.isLoading || identityQuery.isFetching) {
+    statusLabel = "Checking...";
+    statusColor = "#6b7280";
+  } else if (identityQuery.isSuccess && identity) {
+    statusLabel = "Online";
+    statusColor = "#22c55e";
+    statusDetail = identity.network.ip;
+  } else if (identityQuery.isError) {
+    statusLabel = "Offline";
+    statusColor = "#f97316";
+    if (isHttpApiError(error)) {
+      const code = error.code ?? "HTTP_ERROR";
+      const snippet =
+        error.message.length > 80
+          ? `${error.message.slice(0, 77)}…`
+          : error.message;
+      statusDetail = `${code}: ${snippet}`;
+    } else if (error instanceof Error) {
+      const snippet =
+        error.message.length > 80
+          ? `${error.message.slice(0, 77)}…`
+          : error.message;
+      statusDetail = snippet;
+    } else {
+      statusDetail = "Unknown error";
+    }
+  }
+
+  return (
+    <tr
+      style={{
+        borderBottom: "1px solid #0f172a",
+      }}
+    >
+      <td style={{ padding: "0.4rem 0.25rem" }}>{device.name}</td>
+      <td
+        style={{
+          padding: "0.4rem 0.25rem",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+        }}
+      >
+        {device.id}
+      </td>
+      <td
+        style={{
+          padding: "0.4rem 0.25rem",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
+          fontSize: "0.8rem",
+        }}
+      >
+        {device.baseUrl}
+      </td>
+      <td
+        style={{
+          padding: "0.4rem 0.25rem",
+          fontSize: "0.8rem",
+        }}
+      >
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: "0.4rem",
+          }}
+        >
+          <span
+            style={{
+              width: "0.5rem",
+              height: "0.5rem",
+              borderRadius: "999px",
+              backgroundColor: statusColor,
+              boxShadow:
+                statusColor === "#22c55e"
+                  ? "0 0 0 4px rgba(34,197,94,0.25)"
+                  : "none",
+            }}
+          />
+          <span>{statusLabel}</span>
+        </div>
+        {statusDetail ? (
+          <div
+            style={{
+              marginTop: "0.2rem",
+              fontSize: "0.75rem",
+              color: "#9ca3af",
+            }}
+          >
+            {statusDetail}
+          </div>
+        ) : null}
+        <button
+          type="button"
+          onClick={() => {
+            void identityQuery.refetch();
+          }}
+          disabled={identityQuery.isFetching}
+          style={{
+            marginTop: "0.35rem",
+            padding: "0.25rem 0.6rem",
+            borderRadius: "999px",
+            border: "1px solid #374151",
+            backgroundColor: "#020617",
+            color: "#e5e7eb",
+            fontSize: "0.75rem",
+            cursor: identityQuery.isFetching ? "wait" : "pointer",
+          }}
+        >
+          {identityQuery.isFetching ? "Pinging..." : "Test connectivity"}
+        </button>
+      </td>
+      <td
+        style={{
+          padding: "0.4rem 0.25rem",
+          textAlign: "right",
+        }}
+      >
+        <Link
+          to="/$deviceId/cc"
+          params={{ deviceId: device.id }}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            padding: "0.3rem 0.7rem",
+            borderRadius: "999px",
+            border: "1px solid #4b5563",
+            textDecoration: "none",
+            color: "#e5e7eb",
+            fontSize: "0.8rem",
+          }}
+        >
+          Open CC Control
+        </Link>
+      </td>
+    </tr>
+  );
+}

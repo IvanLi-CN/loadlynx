@@ -1,7 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
-import { getCc, getIdentity, getStatus, updateCc } from "../api/client.ts";
+import type { HttpApiError } from "../api/client.ts";
+import {
+  getCc,
+  getIdentity,
+  getStatus,
+  isHttpApiError,
+  updateCc,
+} from "../api/client.ts";
 import type {
   CcControlView,
   CcUpdateRequest,
@@ -35,7 +42,7 @@ export function DeviceCcRoute() {
 
   const baseUrl = device?.baseUrl;
 
-  const identityQuery = useQuery<Identity>({
+  const identityQuery = useQuery<Identity, HttpApiError>({
     queryKey: ["device", deviceId, "identity"],
     queryFn: () => {
       if (!baseUrl) {
@@ -46,7 +53,7 @@ export function DeviceCcRoute() {
     enabled: Boolean(baseUrl),
   });
 
-  const statusQuery = useQuery<FastStatusView>({
+  const statusQuery = useQuery<FastStatusView, HttpApiError>({
     queryKey: ["device", deviceId, "status"],
     queryFn: () => {
       if (!baseUrl) {
@@ -59,7 +66,7 @@ export function DeviceCcRoute() {
     refetchInterval: 2_000,
   });
 
-  const ccQuery = useQuery<CcControlView>({
+  const ccQuery = useQuery<CcControlView, HttpApiError>({
     queryKey: ["device", deviceId, "cc"],
     queryFn: () => {
       if (!baseUrl) {
@@ -103,6 +110,29 @@ export function DeviceCcRoute() {
       });
     },
   });
+
+  const firstHttpError: HttpApiError | null = (() => {
+    const errors: Array<unknown> = [
+      identityQuery.error,
+      statusQuery.error,
+      ccQuery.error,
+    ];
+    for (const err of errors) {
+      if (isHttpApiError(err)) {
+        return err;
+      }
+    }
+    return null;
+  })();
+
+  const topErrorMessage: string | null = firstHttpError
+    ? `${firstHttpError.code ?? "HTTP_ERROR"} — ${firstHttpError.message}`
+    : null;
+
+  const isLinkDownLike =
+    firstHttpError &&
+    (firstHttpError.code === "LINK_DOWN" ||
+      firstHttpError.code === "UNAVAILABLE");
 
   if (devicesQuery.isLoading) {
     return (
@@ -369,6 +399,38 @@ export function DeviceCcRoute() {
         </div>
       </header>
 
+      {topErrorMessage ? (
+        <section
+          aria-label="HTTP error"
+          style={{
+            marginTop: "0.25rem",
+            padding: "0.5rem 0.75rem",
+            borderRadius: "0.5rem",
+            border: "1px solid #7f1d1d",
+            background:
+              "linear-gradient(135deg, rgba(127,29,29,0.35), rgba(15,23,42,0.9))",
+            color: "#fecaca",
+            fontSize: "0.8rem",
+          }}
+        >
+          <div>
+            <strong style={{ fontWeight: 600 }}>HTTP error:</strong>{" "}
+            {topErrorMessage}
+          </div>
+          {isLinkDownLike ? (
+            <div
+              style={{
+                marginTop: "0.15rem",
+                color: "#fed7d7",
+              }}
+            >
+              Link down / Wi‑Fi unavailable — telemetry and control updates may
+              be stale until connectivity recovers.
+            </div>
+          ) : null}
+        </section>
+      ) : null}
+
       <section
         aria-label="Main display"
         style={{
@@ -562,6 +624,32 @@ export function DeviceCcRoute() {
               · target {(cc?.target_i_ma ?? 0) / 1_000} A · limit{" "}
               {(cc?.limit_profile.max_p_mw ?? 0) / 1_000} W
             </div>
+
+            {updateCcMutation.isError && updateCcMutation.error ? (
+              <div
+                style={{
+                  marginTop: "0.35rem",
+                  padding: "0.35rem 0.55rem",
+                  borderRadius: "0.4rem",
+                  border: "1px solid #7f1d1d",
+                  backgroundColor: "#450a0a",
+                  color: "#fecaca",
+                  fontSize: "0.78rem",
+                }}
+              >
+                {(() => {
+                  const error = updateCcMutation.error;
+                  if (isHttpApiError(error)) {
+                    const code = error.code ?? "HTTP_ERROR";
+                    return `Error: ${code} — ${error.message}`;
+                  }
+                  if (error instanceof Error) {
+                    return `Error: ${error.message}`;
+                  }
+                  return "Error: unknown HTTP failure";
+                })()}
+              </div>
+            ) : null}
 
             <button
               type="button"
