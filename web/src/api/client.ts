@@ -6,9 +6,9 @@ import type {
   Identity,
 } from "./types.ts";
 
-// HTTP is the default; mock backend is only used when
-// VITE_USE_HTTP_BACKEND is explicitly set to "false".
-const USE_HTTP_BACKEND = import.meta.env.VITE_USE_HTTP_BACKEND !== "false";
+// Mock backend is the default for local development. Real HTTP backend is
+// enabled only when VITE_USE_HTTP_BACKEND is explicitly set to "true".
+const USE_HTTP_BACKEND = import.meta.env.VITE_USE_HTTP_BACKEND === "true";
 
 export interface HttpApiErrorInit {
   status: number;
