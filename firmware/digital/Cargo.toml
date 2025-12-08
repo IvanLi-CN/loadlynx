@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 static_cell = "2.1"
-embassy-executor = { version = "0.9", features = ["arch-spin", "executor-thread", "defmt"] }
+embassy-executor = { version = "0.9", features = ["defmt"] }
 embassy-futures = "0.1"
 defmt = "1.0.1"
 embedded-hal = "1.0"
@@ -13,8 +13,8 @@ embedded-hal-async = "1.0"
 embedded-graphics = "0.8"
 lcd-async = "0.1.1"
 esp-bootloader-esp-idf = { version = "0.4", features = ["esp32s3"] }
-embedded-io = "0.6"
-embedded-io-async = "0.6"
+embedded-io = "0.7.1"
+embedded-io-async = "0.7.0"
 embedded-hal-nb = "1.0"
 nb = "1.1"
 heapless = "0.8"
@@ -27,6 +27,37 @@ esp-hal = { version = "=1.0.0", features = ["esp32s3", "rt", "unstable", "defmt"
 # Logging & panic/backtrace on ESP (defmt over espflash)
 esp-println = { version = "0.16", default-features = false, features = ["esp32s3", "uart", "defmt-espflash"] }
 esp-backtrace = { version = "0.18", features = ["esp32s3", "panic-handler", "defmt"] }
+
+# Async networking stack (Wi‑Fi STA + TCP/HTTP) via esp-radio + embassy-net (experimental).
+esp-radio = { version = "0.17.0", features = ["esp32s3", "wifi", "smoltcp", "unstable", "defmt"], optional = true }
+# RTOS/runtime integration for esp-hal. Always enabled so we can use
+# #[esp_rtos::main] as the async entrypoint; Wi‑Fi-specific pieces are
+# enabled only when `net_http` is active (see features below).
+esp-rtos = { version = "0.2.0", features = ["esp32s3", "embassy", "defmt"], optional = false }
+esp-alloc = { version = "0.9.0", optional = true }
+embassy-net = { version = "0.7.1", default-features = false, features = [
+    "defmt",
+    "dhcpv4",
+    "medium-ethernet",
+    "tcp",
+    "udp",
+    "dns",
+], optional = true }
+embassy-time = { version = "0.5.0", default-features = false, features = ["defmt"], optional = true }
+smoltcp = { version = "0.12.0", default-features = false, features = [
+    "defmt",
+    "medium-ethernet",
+    "multicast",
+    "proto-dhcpv4",
+    "proto-dns",
+    "proto-ipv4",
+    "socket-dns",
+    "socket-icmp",
+    "socket-raw",
+    "socket-tcp",
+    "socket-udp",
+    "dns-max-server-count-4",
+], optional = true }
 
 [profile.dev]
 opt-level = "z"
@@ -53,3 +84,16 @@ default = ["enable_analog_5v_on_boot", "esp32s3"]
 enable_analog_5v_on_boot = []
 esp32s3 = []
 mock_setpoint = []
+# Experimental Wi‑Fi + HTTP server; disabled by default to avoid impacting existing
+# firmware layout and link scripts. When enabled, this pulls in esp-radio +
+# esp-rtos (Wi‑Fi + allocator bits) + embassy-net/smoltcp. The net task wiring
+# lives in `src/net.rs`.
+net_http = [
+    "esp-radio",
+    "esp-rtos/esp-radio",
+    "esp-rtos/esp-alloc",
+    "esp-alloc",
+    "embassy-net",
+    "embassy-time",
+    "smoltcp",
+]
