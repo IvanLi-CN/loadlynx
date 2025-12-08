@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use core::str::FromStr;
+use core::{fmt::Write as _, str::FromStr, sync::atomic::Ordering};
 
 use alloc::{format, string::String};
 use defmt::*;
@@ -19,8 +19,16 @@ use esp_radio::{
 use heapless::Vec;
 use static_cell::StaticCell;
 
+use loadlynx_protocol::{
+    FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, FastStatus,
+    LimitProfile, PROTOCOL_VERSION,
+};
+
 use crate::{
-    WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME, WIFI_NETMASK, WIFI_PSK, WIFI_SSID, WIFI_STATIC_IP,
+    ANALOG_FW_VERSION_RAW, ENCODER_STEP_MA, ENCODER_VALUE, FAST_STATUS_OK_COUNT, FW_VERSION,
+    HELLO_SEEN, LAST_GOOD_FRAME_MS, LIMIT_PROFILE_DEFAULT, LINK_UP, STATE_FLAG_REMOTE_ACTIVE,
+    TARGET_I_MAX_MA, TARGET_I_MIN_MA, TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME,
+    WIFI_NETMASK, WIFI_PSK, WIFI_SSID, WIFI_STATIC_IP, now_ms32, timestamp_ms, ui::AnalogState,
 };
 
 /// Shared Wi‑Fi/IPv4 state for future HTTP APIs.
@@ -163,6 +171,7 @@ pub fn spawn_wifi_and_http(
     spawner: &Spawner,
     wifi_peripheral: WIFI<'static>,
     wifi_state: &'static WifiStateMutex,
+    telemetry: &'static TelemetryMutex,
 ) {
     // Initialize the shared radio controller once. If the radio init fails, log
     // and gracefully skip Wi‑Fi/HTTP so the rest of the system can run.
@@ -204,7 +213,7 @@ pub fn spawn_wifi_and_http(
 
     info!("spawning HTTP server task");
     spawner
-        .spawn(http_server_task(stack, wifi_state))
+        .spawn(http_server_task(stack, wifi_state, telemetry))
         .expect("http_server_task spawn");
 
     info!("spawning network stack runner");
@@ -342,7 +351,11 @@ async fn wifi_task(
 const HTTP_PORT: u16 = 80;
 
 #[embassy_executor::task]
-async fn http_server_task(stack: Stack<'static>, state: &'static WifiStateMutex) {
+async fn http_server_task(
+    stack: Stack<'static>,
+    state: &'static WifiStateMutex,
+    telemetry: &'static TelemetryMutex,
+) {
     let mut rx_buf = [0u8; 1024];
     let mut tx_buf = [0u8; 1024];
 
@@ -361,7 +374,7 @@ async fn http_server_task(stack: Stack<'static>, state: &'static WifiStateMutex)
             continue;
         }
 
-        if let Err(err) = handle_http_connection(&mut socket, state).await {
+        if let Err(err) = handle_http_connection(&mut socket, state, telemetry).await {
             warn!("HTTP connection handling error: {:?}", err);
         }
 
@@ -371,46 +384,746 @@ async fn http_server_task(stack: Stack<'static>, state: &'static WifiStateMutex)
 
 async fn handle_http_connection(
     socket: &mut TcpSocket<'_>,
-    _state: &'static WifiStateMutex,
+    wifi_state: &'static WifiStateMutex,
+    telemetry: &'static TelemetryMutex,
 ) -> Result<(), embassy_net::tcp::Error> {
-    let mut buf = [0u8; 512];
-    let n = socket.read(&mut buf).await?;
-    if n == 0 {
+    const MAX_REQUEST_SIZE: usize = 1024;
+
+    let mut buf = [0u8; MAX_REQUEST_SIZE];
+    let mut total = 0usize;
+
+    // Read until we see the end of headers or the buffer is full.
+    loop {
+        let n = socket.read(&mut buf[total..]).await?;
+        if n == 0 {
+            // Connection closed before any data.
+            if total == 0 {
+                return Ok(());
+            }
+            break;
+        }
+        total += n;
+        if total >= MAX_REQUEST_SIZE {
+            break;
+        }
+        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    if total == 0 {
         return Ok(());
     }
 
-    let req = core::str::from_utf8(&buf[..n]).unwrap_or("");
-    let mut lines = req.lines();
-    let request_line = lines.next().unwrap_or("");
+    // Parse the request line and headers. To avoid borrowing conflicts with
+    // subsequent reads, copy the small method/path/version tokens into owned
+    // Strings and only keep indices for the header/body split points.
+    let mut method_s = String::new();
+    let mut path_s = String::new();
+    let mut version_s = String::from("HTTP/1.1");
+    let mut header_end: usize = 0;
+    let (mut content_length, mut has_content_length) = (0usize, false);
 
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next().unwrap_or("");
-    let path = parts.next().unwrap_or("");
-    let version = parts.next().unwrap_or("HTTP/1.1");
+    {
+        // Try to parse as UTF‑8; fall back to an error on failure.
+        let req_str = match core::str::from_utf8(&buf[..total]) {
+            Ok(s) => s,
+            Err(_) => {
+                let mut body = String::new();
+                write_error_body(
+                    &mut body,
+                    "INVALID_REQUEST",
+                    "request is not valid UTF-8",
+                    false,
+                    None,
+                );
+                write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+                return Ok(());
+            }
+        };
 
-    let (status_line, body) = if method == "GET" && (path == "/api/v1/ping" || path == "/health") {
-        ("200 OK", r#"{"ok":true}"#)
-    } else if method == "GET" {
-        (
-            "404 Not Found",
-            r#"{"error":{"code":"UNSUPPORTED_OPERATION","message":"not found","retryable":false}}"#,
-        )
-    } else {
-        (
-            "400 Bad Request",
-            r#"{"error":{"code":"INVALID_REQUEST","message":"only GET supported","retryable":false}}"#,
-        )
-    };
+        let mut lines = req_str.lines();
+        let request_line = lines.next().unwrap_or("");
 
-    let response = format!(
-        "{version} {status}\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: {len}\r\n\r\n{body}",
-        version = version,
-        status = status_line,
-        len = body.len(),
-        body = body
-    );
+        let mut parts = request_line.split_whitespace();
+        method_s = String::from(parts.next().unwrap_or(""));
+        path_s = String::from(parts.next().unwrap_or(""));
+        version_s = String::from(parts.next().unwrap_or("HTTP/1.1"));
 
-    socket.write(response.as_bytes()).await?;
+        // Locate the end of headers and the beginning of the (optional) body.
+        header_end = match req_str.find("\r\n\r\n") {
+            Some(idx) => idx + 4,
+            None => {
+                let mut body = String::new();
+                write_error_body(
+                    &mut body,
+                    "INVALID_REQUEST",
+                    "malformed HTTP headers",
+                    false,
+                    None,
+                );
+                write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+                return Ok(());
+            }
+        };
+
+        // Parse headers we care about (currently only Content-Length for PUT /cc).
+        for line in req_str[..header_end].lines().skip(1) {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("Content-Length:") {
+                if let Ok(len) = rest.trim().parse::<usize>() {
+                    content_length = len.min(MAX_REQUEST_SIZE);
+                    has_content_length = true;
+                }
+            }
+        }
+    }
+
+    let method = method_s.as_str();
+    let path = path_s.as_str();
+    let version = version_s.as_str();
+
+    // Only HTTP/1.1 is supported.
+    if version != "HTTP/1.1" {
+        let mut body = String::new();
+        write_error_body(
+            &mut body,
+            "INVALID_REQUEST",
+            "only HTTP/1.1 is supported",
+            false,
+            None,
+        );
+        write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+        return Ok(());
+    }
+
+    // Ensure the full body has been read for PUT requests that carry a JSON payload.
+    let mut body_str: &str = "";
+    if method == "PUT" {
+        if !has_content_length {
+            let mut body = String::new();
+            write_error_body(
+                &mut body,
+                "INVALID_REQUEST",
+                "missing Content-Length for PUT request",
+                false,
+                None,
+            );
+            write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+            return Ok(());
+        }
+
+        while total < header_end + content_length && total < MAX_REQUEST_SIZE {
+            let n = socket.read(&mut buf[total..]).await?;
+            if n == 0 {
+                break;
+            }
+            total += n;
+        }
+
+        if total < header_end + content_length {
+            let mut body = String::new();
+            write_error_body(
+                &mut body,
+                "INVALID_REQUEST",
+                "truncated HTTP request body",
+                false,
+                None,
+            );
+            write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+            return Ok(());
+        }
+
+        let raw_body = &buf[header_end..header_end + content_length];
+        body_str = core::str::from_utf8(raw_body).unwrap_or("");
+    }
+
+    let mut body = String::new();
+
+    match (method, path) {
+        ("GET", "/api/v1/ping") | ("GET", "/health") => {
+            body.push_str(r#"{"ok":true}"#);
+            write_http_response(socket, version, "200 OK", &body).await?;
+        }
+        ("GET", "/api/v1/identity") => {
+            match render_identity_json(&mut body, wifi_state).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body).await?;
+                }
+                Err(err) => {
+                    // render_identity_json already encoded the appropriate ErrorResponse.
+                    write_http_response(socket, version, err, &body).await?;
+                }
+            }
+        }
+        ("GET", "/api/v1/status") => match render_status_json(&mut body, telemetry).await {
+            Ok(()) => {
+                write_http_response(socket, version, "200 OK", &body).await?;
+            }
+            Err(err) => {
+                write_http_response(socket, version, err, &body).await?;
+            }
+        },
+        ("GET", "/api/v1/cc") => match render_cc_view_json(&mut body, telemetry).await {
+            Ok(()) => {
+                write_http_response(socket, version, "200 OK", &body).await?;
+            }
+            Err(err) => {
+                write_http_response(socket, version, err, &body).await?;
+            }
+        },
+        ("PUT", "/api/v1/cc") => match handle_cc_update(body_str, &mut body, telemetry).await {
+            Ok(()) => {
+                write_http_response(socket, version, "200 OK", &body).await?;
+            }
+            Err(err) => {
+                write_http_response(socket, version, err, &body).await?;
+            }
+        },
+        ("GET", _) => {
+            write_error_body(&mut body, "UNSUPPORTED_OPERATION", "not found", false, None);
+            write_http_response(socket, version, "404 Not Found", &body).await?;
+        }
+        _ => {
+            write_error_body(
+                &mut body,
+                "INVALID_REQUEST",
+                "only GET and PUT are supported",
+                false,
+                None,
+            );
+            write_http_response(socket, version, "400 Bad Request", &body).await?;
+        }
+    }
+
     socket.flush().await?;
     Ok(())
+}
+
+fn write_json_string_escaped(buf: &mut String, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '"' => buf.push_str("\\\""),
+            '\\' => buf.push_str("\\\\"),
+            '\n' => buf.push_str("\\n"),
+            '\r' => buf.push_str("\\r"),
+            '\t' => buf.push_str("\\t"),
+            c if c < ' ' => buf.push('?'),
+            c => buf.push(c),
+        }
+    }
+}
+
+fn write_error_body(
+    buf: &mut String,
+    code: &str,
+    message: &str,
+    retryable: bool,
+    details_json: Option<&str>,
+) {
+    buf.clear();
+    buf.push_str("{\"error\":{\"code\":\"");
+    write_json_string_escaped(buf, code);
+    buf.push_str("\",\"message\":\"");
+    write_json_string_escaped(buf, message);
+    buf.push_str("\",\"retryable\":");
+    buf.push_str(if retryable { "true" } else { "false" });
+    if let Some(details) = details_json {
+        buf.push_str(",\"details\":");
+        buf.push_str(details);
+    }
+    buf.push_str("}}");
+}
+
+async fn write_http_response(
+    socket: &mut TcpSocket<'_>,
+    version: &str,
+    status_line: &str,
+    body: &str,
+) -> Result<(), embassy_net::tcp::Error> {
+    let mut head = String::new();
+    let _ = core::write!(
+        &mut head,
+        "{} {}\r\n\
+         Content-Type: application/json; charset=utf-8\r\n\
+         Connection: close\r\n\
+         Content-Length: {}\r\n\
+         \r\n",
+        version,
+        status_line,
+        body.as_bytes().len()
+    );
+    socket.write(head.as_bytes()).await?;
+    socket.write(body.as_bytes()).await?;
+    Ok(())
+}
+
+/// Render the JSON body for `GET /api/v1/identity`.
+///
+/// On error this function writes an appropriate ErrorResponse into `buf` and
+/// returns the HTTP status line to use.
+async fn render_identity_json(
+    buf: &mut String,
+    wifi_state: &'static WifiStateMutex,
+) -> Result<(), &'static str> {
+    let wifi = {
+        let guard = wifi_state.lock().await;
+        *guard
+    };
+
+    // If we don't have a usable IPv4 config yet, treat the service as
+    // temporarily unavailable.
+    if !matches!(wifi.state, WifiConnectionState::Connected) || wifi.ipv4.is_none() {
+        write_error_body(buf, "UNAVAILABLE", "Wi-Fi is not connected", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    let ip = wifi.ipv4.unwrap();
+    let octets = ip.octets();
+
+    buf.clear();
+    buf.push('{');
+
+    // device_id: prefer hostname, fall back to a stable placeholder.
+    buf.push_str("\"device_id\":\"");
+    if let Some(host) = WIFI_HOSTNAME {
+        write_json_string_escaped(buf, host);
+    } else {
+        write_json_string_escaped(buf, "llx-digital-01");
+    }
+    buf.push_str("\",");
+
+    // digital_fw_version
+    buf.push_str("\"digital_fw_version\":\"");
+    write_json_string_escaped(buf, FW_VERSION);
+    buf.push_str("\",");
+
+    // analog_fw_version: for now expose the compact HELLO fw_version as
+    // 0xXXXXXXXX when available; otherwise "unknown".
+    buf.push_str("\"analog_fw_version\":\"");
+    let analog_raw = ANALOG_FW_VERSION_RAW.load(Ordering::Relaxed);
+    if analog_raw != 0 {
+        let s = format!("0x{:08x}", analog_raw);
+        write_json_string_escaped(buf, &s);
+    } else {
+        write_json_string_escaped(buf, "unknown");
+    }
+    buf.push_str("\",");
+
+    // protocol_version
+    buf.push_str("\"protocol_version\":");
+    let _ = core::write!(buf, "{}", PROTOCOL_VERSION);
+    buf.push_str(",");
+
+    // uptime_ms
+    buf.push_str("\"uptime_ms\":");
+    let _ = core::write!(buf, "{}", timestamp_ms());
+    buf.push_str(",");
+
+    // network block
+    buf.push_str("\"network\":{");
+    // ip
+    buf.push_str("\"ip\":\"");
+    let _ = core::write!(
+        buf,
+        "{}.{}.{}.{}",
+        octets[0],
+        octets[1],
+        octets[2],
+        octets[3]
+    );
+    buf.push_str("\",");
+    // mac: TODO derive from Wi‑Fi MAC; placeholder for now.
+    buf.push_str("\"mac\":\"");
+    write_json_string_escaped(buf, "unknown");
+    buf.push_str("\",");
+    // hostname
+    buf.push_str("\"hostname\":\"");
+    if let Some(host) = WIFI_HOSTNAME {
+        write_json_string_escaped(buf, host);
+    } else {
+        write_json_string_escaped(buf, "loadlynx-digital");
+    }
+    buf.push_str("\"},");
+
+    // capabilities
+    buf.push_str("\"capabilities\":{");
+    buf.push_str("\"cc_supported\":true,");
+    buf.push_str("\"cv_supported\":false,");
+    buf.push_str("\"cp_supported\":false,");
+    buf.push_str("\"api_version\":\"1.0.0\"}");
+
+    buf.push('}');
+    Ok(())
+}
+
+/// Render the JSON body for `GET /api/v1/status` (single-shot snapshot).
+async fn render_status_json(
+    buf: &mut String,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    // Require the UART link to be up and at least one valid FastStatus frame.
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    let fast_ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
+    let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
+    let now = now_ms32();
+    let age_ms = if last_good == 0 {
+        u32::MAX
+    } else {
+        now.wrapping_sub(last_good)
+    };
+
+    if !link_up || fast_ok == 0 {
+        let details = format!(r#"{{"last_frame_age_ms":{}}}"#, age_ms);
+        write_error_body(
+            buf,
+            "LINK_DOWN",
+            "UART link is down or no FastStatus frames received",
+            true,
+            Some(&details),
+        );
+        return Err("503 Service Unavailable");
+    }
+
+    let (status, analog_state) = {
+        let guard = telemetry.lock().await;
+        let status = guard.last_status.unwrap_or(FastStatus::default());
+        let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+        (status, analog_state)
+    };
+
+    let hello_seen = HELLO_SEEN.load(Ordering::Relaxed);
+
+    buf.clear();
+    buf.push('{');
+
+    // "status": { ... FastStatusJson ... }
+    buf.push_str("\"status\":");
+    write_fast_status_json(buf, &status);
+    buf.push_str(",");
+
+    // link_up / hello_seen
+    buf.push_str("\"link_up\":");
+    buf.push_str(if link_up { "true" } else { "false" });
+    buf.push_str(",\"hello_seen\":");
+    buf.push_str(if hello_seen { "true" } else { "false" });
+
+    // analog_state
+    buf.push_str(",\"analog_state\":\"");
+    let analog_state_str = match analog_state {
+        AnalogState::Offline => "offline",
+        AnalogState::CalMissing => "cal_missing",
+        AnalogState::Faulted => "faulted",
+        AnalogState::Ready => "ready",
+    };
+    write_json_string_escaped(buf, analog_state_str);
+    buf.push_str("\",");
+
+    // fault_flags_decoded
+    buf.push_str("\"fault_flags_decoded\":[");
+    let mut first = true;
+    let faults = status.fault_flags;
+    if faults & FAULT_OVERCURRENT != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "OVERCURRENT");
+        buf.push('"');
+        first = false;
+    }
+    if faults & FAULT_OVERVOLTAGE != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "OVERVOLTAGE");
+        buf.push('"');
+        first = false;
+    }
+    if faults & FAULT_MCU_OVER_TEMP != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "MCU_OVER_TEMP");
+        buf.push('"');
+        first = false;
+    }
+    if faults & FAULT_SINK_OVER_TEMP != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "SINK_OVER_TEMP");
+        buf.push('"');
+    }
+    buf.push(']');
+
+    buf.push('}');
+    Ok(())
+}
+
+fn write_fast_status_json(buf: &mut String, status: &FastStatus) {
+    buf.push('{');
+    let _ = core::write!(buf, "\"uptime_ms\":{}", status.uptime_ms);
+    let _ = core::write!(buf, ",\"mode\":{}", status.mode);
+    let _ = core::write!(buf, ",\"state_flags\":{}", status.state_flags);
+    let _ = core::write!(
+        buf,
+        ",\"enable\":{}",
+        if status.enable { "true" } else { "false" }
+    );
+    let _ = core::write!(buf, ",\"target_value\":{}", status.target_value);
+    let _ = core::write!(buf, ",\"i_local_ma\":{}", status.i_local_ma);
+    let _ = core::write!(buf, ",\"i_remote_ma\":{}", status.i_remote_ma);
+    let _ = core::write!(buf, ",\"v_local_mv\":{}", status.v_local_mv);
+    let _ = core::write!(buf, ",\"v_remote_mv\":{}", status.v_remote_mv);
+    let _ = core::write!(buf, ",\"calc_p_mw\":{}", status.calc_p_mw);
+    let _ = core::write!(buf, ",\"dac_headroom_mv\":{}", status.dac_headroom_mv);
+    let _ = core::write!(buf, ",\"loop_error\":{}", status.loop_error);
+    let _ = core::write!(buf, ",\"sink_core_temp_mc\":{}", status.sink_core_temp_mc);
+    let _ = core::write!(
+        buf,
+        ",\"sink_exhaust_temp_mc\":{}",
+        status.sink_exhaust_temp_mc
+    );
+    let _ = core::write!(buf, ",\"mcu_temp_mc\":{}", status.mcu_temp_mc);
+    let _ = core::write!(buf, ",\"fault_flags\":{}", status.fault_flags);
+    buf.push('}');
+}
+
+/// Render the JSON body for `GET /api/v1/cc`.
+async fn render_cc_view_json(
+    buf: &mut String,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    if !link_up {
+        write_error_body(buf, "LINK_DOWN", "UART link is down", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted => {
+            write_error_body(
+                buf,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+        AnalogState::CalMissing => {
+            write_error_body(
+                buf,
+                "ANALOG_NOT_READY",
+                "analog board calibration missing or not ready",
+                true,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+        AnalogState::Offline => {
+            write_error_body(buf, "LINK_DOWN", "analog board is offline", true, None);
+            return Err("503 Service Unavailable");
+        }
+        AnalogState::Ready => {}
+    }
+
+    let status = {
+        let guard = telemetry.lock().await;
+        guard.last_status.unwrap_or(FastStatus::default())
+    };
+
+    let limit: LimitProfile = LIMIT_PROFILE_DEFAULT;
+    let i_total = status.i_local_ma + status.i_remote_ma;
+    let v_main = if (status.state_flags & STATE_FLAG_REMOTE_ACTIVE) != 0 {
+        status.v_remote_mv
+    } else {
+        status.v_local_mv
+    };
+
+    // Digital-side desired target based on the shared encoder value. This
+    // matches the path used by the existing SetPoint TX task and keeps the
+    // HTTP view consistent with the local UI knob and remote updates.
+    let desired_target = {
+        let steps = ENCODER_VALUE.load(Ordering::SeqCst);
+        let raw = steps.saturating_mul(ENCODER_STEP_MA);
+        raw.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA)
+    };
+
+    buf.clear();
+    buf.push('{');
+    // enable + target
+    buf.push_str("\"enable\":");
+    buf.push_str(if status.enable { "true" } else { "false" });
+    buf.push_str(",\"target_i_ma\":");
+    let _ = core::write!(buf, "{}", desired_target);
+
+    // limit_profile
+    buf.push_str(",\"limit_profile\":{");
+    let _ = core::write!(buf, "\"max_i_ma\":{}", limit.max_i_ma);
+    let _ = core::write!(buf, ",\"max_p_mw\":{}", limit.max_p_mw);
+    let _ = core::write!(buf, ",\"ovp_mv\":{}", limit.ovp_mv);
+    let _ = core::write!(buf, ",\"temp_trip_mc\":{}", limit.temp_trip_mc);
+    let _ = core::write!(buf, ",\"thermal_derate_pct\":{}", limit.thermal_derate_pct);
+    buf.push('}');
+
+    // protection config: minimal v0 implementation.
+    buf.push_str(",\"protection\":{");
+    buf.push_str("\"voltage_mode\":\"protect\",");
+    buf.push_str("\"power_mode\":\"protect\"}");
+
+    // Derived measurements
+    buf.push_str(",\"i_total_ma\":");
+    let _ = core::write!(buf, "{}", i_total);
+    buf.push_str(",\"v_main_mv\":");
+    let _ = core::write!(buf, "{}", v_main);
+    buf.push_str(",\"p_main_mw\":");
+    let _ = core::write!(buf, "{}", status.calc_p_mw);
+
+    buf.push('}');
+    Ok(())
+}
+
+/// Handle `PUT /api/v1/cc`: minimal v0 implementation that accepts `enable`
+/// and `target_i_ma` and maps them onto the existing encoder-driven CC
+/// control path. Limit fields and protection modes are currently ignored.
+async fn handle_cc_update(
+    body_in: &str,
+    body_out: &mut String,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    if !link_up {
+        write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted => {
+            write_error_body(
+                body_out,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+        AnalogState::CalMissing => {
+            write_error_body(
+                body_out,
+                "ANALOG_NOT_READY",
+                "analog board calibration missing or not ready",
+                true,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+        AnalogState::Offline => {
+            write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
+            return Err("503 Service Unavailable");
+        }
+        AnalogState::Ready => {}
+    }
+
+    let parsed = match parse_cc_update_json(body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    // Range checks: clamp against the software profile; out-of-range is a hard error.
+    let limit = LIMIT_PROFILE_DEFAULT;
+    if parsed.target_i_ma < TARGET_I_MIN_MA
+        || parsed.target_i_ma > TARGET_I_MAX_MA
+        || parsed.target_i_ma > limit.max_i_ma
+    {
+        let details = format!(
+            r#"{{"target_i_ma":{},"max_i_ma":{}}}"#,
+            parsed.target_i_ma, limit.max_i_ma
+        );
+        write_error_body(
+            body_out,
+            "LIMIT_VIOLATION",
+            "target current exceeds allowed range",
+            false,
+            Some(&details),
+        );
+        return Err("422 Unprocessable Entity");
+    }
+
+    // Map `enable=false` onto a zero-current target; we currently keep the
+    // analog-side SetEnable handshake as a separate concern.
+    let effective_target = if parsed.enable { parsed.target_i_ma } else { 0 };
+
+    let steps = effective_target / ENCODER_STEP_MA;
+    ENCODER_VALUE.store(steps, Ordering::SeqCst);
+
+    // Reuse the GET /cc view to report the updated state back to the caller.
+    render_cc_view_json(body_out, telemetry).await
+}
+
+struct CcUpdateRequest {
+    enable: bool,
+    target_i_ma: i32,
+}
+
+fn parse_cc_update_json(body: &str) -> Result<CcUpdateRequest, &'static str> {
+    let mut enable: Option<bool> = None;
+    let mut target_i_ma: Option<i32> = None;
+
+    // Very small hand-written JSON parser: looks for `"enable"` and
+    // `"target_i_ma"` keys and extracts their values. This keeps the firmware
+    // free from heavy JSON dependencies.
+    if let Some(idx) = body.find("\"enable\"") {
+        if let Some(colon_idx) = body[idx..].find(':') {
+            let value_str = body[idx + colon_idx + 1..].trim_start();
+            if value_str.starts_with("true") {
+                enable = Some(true);
+            } else if value_str.starts_with("false") {
+                enable = Some(false);
+            } else {
+                return Err("enable must be true or false");
+            }
+        }
+    }
+
+    if let Some(idx) = body.find("\"target_i_ma\"") {
+        if let Some(colon_idx) = body[idx..].find(':') {
+            let mut value_str = body[idx + colon_idx + 1..].trim_start();
+            // Strip leading sign/digits until we hit a delimiter.
+            let mut end = 0usize;
+            for ch in value_str.chars() {
+                if ch == '-' || ch.is_ascii_digit() {
+                    end += ch.len_utf8();
+                } else {
+                    break;
+                }
+            }
+            value_str = &value_str[..end];
+            match value_str.parse::<i32>() {
+                Ok(v) => target_i_ma = Some(v),
+                Err(_) => return Err("target_i_ma must be an integer"),
+            }
+        }
+    }
+
+    let enable = enable.ok_or("missing field enable")?;
+    let target_i_ma = target_i_ma.ok_or("missing field target_i_ma")?;
+
+    Ok(CcUpdateRequest {
+        enable,
+        target_i_ma,
+    })
 }

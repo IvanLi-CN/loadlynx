@@ -61,7 +61,7 @@ use loadlynx_protocol::{
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
-const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
+pub(crate) const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
@@ -92,7 +92,8 @@ pub const WIFI_DNS: Option<&str> = option_env!("LOADLYNX_WIFI_DNS");
 
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const FW_VERSION: &str = env!("LOADLYNX_FW_VERSION");
+/// Digital firmware version string baked in at build time.
+pub const FW_VERSION: &str = env!("LOADLYNX_FW_VERSION");
 
 const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
@@ -126,7 +127,7 @@ const ENCODER_DEBOUNCE_POLLS: u8 = 3; // simple stable-change debounce for butto
 const ENCODER_FILTER_CYCLES: u16 = 800; // ≈10 µs @ 80 MHz APB, filters encoder bounce
 
 // UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
-const UART_BAUD: u32 = 115_200;
+pub(crate) const UART_BAUD: u32 = 115_200;
 const UART_RX_FIFO_FULL_THRESHOLD: u16 = 120;
 const UART_RX_TIMEOUT_SYMS: u8 = 12;
 const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段/截断
@@ -134,12 +135,12 @@ const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段
 const UART_DMA_BUF_LEN: usize = 1536;
 // SetPoint 发送频率：降到 10Hz（100ms）以减轻模拟侧 UART 压力
 const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
-const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
-const TARGET_I_MIN_MA: i32 = 0;
-const TARGET_I_MAX_MA: i32 = 5_000;
+pub(crate) const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
+pub(crate) const TARGET_I_MIN_MA: i32 = 0;
+pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
 const ENCODER_MAX_STEPS: i32 = TARGET_I_MAX_MA / ENCODER_STEP_MA;
 // 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
-const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
+pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     max_i_ma: TARGET_I_MAX_MA,
     max_p_mw: 250_000,
     ovp_mv: 55_000,
@@ -183,9 +184,9 @@ static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
 static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
-type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
+pub type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
-static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
+pub(crate) static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
 
 #[cfg(not(feature = "mock_setpoint"))]
 struct EncoderPins {
@@ -200,12 +201,12 @@ static ENCODER_PINS: StaticCell<EncoderPins> = StaticCell::new();
 static UART_RX_ERR_TOTAL: AtomicU32 = AtomicU32::new(0);
 static PROTO_DECODE_ERRS: AtomicU32 = AtomicU32::new(0);
 static PROTO_FRAMING_DROPS: AtomicU32 = AtomicU32::new(0);
-static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
+pub(crate) static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
-static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -213,19 +214,21 @@ static SETPOINT_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static SETPOINT_ACK_PENDING: AtomicBool = AtomicBool::new(false);
-static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
-static LINK_UP: AtomicBool = AtomicBool::new(false);
-static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
-static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
+pub(crate) static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
+pub(crate) static LINK_UP: AtomicBool = AtomicBool::new(false);
+pub(crate) static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
+pub(crate) static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_SETPOINT_GATE_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_FAULT_LOG_MS: AtomicU32 = AtomicU32::new(0);
+/// Last analog firmware version identifier observed from HELLO (0 means unknown).
+pub(crate) static ANALOG_FW_VERSION_RAW: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
-fn now_ms32() -> u32 {
+pub fn now_ms32() -> u32 {
     timestamp_ms() as u32
 }
 
-fn timestamp_ms() -> u64 {
+pub fn timestamp_ms() -> u64 {
     HalInstant::now().duration_since_epoch().as_millis() as u64
 }
 
@@ -496,10 +499,14 @@ struct DisplayResources {
     previous_framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
 }
 
-struct TelemetryModel {
-    snapshot: UiSnapshot,
+pub struct TelemetryModel {
+    /// Cached snapshot used by the local UI renderer.
+    pub snapshot: UiSnapshot,
     last_uptime_ms: Option<u32>,
     last_rendered: Option<UiSnapshot>,
+    /// Last raw FastStatus frame observed from the analog side. This is used
+    /// by the optional HTTP API to expose a structured status view.
+    pub last_status: Option<FastStatus>,
 }
 
 impl TelemetryModel {
@@ -508,10 +515,14 @@ impl TelemetryModel {
             snapshot: UiSnapshot::demo(),
             last_uptime_ms: None,
             last_rendered: None,
+            last_status: None,
         }
     }
 
     fn update_from_status(&mut self, status: &FastStatus) {
+        // Keep a copy of the last raw FastStatus for external status views.
+        self.last_status = Some(*status);
+
         let remote_active = (status.state_flags & STATE_FLAG_REMOTE_ACTIVE) != 0;
 
         let remote_voltage = status.v_remote_mv as f32 / 1000.0;
@@ -1333,6 +1344,11 @@ async fn feed_decoder(
                         MSG_HELLO => match decode_hello_frame(&frame) {
                             Ok((_hdr, hello)) => {
                                 record_link_activity();
+                                // Cache the last fw_version so higher-level views (e.g. HTTP
+                                // identity endpoint) can expose a compact analog firmware
+                                // identifier without having to inspect UART traffic.
+                                ANALOG_FW_VERSION_RAW.store(hello.fw_version, Ordering::Relaxed);
+
                                 let first = !HELLO_SEEN.swap(true, Ordering::Relaxed);
                                 if first {
                                     LINK_UP.store(true, Ordering::Relaxed);
@@ -1822,7 +1838,7 @@ async fn main(spawner: Spawner) {
     {
         let wifi_state = net::init_wifi_state();
         info!("spawning Wi-Fi + HTTP net tasks");
-        net::spawn_wifi_and_http(&spawner, peripherals.WIFI, wifi_state);
+        net::spawn_wifi_and_http(&spawner, peripherals.WIFI, wifi_state, telemetry);
         info!("spawning Wi-Fi UI bridge task");
         spawner
             .spawn(wifi_ui_task(wifi_state, telemetry))
