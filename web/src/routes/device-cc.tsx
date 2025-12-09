@@ -7,6 +7,7 @@ import {
   getIdentity,
   getStatus,
   isHttpApiError,
+  subscribeStatusStream,
   updateCc,
 } from "../api/client.ts";
 import type {
@@ -65,6 +66,17 @@ export function DeviceCcRoute() {
   );
 
   const baseUrl = device?.baseUrl;
+
+  const [streamStatus, setStreamStatus] = useState<FastStatusView | null>(null);
+
+  useEffect(() => {
+    // Reset SSE state when switching devices or URLs.
+    if (baseUrl === undefined) {
+      setStreamStatus(null);
+      return;
+    }
+    setStreamStatus(null);
+  }, [baseUrl]);
 
   const identityQuery = useQuery<Identity, HttpApiError>({
     queryKey: ["device", deviceId, "identity"],
@@ -136,11 +148,40 @@ export function DeviceCcRoute() {
     enabled:
       Boolean(baseUrl) &&
       identityQuery.isSuccess &&
-      !updateCcMutation.isPending,
+      !updateCcMutation.isPending &&
+      streamStatus === null,
     refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
     refetchIntervalInBackground: false,
     retryDelay: RETRY_DELAY_MS,
   });
+
+  useEffect(() => {
+    if (!baseUrl || !identityQuery.isSuccess) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    const unsubscribe = subscribeStatusStream(
+      baseUrl,
+      (view) => {
+        if (!cancelled) {
+          setStreamStatus(view);
+        }
+      },
+      () => {
+        if (!cancelled) {
+          // Allow EventSource to auto-retry; keep polling alive until we
+          // receive the next message.
+          setStreamStatus(null);
+        }
+      },
+    );
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [baseUrl, identityQuery.isSuccess]);
 
   const firstHttpError: HttpApiError | null = (() => {
     const errors: Array<unknown> = [
@@ -248,7 +289,7 @@ export function DeviceCcRoute() {
   }
 
   const identity = identityQuery.data;
-  const status = statusQuery.data;
+  const status = streamStatus ?? statusQuery.data;
   const cc = ccQuery.data;
 
   const statusLocalMa = status?.raw.i_local_ma ?? null;

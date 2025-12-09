@@ -80,7 +80,7 @@ lto = "fat"
 panic = "abort"
 
 [features]
-default = ["enable_analog_5v_on_boot", "esp32s3"]
+default = ["enable_analog_5v_on_boot", "esp32s3", "net_http"]
 enable_analog_5v_on_boot = []
 esp32s3 = []
 mock_setpoint = []

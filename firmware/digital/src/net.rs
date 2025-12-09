@@ -73,7 +73,10 @@ pub type WifiStateMutex = Mutex<CriticalSectionRawMutex, WifiState>;
 
 static WIFI_STATE_CELL: StaticCell<WifiStateMutex> = StaticCell::new();
 static RADIO_CONTROLLER: StaticCell<RadioController<'static>> = StaticCell::new();
-static NET_RESOURCES: StaticCell<StackResources<3>> = StaticCell::new();
+// Allow a modest number of simultaneous TCP sockets (HTTP fetches + SSE).
+// Value chosen to cover a typical browser's 4–6 parallel GETs without being
+// wasteful on RAM.
+static NET_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
 
 /// Initialize shared Wi‑Fi state storage.
 pub fn init_wifi_state() -> &'static WifiStateMutex {
@@ -203,7 +206,7 @@ pub fn spawn_wifi_and_http(
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-    let resources = NET_RESOURCES.init(StackResources::<3>::new());
+    let resources = NET_RESOURCES.init(StackResources::<6>::new());
     let (stack, runner) = embassy_net::new(wifi_device, net_cfg, resources, seed);
 
     info!("spawning Wi-Fi connection task");
@@ -423,6 +426,7 @@ async fn handle_http_connection(
     let mut version_s = String::from("HTTP/1.1");
     let mut header_end: usize = 0;
     let (mut content_length, mut has_content_length) = (0usize, false);
+    let mut accept_event_stream = false;
 
     {
         // Try to parse as UTF‑8; fall back to an error on failure.
@@ -467,16 +471,21 @@ async fn handle_http_connection(
             }
         };
 
-        // Parse headers we care about (currently only Content-Length for PUT /cc).
+        // Parse headers we care about.
         for line in req_str[..header_end].lines().skip(1) {
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            if let Some(rest) = line.strip_prefix("Content-Length:") {
+            let lower = line.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("content-length:") {
                 if let Ok(len) = rest.trim().parse::<usize>() {
                     content_length = len.min(MAX_REQUEST_SIZE);
                     has_content_length = true;
+                }
+            } else if let Some(rest) = lower.strip_prefix("accept:") {
+                if rest.contains("text/event-stream") {
+                    accept_event_stream = true;
                 }
             }
         }
@@ -581,14 +590,19 @@ async fn handle_http_connection(
                 }
             }
         }
-        ("GET", "/api/v1/status") => match render_status_json(&mut body, telemetry).await {
-            Ok(()) => {
-                write_http_response(socket, version, "200 OK", &body).await?;
+        ("GET", "/api/v1/status") => {
+            if accept_event_stream {
+                return handle_status_sse(socket, telemetry).await;
             }
-            Err(err) => {
-                write_http_response(socket, version, err, &body).await?;
+            match render_status_json(&mut body, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body).await?;
+                }
             }
-        },
+        }
         ("GET", "/api/v1/cc") => match render_cc_view_json(&mut body, telemetry).await {
             Ok(()) => {
                 write_http_response(socket, version, "200 OK", &body).await?;
@@ -700,6 +714,35 @@ async fn write_http_response(
     Ok(())
 }
 
+async fn write_sse_response_head(
+    socket: &mut TcpSocket<'_>,
+) -> Result<(), embassy_net::tcp::Error> {
+    const CORS_ALLOW_ORIGIN: &str = "*";
+    const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
+    const CORS_ALLOW_HEADERS: &str = "Content-Type";
+    const CORS_ALLOW_PRIVATE_NETWORK: &str = "true";
+
+    let mut head = String::new();
+    let _ = core::write!(
+        &mut head,
+        "HTTP/1.1 200 OK\r\n\
+         Content-Type: text/event-stream\r\n\
+         Cache-Control: no-cache\r\n\
+         Access-Control-Allow-Origin: {}\r\n\
+         Access-Control-Allow-Methods: {}\r\n\
+         Access-Control-Allow-Headers: {}\r\n\
+         Access-Control-Allow-Private-Network: {}\r\n\
+         Connection: keep-alive\r\n\
+         \r\n",
+        CORS_ALLOW_ORIGIN,
+        CORS_ALLOW_METHODS,
+        CORS_ALLOW_HEADERS,
+        CORS_ALLOW_PRIVATE_NETWORK,
+    );
+
+    socket.write(head.as_bytes()).await.map(|_| ())
+}
+
 /// Render the JSON body for `GET /api/v1/identity`.
 ///
 /// On error this function writes an appropriate ErrorResponse into `buf` and
@@ -804,6 +847,23 @@ async fn render_status_json(
     buf: &mut String,
     telemetry: &'static TelemetryMutex,
 ) -> Result<(), &'static str> {
+    render_status_json_inner(buf, telemetry, false).await
+}
+
+async fn render_status_json_sse(
+    buf: &mut String,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    // Allow offline snapshots to keep the SSE stream alive; the consumer can
+    // inspect link_up to decide how to render.
+    render_status_json_inner(buf, telemetry, true).await
+}
+
+async fn render_status_json_inner(
+    buf: &mut String,
+    telemetry: &'static TelemetryMutex,
+    allow_offline: bool,
+) -> Result<(), &'static str> {
     // Require the UART link to be up and at least one valid FastStatus frame.
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fast_ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
@@ -815,7 +875,7 @@ async fn render_status_json(
         now.wrapping_sub(last_good)
     };
 
-    if !link_up || fast_ok == 0 {
+    if (!link_up || fast_ok == 0) && !allow_offline {
         let details = format!(r#"{{"last_frame_age_ms":{}}}"#, age_ms);
         write_error_body(
             buf,
@@ -904,6 +964,46 @@ async fn render_status_json(
 
     buf.push('}');
     Ok(())
+}
+
+async fn handle_status_sse(
+    socket: &mut TcpSocket<'_>,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), embassy_net::tcp::Error> {
+    // Conservative rate to keep CPU/stack usage low while still improving
+    // smoothness over 400 ms polling.
+    const SSE_INTERVAL_MS: u64 = 200;
+
+    write_sse_response_head(socket).await?;
+
+    let mut json_body = String::new();
+    let mut frame = String::new();
+
+    loop {
+        match render_status_json_sse(&mut json_body, telemetry).await {
+            Ok(()) => {
+                frame.clear();
+                frame.push_str("event: status\r\n");
+                frame.push_str("data: ");
+                frame.push_str(&json_body);
+                frame.push_str("\r\n\r\n");
+                socket.write(frame.as_bytes()).await?;
+                socket.flush().await?;
+            }
+            Err(err_status) => {
+                frame.clear();
+                frame.push_str("event: error\r\n");
+                frame.push_str("data: \"");
+                write_json_string_escaped(&mut frame, err_status);
+                frame.push_str("\"\r\n\r\n");
+                socket.write(frame.as_bytes()).await?;
+                socket.flush().await?;
+                return Ok(());
+            }
+        }
+
+        Timer::after(Duration::from_millis(SSE_INTERVAL_MS)).await;
+    }
 }
 
 fn write_fast_status_json(buf: &mut String, status: &FastStatus) {

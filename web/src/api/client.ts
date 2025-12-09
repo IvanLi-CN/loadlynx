@@ -364,6 +364,98 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
   };
 }
 
+export function subscribeStatusStream(
+  baseUrl: string,
+  onMessage: (view: FastStatusView) => void,
+  onError?: (error: Event | Error) => void,
+): () => void {
+  if (isMockBaseUrl(baseUrl)) {
+    let stopped = false;
+    const timer = setInterval(async () => {
+      if (stopped) {
+        return;
+      }
+      try {
+        const next = await mockGetStatus(baseUrl);
+        onMessage(next);
+      } catch (error) {
+        if (onError) {
+          onError(
+            error instanceof Error ? error : new Error("mock stream error"),
+          );
+        }
+      }
+    }, 300);
+
+    return () => {
+      stopped = true;
+      clearInterval(timer);
+    };
+  }
+
+  const url = new URL("/api/v1/status", baseUrl);
+  const source = new EventSource(url.toString());
+
+  const isFastStatusView = (val: unknown): val is FastStatusView => {
+    return (
+      typeof val === "object" &&
+      val !== null &&
+      "raw" in val &&
+      "link_up" in val &&
+      "hello_seen" in val
+    );
+  };
+
+  const handleStatus = (event: MessageEvent) => {
+    try {
+      const parsed = JSON.parse(event.data) as
+        | FastStatusView
+        | {
+            status: FastStatusJson;
+            link_up: boolean;
+            hello_seen: boolean;
+            analog_state: FastStatusView["analog_state"];
+            fault_flags_decoded: FastStatusView["fault_flags_decoded"];
+          };
+
+      const view: FastStatusView = isFastStatusView(parsed)
+        ? parsed
+        : {
+            raw: parsed.status,
+            link_up: parsed.link_up,
+            hello_seen: parsed.hello_seen,
+            analog_state: parsed.analog_state,
+            fault_flags_decoded: parsed.fault_flags_decoded ?? [],
+          };
+
+      onMessage(view);
+    } catch (error) {
+      if (onError) {
+        onError(
+          error instanceof Error ? error : new Error("invalid SSE payload"),
+        );
+      }
+    }
+  };
+
+  const handleError = (event: Event) => {
+    if (onError) {
+      onError(event);
+    }
+  };
+
+  source.addEventListener("status", handleStatus as EventListener);
+  source.addEventListener("message", handleStatus as EventListener);
+  source.addEventListener("error", handleError);
+
+  return () => {
+    source.removeEventListener("status", handleStatus as EventListener);
+    source.removeEventListener("message", handleStatus as EventListener);
+    source.removeEventListener("error", handleError);
+    source.close();
+  };
+}
+
 export async function getCc(baseUrl: string): Promise<CcControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetCc(baseUrl);
