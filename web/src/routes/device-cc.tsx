@@ -53,19 +53,6 @@ export function DeviceCcRoute() {
     enabled: Boolean(baseUrl),
   });
 
-  const statusQuery = useQuery<FastStatusView, HttpApiError>({
-    queryKey: ["device", deviceId, "status"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getStatus(baseUrl);
-    },
-    enabled: Boolean(baseUrl),
-    // Low refresh rate is enough for a mock panel.
-    refetchInterval: 2_000,
-  });
-
   const ccQuery = useQuery<CcControlView, HttpApiError>({
     queryKey: ["device", deviceId, "cc"],
     queryFn: () => {
@@ -74,7 +61,8 @@ export function DeviceCcRoute() {
       }
       return getCc(baseUrl);
     },
-    enabled: Boolean(baseUrl),
+    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+    retryDelay: 500,
   });
 
   const queryClient = useQueryClient();
@@ -111,6 +99,25 @@ export function DeviceCcRoute() {
     },
   });
 
+  const statusQuery = useQuery<FastStatusView, HttpApiError>({
+    queryKey: ["device", deviceId, "status"],
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getStatus(baseUrl);
+    },
+    // Pause polling while a write is in flight to avoid exhausting tiny
+    // connection limits on the device HTTP stack.
+    enabled:
+      Boolean(baseUrl) &&
+      identityQuery.isSuccess &&
+      !updateCcMutation.isPending,
+    // Low refresh rate is enough for a mock panel.
+    refetchInterval: 2_000,
+    retryDelay: 500,
+  });
+
   const firstHttpError: HttpApiError | null = (() => {
     const errors: Array<unknown> = [
       identityQuery.error,
@@ -125,9 +132,28 @@ export function DeviceCcRoute() {
     return null;
   })();
 
-  const topErrorMessage: string | null = firstHttpError
-    ? `${firstHttpError.code ?? "HTTP_ERROR"} — ${firstHttpError.message}`
-    : null;
+  const topError = (() => {
+    if (!firstHttpError) {
+      return null;
+    }
+    const code = firstHttpError.code ?? "HTTP_ERROR";
+    const summary = `${code} — ${firstHttpError.message}`;
+
+    if (firstHttpError.status === 0 && code === "NETWORK_ERROR") {
+      const hint =
+        "无法连接设备" +
+        (baseUrl ? `（baseUrl=${baseUrl}）` : "") +
+        "，请检查网络与 IP 设置。";
+      return { summary, hint } as const;
+    }
+
+    if (firstHttpError.status === 404 && code === "UNSUPPORTED_OPERATION") {
+      const hint = "固件版本不支持该 API，请升级固件后重试。";
+      return { summary, hint } as const;
+    }
+
+    return { summary, hint: null } as const;
+  })();
 
   const isLinkDownLike =
     firstHttpError &&
@@ -201,6 +227,9 @@ export function DeviceCcRoute() {
   const status = statusQuery.data;
   const cc = ccQuery.data;
 
+  const statusLocalMa = status?.raw.i_local_ma ?? null;
+  const statusRemoteMa = status?.raw.i_remote_ma ?? null;
+
   const remoteVoltageV =
     status?.raw.v_remote_mv != null
       ? status.raw.v_remote_mv / 1_000
@@ -211,10 +240,19 @@ export function DeviceCcRoute() {
     status?.raw.v_local_mv != null
       ? status.raw.v_local_mv / 1_000
       : remoteVoltageV;
-  const localCurrentA = (status?.raw.i_local_ma ?? cc?.i_total_ma ?? 0) / 1_000;
-  const remoteCurrentA = (status?.raw.i_remote_ma ?? 0) / 1_000;
-  const totalCurrentA = (cc?.i_total_ma ?? status?.raw.i_local_ma ?? 0) / 1_000;
-  const totalPowerW = (cc?.p_main_mw ?? status?.raw.calc_p_mw ?? 0) / 1_000;
+  const localCurrentA =
+    statusLocalMa != null
+      ? statusLocalMa / 1_000
+      : (cc?.i_total_ma ?? 0) / 1_000 / 2;
+  const remoteCurrentA = statusRemoteMa != null ? statusRemoteMa / 1_000 : 0;
+  const totalCurrentA =
+    statusLocalMa != null && statusRemoteMa != null
+      ? (statusLocalMa + statusRemoteMa) / 1_000
+      : (cc?.i_total_ma ?? 0) / 1_000;
+  const totalPowerW =
+    status?.raw.calc_p_mw != null
+      ? status.raw.calc_p_mw / 1_000
+      : (cc?.p_main_mw ?? 0) / 1_000;
 
   const maxIMa =
     cc?.limit_profile.max_i_ma != null ? cc.limit_profile.max_i_ma : 5_000;
@@ -399,7 +437,7 @@ export function DeviceCcRoute() {
         </div>
       </header>
 
-      {topErrorMessage ? (
+      {topError ? (
         <section
           aria-label="HTTP error"
           style={{
@@ -415,8 +453,18 @@ export function DeviceCcRoute() {
         >
           <div>
             <strong style={{ fontWeight: 600 }}>HTTP error:</strong>{" "}
-            {topErrorMessage}
+            {topError.summary}
           </div>
+          {topError.hint ? (
+            <div
+              style={{
+                marginTop: "0.15rem",
+                color: "#fed7d7",
+              }}
+            >
+              {topError.hint}
+            </div>
+          ) : null}
           {isLinkDownLike ? (
             <div
               style={{
@@ -641,7 +689,21 @@ export function DeviceCcRoute() {
                   const error = updateCcMutation.error;
                   if (isHttpApiError(error)) {
                     const code = error.code ?? "HTTP_ERROR";
-                    return `Error: ${code} — ${error.message}`;
+                    if (error.status === 0 && code === "NETWORK_ERROR") {
+                      return `Network error — unable to reach device${
+                        baseUrl ? ` (${baseUrl})` : ""
+                      }. Check network/IP.`;
+                    }
+                    if (
+                      error.status === 404 &&
+                      code === "UNSUPPORTED_OPERATION"
+                    ) {
+                      return "API unsupported by device firmware — please upgrade and retry.";
+                    }
+                    if (error.status >= 400 && error.status < 500 && code) {
+                      return `Device rejected request: ${code} — ${error.message}`;
+                    }
+                    return `HTTP error: ${code} — ${error.message}`;
                   }
                   if (error instanceof Error) {
                     return `Error: ${error.message}`;
