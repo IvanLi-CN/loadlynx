@@ -27,12 +27,36 @@ import {
 const MONO_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 
+const FAST_STATUS_REFETCH_MS = 400;
+const RETRY_DELAY_MS = 500;
+
 export function DeviceCcRoute() {
   const { deviceId } = useParams({
     from: "/$deviceId/cc",
   }) as {
     deviceId: string;
   };
+
+  const [isPageVisible, setIsPageVisible] = useState(() =>
+    typeof document === "undefined"
+      ? true
+      : document.visibilityState === "visible",
+  );
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+
+    const handleVisibility = () => {
+      setIsPageVisible(document.visibilityState === "visible");
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, []);
 
   const devicesQuery = useDevicesQuery();
   const device = useMemo(
@@ -62,7 +86,7 @@ export function DeviceCcRoute() {
       return getCc(baseUrl);
     },
     enabled: Boolean(baseUrl) && identityQuery.isSuccess,
-    retryDelay: 500,
+    retryDelay: RETRY_DELAY_MS,
   });
 
   const queryClient = useQueryClient();
@@ -113,9 +137,9 @@ export function DeviceCcRoute() {
       Boolean(baseUrl) &&
       identityQuery.isSuccess &&
       !updateCcMutation.isPending,
-    // Low refresh rate is enough for a mock panel.
-    refetchInterval: 2_000,
-    retryDelay: 500,
+    refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
+    refetchIntervalInBackground: false,
+    retryDelay: RETRY_DELAY_MS,
   });
 
   const firstHttpError: HttpApiError | null = (() => {
