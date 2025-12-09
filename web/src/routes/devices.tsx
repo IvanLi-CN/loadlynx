@@ -353,19 +353,23 @@ function DeviceRow(props: { device: StoredDevice }) {
   } else if (identityQuery.isError) {
     statusLabel = "Offline";
     statusColor = "#f97316";
+
+    const formatSnippet = (message: string) =>
+      message.length > 80 ? `${message.slice(0, 77)}…` : message;
+
     if (isHttpApiError(error)) {
       const code = error.code ?? "HTTP_ERROR";
-      const snippet =
-        error.message.length > 80
-          ? `${error.message.slice(0, 77)}…`
-          : error.message;
-      statusDetail = `${code}: ${snippet}`;
+      if (error.status === 0 && code === "NETWORK_ERROR") {
+        statusDetail = "Network error — check device IP or network";
+      } else if (error.status === 404 && code === "UNSUPPORTED_OPERATION") {
+        statusLabel = "Online (HTTP)";
+        statusColor = "#f59e0b";
+        statusDetail = "Unsupported API on current firmware";
+      } else {
+        statusDetail = `${code}: ${formatSnippet(error.message)}`;
+      }
     } else if (error instanceof Error) {
-      const snippet =
-        error.message.length > 80
-          ? `${error.message.slice(0, 77)}…`
-          : error.message;
-      statusDetail = snippet;
+      statusDetail = formatSnippet(error.message);
     } else {
       statusDetail = "Unknown error";
     }

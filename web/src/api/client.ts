@@ -85,15 +85,26 @@ async function httpJson<T>(
 ): Promise<T> {
   const url = new URL(path, baseUrl);
 
+  const headers: Record<string, string> = {
+    ...(init?.headers as Record<string, string> | undefined),
+  };
+
+  // Embedded servers often have tiny connection limits; explicitly request
+  // connection close to avoid keeping sockets busy between polls/mutations.
+  headers.Connection ||= "close";
+
+  const method = init?.method ?? "GET";
+  const hasBody = init?.body !== undefined && init.body !== null;
+  if (hasBody || method.toUpperCase() !== "GET") {
+    headers["Content-Type"] ||= "application/json";
+  }
+
   let response: Response;
   try {
     response = await fetch(url.toString(), {
-      method: init?.method ?? "GET",
+      method,
       ...init,
-      headers: {
-        "Content-Type": "application/json",
-        ...(init?.headers ?? {}),
-      },
+      headers,
     });
   } catch (error) {
     const message =
@@ -368,8 +379,15 @@ export async function updateCc(
     return mockUpdateCc(baseUrl, payload);
   }
 
+  const body = JSON.stringify(payload);
+
+  // Use POST + text/plain to stay within the CORS simple-request surface and
+  // avoid私网预检；fetch 会发送 Content-Length，兼容设备端的小栈。
   return httpJson<CcControlView>(baseUrl, "/api/v1/cc", {
-    method: "PUT",
-    body: JSON.stringify(payload),
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
   });
 }

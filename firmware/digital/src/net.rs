@@ -500,15 +500,15 @@ async fn handle_http_connection(
         return Ok(());
     }
 
-    // Ensure the full body has been read for PUT requests that carry a JSON payload.
+    // Ensure the full body has been read for PUT/POST requests that carry a JSON payload.
     let mut body_str: &str = "";
-    if method == "PUT" {
+    if method == "PUT" || method == "POST" {
         if !has_content_length {
             let mut body = String::new();
             write_error_body(
                 &mut body,
                 "INVALID_REQUEST",
-                "missing Content-Length for PUT request",
+                "missing Content-Length for PUT/POST request",
                 false,
                 None,
             );
@@ -597,14 +597,16 @@ async fn handle_http_connection(
                 write_http_response(socket, version, err, &body).await?;
             }
         },
-        ("PUT", "/api/v1/cc") => match handle_cc_update(body_str, &mut body, telemetry).await {
-            Ok(()) => {
-                write_http_response(socket, version, "200 OK", &body).await?;
+        ("PUT", "/api/v1/cc") | ("POST", "/api/v1/cc") => {
+            match handle_cc_update(body_str, &mut body, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body).await?;
+                }
             }
-            Err(err) => {
-                write_http_response(socket, version, err, &body).await?;
-            }
-        },
+        }
         ("GET", _) => {
             write_error_body(&mut body, "UNSUPPORTED_OPERATION", "not found", false, None);
             write_http_response(socket, version, "404 Not Found", &body).await?;
@@ -613,7 +615,7 @@ async fn handle_http_connection(
             write_error_body(
                 &mut body,
                 "INVALID_REQUEST",
-                "only GET and PUT are supported",
+                "only GET, PUT, and POST are supported",
                 false,
                 None,
             );
@@ -669,8 +671,9 @@ async fn write_http_response(
     // Minimal CORS support to allow the LoadLynx web console (running on a
     // separate origin during development) to access the HTTP API.
     const CORS_ALLOW_ORIGIN: &str = "*";
-    const CORS_ALLOW_METHODS: &str = "GET, PUT, OPTIONS";
+    const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
     const CORS_ALLOW_HEADERS: &str = "Content-Type";
+    const CORS_ALLOW_PRIVATE_NETWORK: &str = "true";
 
     let mut head = String::new();
     let _ = core::write!(
@@ -680,6 +683,7 @@ async fn write_http_response(
          Access-Control-Allow-Origin: {}\r\n\
          Access-Control-Allow-Methods: {}\r\n\
          Access-Control-Allow-Headers: {}\r\n\
+         Access-Control-Allow-Private-Network: {}\r\n\
          Connection: close\r\n\
          Content-Length: {}\r\n\
          \r\n",
@@ -688,6 +692,7 @@ async fn write_http_response(
         CORS_ALLOW_ORIGIN,
         CORS_ALLOW_METHODS,
         CORS_ALLOW_HEADERS,
+        CORS_ALLOW_PRIVATE_NETWORK,
         body.as_bytes().len()
     );
     socket.write(head.as_bytes()).await?;
