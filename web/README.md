@@ -31,3 +31,7 @@ Core scripts:
 - `bun run check` – run `biome check .`.
 - `bun run test:e2e` – run Playwright E2E tests.
 
+## CI versioning
+
+- GitHub Actions calls `.github/scripts/compute-version.sh` to emit `APP_EFFECTIVE_VERSION` (from `APP_BASE_VERSION` or `package.json` plus git metadata).
+- `scripts/write-version.mjs` consumes `APP_EFFECTIVE_VERSION` during `bun run build` to write `dist/public/version.json`.
