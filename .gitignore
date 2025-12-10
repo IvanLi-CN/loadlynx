@@ -11,4 +11,15 @@ logs/agentd/
 .stm32-probe
 .stm32-port
 .esp32-port
-node_modules/
+
+# Frontend build artifacts and dependencies
+**/node_modules/
+**/dist/
+**/playwright-report/
+**/test-results/
+
+# Local lefthook example config at repo root (not tracked)
+/lefthook.yml
+
+# Local environment configuration (contains secrets, never commit)
+.env

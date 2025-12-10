@@ -1,15 +1,16 @@
-[target.xtensa-esp32s3-none-elf]
-runner = "espflash flash --monitor"
-
-[env]
-DEFMT_LOG = "info"
-
 [build]
 target = "xtensa-esp32s3-none-elf"
+
+[target.'cfg(target_arch = "xtensa")']
+runner = "espflash flash --monitor --log-format defmt"
 rustflags = [
   "-C", "link-arg=-nostartfiles",
 ]
 
 [unstable]
-build-std = ["core"]
-build-std-features = ["panic_immediate_abort"]
+build-std = ["core", "alloc"]
+
+[env]
+# Ensure defmt logs are compiled in at info level for all digital firmware
+# builds, so that espflash/agentd can always decode runtime logs.
+DEFMT_LOG = "info"

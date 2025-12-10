@@ -18,6 +18,14 @@ fn main() {
         println!("cargo:rerun-if-changed={}", head.display());
     }
 
+    // Re-run when Wi-Fi config changes.
+    if let Some(repo_root) = repo_root_from_manifest() {
+        let env_path = repo_root.join(".env");
+        if env_path.exists() {
+            println!("cargo:rerun-if-changed={}", env_path.display());
+        }
+    }
+
     let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
     let pkg_ver = std::env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
     let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
@@ -44,6 +52,47 @@ fn main() {
         let file_name = format!("{name}-fw-version.txt", name = pkg_name);
         let path = tmp_dir.join(file_name);
         let _ = std::fs::write(path, &version_string);
+    }
+
+    // Load Wi-Fi configuration from .env or environment and inject it as compile-time env vars.
+    let mut cfg = std::collections::HashMap::new();
+    if let Some(repo_root) = repo_root_from_manifest() {
+        let env_path = repo_root.join(".env");
+        if env_path.exists() {
+            cfg.extend(load_env_file(&env_path));
+        }
+    }
+
+    let wifi_ssid = get_wifi_cfg("DIGITAL_WIFI_SSID", &cfg);
+    let wifi_psk = get_wifi_cfg("DIGITAL_WIFI_PSK", &cfg);
+
+    if wifi_ssid.is_none() || wifi_psk.is_none() {
+        eprintln!(
+            "error: Wi-Fi config missing. Set DIGITAL_WIFI_SSID and DIGITAL_WIFI_PSK in .env or environment."
+        );
+        std::process::exit(1);
+    }
+
+    let wifi_ssid = wifi_ssid.unwrap();
+    let wifi_psk = wifi_psk.unwrap();
+
+    println!("cargo:rustc-env=LOADLYNX_WIFI_SSID={}", wifi_ssid);
+    println!("cargo:rustc-env=LOADLYNX_WIFI_PSK={}", wifi_psk);
+
+    if let Some(hostname) = get_wifi_cfg("DIGITAL_WIFI_HOSTNAME", &cfg) {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_HOSTNAME={}", hostname);
+    }
+    if let Some(static_ip) = get_wifi_cfg("DIGITAL_WIFI_STATIC_IP", &cfg) {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_STATIC_IP={}", static_ip);
+    }
+    if let Some(netmask) = get_wifi_cfg("DIGITAL_WIFI_NETMASK", &cfg) {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_NETMASK={}", netmask);
+    }
+    if let Some(gateway) = get_wifi_cfg("DIGITAL_WIFI_GATEWAY", &cfg) {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_GATEWAY={}", gateway);
+    }
+    if let Some(dns) = get_wifi_cfg("DIGITAL_WIFI_DNS", &cfg) {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_DNS={}", dns);
     }
 }
 
@@ -149,4 +198,50 @@ fn source_digest() -> Option<u64> {
     } else {
         None
     }
+}
+
+fn load_env_file(path: &std::path::Path) -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+
+    let contents = match fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return map,
+    };
+
+    for line in contents.lines() {
+        let line = line.trim();
+
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        if let Some((key, value)) = line.split_once('=') {
+            let key = key.trim();
+            let value = value.trim();
+
+            if !key.is_empty() && !value.is_empty() {
+                map.insert(key.to_string(), value.to_string());
+            }
+        }
+    }
+
+    map
+}
+
+fn get_wifi_cfg(key: &str, file_cfg: &std::collections::HashMap<String, String>) -> Option<String> {
+    if let Ok(v) = env::var(key) {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+
+    if let Some(v) = file_cfg.get(key) {
+        let v = v.trim();
+        if !v.is_empty() {
+            return Some(v.to_string());
+        }
+    }
+
+    None
 }

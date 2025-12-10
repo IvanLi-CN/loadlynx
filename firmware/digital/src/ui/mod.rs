@@ -45,6 +45,14 @@ const CARD_BG_RIGHT: i32 = 182;
 const CARD_BG_TOP_OFFSET: i32 = 6;
 const CARD_BG_BOTTOM_OFFSET: i32 = 80;
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum WifiUiStatus {
+    Disabled,
+    Connecting,
+    Ok,
+    Error,
+}
+
 /// Bitmask describing which logical UI regions need to be updated for a frame.
 #[derive(Copy, Clone, Default)]
 pub struct UiChangeMask {
@@ -53,6 +61,7 @@ pub struct UiChangeMask {
     pub current_pair: bool,
     pub telemetry_lines: bool,
     pub bars: bool,
+    pub wifi_status: bool,
 }
 
 impl UiChangeMask {
@@ -61,7 +70,8 @@ impl UiChangeMask {
             || self.voltage_pair
             || self.current_pair
             || self.telemetry_lines
-            || self.bars)
+            || self.bars
+            || self.wifi_status)
     }
 }
 
@@ -130,6 +140,8 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
     );
     draw_set_current(&mut canvas, data.set_current_text.as_str());
     draw_telemetry(&mut canvas, data);
+
+    render_wifi_status(&mut canvas, data.wifi_status);
 
     if DEBUG_OVERLAY {
         draw_debug_overlay(&mut canvas);
@@ -234,6 +246,9 @@ pub fn render_partial(
             curr.ch2_current / 5.0,
         );
     }
+
+    // Wi‑Fi 状态标记始终在最后绘制一层小覆盖，避免被右侧其它元素重绘时“擦掉”。
+    render_wifi_status(&mut canvas, curr.wifi_status);
 }
 
 /// 在左上角叠加显示 FPS 信息。
@@ -250,6 +265,28 @@ pub fn render_fps_overlay(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, fps: u32) 
     canvas.fill_rect(Rect::new(0, 0, 80, 16), rgb(0x101829));
     // 叠加白色小字体文本。
     draw_small_text(&mut canvas, text.as_str(), 4, 4, rgb(0xFFFFFF), 0);
+}
+
+/// 在右上角叠加显示简要 Wi‑Fi 状态。
+fn render_wifi_status(canvas: &mut Canvas, status: WifiUiStatus) {
+    // 固定在屏幕最右上角的一小块区域，尽量避免覆盖 REMOTE/LOCAL 文本。
+    // LOGICAL_WIDTH=320，因此这里占用 [288,320)×[0,10) 这一条窄带。
+    let area = Rect::new(LOGICAL_WIDTH - 32, 0, LOGICAL_WIDTH, 10);
+    // 使用与右侧卡片相同的背景色。
+    canvas.fill_rect(area, rgb(0x080f19));
+
+    // 使用至多 4 个字符的状态缩写，保证在窄区域内完整可见：
+    //   W:OK / W:.. / W:ER / W:--
+    let (text, color) = match status {
+        WifiUiStatus::Ok => ("W:OK", rgb(0x6EF58C)),
+        WifiUiStatus::Connecting => ("W:..", rgb(0xFFB347)),
+        WifiUiStatus::Error => ("W:ER", rgb(0xFF5252)),
+        WifiUiStatus::Disabled => ("W:--", rgb(0x6d7fa4)),
+    };
+
+    let x = area.left + 2;
+    let y = area.top + 1;
+    draw_small_text(canvas, text, x, y, color, 0);
 }
 
 fn draw_main_metric(
@@ -667,6 +704,7 @@ pub struct UiSnapshot {
     pub remote_active: bool,
     pub fault_flags: u32,
     pub analog_state: AnalogState,
+    pub wifi_status: WifiUiStatus,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -700,6 +738,7 @@ impl UiSnapshot {
             remote_active: true,
             fault_flags: 0,
             analog_state: AnalogState::Ready,
+            wifi_status: WifiUiStatus::Disabled,
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),

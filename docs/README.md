@@ -6,6 +6,8 @@
 
 - 接口（Interfaces）
   - `interfaces/uart-link.md`
+  - `interfaces/network-control.md`
+  - `interfaces/network-http-api.md`
   - `interfaces/pinmaps/esp32-s3.md`
 
 - 器件与选型（Components）

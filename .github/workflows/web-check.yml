@@ -1,0 +1,70 @@
+name: Web Check
+
+on:
+  push:
+    branches:
+      - main
+      - feat/**
+      - chore/**
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-check.yml'
+      - '.github/scripts/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-check.yml'
+      - '.github/scripts/**'
+
+jobs:
+  web-check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v1
+        with:
+          bun-version: '1.1.34'
+
+      - name: Compute web version
+        working-directory: web
+        id: version
+        run: |
+          VERSION_LINE="$(../.github/scripts/compute-version.sh)"
+          echo "$VERSION_LINE" >> "$GITHUB_ENV"
+          echo "Using $VERSION_LINE for build"
+
+      - name: Install dependencies
+        working-directory: web
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright browsers
+        working-directory: web
+        run: bunx playwright install --with-deps
+
+      - name: Lint
+        working-directory: web
+        run: bun run lint
+
+      - name: Check
+        working-directory: web
+        run: bun run check
+
+      - name: Build
+        working-directory: web
+        run: bun run build
+
+      - name: E2E tests
+        working-directory: web
+        run: bun run test:e2e

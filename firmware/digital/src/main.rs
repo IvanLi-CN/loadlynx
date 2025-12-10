@@ -1,11 +1,18 @@
 #![no_std]
 #![no_main]
 
+// Enable heap allocations (String, Vec, etc.) when the experimental net_http
+// feature is used for Wi‑Fi + HTTP.
+#[cfg(feature = "net_http")]
+extern crate alloc;
+
 use core::convert::Infallible;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use defmt::*;
-use embassy_executor::Executor;
+use embassy_executor::Spawner;
 use embassy_futures::yield_now;
+#[cfg(feature = "net_http")]
+use embassy_sync::channel::Channel;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
@@ -14,6 +21,7 @@ use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
 use embedded_io_async::Read as AsyncRead;
 use esp_hal::time::Instant as HalInstant;
+use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::uhci::{self, RxConfig as UhciRxConfig, TxConfig as UhciTxConfig, Uhci};
 use esp_hal::uart::{Config as UartConfig, DataBits, Parity, RxConfig, StopBits, Uart};
 use esp_hal::{
@@ -26,7 +34,6 @@ use esp_hal::{
         channel::{self as ledc_channel, ChannelIFace as _},
         timer::{self as ledc_timer, TimerIFace as _},
     },
-    main,
     spi::{
         Mode,
         master::{Config as SpiConfig, Spi, SpiDmaBus},
@@ -56,16 +63,39 @@ use loadlynx_protocol::{
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
-const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
+pub(crate) const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
 mod ui;
 use ui::{AnalogState, UiSnapshot};
 
+// Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
+#[cfg(feature = "net_http")]
+mod net;
+
+// Wi‑Fi compile-time configuration injected by firmware/digital/build.rs.
+// Kept near the top so both main and the net module can rely on a single
+// source of truth for SSID/PSK/static IP.
+#[cfg(feature = "net_http")]
+pub const WIFI_SSID: &str = env!("LOADLYNX_WIFI_SSID");
+#[cfg(feature = "net_http")]
+pub const WIFI_PSK: &str = env!("LOADLYNX_WIFI_PSK");
+#[cfg(feature = "net_http")]
+pub const WIFI_HOSTNAME: Option<&str> = option_env!("LOADLYNX_WIFI_HOSTNAME");
+#[cfg(feature = "net_http")]
+pub const WIFI_STATIC_IP: Option<&str> = option_env!("LOADLYNX_WIFI_STATIC_IP");
+#[cfg(feature = "net_http")]
+pub const WIFI_NETMASK: Option<&str> = option_env!("LOADLYNX_WIFI_NETMASK");
+#[cfg(feature = "net_http")]
+pub const WIFI_GATEWAY: Option<&str> = option_env!("LOADLYNX_WIFI_GATEWAY");
+#[cfg(feature = "net_http")]
+pub const WIFI_DNS: Option<&str> = option_env!("LOADLYNX_WIFI_DNS");
+
 esp_bootloader_esp_idf::esp_app_desc!();
 
-const FW_VERSION: &str = env!("LOADLYNX_FW_VERSION");
+/// Digital firmware version string baked in at build time.
+pub const FW_VERSION: &str = env!("LOADLYNX_FW_VERSION");
 
 const DISPLAY_WIDTH: usize = 240;
 const DISPLAY_HEIGHT: usize = 320;
@@ -99,7 +129,7 @@ const ENCODER_DEBOUNCE_POLLS: u8 = 3; // simple stable-change debounce for butto
 const ENCODER_FILTER_CYCLES: u16 = 800; // ≈10 µs @ 80 MHz APB, filters encoder bounce
 
 // UART + 协议相关的关键参数，用于日志自描述与 A/B 对比
-const UART_BAUD: u32 = 115_200;
+pub(crate) const UART_BAUD: u32 = 115_200;
 const UART_RX_FIFO_FULL_THRESHOLD: u16 = 120;
 const UART_RX_TIMEOUT_SYMS: u8 = 12;
 const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段/截断
@@ -107,12 +137,12 @@ const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段
 const UART_DMA_BUF_LEN: usize = 1536;
 // SetPoint 发送频率：降到 10Hz（100ms）以减轻模拟侧 UART 压力
 const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
-const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
-const TARGET_I_MIN_MA: i32 = 0;
-const TARGET_I_MAX_MA: i32 = 5_000;
+pub(crate) const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
+pub(crate) const TARGET_I_MIN_MA: i32 = 0;
+pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
 const ENCODER_MAX_STEPS: i32 = TARGET_I_MAX_MA / ENCODER_STEP_MA;
 // 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
-const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
+pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     max_i_ma: TARGET_I_MAX_MA,
     max_p_mw: 250_000,
     ovp_mv: 55_000,
@@ -141,11 +171,11 @@ const FAN_LOG_DUTY_DELTA_LARGE_PCT: u8 = 20; // 占空比变化超过该阈值�
 const FAN_LOG_COOLDOWN_MS: u32 = 5_000; // fan 日志限频
 const FAN_POWER_LOW_W: f32 = 5.0; // sink 功率低于该值时允许在低温下停转
 
-static EXECUTOR: StaticCell<Executor> = StaticCell::new();
 #[repr(align(32))]
 struct Align32<T>(T);
 
 static FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
+#[cfg(not(feature = "net_http"))]
 static PREVIOUS_FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
@@ -156,9 +186,36 @@ static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
 static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
-type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
+pub type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
-static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
+pub(crate) static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
+
+// Soft-reset requests originating from the HTTP API are funneled through this
+// small channel so they can be serialized onto the existing UART TX task.
+#[cfg(feature = "net_http")]
+static SOFT_RESET_REQUESTS: Channel<CriticalSectionRawMutex, SoftResetReason, 4> = Channel::new();
+
+#[cfg(feature = "net_http")]
+pub(crate) fn enqueue_soft_reset(reason: SoftResetReason) -> Result<(), &'static str> {
+    SOFT_RESET_REQUESTS
+        .try_send(reason)
+        .map_err(|_| "SOFT_RESET_QUEUE_FULL")
+}
+
+#[cfg(not(feature = "net_http"))]
+pub(crate) fn enqueue_soft_reset(_reason: SoftResetReason) -> Result<(), &'static str> {
+    Err("net_http feature disabled")
+}
+
+#[cfg(feature = "net_http")]
+pub(crate) fn dequeue_soft_reset() -> Option<SoftResetReason> {
+    SOFT_RESET_REQUESTS.try_receive().ok()
+}
+
+#[cfg(not(feature = "net_http"))]
+pub(crate) fn dequeue_soft_reset() -> Option<SoftResetReason> {
+    None
+}
 
 #[cfg(not(feature = "mock_setpoint"))]
 struct EncoderPins {
@@ -173,12 +230,12 @@ static ENCODER_PINS: StaticCell<EncoderPins> = StaticCell::new();
 static UART_RX_ERR_TOTAL: AtomicU32 = AtomicU32::new(0);
 static PROTO_DECODE_ERRS: AtomicU32 = AtomicU32::new(0);
 static PROTO_FRAMING_DROPS: AtomicU32 = AtomicU32::new(0);
-static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
+pub(crate) static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
-static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -186,23 +243,41 @@ static SETPOINT_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static SETPOINT_ACK_PENDING: AtomicBool = AtomicBool::new(false);
-static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
-static LINK_UP: AtomicBool = AtomicBool::new(false);
-static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
-static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
+pub(crate) static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
+pub(crate) static LINK_UP: AtomicBool = AtomicBool::new(false);
+pub(crate) static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
+pub(crate) static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_SETPOINT_GATE_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_FAULT_LOG_MS: AtomicU32 = AtomicU32::new(0);
+/// Last analog firmware version identifier observed from HELLO (0 means unknown).
+pub(crate) static ANALOG_FW_VERSION_RAW: AtomicU32 = AtomicU32::new(0);
 
 #[inline]
-fn now_ms32() -> u32 {
+pub fn now_ms32() -> u32 {
     timestamp_ms() as u32
 }
 
-fn timestamp_ms() -> u64 {
+pub fn timestamp_ms() -> u64 {
     HalInstant::now().duration_since_epoch().as_millis() as u64
 }
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
+
+fn log_wifi_config() {
+    // These values are injected at compile time by firmware/digital/build.rs.
+    let ssid = env!("LOADLYNX_WIFI_SSID");
+    let hostname = option_env!("LOADLYNX_WIFI_HOSTNAME");
+    let static_ip = option_env!("LOADLYNX_WIFI_STATIC_IP");
+    let netmask = option_env!("LOADLYNX_WIFI_NETMASK");
+    let gateway = option_env!("LOADLYNX_WIFI_GATEWAY");
+    let dns = option_env!("LOADLYNX_WIFI_DNS");
+    let psk_present = option_env!("LOADLYNX_WIFI_PSK").is_some();
+
+    info!(
+        "Wi-Fi config: ssid=\"{}\", hostname={:?}, static_ip={:?}, netmask={:?}, gateway={:?}, dns={:?}, psk_present={}",
+        ssid, hostname, static_ip, netmask, gateway, dns, psk_present
+    );
+}
 
 /// Hook to release PAD‑JTAG so MTCK/MTDO (GPIO39/40) can be used for FAN_PWM/FAN_TACH.
 ///
@@ -449,13 +524,18 @@ struct DisplayResources {
     dc: Option<Output<'static>>,
     rst: Option<Output<'static>>,
     framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
+    #[cfg(not(feature = "net_http"))]
     previous_framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
 }
 
-struct TelemetryModel {
-    snapshot: UiSnapshot,
+pub struct TelemetryModel {
+    /// Cached snapshot used by the local UI renderer.
+    pub snapshot: UiSnapshot,
     last_uptime_ms: Option<u32>,
     last_rendered: Option<UiSnapshot>,
+    /// Last raw FastStatus frame observed from the analog side. This is used
+    /// by the optional HTTP API to expose a structured status view.
+    pub last_status: Option<FastStatus>,
 }
 
 impl TelemetryModel {
@@ -464,10 +544,14 @@ impl TelemetryModel {
             snapshot: UiSnapshot::demo(),
             last_uptime_ms: None,
             last_rendered: None,
+            last_status: None,
         }
     }
 
     fn update_from_status(&mut self, status: &FastStatus) {
+        // Keep a copy of the last raw FastStatus for external status views.
+        self.last_status = Some(*status);
+
         let remote_active = (status.state_flags & STATE_FLAG_REMOTE_ACTIVE) != 0;
 
         let remote_voltage = status.v_remote_mv as f32 / 1000.0;
@@ -508,6 +592,10 @@ impl TelemetryModel {
             }
         }
         self.last_uptime_ms = Some(status.uptime_ms);
+    }
+
+    fn set_wifi_ui_status(&mut self, status: ui::WifiUiStatus) {
+        self.snapshot.wifi_status = status;
     }
 
     /// Compute a change mask between the last rendered snapshot and the current
@@ -561,6 +649,9 @@ impl TelemetryModel {
             if mask.voltage_pair || mask.current_pair {
                 mask.bars = true;
             }
+            if prev.wifi_status != current.wifi_status {
+                mask.wifi_status = true;
+            }
         } else {
             // First-frame render: everything is considered dirty so that the
             // initial layout is fully drawn.
@@ -569,6 +660,7 @@ impl TelemetryModel {
             mask.current_pair = true;
             mask.telemetry_lines = true;
             mask.bars = true;
+            mask.wifi_status = true;
         }
 
         // 记录当前快照用于下一次 diff；只在这里 clone 一次，避免在栈上持有多份大对象。
@@ -685,6 +777,40 @@ async fn fan_task(
         }
 
         cooperative_delay_ms(FAN_CONTROL_PERIOD_MS).await;
+    }
+}
+
+/// Bridge Wi‑Fi connection state into the UI model so the display task can
+/// render a compact status indicator without performing async net locking.
+#[cfg(feature = "net_http")]
+#[embassy_executor::task]
+async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static TelemetryMutex) {
+    use ui::WifiUiStatus;
+
+    loop {
+        let ui_status = {
+            let guard = state.lock().await;
+            match guard.state {
+                net::WifiConnectionState::Connected => WifiUiStatus::Ok,
+                net::WifiConnectionState::Connecting => WifiUiStatus::Connecting,
+                net::WifiConnectionState::Idle => {
+                    if guard.last_error.is_some() {
+                        WifiUiStatus::Error
+                    } else {
+                        WifiUiStatus::Disabled
+                    }
+                }
+                net::WifiConnectionState::Error => WifiUiStatus::Error,
+            }
+        };
+
+        {
+            let mut guard = telemetry.lock().await;
+            guard.set_wifi_ui_status(ui_status);
+        }
+
+        // UI 刷新频率远低于 Wi‑Fi 事件频率，这里约 4Hz 轮询即可。
+        cooperative_delay_ms(250).await;
     }
 }
 
@@ -879,6 +1005,7 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
             y += rows;
         }
         info!("Color bars rendered");
+        #[cfg(not(feature = "net_http"))]
         ctx.previous_framebuffer
             .copy_from_slice(&ctx.framebuffer[..]);
     } else {
@@ -946,57 +1073,80 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
             let mut dirty_spans = 0usize;
 
             if ENABLE_DISPLAY_SPI_UPDATES {
-                let bytes_per_row = DISPLAY_WIDTH * 2;
-                let mut change_map = [false; DISPLAY_HEIGHT];
-                for row in 0..DISPLAY_HEIGHT {
-                    let offset = row * bytes_per_row;
-                    change_map[row] = ctx.framebuffer[offset..offset + bytes_per_row]
-                        != ctx.previous_framebuffer[offset..offset + bytes_per_row];
-                }
-
-                let mut row = 0usize;
-                while row < DISPLAY_HEIGHT {
-                    if !change_map[row] {
-                        row += 1;
-                        continue;
+                #[cfg(not(feature = "net_http"))]
+                {
+                    let bytes_per_row = DISPLAY_WIDTH * 2;
+                    let mut change_map = [false; DISPLAY_HEIGHT];
+                    for row in 0..DISPLAY_HEIGHT {
+                        let offset = row * bytes_per_row;
+                        change_map[row] = ctx.framebuffer[offset..offset + bytes_per_row]
+                            != ctx.previous_framebuffer[offset..offset + bytes_per_row];
                     }
 
-                    let start_row = row;
-                    row += 1;
-                    let mut gap_rows = 0usize;
+                    let mut row = 0usize;
                     while row < DISPLAY_HEIGHT {
-                        if change_map[row] {
-                            gap_rows = 0;
+                        if !change_map[row] {
                             row += 1;
-                        } else if gap_rows < DISPLAY_DIRTY_MERGE_GAP_ROWS {
-                            gap_rows += 1;
-                            row += 1;
-                        } else {
-                            break;
+                            continue;
                         }
+
+                        let start_row = row;
+                        row += 1;
+                        let mut gap_rows = 0usize;
+                        while row < DISPLAY_HEIGHT {
+                            if change_map[row] {
+                                gap_rows = 0;
+                                row += 1;
+                            } else if gap_rows < DISPLAY_DIRTY_MERGE_GAP_ROWS {
+                                gap_rows += 1;
+                                row += 1;
+                            } else {
+                                break;
+                            }
+                        }
+
+                        let rows_changed = row - start_row;
+                        let start_idx = start_row * bytes_per_row;
+                        let end_idx = start_idx + rows_changed * bytes_per_row;
+                        display
+                            .show_raw_data(
+                                0,
+                                start_row as u16,
+                                DISPLAY_WIDTH as u16,
+                                rows_changed as u16,
+                                &ctx.framebuffer[start_idx..end_idx],
+                            )
+                            .await
+                            .expect("frame push (dirty)");
+                        ctx.previous_framebuffer[start_idx..end_idx]
+                            .copy_from_slice(&ctx.framebuffer[start_idx..end_idx]);
+                        dirty_rows += rows_changed;
+                        dirty_spans += 1;
                     }
 
-                    let rows_changed = row - start_row;
-                    let start_idx = start_row * bytes_per_row;
-                    let end_idx = start_idx + rows_changed * bytes_per_row;
-                    display
-                        .show_raw_data(
-                            0,
-                            start_row as u16,
-                            DISPLAY_WIDTH as u16,
-                            rows_changed as u16,
-                            &ctx.framebuffer[start_idx..end_idx],
-                        )
-                        .await
-                        .expect("frame push (dirty)");
-                    ctx.previous_framebuffer[start_idx..end_idx]
-                        .copy_from_slice(&ctx.framebuffer[start_idx..end_idx]);
-                    dirty_rows += rows_changed;
-                    dirty_spans += 1;
+                    if dirty_spans >= DISPLAY_DIRTY_SPAN_FALLBACK {
+                        // 如果脏区 span 过多，则退回整帧推送；否则保持行级增量更新。
+                        display
+                            .show_raw_data(
+                                0,
+                                0,
+                                DISPLAY_WIDTH as u16,
+                                DISPLAY_HEIGHT as u16,
+                                &ctx.framebuffer[..],
+                            )
+                            .await
+                            .expect("frame push (full fallback)");
+                        ctx.previous_framebuffer
+                            .copy_from_slice(&ctx.framebuffer[..]);
+                        dirty_rows = DISPLAY_HEIGHT;
+                        dirty_spans = 1;
+                    }
                 }
 
-                if dirty_spans >= DISPLAY_DIRTY_SPAN_FALLBACK {
-                    // 如果脏区 span 过多，则退回整帧推送；否则保持行级增量更新。
+                #[cfg(feature = "net_http")]
+                {
+                    // 在启用 Wi‑Fi/HTTP 的构建中，为了节省 DRAM，仅保留单帧缓冲，
+                    // 这里退化为整帧推送。
                     display
                         .show_raw_data(
                             0,
@@ -1006,9 +1156,7 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                             &ctx.framebuffer[..],
                         )
                         .await
-                        .expect("frame push (full fallback)");
-                    ctx.previous_framebuffer
-                        .copy_from_slice(&ctx.framebuffer[..]);
+                        .expect("frame push (full)");
                     dirty_rows = DISPLAY_HEIGHT;
                     dirty_spans = 1;
                 }
@@ -1225,6 +1373,11 @@ async fn feed_decoder(
                         MSG_HELLO => match decode_hello_frame(&frame) {
                             Ok((_hdr, hello)) => {
                                 record_link_activity();
+                                // Cache the last fw_version so higher-level views (e.g. HTTP
+                                // identity endpoint) can expose a compact analog firmware
+                                // identifier without having to inspect UART traffic.
+                                ANALOG_FW_VERSION_RAW.store(hello.fw_version, Ordering::Relaxed);
+
                                 let first = !HELLO_SEEN.swap(true, Ordering::Relaxed);
                                 if first {
                                     LINK_UP.store(true, Ordering::Relaxed);
@@ -1397,12 +1550,28 @@ fn rate_limited_framing_warn(frame_len: usize, declared_payload_len: usize, drop
     }
 }
 
-#[main]
-fn main() -> ! {
+#[esp_rtos::main]
+async fn main(spawner: Spawner) {
     let peripherals = hal::init(hal::Config::default());
 
+    #[cfg(feature = "net_http")]
+    {
+        // Reserve reclaimed bootloader RAM as heap for Wi‑Fi + HTTP stack
+        // allocations, avoiding additional pressure on the main DRAM region.
+        esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
+    }
+
+    // Initialize the preemptive scheduler used by esp-radio + embassy-net
+    // before any Wi‑Fi/HTTP tasks are spawned.
+    let timg0 = TimerGroup::new(peripherals.TIMG0);
+    esp_rtos::start(timg0.timer0);
+
     info!("LoadLynx digital firmware version: {}", FW_VERSION);
+    log_wifi_config();
     info!("LoadLynx digital alive; initializing local peripherals");
+    // Lightweight probe to help verify that application logs are reaching the
+    // same serial monitor path as the ROM/bootloader output.
+    esp_println::println!("digital-log-probe: main() started, peripherals initialized");
 
     // 禁用 PAD‑JTAG，将 MTCK/MTDO (GPIO39/40) 释放为普通 GPIO，
     // 以便下文配置 FAN_PWM/FAN_TACH（GPIO40 仅预留，不在本任务中使用）。
@@ -1501,6 +1670,7 @@ fn main() -> ! {
         .expect("fan duty default");
 
     let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
+    #[cfg(not(feature = "net_http"))]
     let prev_framebuffer = &mut PREVIOUS_FRAMEBUFFER
         .init_with(|| Align32([0; FRAMEBUFFER_LEN]))
         .0;
@@ -1511,6 +1681,7 @@ fn main() -> ! {
         dc: Some(dc),
         rst: Some(rst),
         framebuffer,
+        #[cfg(not(feature = "net_http"))]
         previous_framebuffer: prev_framebuffer,
     });
 
@@ -1632,65 +1803,81 @@ fn main() -> ! {
 
     let uart1 = uart_async.map(|u| UART1_CELL.init(u));
 
-    let executor = EXECUTOR.init(Executor::new());
-    executor.run(|spawner| {
-        info!("spawning ticker task");
-        spawner.spawn(ticker()).expect("ticker spawn");
-        info!("spawning diag task");
-        spawner.spawn(diag_task()).expect("diag_task spawn");
+    info!("spawning ticker task");
+    spawner.spawn(ticker()).expect("ticker spawn");
+    info!("spawning diag task");
+    spawner.spawn(diag_task()).expect("diag_task spawn");
 
-        #[cfg(not(feature = "mock_setpoint"))]
-        {
-            info!("spawning encoder task");
-            spawner
-                .spawn(encoder_task(encoder_unit, encoder_counter, encoder_button))
-                .expect("encoder_task spawn");
-        }
+    #[cfg(not(feature = "mock_setpoint"))]
+    {
+        info!("spawning encoder task");
+        spawner
+            .spawn(encoder_task(encoder_unit, encoder_counter, encoder_button))
+            .expect("encoder_task spawn");
+    }
 
-        #[cfg(feature = "mock_setpoint")]
-        {
-            info!("spawning mock setpoint task");
-            spawner
-                .spawn(mock_setpoint_task())
-                .expect("mock_setpoint_task spawn");
-        }
-        info!("spawning display task");
+    #[cfg(feature = "mock_setpoint")]
+    {
+        info!("spawning mock setpoint task");
         spawner
-            .spawn(display_task(resources, telemetry))
-            .expect("display_task spawn");
-        info!("spawning fan task");
-        spawner
-            .spawn(fan_task(telemetry, fan_channel))
-            .expect("fan_task spawn");
-        if ENABLE_UART_LINK_TASK {
-            if ENABLE_UART_UHCI_DMA {
-                let uhci_rx = uhci_rx_opt.take().expect("uhci rx missing");
-                let dma_rx = uhci_dma_buf_opt.take().expect("uhci dma buf missing");
-                info!("spawning uart link task (UHCI DMA)");
-                spawner
-                    .spawn(uart_link_task_dma(uhci_rx, dma_rx, telemetry))
-                    .expect("uart_link_task_dma spawn");
-            } else {
-                let uart1 = uart1.expect("uart1 missing");
-                info!("spawning uart link task (async no-DMA)");
-                spawner
-                    .spawn(uart_link_task(uart1, telemetry))
-                    .expect("uart_link_task spawn");
-            }
-        } else {
-            info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
-        }
-        info!("spawning stats task");
-        spawner.spawn(stats_task()).expect("stats_task spawn");
-        if let Some(uhci_tx) = uhci_tx_opt.take() {
-            info!("spawning setpoint tx task (UHCI TX, 20Hz fixed target)");
+            .spawn(mock_setpoint_task())
+            .expect("mock_setpoint_task spawn");
+    }
+    info!("spawning display task");
+    spawner
+        .spawn(display_task(resources, telemetry))
+        .expect("display_task spawn");
+    info!("spawning fan task");
+    spawner
+        .spawn(fan_task(telemetry, fan_channel))
+        .expect("fan_task spawn");
+    if ENABLE_UART_LINK_TASK {
+        if ENABLE_UART_UHCI_DMA {
+            let uhci_rx = uhci_rx_opt.take().expect("uhci rx missing");
+            let dma_rx = uhci_dma_buf_opt.take().expect("uhci dma buf missing");
+            info!("spawning uart link task (UHCI DMA)");
             spawner
-                .spawn(setpoint_tx_task(uhci_tx))
-                .expect("setpoint_tx_task spawn");
+                .spawn(uart_link_task_dma(uhci_rx, dma_rx, telemetry))
+                .expect("uart_link_task_dma spawn");
         } else {
-            warn!("setpoint tx task not started (UHCI TX unavailable)");
+            let uart1 = uart1.expect("uart1 missing");
+            info!("spawning uart link task (async no-DMA)");
+            spawner
+                .spawn(uart_link_task(uart1, telemetry))
+                .expect("uart_link_task spawn");
         }
-    })
+    } else {
+        info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
+    }
+    info!("spawning stats task");
+    spawner.spawn(stats_task()).expect("stats_task spawn");
+    if let Some(uhci_tx) = uhci_tx_opt.take() {
+        info!("spawning setpoint tx task (UHCI TX, 20Hz fixed target)");
+        spawner
+            .spawn(setpoint_tx_task(uhci_tx))
+            .expect("setpoint_tx_task spawn");
+    } else {
+        warn!("setpoint tx task not started (UHCI TX unavailable)");
+    }
+
+    // Wi‑Fi + HTTP server: runs as a separate Embassy task tree. Failures are
+    // logged and retried internally; UART/UI functionality must not depend
+    // on Wi‑Fi availability.
+    #[cfg(feature = "net_http")]
+    {
+        let wifi_state = net::init_wifi_state();
+        info!("spawning Wi-Fi + HTTP net tasks");
+        net::spawn_wifi_and_http(&spawner, peripherals.WIFI, wifi_state, telemetry);
+        info!("spawning Wi-Fi UI bridge task");
+        spawner
+            .spawn(wifi_ui_task(wifi_state, telemetry))
+            .expect("wifi_ui_task spawn");
+    }
+
+    // Keep the async main task alive; all real work runs in spawned tasks.
+    loop {
+        yield_now().await;
+    }
 }
 
 // 周期性聚合统计，启动后每 5 秒打印一次（便于 DMA 验证阶段观察计数）
@@ -1904,6 +2091,14 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
 
     loop {
         yield_now().await;
+
+        // Drain at most one pending soft-reset request per loop iteration.
+        if let Some(reason) = crate::dequeue_soft_reset() {
+            let soft_seq = seq;
+            seq = seq.wrapping_add(1);
+            send_soft_reset_one_shot(&mut uhci_tx, soft_seq, &mut raw, &mut slip, reason).await;
+        }
+
         let now = now_ms32();
         let desired_target =
             clamp_target_ma(ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA);
@@ -2266,6 +2461,54 @@ async fn send_setpoint_frame(
         }
     }
 }
+
+async fn send_soft_reset_one_shot(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    reason: SoftResetReason,
+) {
+    let reset = SoftReset {
+        reason,
+        timestamp_ms: now_ms32(),
+    };
+
+    let frame_len = match encode_soft_reset_frame(seq, &reset, false, raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("soft_reset(one-shot) encode error: {:?}", err);
+            return;
+        }
+    };
+    let slip_len = match slip_encode(&raw[..frame_len], slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("soft_reset(one-shot) slip_encode error: {:?}", err);
+            return;
+        }
+    };
+
+    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+        Ok(written) if written == slip_len => {
+            let _ = uhci_tx.uart_tx.flush_async().await;
+            info!(
+                "soft_reset(one-shot) frame sent seq={} reason={:?} len={} slip_len={}",
+                seq, reset.reason, frame_len, slip_len
+            );
+        }
+        Ok(written) => {
+            warn!(
+                "soft_reset(one-shot) short write: written={} len={} (seq={})",
+                written, slip_len, seq
+            );
+        }
+        Err(err) => {
+            warn!("soft_reset(one-shot) write error: {:?}", err);
+        }
+    }
+}
+
 async fn send_soft_reset_handshake(
     uhci_tx: &mut uhci::UhciTx<'static, Async>,
     seq: u8,
