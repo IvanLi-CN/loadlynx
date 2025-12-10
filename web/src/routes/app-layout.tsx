@@ -83,35 +83,72 @@ export function AppLayout() {
             </li>
 
             {deviceId ? (
-              <li>
-                <Link
-                  to="/$deviceId/cc"
-                  params={{ deviceId }}
-                  activeProps={{ className: "active" }}
-                  className="rounded-box"
-                >
-                  CC Control
-                </Link>
-              </li>
+              <>
+                <li>
+                  <Link
+                    to="/$deviceId/cc"
+                    params={{ deviceId }}
+                    activeProps={{ className: "active" }}
+                    className="rounded-box"
+                  >
+                    CC Control
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to="/$deviceId/status"
+                    params={{ deviceId }}
+                    activeProps={{ className: "active" }}
+                    className="rounded-box"
+                  >
+                    Status
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to="/$deviceId/settings"
+                    params={{ deviceId }}
+                    activeProps={{ className: "active" }}
+                    className="rounded-box"
+                  >
+                    Settings
+                  </Link>
+                </li>
+              </>
             ) : (
-              <li>
-                <button
-                  type="button"
-                  disabled
-                  className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
-                >
-                  CC Control (select device)
-                </button>
-              </li>
+              <>
+                <li>
+                  <button
+                    type="button"
+                    disabled
+                    className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                  >
+                    CC Control
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    disabled
+                    className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                  >
+                    Status
+                  </button>
+                </li>
+                <li>
+                  <button
+                    type="button"
+                    disabled
+                    className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                  >
+                    Settings
+                  </button>
+                </li>
+              </>
             )}
 
             <li className="menu-title mt-6 uppercase tracking-wider opacity-70 text-xs">
               Other functions
-            </li>
-            <li>
-              <span className="pointer-events-none opacity-50 px-4 py-2 block">
-                status / settings (placeholders)
-              </span>
             </li>
           </ul>
         </aside>

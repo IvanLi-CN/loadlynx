@@ -6,6 +6,8 @@ import {
 } from "@tanstack/react-router";
 import { AppLayout } from "./routes/app-layout.tsx";
 import { DeviceCcRoute } from "./routes/device-cc.tsx";
+import { DeviceSettingsRoute } from "./routes/device-settings.tsx";
+import { DeviceStatusRoute } from "./routes/device-status.tsx";
 import { DevicesRoute } from "./routes/devices.tsx";
 
 export interface RouterContext {
@@ -40,31 +42,13 @@ const deviceCcRoute = createRoute({
 const deviceStatusRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "$deviceId/status",
-  component: () => (
-    <div
-      style={{
-        fontSize: "0.9rem",
-        color: "#9ca3af",
-      }}
-    >
-      Device status view (placeholder)
-    </div>
-  ),
+  component: DeviceStatusRoute,
 });
 
 const deviceSettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "$deviceId/settings",
-  component: () => (
-    <div
-      style={{
-        fontSize: "0.9rem",
-        color: "#9ca3af",
-      }}
-    >
-      Device settings view (placeholder)
-    </div>
-  ),
+  component: DeviceSettingsRoute,
 });
 
 const routeTree = rootRoute.addChildren([
