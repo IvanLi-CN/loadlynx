@@ -1,0 +1,41 @@
+@import "tailwindcss";
+@plugin "daisyui";
+
+@theme {
+    /* Override default dark theme colors to match original design */
+    --color-base-100: #020617;
+    /* Slate 950 */
+    --color-base-200: #0f172a;
+    /* Slate 900 */
+    --color-base-300: #1e293b;
+    /* Slate 800 */
+    --color-base-content: #e5e7eb;
+    /* Gray 200 */
+
+    --color-primary: #38bdf8;
+    /* Sky 400 */
+    --color-primary-content: #020617;
+
+    --color-secondary: #0ea5e9;
+    /* Sky 500 */
+    --color-secondary-content: #020617;
+
+    --color-accent: #38bdf8;
+    --color-accent-content: #020617;
+
+    --color-neutral: #1e293b;
+    --color-neutral-content: #94a3b8;
+
+    --color-info: #0ea5e9;
+    --color-success: #22c55e;
+    --color-warning: #f59e0b;
+    --color-error: #ef4444;
+
+    --radius-selector: 0.375rem;
+    --radius-field: 0.375rem;
+    --radius-box: 0.5rem;
+    --radius-btn: 0.375rem;
+}
+
+/* Fix for range input in daisyUI 5 + Tailwind 4 if needed, 
+   but standard range-primary should work with the mapped colors */

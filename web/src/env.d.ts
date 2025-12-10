@@ -1,3 +1,4 @@
+/// <reference types="vite/client" />
 interface ImportMetaEnv {
   readonly DEV: boolean;
   readonly VITE_ENABLE_MOCK_BACKEND?: string;

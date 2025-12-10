@@ -6,7 +6,7 @@
     "useIgnoreFile": true
   },
   "files": {
-    "includes": ["**", "!!**/dist"]
+    "includes": ["**", "!!**/dist", "!!src/index.css"]
   },
   "formatter": {
     "enabled": true,
@@ -24,6 +24,27 @@
       "quoteStyle": "double"
     }
   },
+  "css": {
+    "parser": {
+      "cssModules": true,
+      "allowWrongLineComments": false
+    },
+    "linter": {
+      "enabled": true
+    }
+  },
+  "overrides": [
+    {
+      "includes": ["**/*.css"],
+      "linter": {
+        "rules": {
+          "suspicious": {
+            "noUnknownAtRules": "off"
+          }
+        }
+      }
+    }
+  ],
   "assist": {
     "enabled": true,
     "actions": {

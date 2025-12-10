@@ -15,230 +15,108 @@ export function AppLayout() {
       : undefined;
 
   return (
-    <div
-      style={{
-        minHeight: "100vh",
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: "#020617",
-        color: "#e5e7eb",
-        fontFamily: "-apple-system, BlinkMacSystemFont, system-ui, sans-serif",
-      }}
-    >
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          padding: "0.75rem 1.5rem",
-          borderBottom: "1px solid #1f2937",
-          background:
-            "radial-gradient(circle at top, rgba(56,189,248,0.12), transparent 55%)",
-        }}
-      >
-        <div>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: "1.2rem",
-              letterSpacing: "0.03em",
-            }}
-          >
-            LoadLynx Web Console
-          </h1>
-          <p
-            style={{
-              margin: 0,
-              marginTop: "0.1rem",
-              fontSize: "0.8rem",
-              color: "#9ca3af",
-            }}
-          >
-            Network device manager &amp; CC control
-          </p>
+    <div className="flex flex-col min-h-screen bg-base-100 text-base-content antialiased">
+      <header className="navbar bg-base-200 border-b border-base-300 px-6 py-2">
+        <div className="navbar-start">
+          <div className="flex flex-col items-start">
+            <h1 className="text-xl font-semibold px-2">LoadLynx Web Console</h1>
+            <span className="text-xs text-base-content/70 px-2">
+              Network device manager & CC control
+            </span>
+          </div>
         </div>
 
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.75rem",
-            minWidth: 0,
-          }}
-        >
-          <label
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              fontSize: "0.75rem",
-            }}
-          >
-            <span
-              style={{
-                marginBottom: "0.1rem",
-                color: "#9ca3af",
-              }}
-            >
-              Current device
-            </span>
-            <select
-              disabled
-              style={{
-                minWidth: "220px",
-                padding: "0.25rem 0.5rem",
-                borderRadius: "0.375rem",
-                border: "1px solid #374151",
-                backgroundColor: "#020617",
-                color: "#e5e7eb",
-                fontSize: "0.8rem",
-              }}
-            >
-              <option>
-                {currentDevice
-                  ? `${currentDevice.name} (${currentDevice.id})`
-                  : "No device selected (device selector)"}
-              </option>
-            </select>
+        <div className="navbar-end flex gap-4">
+          <label className="form-control w-full max-w-[250px]">
+            <div className="label pt-0 pb-1">
+              <span className="label-text-alt text-base-content/70">
+                Current device
+              </span>
+            </div>
+            <div className="join">
+              <select
+                disabled
+                className="select select-bordered select-sm w-full join-item text-xs"
+              >
+                <option>
+                  {currentDevice
+                    ? `${currentDevice.name} (${currentDevice.id})`
+                    : "No device selected (device selector)"}
+                </option>
+              </select>
+              <button
+                type="button"
+                className="btn btn-sm join-item btn-square"
+                disabled
+              >
+                ▼
+              </button>
+            </div>
           </label>
 
-          <Link
-            to="/devices"
-            activeProps={{
-              style: { backgroundColor: "#0f172a" },
-            }}
-            style={{
-              padding: "0.4rem 0.8rem",
-              borderRadius: "999px",
-              border: "1px solid #374151",
-              fontSize: "0.8rem",
-              textDecoration: "none",
-              color: "#e5e7eb",
-              backgroundColor: "#020617",
-            }}
-          >
-            Add device
-          </Link>
+          <div className="flex items-end pb-1">
+            <Link
+              to="/devices"
+              activeProps={{ className: "btn-active" }}
+              className="btn btn-sm btn-outline rounded-full"
+            >
+              Add device
+            </Link>
+          </div>
         </div>
       </header>
 
-      <div
-        style={{
-          display: "flex",
-          flex: 1,
-          minHeight: 0,
-        }}
-      >
-        <nav
-          aria-label="Primary"
-          style={{
-            width: "220px",
-            borderRight: "1px solid #1f2937",
-            padding: "1rem 1.25rem",
-            boxSizing: "border-box",
-          }}
-        >
-          <div
-            style={{
-              marginBottom: "0.75rem",
-              fontSize: "0.75rem",
-              textTransform: "uppercase",
-              letterSpacing: "0.08em",
-              color: "#6b7280",
-            }}
-          >
-            Navigation
-          </div>
-
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.25rem",
-              fontSize: "0.85rem",
-            }}
-          >
-            <Link
-              to="/devices"
-              activeProps={{
-                style: {
-                  backgroundColor: "#0f172a",
-                  color: "#38bdf8",
-                },
-              }}
-              style={{
-                display: "block",
-                padding: "0.4rem 0.6rem",
-                borderRadius: "0.375rem",
-                textDecoration: "none",
-                color: "#e5e7eb",
-              }}
-            >
-              Devices
-            </Link>
+      <div className="flex flex-1 overflow-hidden">
+        <aside className="w-64 bg-base-200/50 border-r border-base-300 overflow-y-auto">
+          <ul className="menu p-4 w-full gap-1">
+            <li className="menu-title uppercase tracking-wider opacity-70 text-xs">
+              Navigation
+            </li>
+            <li>
+              <Link
+                to="/devices"
+                activeProps={{ className: "active" }}
+                className="rounded-box"
+              >
+                Devices
+              </Link>
+            </li>
 
             {deviceId ? (
-              <Link
-                to="/$deviceId/cc"
-                params={{ deviceId }}
-                activeProps={{
-                  style: {
-                    backgroundColor: "#0f172a",
-                    color: "#38bdf8",
-                  },
-                }}
-                style={{
-                  display: "block",
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: "0.375rem",
-                  textDecoration: "none",
-                  color: "#e5e7eb",
-                }}
-              >
-                CC Control
-              </Link>
+              <li>
+                <Link
+                  to="/$deviceId/cc"
+                  params={{ deviceId }}
+                  activeProps={{ className: "active" }}
+                  className="rounded-box"
+                >
+                  CC Control
+                </Link>
+              </li>
             ) : (
-              <button
-                type="button"
-                disabled
-                style={{
-                  display: "block",
-                  width: "100%",
-                  padding: "0.4rem 0.6rem",
-                  borderRadius: "0.375rem",
-                  border: "1px dashed #1f2937",
-                  backgroundColor: "transparent",
-                  color: "#6b7280",
-                  fontSize: "0.85rem",
-                  textAlign: "left",
-                  cursor: "not-allowed",
-                }}
-              >
-                CC Control (select device)
-              </button>
+              <li>
+                <button
+                  type="button"
+                  disabled
+                  className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                >
+                  CC Control (select device)
+                </button>
+              </li>
             )}
 
-            <div
-              style={{
-                marginTop: "0.75rem",
-                fontSize: "0.75rem",
-                color: "#6b7280",
-              }}
-            >
+            <li className="menu-title mt-6 uppercase tracking-wider opacity-70 text-xs">
               Other functions
-              <div style={{ marginTop: "0.25rem" }}>
-                <span>status / settings (placeholders)</span>
-              </div>
-            </div>
-          </div>
-        </nav>
+            </li>
+            <li>
+              <span className="pointer-events-none opacity-50 px-4 py-2 block">
+                status / settings (placeholders)
+              </span>
+            </li>
+          </ul>
+        </aside>
 
-        <main
-          style={{
-            flex: 1,
-            padding: "1.25rem 1.5rem",
-            boxSizing: "border-box",
-          }}
-        >
+        <main className="flex-1 p-6 overflow-y-auto bg-base-100">
           <Outlet />
         </main>
       </div>

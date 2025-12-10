@@ -226,61 +226,21 @@ export function DeviceCcRoute() {
       firstHttpError.code === "UNAVAILABLE");
 
   if (devicesQuery.isLoading) {
-    return (
-      <p
-        style={{
-          fontSize: "0.9rem",
-          color: "#9ca3af",
-        }}
-      >
-        Loading devices...
-      </p>
-    );
+    return <p className="text-sm text-base-content/60">Loading devices...</p>;
   }
 
   if (!device) {
     return (
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "0.75rem",
-          maxWidth: "640px",
-        }}
-      >
-        <h2
-          style={{
-            margin: 0,
-            fontSize: "1.1rem",
-          }}
-        >
-          Device not found
-        </h2>
-        <p
-          style={{
-            margin: 0,
-            fontSize: "0.9rem",
-            color: "#9ca3af",
-          }}
-        >
-          The requested device ID <code>{deviceId}</code> does not exist in the
-          local registry. Please return to the device list and add or select a
-          device.
+      <div className="flex flex-col gap-4 max-w-xl">
+        <h2 className="text-xl font-bold">Device not found</h2>
+        <p className="text-sm text-base-content/70">
+          The requested device ID{" "}
+          <code className="font-mono bg-base-200 px-1 rounded">{deviceId}</code>{" "}
+          does not exist in the local registry. Please return to the device list
+          and add or select a device.
         </p>
         <div>
-          <Link
-            to="/devices"
-            style={{
-              display: "inline-flex",
-              alignItems: "center",
-              padding: "0.4rem 0.8rem",
-              borderRadius: "0.375rem",
-              border: "1px solid #4b5563",
-              color: "#e5e7eb",
-              textDecoration: "none",
-              fontSize: "0.9rem",
-            }}
-          >
+          <Link to="/devices" className="btn btn-sm btn-outline">
             Back to devices
           </Link>
         </div>
@@ -348,111 +308,44 @@ export function DeviceCcRoute() {
   };
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "0.9rem",
-        maxWidth: "960px",
-        fontFamily: MONO_FONT_FAMILY,
-        fontVariantNumeric: "tabular-nums",
-      }}
-    >
+    <div className="flex flex-col gap-6 max-w-5xl font-mono tabular-nums">
       {/* Top context: device + mode strip + link status */}
-      <header
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          gap: "0.8rem",
-          alignItems: "flex-start",
-        }}
-      >
+      <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h2
-            style={{
-              margin: 0,
-              fontSize: "1.05rem",
-            }}
-          >
-            Device control
-          </h2>
-          <p
-            style={{
-              margin: "0.25rem 0 0",
-              fontSize: "0.85rem",
-              color: "#9ca3af",
-            }}
-          >
+          <h2 className="text-lg font-bold">Device control</h2>
+          <p className="mt-1 text-sm text-base-content/70">
             Shared control surface for all operating modes. This view focuses on
             CC behaviour while keeping the layout aligned with the hardware main
             display.
           </p>
-          <p
-            style={{
-              margin: "0.25rem 0 0",
-              fontSize: "0.75rem",
-              color: "#6b7280",
-            }}
-          >
+          <p className="mt-1 text-xs text-base-content/60">
             Device name:{" "}
-            <strong style={{ fontWeight: 500 }}>{device.name}</strong>
+            <strong className="font-medium text-base-content">
+              {device.name}
+            </strong>
             {identity ? (
               <>
                 {" "}
-                · IP: <code>{identity.network.ip}</code>
+                · IP:{" "}
+                <code className="font-mono bg-base-200 px-1 rounded text-xs">
+                  {identity.network.ip}
+                </code>
               </>
             ) : null}
           </p>
         </div>
-        <div
-          style={{
-            display: "flex",
-            flexDirection: "column",
-            alignItems: "flex-end",
-            gap: "0.4rem",
-            fontSize: "0.78rem",
-            color: "#9ca3af",
-          }}
-        >
-          <div
-            style={{
-              display: "flex",
-              gap: "0.4rem",
-              alignItems: "center",
-            }}
-          >
-            <span
-              style={{
-                fontSize: "0.75rem",
-                textTransform: "uppercase",
-                letterSpacing: "0.08em",
-                color: "#6b7280",
-              }}
-            >
+        <div className="flex flex-col items-end gap-2 text-xs text-base-content/70">
+          <div className="flex items-center gap-2">
+            <span className="uppercase tracking-wider text-base-content/50 text-[10px]">
               Mode
             </span>
-            <div
-              style={{
-                display: "inline-flex",
-                gap: "0.25rem",
-              }}
-            >
+            <div className="flex gap-1">
               {["CC", "CV", "CP", "CR"].map((mode) => {
                 const isActive = mode === "CC";
                 return (
                   <span
                     key={mode}
-                    style={{
-                      padding: "0.15rem 0.5rem",
-                      borderRadius: "999px",
-                      border: isActive
-                        ? "1px solid #38bdf8"
-                        : "1px solid #374151",
-                      backgroundColor: isActive ? "#0f172a" : "#020617",
-                      fontSize: "0.75rem",
-                      color: isActive ? "#e0f2fe" : "#9ca3af",
-                      opacity: mode === "CC" ? 1 : 0.55,
-                    }}
+                    className={`badge badge-sm ${isActive ? "badge-primary" : "badge-ghost opacity-50"}`}
                   >
                     {mode}
                   </span>
@@ -461,21 +354,15 @@ export function DeviceCcRoute() {
             </div>
           </div>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.2rem",
-              textAlign: "right",
-            }}
-          >
+          <div className="flex flex-col gap-1 text-right">
             <div>
               Link:{" "}
               <span
-                style={{
-                  color: status?.link_up ? "#22c55e" : "#f97316",
-                  fontWeight: 500,
-                }}
+                className={
+                  status?.link_up
+                    ? "text-success font-medium"
+                    : "text-error font-medium"
+                }
               >
                 {status?.link_up ? "up" : "down"}
               </span>
@@ -485,16 +372,14 @@ export function DeviceCcRoute() {
             </div>
             {identity ? (
               <div>
-                API version: <code>{identity.capabilities.api_version}</code>
+                API version:{" "}
+                <span className="font-mono">
+                  {identity.capabilities.api_version}
+                </span>
               </div>
             ) : null}
             {status && status.fault_flags_decoded.length > 0 ? (
-              <div
-                style={{
-                  color: "#f97316",
-                  fontSize: "0.75rem",
-                }}
-              >
+              <div className="text-error font-medium">
                 Faults: {status.fault_flags_decoded.join(", ")}
               </div>
             ) : null}
@@ -505,296 +390,209 @@ export function DeviceCcRoute() {
       {topError ? (
         <section
           aria-label="HTTP error"
-          style={{
-            marginTop: "0.25rem",
-            padding: "0.5rem 0.75rem",
-            borderRadius: "0.5rem",
-            border: "1px solid #7f1d1d",
-            background:
-              "linear-gradient(135deg, rgba(127,29,29,0.35), rgba(15,23,42,0.9))",
-            color: "#fecaca",
-            fontSize: "0.8rem",
-          }}
+          className="alert alert-error shadow-lg rounded-lg"
         >
-          <div>
-            <strong style={{ fontWeight: 600 }}>HTTP error:</strong>{" "}
-            {topError.summary}
+          <svg
+            xmlns="http://www.w3.org/2000/svg"
+            className="stroke-current shrink-0 h-6 w-6"
+            fill="none"
+            viewBox="0 0 24 24"
+            role="img"
+            aria-label="Error icon"
+          >
+            <title>Error</title>
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              strokeWidth="2"
+              d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
+            />
+          </svg>
+          <div className="text-sm">
+            <div className="font-bold">HTTP error: {topError.summary}</div>
+            {topError.hint ? (
+              <div className="mt-1 opacity-90">{topError.hint}</div>
+            ) : null}
+            {isLinkDownLike ? (
+              <div className="mt-1 opacity-90">
+                Link down / Wi‑Fi unavailable — telemetry and control updates
+                may be stale until connectivity recovers.
+              </div>
+            ) : null}
           </div>
-          {topError.hint ? (
-            <div
-              style={{
-                marginTop: "0.15rem",
-                color: "#fed7d7",
-              }}
-            >
-              {topError.hint}
-            </div>
-          ) : null}
-          {isLinkDownLike ? (
-            <div
-              style={{
-                marginTop: "0.15rem",
-                color: "#fed7d7",
-              }}
-            >
-              Link down / Wi‑Fi unavailable — telemetry and control updates may
-              be stale until connectivity recovers.
-            </div>
-          ) : null}
         </section>
       ) : null}
 
-      <section
-        aria-label="Main display"
-        style={{
-          padding: "0.4rem 0.25rem 0.4rem",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "center",
-          }}
-        >
-          <MainDisplayCanvas
-            remoteVoltageV={remoteVoltageV}
-            localVoltageV={localVoltageV}
-            localCurrentA={localCurrentA}
-            remoteCurrentA={remoteCurrentA}
-            totalCurrentA={totalCurrentA}
-            totalPowerW={totalPowerW}
-            ccTargetA={(cc?.target_i_ma ?? 0) / 1_000}
-            uptimeSeconds={uptimeSeconds}
-            tempC={tempC}
-          />
-        </div>
+      <section aria-label="Main display" className="flex justify-center">
+        <MainDisplayCanvas
+          remoteVoltageV={remoteVoltageV}
+          localVoltageV={localVoltageV}
+          localCurrentA={localCurrentA}
+          remoteCurrentA={remoteCurrentA}
+          totalCurrentA={totalCurrentA}
+          totalPowerW={totalPowerW}
+          ccTargetA={(cc?.target_i_ma ?? 0) / 1_000}
+          uptimeSeconds={uptimeSeconds}
+          tempC={tempC}
+        />
       </section>
 
       <section
         aria-label="CC control"
-        style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(0, 1.8fr) minmax(0, 1.1fr)",
-          gap: "0.75rem",
-          alignItems: "flex-start",
-          marginTop: "0.2rem",
-        }}
+        className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start"
       >
-        <div
-          style={{
-            padding: "0.7rem 0.9rem",
-            borderRadius: "0.6rem",
-            border: "1px solid #111827",
-            backgroundColor: "#020617",
-          }}
-        >
-          <h3
-            style={{
-              margin: 0,
-              fontSize: "0.9rem",
-              marginBottom: "0.6rem",
-            }}
-          >
-            Setpoint
-          </h3>
+        <div className="card bg-base-100 shadow-sm border border-base-200 lg:col-span-2">
+          <div className="card-body p-6">
+            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+              Setpoint
+            </h3>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.9rem",
-            }}
-          >
-            <label
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.2rem",
-                fontSize: "0.8rem",
-              }}
-            >
-              <span>
-                Target current{" "}
-                <span
-                  style={{
-                    color: "#9ca3af",
-                    fontSize: "0.78rem",
+            <div className="flex flex-col gap-6">
+              <div className="form-control">
+                <label className="label" htmlFor="input-target-current">
+                  <span className="label-text">Target current</span>
+                  <span className="label-text-alt font-mono">
+                    {(draftTargetIMa / 1_000).toFixed(2)} A · {draftTargetIMa}{" "}
+                    mA
+                  </span>
+                </label>
+                <input
+                  id="input-target-current"
+                  type="range"
+                  min={0}
+                  max={maxIMa}
+                  step={50}
+                  value={draftTargetIMa}
+                  onChange={(event) => {
+                    setDraftTargetIMa(Number.parseInt(event.target.value, 10));
                   }}
-                >
-                  ({(draftTargetIMa / 1_000).toFixed(2)} A · {draftTargetIMa}{" "}
-                  mA)
-                </span>
-              </span>
-              <input
-                type="range"
-                min={0}
-                max={maxIMa}
-                step={50}
-                value={draftTargetIMa}
-                onChange={(event) => {
-                  setDraftTargetIMa(Number.parseInt(event.target.value, 10));
-                }}
-              />
-            </label>
+                  className="range range-primary range-sm"
+                />
+              </div>
 
-            <label
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: "0.2rem",
-                fontSize: "0.8rem",
-              }}
-            >
-              <span>
-                Max power limit{" "}
-                <span
-                  style={{
-                    color: "#9ca3af",
-                    fontSize: "0.8rem",
+              <div className="form-control">
+                <label className="label" htmlFor="input-max-power">
+                  <span className="label-text">Max power limit</span>
+                  <span className="label-text-alt font-mono">
+                    {(draftMaxPMw / 1_000).toFixed(1)} W · {draftMaxPMw} mW
+                  </span>
+                </label>
+                <input
+                  id="input-max-power"
+                  type="range"
+                  min={10_000}
+                  max={maxPMw}
+                  step={1_000}
+                  value={draftMaxPMw}
+                  onChange={(event) => {
+                    setDraftMaxPMw(Number.parseInt(event.target.value, 10));
                   }}
-                >
-                  ({(draftMaxPMw / 1_000).toFixed(1)} W · {draftMaxPMw} mW)
-                </span>
-              </span>
-              <input
-                type="range"
-                min={10_000}
-                max={maxPMw}
-                step={1_000}
-                value={draftMaxPMw}
-                onChange={(event) => {
-                  setDraftMaxPMw(Number.parseInt(event.target.value, 10));
-                }}
-              />
-            </label>
+                  className="range range-sm"
+                />
+              </div>
+            </div>
           </div>
         </div>
 
-        <div
-          style={{
-            padding: "0.7rem 0.9rem",
-            borderRadius: "0.6rem",
-            border: "1px solid #111827",
-            backgroundColor: "#020617",
-          }}
-        >
-          <h3
-            style={{
-              margin: 0,
-              fontSize: "0.9rem",
-              marginBottom: "0.6rem",
-            }}
-          >
-            Output &amp; limits
-          </h3>
+        <div className="card bg-base-100 shadow-sm border border-base-200">
+          <div className="card-body p-6">
+            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+              Output &amp; limits
+            </h3>
 
-          <div
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.55rem",
-              fontSize: "0.8rem",
-            }}
-          >
-            <label
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: "0.5rem",
-              }}
-            >
-              <input
-                type="checkbox"
-                checked={draftEnable}
-                onChange={(event) => {
-                  setDraftEnable(event.target.checked);
-                }}
-              />
-              <span>
-                Enable output{" "}
-                <span
-                  style={{
-                    color: "#9ca3af",
-                    fontSize: "0.78rem",
-                  }}
-                >
-                  (current firmware maps disable to a zero setpoint)
-                </span>
-              </span>
-            </label>
-
-            <div
-              style={{
-                marginTop: "0.25rem",
-                fontSize: "0.78rem",
-                color: "#9ca3af",
-              }}
-            >
-              Current state:{" "}
-              <strong style={{ fontWeight: 500 }}>
-                {cc?.enable ? "enabled" : "disabled"}
-              </strong>{" "}
-              · target {(cc?.target_i_ma ?? 0) / 1_000} A · limit{" "}
-              {(cc?.limit_profile.max_p_mw ?? 0) / 1_000} W
-            </div>
-
-            {updateCcMutation.isError && updateCcMutation.error ? (
-              <div
-                style={{
-                  marginTop: "0.35rem",
-                  padding: "0.35rem 0.55rem",
-                  borderRadius: "0.4rem",
-                  border: "1px solid #7f1d1d",
-                  backgroundColor: "#450a0a",
-                  color: "#fecaca",
-                  fontSize: "0.78rem",
-                }}
-              >
-                {(() => {
-                  const error = updateCcMutation.error;
-                  if (isHttpApiError(error)) {
-                    const code = error.code ?? "HTTP_ERROR";
-                    if (error.status === 0 && code === "NETWORK_ERROR") {
-                      return `Network error — unable to reach device${
-                        baseUrl ? ` (${baseUrl})` : ""
-                      }. Check network/IP.`;
-                    }
-                    if (
-                      error.status === 404 &&
-                      code === "UNSUPPORTED_OPERATION"
-                    ) {
-                      return "API unsupported by device firmware — please upgrade and retry.";
-                    }
-                    if (error.status >= 400 && error.status < 500 && code) {
-                      return `Device rejected request: ${code} — ${error.message}`;
-                    }
-                    return `HTTP error: ${code} — ${error.message}`;
-                  }
-                  if (error instanceof Error) {
-                    return `Error: ${error.message}`;
-                  }
-                  return "Error: unknown HTTP failure";
-                })()}
+            <div className="flex flex-col gap-4">
+              <div className="form-control">
+                <label className="label cursor-pointer justify-start gap-4">
+                  <input
+                    type="checkbox"
+                    className="toggle toggle-primary"
+                    checked={draftEnable}
+                    onChange={(event) => {
+                      setDraftEnable(event.target.checked);
+                    }}
+                  />
+                  <div className="flex flex-col">
+                    <span className="label-text font-semibold">
+                      Enable output
+                    </span>
+                    <span className="label-text-alt text-base-content/60">
+                      zero setpoint if disabled
+                    </span>
+                  </div>
+                </label>
               </div>
-            ) : null}
 
-            <button
-              type="button"
-              onClick={handleApply}
-              disabled={updateCcMutation.isPending || !cc}
-              style={{
-                marginTop: "0.4rem",
-                padding: "0.35rem 0.8rem",
-                borderRadius: "0.375rem",
-                border: "1px solid #4b5563",
-                backgroundColor: "#111827",
-                color: "#e5e7eb",
-                fontSize: "0.85rem",
-                cursor: updateCcMutation.isPending ? "wait" : "pointer",
-              }}
-            >
-              {updateCcMutation.isPending ? "Applying..." : "Apply changes"}
-            </button>
+              <div className="text-xs text-base-content/60 space-y-1 bg-base-200/50 p-3 rounded-lg">
+                <div>
+                  Status:{" "}
+                  <span
+                    className={
+                      cc?.enable
+                        ? "text-success font-bold"
+                        : "text-base-content font-bold"
+                    }
+                  >
+                    {cc?.enable ? "enabled" : "disabled"}
+                  </span>
+                </div>
+                <div>
+                  Target:{" "}
+                  <span className="font-mono">
+                    {(cc?.target_i_ma ?? 0) / 1_000} A
+                  </span>
+                </div>
+                <div>
+                  Limit:{" "}
+                  <span className="font-mono">
+                    {(cc?.limit_profile.max_p_mw ?? 0) / 1_000} W
+                  </span>
+                </div>
+              </div>
+
+              {updateCcMutation.isError && updateCcMutation.error ? (
+                <div className="alert alert-error text-xs p-2">
+                  <span>
+                    {(() => {
+                      const error = updateCcMutation.error;
+                      if (isHttpApiError(error)) {
+                        const code = error.code ?? "HTTP_ERROR";
+                        if (error.status === 0 && code === "NETWORK_ERROR") {
+                          return `Network error — unable to reach device${
+                            baseUrl ? ` (${baseUrl})` : ""
+                          }. Check network/IP.`;
+                        }
+                        if (
+                          error.status === 404 &&
+                          code === "UNSUPPORTED_OPERATION"
+                        ) {
+                          return "API unsupported by device firmware — please upgrade and retry.";
+                        }
+                        if (error.status >= 400 && error.status < 500 && code) {
+                          return `Device rejected request: ${code} — ${error.message}`;
+                        }
+                        return `HTTP error: ${code} — ${error.message}`;
+                      }
+                      if (error instanceof Error) {
+                        return `Error: ${error.message}`;
+                      }
+                      return "Error: unknown HTTP failure";
+                    })()}
+                  </span>
+                </div>
+              ) : null}
+
+              <button
+                type="button"
+                onClick={handleApply}
+                disabled={updateCcMutation.isPending || !cc}
+                className="btn btn-primary w-full mt-2"
+              >
+                {updateCcMutation.isPending ? (
+                  <span className="loading loading-spinner text-primary-content"></span>
+                ) : null}
+                {updateCcMutation.isPending ? "Applying..." : "Apply changes"}
+              </button>
+            </div>
           </div>
         </div>
       </section>
@@ -1166,28 +964,14 @@ function MainDisplayCanvas({
   ]);
 
   return (
-    <div
-      style={{
-        width: "100%",
-        maxWidth: 640,
-        aspectRatio: "4 / 3",
-        borderRadius: "1rem",
-        backgroundColor: "#05070D",
-        boxShadow:
-          "0 18px 40px rgba(15,23,42,0.85), 0 0 0 1px rgba(15,23,42,0.9)",
-        boxSizing: "border-box",
-        overflow: "hidden",
-      }}
-    >
+    <div className="card w-full max-w-[640px] aspect-[4/3] rounded-2xl bg-[#05070D] shadow-2xl overflow-hidden border border-[#1f2937]">
       <canvas
         ref={canvasRef}
         width={320}
         height={240}
+        className="w-full h-full block"
         style={{
-          width: "100%",
-          height: "100%",
           imageRendering: "pixelated",
-          display: "block",
         }}
       />
     </div>

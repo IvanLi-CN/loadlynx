@@ -29,199 +29,124 @@ export function DevicesRoute() {
   const isAddingReal = addRealDeviceMutation.isPending;
 
   return (
-    <div
-      style={{
-        display: "flex",
-        flexDirection: "column",
-        gap: "1rem",
-        maxWidth: "960px",
-      }}
-    >
+    <div className="max-w-5xl mx-auto space-y-6">
       <header>
-        <h2
-          style={{
-            margin: 0,
-            fontSize: "1.25rem",
-          }}
-        >
-          Devices
-        </h2>
-        <p
-          style={{
-            margin: "0.25rem 0 0",
-            fontSize: "0.9rem",
-            color: "#9ca3af",
-          }}
-        >
+        <h2 className="text-2xl font-bold">Devices</h2>
+        <p className="mt-1 text-sm text-base-content/70">
           Manage known devices for the LoadLynx network console. Each device is
-          probed via <code>/api/v1/identity</code> to show live status.
+          probed via <code className="code">/api/v1/identity</code> to show live
+          status.
         </p>
       </header>
 
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          const name = newDeviceName.trim();
-          const baseUrl = newDeviceBaseUrl.trim();
+      <div className="card bg-base-100 shadow-sm border border-base-200">
+        <div className="card-body p-4">
+          <form
+            onSubmit={(event) => {
+              event.preventDefault();
+              const name = newDeviceName.trim();
+              const baseUrl = newDeviceBaseUrl.trim();
 
-          if (!name || !baseUrl) {
-            setAddDeviceError("Name and base URL are required.");
-            return;
-          }
+              if (!name || !baseUrl) {
+                setAddDeviceError("Name and base URL are required.");
+                return;
+              }
 
-          const lowerBaseUrl = baseUrl.toLowerCase();
-          if (
-            !lowerBaseUrl.startsWith("http://") &&
-            !lowerBaseUrl.startsWith("https://")
-          ) {
-            setAddDeviceError("Base URL must start with http:// or https://.");
-            return;
-          }
+              const lowerBaseUrl = baseUrl.toLowerCase();
+              if (
+                !lowerBaseUrl.startsWith("http://") &&
+                !lowerBaseUrl.startsWith("https://")
+              ) {
+                setAddDeviceError(
+                  "Base URL must start with http:// or https://.",
+                );
+                return;
+              }
 
-          setAddDeviceError(null);
-          addRealDeviceMutation.mutate(
-            { name, baseUrl },
-            {
-              onSuccess: () => {
-                setNewDeviceName("");
-                setNewDeviceBaseUrl("");
-                // Keep any stale query instances (e.g. from other tabs) in sync.
-                queryClient.invalidateQueries({ queryKey: ["devices"] });
-              },
-            },
-          );
-        }}
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          gap: "0.5rem",
-          padding: "0.75rem 0.9rem",
-          borderRadius: "0.75rem",
-          border: "1px solid #1f2937",
-          backgroundColor: "#020617",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            flexWrap: "wrap",
-            gap: "0.75rem",
-            alignItems: "flex-end",
-          }}
-        >
-          <label
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.25rem",
-              flex: "1 1 160px",
-              minWidth: "0",
+              setAddDeviceError(null);
+              addRealDeviceMutation.mutate(
+                { name, baseUrl },
+                {
+                  onSuccess: () => {
+                    setNewDeviceName("");
+                    setNewDeviceBaseUrl("");
+                    // Keep any stale query instances (e.g. from other tabs) in sync.
+                    queryClient.invalidateQueries({ queryKey: ["devices"] });
+                  },
+                },
+              );
             }}
+            className="flex flex-col gap-4"
           >
-            <span
-              style={{
-                fontSize: "0.8rem",
-                color: "#9ca3af",
-              }}
-            >
-              Device name
-            </span>
-            <input
-              type="text"
-              value={newDeviceName}
-              onChange={(event) => setNewDeviceName(event.target.value)}
-              placeholder="My LoadLynx"
-              style={{
-                padding: "0.4rem 0.5rem",
-                borderRadius: "0.375rem",
-                border: "1px solid #374151",
-                backgroundColor: "#020617",
-                color: "#e5e7eb",
-                fontSize: "0.9rem",
-              }}
-            />
-          </label>
-          <label
-            style={{
-              display: "flex",
-              flexDirection: "column",
-              gap: "0.25rem",
-              flex: "2 1 220px",
-              minWidth: "0",
-            }}
-          >
-            <span
-              style={{
-                fontSize: "0.8rem",
-                color: "#9ca3af",
-              }}
-            >
-              Base URL
-            </span>
-            <input
-              type="text"
-              value={newDeviceBaseUrl}
-              onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
-              placeholder="http://192.168.1.100"
-              style={{
-                padding: "0.4rem 0.5rem",
-                borderRadius: "0.375rem",
-                border: "1px solid #374151",
-                backgroundColor: "#020617",
-                color: "#e5e7eb",
-                fontSize: "0.9rem",
-              }}
-            />
-          </label>
-          <button
-            type="submit"
-            disabled={isAddingReal}
-            style={{
-              padding: "0.5rem 0.9rem",
-              borderRadius: "0.375rem",
-              border: "1px solid #4b5563",
-              backgroundColor: "#111827",
-              color: "#e5e7eb",
-              fontSize: "0.9rem",
-              cursor: isAddingReal ? "wait" : "pointer",
-              whiteSpace: "nowrap",
-            }}
-          >
-            {isAddingReal ? "Adding..." : "Add device"}
-          </button>
+            <div className="flex flex-wrap gap-4 items-end">
+              <label className="form-control flex-1 min-w-[200px]">
+                <div className="label pb-1">
+                  <span className="label-text">Device name</span>
+                </div>
+                <input
+                  type="text"
+                  value={newDeviceName}
+                  onChange={(event) => setNewDeviceName(event.target.value)}
+                  placeholder="My LoadLynx"
+                  className="input input-bordered w-full"
+                />
+              </label>
+              <label className="form-control flex-[2] min-w-[250px]">
+                <div className="label pb-1">
+                  <span className="label-text">Base URL</span>
+                </div>
+                <input
+                  type="text"
+                  value={newDeviceBaseUrl}
+                  onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
+                  placeholder="http://192.168.1.100"
+                  className="input input-bordered w-full"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={isAddingReal}
+                className="btn btn-primary"
+              >
+                {isAddingReal ? (
+                  <span className="loading loading-spinner loading-xs"></span>
+                ) : null}
+                {isAddingReal ? "Adding..." : "Add device"}
+              </button>
+            </div>
+            {addDeviceError ? (
+              <div role="alert" className="alert alert-error text-sm py-2">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="stroke-current shrink-0 h-4 w-4"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  role="img"
+                  aria-label="Error icon"
+                >
+                  <title>Error</title>
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="2"
+                    d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
+                  />
+                </svg>
+                <span>{addDeviceError}</span>
+              </div>
+            ) : (
+              <div className="text-xs text-base-content/60">
+                Add one or more devices by name and HTTP base URL. Each device
+                will be probed via{" "}
+                <code className="code">/api/v1/identity</code>.
+              </div>
+            )}
+          </form>
         </div>
-        {addDeviceError ? (
-          <p
-            style={{
-              margin: 0,
-              fontSize: "0.8rem",
-              color: "#f97316",
-            }}
-          >
-            {addDeviceError}
-          </p>
-        ) : (
-          <p
-            style={{
-              margin: 0,
-              fontSize: "0.8rem",
-              color: "#6b7280",
-            }}
-          >
-            Add one or more devices by name and HTTP base URL. Each device will
-            be probed via <code>/api/v1/identity</code>.
-          </p>
-        )}
-      </form>
+      </div>
 
       {ENABLE_MOCK ? (
-        <div
-          style={{
-            display: "flex",
-            gap: "0.75rem",
-            alignItems: "center",
-          }}
-        >
+        <div className="flex items-center gap-3">
           <button
             type="button"
             onClick={() => {
@@ -233,99 +158,57 @@ export function DevicesRoute() {
               });
             }}
             disabled={isMutating}
-            style={{
-              padding: "0.5rem 0.9rem",
-              borderRadius: "0.375rem",
-              border: "1px solid #4b5563",
-              backgroundColor: "#111827",
-              color: "#e5e7eb",
-              fontSize: "0.9rem",
-              cursor: isMutating ? "wait" : "pointer",
-            }}
+            className="btn btn-secondary btn-sm"
           >
             {isMutating ? "Adding device..." : "Add demo device"}
           </button>
-          <span
-            style={{
-              fontSize: "0.8rem",
-              color: "#6b7280",
-            }}
-          >
+          <span className="text-xs text-base-content/60">
             Adds a built-in demo device backed by an in-memory backend (for
             development).
           </span>
         </div>
       ) : null}
 
-      <section
-        aria-label="Known devices"
-        style={{
-          borderRadius: "0.75rem",
-          border: "1px solid #1f2937",
-          background:
-            "radial-gradient(circle at top left, rgba(56,189,248,0.06), transparent 60%), #020617",
-          padding: "1rem 1.25rem",
-        }}
-      >
-        {devicesQuery.isLoading ? (
-          <p
-            style={{
-              margin: 0,
-              fontSize: "0.9rem",
-              color: "#9ca3af",
-            }}
-          >
-            Loading devices...
-          </p>
-        ) : devices.length === 0 ? (
-          <p
-            style={{
-              margin: 0,
-              fontSize: "0.9rem",
-              color: "#9ca3af",
-            }}
-          >
-            {ENABLE_MOCK ? (
-              <>
-                No devices yet. Use the{" "}
-                <strong style={{ fontWeight: 500 }}>Add demo device</strong>{" "}
-                action above to seed a demo entry.
-              </>
-            ) : (
-              <>No devices yet. Add one or more real devices to begin.</>
-            )}
-          </p>
-        ) : (
-          <table
-            style={{
-              width: "100%",
-              borderCollapse: "collapse",
-              fontSize: "0.9rem",
-            }}
-          >
-            <thead>
-              <tr
-                style={{
-                  textAlign: "left",
-                  color: "#9ca3af",
-                  borderBottom: "1px solid #111827",
-                }}
-              >
-                <th style={{ padding: "0.4rem 0.25rem" }}>Name</th>
-                <th style={{ padding: "0.4rem 0.25rem" }}>Device ID</th>
-                <th style={{ padding: "0.4rem 0.25rem" }}>Base URL</th>
-                <th style={{ padding: "0.4rem 0.25rem" }}>Status</th>
-                <th style={{ padding: "0.4rem 0.25rem" }}>Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {devices.map((device) => (
-                <DeviceRow key={device.id} device={device} />
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
+      <div className="card bg-base-100 shadow-sm border border-base-200">
+        <div className="card-body p-0 overflow-x-auto">
+          {devicesQuery.isLoading ? (
+            <div className="p-8 text-center text-base-content/60">
+              Loading devices...
+            </div>
+          ) : devices.length === 0 ? (
+            <div className="p-8 text-center text-base-content/60">
+              {ENABLE_MOCK ? (
+                <>
+                  No devices yet. Use the{" "}
+                  <strong className="font-medium text-base-content">
+                    Add demo device
+                  </strong>{" "}
+                  action above to seed a demo entry.
+                </>
+              ) : (
+                <>No devices yet. Add one or more real devices to begin.</>
+              )}
+            </div>
+          ) : (
+            <table className="table table-zebra table-sm">
+              <thead className="bg-base-200">
+                <tr>
+                  <th>Name</th>
+                  <th>Device ID</th>
+                  <th>Base URL</th>
+                  <th>Status</th>
+                  <th className="text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {devices.map((device) => (
+                  <DeviceRow key={device.id} device={device} />
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -339,20 +222,20 @@ function DeviceRow(props: { device: StoredDevice }) {
   const identity = identityQuery.data;
   const error: unknown = identityQuery.error;
 
+  let statusBadgeClass = "badge badge-ghost";
   let statusLabel = "Checking...";
-  let statusColor = "#6b7280";
   let statusDetail: string | null = null;
 
   if (identityQuery.isLoading || identityQuery.isFetching) {
+    statusBadgeClass = "badge badge-ghost";
     statusLabel = "Checking...";
-    statusColor = "#6b7280";
   } else if (identityQuery.isSuccess && identity) {
+    statusBadgeClass = "badge badge-success";
     statusLabel = "Online";
-    statusColor = "#22c55e";
     statusDetail = identity.network.ip;
   } else if (identityQuery.isError) {
+    statusBadgeClass = "badge badge-error";
     statusLabel = "Offline";
-    statusColor = "#f97316";
 
     const formatSnippet = (message: string) =>
       message.length > 80 ? `${message.slice(0, 77)}…` : message;
@@ -362,8 +245,8 @@ function DeviceRow(props: { device: StoredDevice }) {
       if (error.status === 0 && code === "NETWORK_ERROR") {
         statusDetail = "Network error — check device IP or network";
       } else if (error.status === 404 && code === "UNSUPPORTED_OPERATION") {
+        statusBadgeClass = "badge badge-warning";
         statusLabel = "Online (HTTP)";
-        statusColor = "#f59e0b";
         statusDetail = "Unsupported API on current firmware";
       } else {
         statusDetail = `${code}: ${formatSnippet(error.message)}`;
@@ -376,106 +259,61 @@ function DeviceRow(props: { device: StoredDevice }) {
   }
 
   return (
-    <tr
-      style={{
-        borderBottom: "1px solid #0f172a",
-      }}
-    >
-      <td style={{ padding: "0.4rem 0.25rem" }}>{device.name}</td>
-      <td
-        style={{
-          padding: "0.4rem 0.25rem",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-        }}
-      >
-        {device.id}
-      </td>
-      <td
-        style={{
-          padding: "0.4rem 0.25rem",
-          fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
-          fontSize: "0.8rem",
-        }}
-      >
+    <tr>
+      <td className="font-medium">{device.name}</td>
+      <td className="font-mono text-xs">{device.id}</td>
+      <td className="font-mono text-xs text-base-content/70">
         {device.baseUrl}
       </td>
-      <td
-        style={{
-          padding: "0.4rem 0.25rem",
-          fontSize: "0.8rem",
-        }}
-      >
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: "0.4rem",
-          }}
-        >
-          <span
-            style={{
-              width: "0.5rem",
-              height: "0.5rem",
-              borderRadius: "999px",
-              backgroundColor: statusColor,
-              boxShadow:
-                statusColor === "#22c55e"
-                  ? "0 0 0 4px rgba(34,197,94,0.25)"
-                  : "none",
-            }}
-          />
-          <span>{statusLabel}</span>
-        </div>
-        {statusDetail ? (
-          <div
-            style={{
-              marginTop: "0.2rem",
-              fontSize: "0.75rem",
-              color: "#9ca3af",
-            }}
-          >
-            {statusDetail}
+      <td>
+        <div className="flex flex-col gap-1">
+          <div className="flex items-center gap-2">
+            <div className={`badge badge-sm gap-2 ${statusBadgeClass}`}>
+              {statusLabel}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                void identityQuery.refetch();
+              }}
+              disabled={identityQuery.isFetching}
+              className="btn btn-ghost btn-xs btn-circle"
+              title="Test connectivity"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeWidth={1.5}
+                stroke="currentColor"
+                className={`w-4 h-4 ${identityQuery.isFetching ? "animate-spin" : ""}`}
+                role="img"
+                aria-label="Refresh icon"
+              >
+                <title>Refresh</title>
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0013.803-3.7M4.031 9.865a8.25 8.25 0 0113.803-3.7l3.181 3.182m0-4.991v4.99"
+                />
+              </svg>
+            </button>
           </div>
-        ) : null}
-        <button
-          type="button"
-          onClick={() => {
-            void identityQuery.refetch();
-          }}
-          disabled={identityQuery.isFetching}
-          style={{
-            marginTop: "0.35rem",
-            padding: "0.25rem 0.6rem",
-            borderRadius: "999px",
-            border: "1px solid #374151",
-            backgroundColor: "#020617",
-            color: "#e5e7eb",
-            fontSize: "0.75rem",
-            cursor: identityQuery.isFetching ? "wait" : "pointer",
-          }}
-        >
-          {identityQuery.isFetching ? "Pinging..." : "Test connectivity"}
-        </button>
+          {statusDetail ? (
+            <span
+              className="text-xs text-base-content/60 max-w-[200px] truncate"
+              title={statusDetail}
+            >
+              {statusDetail}
+            </span>
+          ) : null}
+        </div>
       </td>
-      <td
-        style={{
-          padding: "0.4rem 0.25rem",
-          textAlign: "right",
-        }}
-      >
+      <td className="text-right">
         <Link
           to="/$deviceId/cc"
           params={{ deviceId: device.id }}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            padding: "0.3rem 0.7rem",
-            borderRadius: "999px",
-            border: "1px solid #4b5563",
-            textDecoration: "none",
-            color: "#e5e7eb",
-            fontSize: "0.8rem",
-          }}
+          className="btn btn-sm btn-outline"
         >
           Open CC Control
         </Link>
