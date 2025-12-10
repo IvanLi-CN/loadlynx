@@ -58,13 +58,15 @@ test.describe("Device Pages", () => {
     const resetBtn = page.locator("button:text('Soft Reset')");
     await expect(resetBtn).toBeVisible();
 
-    // Handle dialog
+    // Handle confirmation dialog and expect a success alert in the UI.
     page.on("dialog", async (dialog) => {
-      expect(dialog.message()).toContain(
-        "Soft reset API is not yet implemented",
-      );
+      expect(dialog.message()).toContain("Soft Reset");
       await dialog.accept();
     });
     await resetBtn.click();
+
+    const successAlert = page.locator(".alert-success");
+    await expect(successAlert).toBeVisible();
+    await expect(successAlert).toContainText(/Soft reset/i);
   });
 });

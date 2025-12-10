@@ -21,7 +21,7 @@ use static_cell::StaticCell;
 
 use loadlynx_protocol::{
     FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, FastStatus,
-    LimitProfile, PROTOCOL_VERSION,
+    LimitProfile, PROTOCOL_VERSION, SoftResetReason,
 };
 
 use crate::{
@@ -621,6 +621,14 @@ async fn handle_http_connection(
                 }
             }
         }
+        ("POST", "/api/v1/soft-reset") => match handle_soft_reset_http(body_str, &mut body) {
+            Ok(()) => {
+                write_http_response(socket, version, "200 OK", &body).await?;
+            }
+            Err(status) => {
+                write_http_response(socket, version, status, &body).await?;
+            }
+        },
         ("GET", _) => {
             write_error_body(&mut body, "UNSUPPORTED_OPERATION", "not found", false, None);
             write_http_response(socket, version, "404 Not Found", &body).await?;
@@ -1265,4 +1273,114 @@ fn parse_cc_update_json(body: &str) -> Result<CcUpdateRequest, &'static str> {
         enable,
         target_i_ma,
     })
+}
+
+struct SoftResetRequest<'a> {
+    reason_str: &'a str,
+    reason: SoftResetReason,
+}
+
+fn parse_soft_reset_json(body: &str) -> Result<SoftResetRequest<'_>, &'static str> {
+    // Very small hand-written JSON parser: looks for a `"reason"` string field
+    // and maps it onto the SoftResetReason enum. This keeps the firmware free
+    // from heavy JSON dependencies.
+    let idx = body.find("\"reason\"").ok_or("missing field reason")?;
+    let colon_idx = body[idx..].find(':').ok_or("malformed reason field")?;
+    let mut value_str = body[idx + colon_idx + 1..].trim_start();
+    if !value_str.starts_with('"') {
+        return Err("reason must be a string");
+    }
+    value_str = &value_str[1..];
+    let end = value_str.find('"').ok_or("reason must be a string")?;
+    let reason_str = &value_str[..end];
+
+    let reason = match reason_str {
+        "manual" => SoftResetReason::Manual,
+        "firmware_update" => SoftResetReason::FirmwareUpdate,
+        "ui_recover" => SoftResetReason::UiRecover,
+        "link_recover" => SoftResetReason::LinkRecover,
+        _ => {
+            return Err(
+                "reason must be one of \"manual\", \"firmware_update\", \"ui_recover\", \"link_recover\"",
+            );
+        }
+    };
+
+    Ok(SoftResetRequest { reason_str, reason })
+}
+
+fn handle_soft_reset_http(body_in: &str, body_out: &mut String) -> Result<(), &'static str> {
+    let parsed = match parse_soft_reset_json(body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    // Require the UART link to be up and at least one valid FastStatus frame.
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    let fast_ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
+    let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
+    let now = now_ms32();
+    let age_ms = if last_good == 0 {
+        u32::MAX
+    } else {
+        now.wrapping_sub(last_good)
+    };
+
+    if !link_up || fast_ok == 0 {
+        let details = format!(
+            r#"{{"last_frame_age_ms":{},"fast_status_ok_count":{}}}"#,
+            age_ms, fast_ok
+        );
+        write_error_body(
+            body_out,
+            "LINK_DOWN",
+            "UART link is down or no FastStatus frames received",
+            true,
+            Some(&details),
+        );
+        return Err("503 Service Unavailable");
+    }
+
+    if !HELLO_SEEN.load(Ordering::Relaxed) {
+        let details = format!(
+            r#"{{"last_frame_age_ms":{},"fast_status_ok_count":{}}}"#,
+            age_ms, fast_ok
+        );
+        write_error_body(
+            body_out,
+            "UNAVAILABLE",
+            "analog HELLO not yet observed; soft reset not available",
+            true,
+            Some(&details),
+        );
+        return Err("503 Service Unavailable");
+    }
+
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    if matches!(analog_state, AnalogState::Offline) {
+        write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    if let Err(_err) = crate::enqueue_soft_reset(parsed.reason) {
+        write_error_body(
+            body_out,
+            "UNAVAILABLE",
+            "soft reset queue is full; try again later",
+            true,
+            None,
+        );
+        return Err("503 Service Unavailable");
+    }
+
+    body_out.clear();
+    body_out.push('{');
+    body_out.push_str("\"accepted\":true,\"reason\":\"");
+    write_json_string_escaped(body_out, parsed.reason_str);
+    body_out.push_str("\"}");
+
+    Ok(())
 }

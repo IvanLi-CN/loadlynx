@@ -1,8 +1,8 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { useMemo } from "react";
 import type { HttpApiError } from "../api/client.ts";
-import { getIdentity, isHttpApiError } from "../api/client.ts";
+import { getIdentity, isHttpApiError, postSoftReset } from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
@@ -45,6 +45,32 @@ export function DeviceSettingsRoute() {
     return { summary, hint: null } as const;
   })();
 
+  const softResetMutation = useMutation({
+    mutationFn: async () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return postSoftReset(baseUrl, "manual");
+    },
+  });
+
+  const softResetError = (() => {
+    const err = softResetMutation.error;
+    if (!err || !isHttpApiError(err)) return null;
+
+    const code = err.code ?? "HTTP_ERROR";
+    const summary = `Soft reset failed: ${code} — ${err.message}`;
+
+    let hint: string | null = null;
+    if (code === "NETWORK_ERROR") {
+      hint = "Network error: check device network/IP.";
+    } else if (code === "LINK_DOWN" || code === "UNAVAILABLE") {
+      hint = "Link is not ready; soft reset is temporarily unavailable.";
+    }
+
+    return { summary, hint } as const;
+  })();
+
   if (devicesQuery.isLoading) {
     return <p className="text-sm text-base-content/60">Loading devices...</p>;
   }
@@ -70,8 +96,17 @@ export function DeviceSettingsRoute() {
   const identity = identityQuery.data;
 
   const handleSoftReset = () => {
-    // Placeholder
-    alert("Soft reset API is not yet implemented.");
+    if (!baseUrl) {
+      return;
+    }
+    const confirmed = window.confirm(
+      "确定要进行 Soft Reset 吗？当前输出会被重置。",
+    );
+    if (!confirmed) {
+      return;
+    }
+    softResetMutation.reset();
+    softResetMutation.mutate();
   };
 
   return (
@@ -210,7 +245,25 @@ export function DeviceSettingsRoute() {
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
               Actions
             </h3>
-            <div>
+            <div className="flex flex-col gap-3">
+              {softResetMutation.isSuccess ? (
+                <div className="alert alert-success shadow-sm text-xs sm:text-sm">
+                  <span>
+                    Soft reset requested (reason:{" "}
+                    {softResetMutation.data?.reason ?? "manual"}).
+                  </span>
+                </div>
+              ) : null}
+              {softResetError ? (
+                <div className="alert alert-error shadow-sm text-xs sm:text-sm">
+                  <span className="font-bold">{softResetError.summary}</span>
+                  {softResetError.hint && (
+                    <span className="text-xs opacity-80 block">
+                      {softResetError.hint}
+                    </span>
+                  )}
+                </div>
+              ) : null}
               <button
                 type="button"
                 className="btn btn-outline btn-sm text-error hover:bg-error hover:text-white"

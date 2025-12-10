@@ -11,6 +11,8 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
+#[cfg(feature = "net_http")]
+use embassy_sync::channel::Channel;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
@@ -187,6 +189,33 @@ static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
 pub type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
 pub(crate) static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
+
+// Soft-reset requests originating from the HTTP API are funneled through this
+// small channel so they can be serialized onto the existing UART TX task.
+#[cfg(feature = "net_http")]
+static SOFT_RESET_REQUESTS: Channel<CriticalSectionRawMutex, SoftResetReason, 4> = Channel::new();
+
+#[cfg(feature = "net_http")]
+pub(crate) fn enqueue_soft_reset(reason: SoftResetReason) -> Result<(), &'static str> {
+    SOFT_RESET_REQUESTS
+        .try_send(reason)
+        .map_err(|_| "SOFT_RESET_QUEUE_FULL")
+}
+
+#[cfg(not(feature = "net_http"))]
+pub(crate) fn enqueue_soft_reset(_reason: SoftResetReason) -> Result<(), &'static str> {
+    Err("net_http feature disabled")
+}
+
+#[cfg(feature = "net_http")]
+pub(crate) fn dequeue_soft_reset() -> Option<SoftResetReason> {
+    SOFT_RESET_REQUESTS.try_receive().ok()
+}
+
+#[cfg(not(feature = "net_http"))]
+pub(crate) fn dequeue_soft_reset() -> Option<SoftResetReason> {
+    None
+}
 
 #[cfg(not(feature = "mock_setpoint"))]
 struct EncoderPins {
@@ -2062,6 +2091,14 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
 
     loop {
         yield_now().await;
+
+        // Drain at most one pending soft-reset request per loop iteration.
+        if let Some(reason) = crate::dequeue_soft_reset() {
+            let soft_seq = seq;
+            seq = seq.wrapping_add(1);
+            send_soft_reset_one_shot(&mut uhci_tx, soft_seq, &mut raw, &mut slip, reason).await;
+        }
+
         let now = now_ms32();
         let desired_target =
             clamp_target_ma(ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA);
@@ -2424,6 +2461,54 @@ async fn send_setpoint_frame(
         }
     }
 }
+
+async fn send_soft_reset_one_shot(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    reason: SoftResetReason,
+) {
+    let reset = SoftReset {
+        reason,
+        timestamp_ms: now_ms32(),
+    };
+
+    let frame_len = match encode_soft_reset_frame(seq, &reset, false, raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("soft_reset(one-shot) encode error: {:?}", err);
+            return;
+        }
+    };
+    let slip_len = match slip_encode(&raw[..frame_len], slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("soft_reset(one-shot) slip_encode error: {:?}", err);
+            return;
+        }
+    };
+
+    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+        Ok(written) if written == slip_len => {
+            let _ = uhci_tx.uart_tx.flush_async().await;
+            info!(
+                "soft_reset(one-shot) frame sent seq={} reason={:?} len={} slip_len={}",
+                seq, reset.reason, frame_len, slip_len
+            );
+        }
+        Ok(written) => {
+            warn!(
+                "soft_reset(one-shot) short write: written={} len={} (seq={})",
+                written, slip_len, seq
+            );
+        }
+        Err(err) => {
+            warn!("soft_reset(one-shot) write error: {:?}", err);
+        }
+    }
+}
+
 async fn send_soft_reset_handshake(
     uhci_tx: &mut uhci::UhciTx<'static, Async>,
     seq: u8,

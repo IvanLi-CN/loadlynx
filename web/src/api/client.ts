@@ -331,6 +331,19 @@ async function mockUpdateCc(
   return structuredClone(nextCc);
 }
 
+async function mockSoftReset(
+  baseUrl: string,
+  reason: string,
+): Promise<{ accepted: boolean; reason: string }> {
+  // Ensure the device exists in the mock registry so identity/status remain
+  // consistent, but we do not currently simulate side effects.
+  getOrCreateMockDevice(baseUrl);
+  return {
+    accepted: true,
+    reason,
+  };
+}
+
 export async function getIdentity(baseUrl: string): Promise<Identity> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetIdentity(baseUrl);
@@ -482,4 +495,31 @@ export async function updateCc(
       "Content-Type": "text/plain",
     },
   });
+}
+
+export async function postSoftReset(
+  baseUrl: string,
+  reason:
+    | "manual"
+    | "firmware_update"
+    | "ui_recover"
+    | "link_recover" = "manual",
+): Promise<{ accepted: boolean; reason: string }> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockSoftReset(baseUrl, reason);
+  }
+
+  const body = JSON.stringify({ reason });
+
+  return httpJson<{ accepted: boolean; reason: string }>(
+    baseUrl,
+    "/api/v1/soft-reset",
+    {
+      method: "POST",
+      body,
+      headers: {
+        "Content-Type": "application/json; charset=utf-8",
+      },
+    },
+  );
 }
