@@ -102,3 +102,5 @@ export function useAddRealDeviceMutation() {
     },
   });
 }
+
+export * from "./scan-hooks.ts";

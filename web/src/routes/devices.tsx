@@ -4,10 +4,13 @@ import { useMemo, useState } from "react";
 import { ENABLE_MOCK, isHttpApiError } from "../api/client.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
 import {
+  type DiscoveredDevice,
+  type ScanProgress,
   useAddDeviceMutation,
   useAddRealDeviceMutation,
   useDeviceIdentity,
   useDevicesQuery,
+  useSubnetScanMutation,
 } from "../devices/hooks.ts";
 
 export function DevicesRoute() {
@@ -27,6 +30,37 @@ export function DevicesRoute() {
 
   const isMutating = addDeviceMutation.isPending;
   const isAddingReal = addRealDeviceMutation.isPending;
+
+  // Scanning state
+  const scanMutation = useSubnetScanMutation();
+  const [isScanPanelOpen, setIsScanPanelOpen] = useState(false);
+  const [seedIp, setSeedIp] = useState("192.168.1.100"); // Default/Example
+  const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
+  const [scanResults, setScanResults] = useState<DiscoveredDevice[]>([]);
+  const [scanError, setScanError] = useState<string | null>(null);
+
+  const startScan = () => {
+    setScanProgress({ scannedCount: 0, totalCount: 0, foundCount: 0 });
+    setScanResults([]);
+    setScanError(null);
+
+    scanMutation.mutate(
+      {
+        options: { seedIp: seedIp.trim() },
+        onProgress: (p: ScanProgress) => setScanProgress(p),
+      },
+      {
+        onSuccess: (data: DiscoveredDevice[]) => {
+          setScanResults(data);
+        },
+        onError: (err: Error) => {
+          setScanError(err instanceof Error ? err.message : "Unknown error");
+        },
+      },
+    );
+  };
+
+  const isScanning = scanMutation.isPending;
 
   return (
     <div className="max-w-5xl mx-auto space-y-6">
@@ -99,7 +133,7 @@ export function DevicesRoute() {
                   type="text"
                   value={newDeviceBaseUrl}
                   onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
-                  placeholder="http://192.168.1.100"
+                  placeholder="http://loadlynx-a1b2c3.local"
                   className="input input-bordered w-full"
                 />
               </label>
@@ -136,14 +170,175 @@ export function DevicesRoute() {
               </div>
             ) : (
               <div className="text-xs text-base-content/60">
-                Add one or more devices by name and HTTP base URL. Each device
-                will be probed via{" "}
-                <code className="code">/api/v1/identity</code>.
+                Enter the device <strong>Hostname</strong> (recommended) or IP
+                address.
+                <br />
+                Example:{" "}
+                <code className="code">http://loadlynx-d68638.local</code> (uses
+                the Short ID from the device screen).
               </div>
             )}
           </form>
         </div>
       </div>
+
+      {/* Scan Panel Toggle */}
+      <div className="flex justify-end">
+        <button
+          type="button"
+          onClick={() => setIsScanPanelOpen(!isScanPanelOpen)}
+          className="btn btn-sm btn-ghost"
+        >
+          {isScanPanelOpen ? "Hide Network Scanner" : "Scan current network..."}
+        </button>
+      </div>
+
+      {/* Scan Panel */}
+      {isScanPanelOpen && (
+        <div className="card bg-base-100 shadow-sm border border-base-200">
+          <div className="card-body p-4">
+            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50">
+              LAN Scanner
+            </h3>
+
+            <div className="alert alert-warning text-xs">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="stroke-current shrink-0 h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                role="img"
+                aria-label="Warning icon"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth="2"
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <span>
+                <b>Risk Warning:</b> This scan sends short-lived HTTP probes to
+                the seed IP’s entire /24 subnet. It is intended for small lab
+                networks only and may be blocked or discouraged on
+                managed/corporate networks.
+              </span>
+            </div>
+
+            <div className="flex flex-wrap gap-4 items-end mt-2">
+              <label className="form-control flex-1 min-w-[200px]">
+                <div className="label pb-1">
+                  <span className="label-text">Seed IP (Example Device)</span>
+                </div>
+                <input
+                  type="text"
+                  value={seedIp}
+                  onChange={(e) => setSeedIp(e.target.value)}
+                  placeholder="e.g. 192.168.1.100"
+                  disabled={isScanning}
+                  className="input input-bordered w-full input-sm"
+                />
+              </label>
+              <button
+                type="button"
+                onClick={startScan}
+                disabled={isScanning || !seedIp}
+                className="btn btn-primary btn-sm"
+              >
+                {isScanning ? (
+                  <span className="loading loading-spinner loading-xs"></span>
+                ) : null}
+                {isScanning ? "Scanning..." : "Start scan"}
+              </button>
+              {isScanning && (
+                <button
+                  type="button"
+                  className="btn btn-ghost btn-sm"
+                  onClick={() => scanMutation.reset()}
+                >
+                  Cancel
+                </button>
+              )}
+            </div>
+
+            {scanError && (
+              <div className="text-error text-sm mt-2">
+                Scan failed: {scanError}
+              </div>
+            )}
+
+            {isScanning && scanProgress && (
+              <div className="mt-4 space-y-2">
+                <div className="flex justify-between text-xs text-base-content/70">
+                  <span>
+                    Scanned {scanProgress.scannedCount} /{" "}
+                    {scanProgress.totalCount} hosts
+                  </span>
+                  <span>Found {scanProgress.foundCount} devices</span>
+                </div>
+                <progress
+                  className="progress progress-primary w-full"
+                  value={scanProgress.scannedCount}
+                  max={scanProgress.totalCount}
+                ></progress>
+              </div>
+            )}
+
+            {/* Scan Results */}
+            {scanResults.length > 0 && (
+              <div className="mt-4">
+                <h4 className="font-bold text-sm mb-2">
+                  Discovered Devices ({scanResults.length})
+                </h4>
+                <div className="overflow-x-auto">
+                  <table className="table table-xs">
+                    <thead>
+                      <tr>
+                        <th>Hostname</th>
+                        <th>IP</th>
+                        <th>Device ID</th>
+                        <th>Action</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scanResults.map((d) => (
+                        <tr key={d.ip}>
+                          <td>{d.hostname || "-"}</td>
+                          <td className="font-mono">{d.ip}</td>
+                          <td className="font-mono">{d.identity.device_id}</td>
+                          <td>
+                            <button
+                              type="button"
+                              className="btn btn-xs btn-outline btn-primary"
+                              onClick={() => {
+                                addRealDeviceMutation.mutate({
+                                  name:
+                                    d.hostname ||
+                                    d.identity.device_id ||
+                                    `Device ${d.ip}`,
+                                  baseUrl: `http://${d.ip}`,
+                                });
+                              }}
+                              disabled={isAddingReal}
+                            >
+                              Add
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+            {scanMutation.isSuccess && scanResults.length === 0 && (
+              <div className="text-sm text-base-content/60 mt-4 italic">
+                No LoadLynx devices discovered in this subnet.
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {ENABLE_MOCK ? (
         <div className="flex items-center gap-3">
@@ -232,7 +427,13 @@ function DeviceRow(props: { device: StoredDevice }) {
   } else if (identityQuery.isSuccess && identity) {
     statusBadgeClass = "badge badge-success";
     statusLabel = "Online";
-    statusDetail = identity.network.ip;
+
+    const primaryHost = identity.hostname ?? identity.network?.hostname;
+    if (primaryHost) {
+      statusDetail = `${primaryHost} (${identity.network.ip})`;
+    } else {
+      statusDetail = identity.network.ip;
+    }
   } else if (identityQuery.isError) {
     statusBadgeClass = "badge badge-error";
     statusLabel = "Offline";

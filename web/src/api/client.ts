@@ -253,6 +253,10 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
       mac: "00:00:00:00:00:00",
       hostname: new URL(baseUrl).hostname || "loadlynx-mock",
     },
+    // Mock FQDN: loadlynx-<short_id>.local
+    hostname: `loadlynx-${String(index).padStart(6, "a")}.local`,
+    // Mock Short ID: 6-char hex-like string
+    short_id: String(index).padStart(6, "a"),
     capabilities: {
       cc_supported: true,
       cv_supported: false,

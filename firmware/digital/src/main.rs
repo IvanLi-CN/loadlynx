@@ -72,6 +72,8 @@ use ui::{AnalogState, UiSnapshot};
 
 // Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
 #[cfg(feature = "net_http")]
+mod mdns;
+#[cfg(feature = "net_http")]
 mod net;
 
 // Wi‑Fi compile-time configuration injected by firmware/digital/build.rs.
