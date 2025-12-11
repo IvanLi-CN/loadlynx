@@ -31,6 +31,21 @@ Core scripts:
 - `bun run check` – run `biome check .`.
 - `bun run test:e2e` – run Playwright E2E tests.
 
+## Simulation devices & mock backend
+
+- `mock://` devices are in-memory simulation devices handled entirely in the web app. They are helpful when you do not have hardware on hand, or when you want fast UI demos and automated tests. Real devices use `http://` or `https://` base URLs backed by the LoadLynx HTTP API.
+- Empty list UX: when no devices are stored, the Devices page shows a primary prompt to add a real LoadLynx device and also offers an “Add simulation device” button. Clicking it creates a `mock://…` device so you can open CC, Status, Settings, etc., with mocked data.
+- Developer mock devtools: the “Add demo device” banner is developer/test tooling controlled by `VITE_ENABLE_MOCK_DEVTOOLS` (runtime constant `ENABLE_MOCK_DEVTOOLS`). When enabled, it adds a quick “Add demo device” button that inserts a `mock://` entry during local development or QA.
+- Environment flags (current implementation):
+  - `VITE_ENABLE_MOCK_BACKEND` — allows creation of mock/simulation devices via the UI. Default (unset) is allowed. Set to `"false"` to reject new mock devices; previously stored `mock://` entries in `localStorage` still load and work.
+  - `VITE_ENABLE_MOCK_DEVTOOLS` — controls visibility of developer-facing mock controls. `"true"`: always show; `"false"`: always hide; unset: enabled in `DEV` builds, disabled otherwise.
+  - The mock backend itself is always available for `mock://` URLs; these flags only gate whether the UI lets users create new mock entries and whether the devtools banner is shown.
+- Recommended setups:
+  - Local development: leave both vars unset or set them to `"true"` → simulation devices plus devtools available.
+  - CI / Playwright E2E: default dev config or explicitly set both vars to `"true"` → tests can freely create `mock://` devices.
+  - Production (allow user exploration without hardware): `VITE_ENABLE_MOCK_BACKEND="true"`, `VITE_ENABLE_MOCK_DEVTOOLS="false"` → empty-state “Add simulation device” is visible, devtools banner is hidden.
+  - Production (disable all new mock entries): `VITE_ENABLE_MOCK_BACKEND="false"`, `VITE_ENABLE_MOCK_DEVTOOLS="false"` → UI rejects creating new mock devices; previously stored `mock://` entries (if any) still load.
+
 ## CI versioning
 
 - GitHub Actions calls `.github/scripts/compute-version.sh` to emit `APP_EFFECTIVE_VERSION` (from `APP_BASE_VERSION` or `package.json` plus git metadata).
