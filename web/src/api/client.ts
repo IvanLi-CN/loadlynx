@@ -9,7 +9,16 @@ import type {
 // Mock backend selection is based solely on the device URL scheme. The
 // ENABLE_MOCK flag remains exported for other modules but no longer gates the
 // mock backend here.
+// ENABLE_MOCK remains exported for compatibility but no longer gates the backend choice.
 export const ENABLE_MOCK = import.meta.env.VITE_ENABLE_MOCK_BACKEND !== "false";
+
+// Controls visibility of developer-facing mock controls (e.g. "Add demo device" button).
+// Defaults to TRUE in DEV mode unless explicitly disabled.
+// Always TRUE if VITE_ENABLE_MOCK_DEVTOOLS is "true".
+// Always FALSE if VITE_ENABLE_MOCK_DEVTOOLS is "false".
+export const ENABLE_MOCK_DEVTOOLS =
+  import.meta.env.VITE_ENABLE_MOCK_DEVTOOLS === "true" ||
+  (import.meta.env.DEV && import.meta.env.VITE_ENABLE_MOCK_DEVTOOLS !== "false");
 
 export function isMockBaseUrl(baseUrl: string): boolean {
   if (!baseUrl) {
@@ -465,22 +474,22 @@ export function subscribeStatusStream(
       const parsed = JSON.parse(event.data) as
         | FastStatusView
         | {
-            status: FastStatusJson;
-            link_up: boolean;
-            hello_seen: boolean;
-            analog_state: FastStatusView["analog_state"];
-            fault_flags_decoded: FastStatusView["fault_flags_decoded"];
-          };
+          status: FastStatusJson;
+          link_up: boolean;
+          hello_seen: boolean;
+          analog_state: FastStatusView["analog_state"];
+          fault_flags_decoded: FastStatusView["fault_flags_decoded"];
+        };
 
       const view: FastStatusView = isFastStatusView(parsed)
         ? parsed
         : {
-            raw: parsed.status,
-            link_up: parsed.link_up,
-            hello_seen: parsed.hello_seen,
-            analog_state: parsed.analog_state,
-            fault_flags_decoded: parsed.fault_flags_decoded ?? [],
-          };
+          raw: parsed.status,
+          link_up: parsed.link_up,
+          hello_seen: parsed.hello_seen,
+          analog_state: parsed.analog_state,
+          fault_flags_decoded: parsed.fault_flags_decoded ?? [],
+        };
 
       onMessage(view);
     } catch (error) {

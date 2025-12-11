@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
-import { ENABLE_MOCK, isHttpApiError } from "../api/client.ts";
+import { ENABLE_MOCK_DEVTOOLS, isHttpApiError } from "../api/client.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
 import {
   type DiscoveredDevice,
@@ -340,7 +340,7 @@ export function DevicesRoute() {
         </div>
       )}
 
-      {ENABLE_MOCK ? (
+      {ENABLE_MOCK_DEVTOOLS ? (
         <div className="flex items-center gap-3">
           <button
             type="button"
@@ -359,7 +359,7 @@ export function DevicesRoute() {
           </button>
           <span className="text-xs text-base-content/60">
             Adds a built-in demo device backed by an in-memory backend (for
-            development).
+            development / testing).
           </span>
         </div>
       ) : null}
@@ -371,18 +371,33 @@ export function DevicesRoute() {
               Loading devices...
             </div>
           ) : devices.length === 0 ? (
-            <div className="p-8 text-center text-base-content/60">
-              {ENABLE_MOCK ? (
-                <>
-                  No devices yet. Use the{" "}
-                  <strong className="font-medium text-base-content">
-                    Add demo device
-                  </strong>{" "}
-                  action above to seed a demo entry.
-                </>
-              ) : (
-                <>No devices yet. Add one or more real devices to begin.</>
-              )}
+            <div className="p-8 text-center space-y-4">
+              <p className="text-base-content/80 text-lg">
+                No devices yet. Add a LoadLynx device to begin monitoring and
+                control.
+              </p>
+
+              <div className="divider text-base-content/30 text-xs">OR</div>
+
+              <div className="flex flex-col items-center gap-2">
+                <p className="text-sm text-base-content/70">
+                  No hardware on hand? You can add a simulation device to try the console UI before connecting a real LoadLynx.
+                </p>
+                <button
+                  type="button"
+                  className="btn btn-secondary btn-sm"
+                  onClick={() => {
+                    addDeviceMutation.mutate(undefined, {
+                      onSuccess: () => {
+                        queryClient.invalidateQueries({ queryKey: ["devices"] });
+                      },
+                    });
+                  }}
+                  disabled={isMutating}
+                >
+                  {isMutating ? "Adding simulation..." : "Add simulation device"}
+                </button>
+              </div>
             </div>
           ) : (
             <table className="table table-zebra table-sm">
