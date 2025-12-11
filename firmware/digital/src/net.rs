@@ -16,7 +16,7 @@ use esp_radio::{
     Controller as RadioController, init as radio_init,
     wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent},
 };
-use heapless::Vec;
+use heapless::{String as HString, Vec};
 use static_cell::StaticCell;
 
 use loadlynx_protocol::{
@@ -24,11 +24,13 @@ use loadlynx_protocol::{
     LimitProfile, PROTOCOL_VERSION, SoftResetReason,
 };
 
+use crate::mdns::MdnsConfig;
 use crate::{
     ANALOG_FW_VERSION_RAW, ENCODER_STEP_MA, ENCODER_VALUE, FAST_STATUS_OK_COUNT, FW_VERSION,
     HELLO_SEEN, LAST_GOOD_FRAME_MS, LIMIT_PROFILE_DEFAULT, LINK_UP, STATE_FLAG_REMOTE_ACTIVE,
     TARGET_I_MAX_MA, TARGET_I_MIN_MA, TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME,
-    WIFI_NETMASK, WIFI_PSK, WIFI_SSID, WIFI_STATIC_IP, now_ms32, timestamp_ms, ui::AnalogState,
+    WIFI_NETMASK, WIFI_PSK, WIFI_SSID, WIFI_STATIC_IP, mdns, now_ms32, timestamp_ms,
+    ui::AnalogState,
 };
 
 /// Shared Wi‑Fi/IPv4 state for future HTTP APIs.
@@ -55,6 +57,7 @@ pub struct WifiState {
     pub gateway: Option<Ipv4Address>,
     pub is_static: bool,
     pub last_error: Option<WifiErrorKind>,
+    pub mac: Option<[u8; 6]>,
 }
 
 impl WifiState {
@@ -65,8 +68,18 @@ impl WifiState {
             gateway: None,
             is_static: false,
             last_error: None,
+            mac: None,
         }
     }
+}
+
+#[derive(Clone)]
+struct DeviceNames {
+    mac: [u8; 6],
+    mac_str: HString<17>,
+    short_id: HString<6>,
+    hostname: HString<32>,
+    hostname_fqdn: HString<48>,
 }
 
 pub type WifiStateMutex = Mutex<CriticalSectionRawMutex, WifiState>;
@@ -77,6 +90,32 @@ static RADIO_CONTROLLER: StaticCell<RadioController<'static>> = StaticCell::new(
 // Value chosen to cover a typical browser's 4–6 parallel GETs without being
 // wasteful on RAM.
 static NET_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
+
+fn derive_device_names(mac: [u8; 6]) -> DeviceNames {
+    let short_id = mdns::short_id_from_mac(mac);
+    let hostname = mdns::hostname_from_short_id(short_id.as_str());
+    let hostname_fqdn = mdns::fqdn_from_hostname(hostname.as_str());
+    let mac_str = format_mac(mac);
+
+    DeviceNames {
+        mac,
+        mac_str,
+        short_id,
+        hostname,
+        hostname_fqdn,
+    }
+}
+
+fn format_mac(mac: [u8; 6]) -> HString<17> {
+    let mut s: HString<17> = HString::new();
+    for (idx, byte) in mac.iter().enumerate() {
+        let _ = core::write!(s, "{:02x}", byte);
+        if idx != mac.len() - 1 {
+            let _ = s.push(':');
+        }
+    }
+    s
+}
 
 /// Initialize shared Wi‑Fi state storage.
 pub fn init_wifi_state() -> &'static WifiStateMutex {
@@ -200,6 +239,8 @@ pub fn spawn_wifi_and_http(
         };
 
     let wifi_device: WifiDevice<'static> = wifi_interfaces.sta;
+    let wifi_mac = wifi_device.mac_address();
+    let device_names = derive_device_names(wifi_mac);
 
     let (net_cfg, is_static) = build_net_config_from_env();
 
@@ -211,7 +252,13 @@ pub fn spawn_wifi_and_http(
 
     info!("spawning Wi-Fi connection task");
     spawner
-        .spawn(wifi_task(wifi_controller, stack, wifi_state, is_static))
+        .spawn(wifi_task(
+            wifi_controller,
+            stack,
+            wifi_state,
+            is_static,
+            wifi_mac,
+        ))
         .expect("wifi_task spawn");
 
     info!("spawning HTTP workers (count={})", HTTP_WORKER_COUNT);
@@ -220,6 +267,20 @@ pub fn spawn_wifi_and_http(
             .spawn(http_worker(stack, wifi_state, telemetry, idx))
             .expect("http_worker spawn");
     }
+
+    let mdns_cfg = MdnsConfig {
+        hostname: device_names.hostname.clone(),
+        hostname_fqdn: device_names.hostname_fqdn.clone(),
+        port: HTTP_PORT,
+    };
+    info!(
+        "spawning mDNS task (hostname={}, short_id={})",
+        device_names.hostname_fqdn.as_str(),
+        device_names.short_id.as_str(),
+    );
+    spawner
+        .spawn(mdns::mdns_task(stack, mdns_cfg))
+        .expect("mdns_task spawn");
 
     info!("spawning network stack runner");
     spawner
@@ -238,6 +299,7 @@ async fn wifi_task(
     stack: Stack<'static>,
     state: &'static WifiStateMutex,
     is_static_ip: bool,
+    mac: [u8; 6],
 ) {
     info!(
         "Wi-Fi task starting (ssid=\"{}\", hostname={:?}, static_ip={})",
@@ -324,6 +386,7 @@ async fn wifi_task(
                         guard.gateway = Some(gw);
                         guard.is_static = is_static_ip;
                         guard.last_error = None;
+                        guard.mac = Some(mac);
                     }
                 }
 
@@ -784,6 +847,7 @@ async fn render_identity_json(
 
     let ip = wifi.ipv4.unwrap();
     let octets = ip.octets();
+    let names = wifi.mac.map(derive_device_names);
 
     buf.clear();
     buf.push('{');
@@ -792,10 +856,20 @@ async fn render_identity_json(
     buf.push_str("\"device_id\":\"");
     if let Some(host) = WIFI_HOSTNAME {
         write_json_string_escaped(buf, host);
+    } else if let Some(ref names) = names {
+        write_json_string_escaped(buf, names.hostname.as_str());
     } else {
         write_json_string_escaped(buf, "llx-digital-01");
     }
     buf.push_str("\",");
+
+    if let Some(ref names) = names {
+        buf.push_str("\"hostname\":\"");
+        write_json_string_escaped(buf, names.hostname_fqdn.as_str());
+        buf.push_str("\",\"short_id\":\"");
+        write_json_string_escaped(buf, names.short_id.as_str());
+        buf.push_str("\",");
+    }
 
     // digital_fw_version
     buf.push_str("\"digital_fw_version\":\"");
@@ -837,13 +911,19 @@ async fn render_identity_json(
         octets[3]
     );
     buf.push_str("\",");
-    // mac: TODO derive from Wi‑Fi MAC; placeholder for now.
+    // mac
     buf.push_str("\"mac\":\"");
-    write_json_string_escaped(buf, "unknown");
+    if let Some(ref names) = names {
+        write_json_string_escaped(buf, names.mac_str.as_str());
+    } else {
+        write_json_string_escaped(buf, "unknown");
+    }
     buf.push_str("\",");
     // hostname
     buf.push_str("\"hostname\":\"");
-    if let Some(host) = WIFI_HOSTNAME {
+    if let Some(ref names) = names {
+        write_json_string_escaped(buf, names.hostname_fqdn.as_str());
+    } else if let Some(host) = WIFI_HOSTNAME {
         write_json_string_escaped(buf, host);
     } else {
         write_json_string_escaped(buf, "loadlynx-digital");
