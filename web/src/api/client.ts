@@ -6,13 +6,17 @@ import type {
   Identity,
 } from "./types.ts";
 
-// Mock backend is enabled on a per-device basis. Devices whose baseUrl starts
-// with "mock://" use the in-memory backend when ENABLE_MOCK is true; all other
-// devices use the real HTTP backend.
+// Mock backend selection is based solely on the device URL scheme. The
+// ENABLE_MOCK flag remains exported for other modules but no longer gates the
+// mock backend here.
 export const ENABLE_MOCK = import.meta.env.VITE_ENABLE_MOCK_BACKEND !== "false";
 
 export function isMockBaseUrl(baseUrl: string): boolean {
-  return ENABLE_MOCK && baseUrl.startsWith("mock://");
+  if (!baseUrl) {
+    return false;
+  }
+  const normalized = baseUrl.trim().toLowerCase();
+  return normalized.startsWith("mock://");
 }
 
 export interface HttpApiErrorInit {

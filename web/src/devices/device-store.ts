@@ -1,5 +1,3 @@
-import { ENABLE_MOCK } from "../api/client.ts";
-
 export interface StoredDevice {
   id: string;
   name: string;
@@ -8,19 +6,8 @@ export interface StoredDevice {
 
 const STORAGE_KEY = "loadlynx.devices";
 
-const DEFAULT_DEVICES: StoredDevice[] = [
-  {
-    id: "llx-dev-001",
-    name: "Demo Device #1",
-    baseUrl: "mock://demo-1",
-  },
-];
-
 function getDefaultDevices(): StoredDevice[] {
-  if (!ENABLE_MOCK) {
-    return [];
-  }
-  return DEFAULT_DEVICES;
+  return [];
 }
 
 function isBrowser(): boolean {
@@ -61,14 +48,8 @@ export function loadDevices(): StoredDevice[] {
       }
     }
 
-    const normalized = ENABLE_MOCK
-      ? devices
-      : devices.filter(
-          (device) => !device.baseUrl.toLowerCase().startsWith("mock://"),
-        );
-
-    if (normalized.length > 0) {
-      return normalized;
+    if (devices.length > 0) {
+      return devices;
     }
 
     return getDefaultDevices();
