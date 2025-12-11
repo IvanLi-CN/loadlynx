@@ -18,7 +18,8 @@ export const ENABLE_MOCK = import.meta.env.VITE_ENABLE_MOCK_BACKEND !== "false";
 // Always FALSE if VITE_ENABLE_MOCK_DEVTOOLS is "false".
 export const ENABLE_MOCK_DEVTOOLS =
   import.meta.env.VITE_ENABLE_MOCK_DEVTOOLS === "true" ||
-  (import.meta.env.DEV && import.meta.env.VITE_ENABLE_MOCK_DEVTOOLS !== "false");
+  (import.meta.env.DEV &&
+    import.meta.env.VITE_ENABLE_MOCK_DEVTOOLS !== "false");
 
 export function isMockBaseUrl(baseUrl: string): boolean {
   if (!baseUrl) {
@@ -474,22 +475,22 @@ export function subscribeStatusStream(
       const parsed = JSON.parse(event.data) as
         | FastStatusView
         | {
-          status: FastStatusJson;
-          link_up: boolean;
-          hello_seen: boolean;
-          analog_state: FastStatusView["analog_state"];
-          fault_flags_decoded: FastStatusView["fault_flags_decoded"];
-        };
+            status: FastStatusJson;
+            link_up: boolean;
+            hello_seen: boolean;
+            analog_state: FastStatusView["analog_state"];
+            fault_flags_decoded: FastStatusView["fault_flags_decoded"];
+          };
 
       const view: FastStatusView = isFastStatusView(parsed)
         ? parsed
         : {
-          raw: parsed.status,
-          link_up: parsed.link_up,
-          hello_seen: parsed.hello_seen,
-          analog_state: parsed.analog_state,
-          fault_flags_decoded: parsed.fault_flags_decoded ?? [],
-        };
+            raw: parsed.status,
+            link_up: parsed.link_up,
+            hello_seen: parsed.hello_seen,
+            analog_state: parsed.analog_state,
+            fault_flags_decoded: parsed.fault_flags_decoded ?? [],
+          };
 
       onMessage(view);
     } catch (error) {

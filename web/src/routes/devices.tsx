@@ -381,7 +381,8 @@ export function DevicesRoute() {
 
               <div className="flex flex-col items-center gap-2">
                 <p className="text-sm text-base-content/70">
-                  No hardware on hand? You can add a simulation device to try the console UI before connecting a real LoadLynx.
+                  No hardware on hand? You can add a simulation device to try
+                  the console UI before connecting a real LoadLynx.
                 </p>
                 <button
                   type="button"
@@ -389,13 +390,17 @@ export function DevicesRoute() {
                   onClick={() => {
                     addDeviceMutation.mutate(undefined, {
                       onSuccess: () => {
-                        queryClient.invalidateQueries({ queryKey: ["devices"] });
+                        queryClient.invalidateQueries({
+                          queryKey: ["devices"],
+                        });
                       },
                     });
                   }}
                   disabled={isMutating}
                 >
-                  {isMutating ? "Adding simulation..." : "Add simulation device"}
+                  {isMutating
+                    ? "Adding simulation..."
+                    : "Add simulation device"}
                 </button>
               </div>
             </div>

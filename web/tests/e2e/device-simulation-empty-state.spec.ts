@@ -10,7 +10,9 @@ test.describe("Simulation device empty state", () => {
     ).toBeVisible();
   });
 
-  test("adds simulation device from empty state and opens CC", async ({ page }) => {
+  test("adds simulation device from empty state and opens CC", async ({
+    page,
+  }) => {
     await expect(
       page.getByText(/No devices yet\. Add a LoadLynx device/i),
     ).toBeVisible();
@@ -18,7 +20,9 @@ test.describe("Simulation device empty state", () => {
 
     await page.getByRole("button", { name: /Add simulation device/i }).click();
 
-    await expect(page.getByRole("cell", { name: /mock:\/\/demo-1/i })).toBeVisible();
+    await expect(
+      page.getByRole("cell", { name: /mock:\/\/demo-1/i }),
+    ).toBeVisible();
     await page.getByRole("link", { name: /Open CC Control/i }).click();
 
     await expect(page).toHaveURL(/\/cc/);
