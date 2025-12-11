@@ -99,7 +99,7 @@ export function DevicesRoute() {
                   type="text"
                   value={newDeviceBaseUrl}
                   onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
-                  placeholder="http://192.168.1.100"
+                  placeholder="http://loadlynx-a1b2c3.local"
                   className="input input-bordered w-full"
                 />
               </label>
@@ -136,7 +136,10 @@ export function DevicesRoute() {
               </div>
             ) : (
               <div className="text-xs text-base-content/60">
-                Add one or more devices by name and HTTP base URL. Each device
+                Add one or more devices by name and HTTP base URL. Recommended:
+                use{" "}
+                <code className="code">http://loadlynx-&lt;id&gt;.local</code>{" "}
+                (see device screen). IP address works as a fallback. Each device
                 will be probed via{" "}
                 <code className="code">/api/v1/identity</code>.
               </div>
@@ -232,7 +235,13 @@ function DeviceRow(props: { device: StoredDevice }) {
   } else if (identityQuery.isSuccess && identity) {
     statusBadgeClass = "badge badge-success";
     statusLabel = "Online";
-    statusDetail = identity.network.ip;
+
+    const primaryHost = identity.hostname ?? identity.network?.hostname;
+    if (primaryHost) {
+      statusDetail = `${primaryHost} (${identity.network.ip})`;
+    } else {
+      statusDetail = identity.network.ip;
+    }
   } else if (identityQuery.isError) {
     statusBadgeClass = "badge badge-error";
     statusLabel = "Offline";

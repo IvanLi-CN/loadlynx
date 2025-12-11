@@ -24,6 +24,10 @@ export interface Identity {
   uptime_ms: number;
   network: NetworkInfo;
   capabilities: DeviceCapabilities;
+
+  // Added fields in digital firmware /api/v1/identity
+  hostname?: string;
+  short_id?: string;
 }
 
 export type AnalogState = "offline" | "cal_missing" | "faulted" | "ready";

@@ -100,7 +100,10 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
             &mut tx_meta,
             &mut tx_storage,
         );
-        if let Err(err) = socket.bind((IpAddress::Ipv4(Ipv4Address::UNSPECIFIED), MDNS_PORT)) {
+        socket.set_hop_limit(Some(255));
+        // Binding to the current IPv4 address (instead of 0.0.0.0) avoids emitting responses
+        // with a source address of 0.0.0.0, which some resolvers will drop.
+        if let Err(err) = socket.bind((IpAddress::Ipv4(ip), MDNS_PORT)) {
             warn!(
                 "mdns: bind 5353 failed (hostname={}): {:?}",
                 cfg.hostname_fqdn.as_str(),
@@ -124,6 +127,7 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
             cfg.hostname.as_str(),
             ip,
             IpEndpoint::new(IpAddress::Ipv4(MDNS_MULTICAST_V4), MDNS_PORT),
+            false,
         )
         .await;
 
@@ -137,6 +141,12 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
                     match res {
                         Ok((len, meta)) => {
                             if let Some(query) = parse_query(&recv_buf[..len]) {
+                                info!(
+                                    "mdns: query name={} qtype={} unicast={}",
+                                    query.name.as_str(),
+                                    query.qtype,
+                                    query.unicast_response
+                                );
                                 if name_matches(&query.name, cfg.hostname_fqdn.as_str()) {
                                     let dest = if query.unicast_response {
                                         meta.endpoint
@@ -152,6 +162,7 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
                                         cfg.hostname.as_str(),
                                         ip,
                                         dest,
+                                        true,
                                     )
                                     .await;
                                 }
@@ -172,6 +183,7 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
                         cfg.hostname.as_str(),
                         ip,
                         IpEndpoint::new(IpAddress::Ipv4(MDNS_MULTICAST_V4), MDNS_PORT),
+                        false,
                     )
                     .await;
                     announce_timer = Timer::after(ANNOUNCE_INTERVAL);
@@ -193,14 +205,20 @@ async fn send_a_response(
     hostname: &str,
     ip: Ipv4Address,
     dest: IpEndpoint,
+    include_question: bool,
 ) {
-    let len = match build_a_response(buf, hostname, ip) {
-        Some(len) => len,
-        None => {
-            warn!("mdns: failed to encode response (buffer too small)");
-            return;
-        }
-    };
+    let len = if include_question {
+        build_a_response(buf, hostname, ip)
+    } else {
+        build_unsolicited_response(buf, hostname, ip)
+    }
+    .unwrap_or_else(|| {
+        warn!("mdns: failed to encode response (buffer too small)");
+        0
+    });
+    if len == 0 {
+        return;
+    }
 
     if let Err(err) = socket.send_to(&buf[..len], dest).await {
         match err {
@@ -212,6 +230,19 @@ async fn send_a_response(
 }
 
 fn build_a_response(buf: &mut [u8], hostname: &str, ip: Ipv4Address) -> Option<usize> {
+    build_response_inner(buf, hostname, ip, true)
+}
+
+fn build_unsolicited_response(buf: &mut [u8], hostname: &str, ip: Ipv4Address) -> Option<usize> {
+    build_response_inner(buf, hostname, ip, false)
+}
+
+fn build_response_inner(
+    buf: &mut [u8],
+    hostname: &str,
+    ip: Ipv4Address,
+    include_question: bool,
+) -> Option<usize> {
     if buf.len() < 12 {
         return None;
     }
@@ -221,8 +252,11 @@ fn build_a_response(buf: &mut [u8], hostname: &str, ip: Ipv4Address) -> Option<u
     buf[1] = 0; // ID = 0 for mDNS
     buf[2] = 0x84; // QR=1, AA=1
     buf[3] = 0x00;
-    buf[4] = 0;
-    buf[5] = 0; // QDCOUNT
+
+    // Set QDCOUNT/ANCOUNT according to mode.
+    let qdcount = if include_question { 1u16 } else { 0u16 };
+    buf[4] = (qdcount >> 8) as u8;
+    buf[5] = qdcount as u8;
     buf[6] = 0;
     buf[7] = 1; // ANCOUNT = 1
     buf[8] = 0;
@@ -231,7 +265,35 @@ fn build_a_response(buf: &mut [u8], hostname: &str, ip: Ipv4Address) -> Option<u
     buf[11] = 0; // ARCOUNT
 
     let mut offset = 12;
-    offset = encode_name(buf, offset, hostname)?;
+
+    // Question (optional)
+    if include_question {
+        offset = encode_name(buf, offset, hostname)?;
+        if offset + 4 > buf.len() {
+            return None;
+        }
+        // QTYPE A
+        buf[offset] = 0;
+        buf[offset + 1] = 1;
+        // QCLASS IN
+        buf[offset + 2] = 0;
+        buf[offset + 3] = 1;
+        offset += 4;
+    }
+
+    // Answer name: if we included question, we can pointer-compress.
+    if include_question {
+        if offset + 2 > buf.len() {
+            return None;
+        }
+        // pointer to the question name at 0x000c
+        buf[offset] = 0xC0;
+        buf[offset + 1] = 0x0C;
+        offset += 2;
+    } else {
+        offset = encode_name(buf, offset, hostname)?;
+    }
+
     if offset + 10 > buf.len() {
         return None;
     }
