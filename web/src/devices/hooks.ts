@@ -1,5 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ENABLE_MOCK, getIdentity, HttpApiError } from "../api/client.ts";
+import {
+  ENABLE_MOCK,
+  getIdentity,
+  HttpApiError,
+  isMockBaseUrl,
+} from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
 import { loadDevices, type StoredDevice, saveDevices } from "./device-store.ts";
 
@@ -13,6 +18,7 @@ export function useDevicesQuery() {
 export function useDeviceIdentity(device: StoredDevice | null | undefined) {
   const baseUrl = device?.baseUrl;
   const queryKey = ["device", device?.id ?? "unknown", "identity"] as const;
+  const jitterRetryDelay = () => 200 + Math.random() * 300;
 
   return useQuery<Identity, HttpApiError>({
     queryKey,
@@ -28,7 +34,15 @@ export function useDeviceIdentity(device: StoredDevice | null | undefined) {
       }
       return getIdentity(baseUrl);
     },
-    retry: 1,
+    retry: (failureCount, error) => {
+      if (error instanceof HttpApiError && error.code === "NO_BASE_URL") {
+        return false;
+      }
+      const isRealDevice =
+        Boolean(baseUrl) && baseUrl !== undefined && !isMockBaseUrl(baseUrl);
+      return isRealDevice ? failureCount < 2 : failureCount < 1;
+    },
+    retryDelay: jitterRetryDelay,
   });
 }
 

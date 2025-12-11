@@ -243,7 +243,7 @@ function DeviceRow(props: { device: StoredDevice }) {
     if (isHttpApiError(error)) {
       const code = error.code ?? "HTTP_ERROR";
       if (error.status === 0 && code === "NETWORK_ERROR") {
-        statusDetail = "Network error — check device IP or network";
+        statusDetail = "网络异常，已自动重试；如仍失败请检查设备 IP 或网络";
       } else if (error.status === 404 && code === "UNSUPPORTED_OPERATION") {
         statusBadgeClass = "badge badge-warning";
         statusLabel = "Online (HTTP)";

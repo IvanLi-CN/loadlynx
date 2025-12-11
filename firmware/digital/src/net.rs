@@ -214,10 +214,12 @@ pub fn spawn_wifi_and_http(
         .spawn(wifi_task(wifi_controller, stack, wifi_state, is_static))
         .expect("wifi_task spawn");
 
-    info!("spawning HTTP server task");
-    spawner
-        .spawn(http_server_task(stack, wifi_state, telemetry))
-        .expect("http_server_task spawn");
+    info!("spawning HTTP workers (count={})", HTTP_WORKER_COUNT);
+    for idx in 0..HTTP_WORKER_COUNT {
+        spawner
+            .spawn(http_worker(stack, wifi_state, telemetry, idx))
+            .expect("http_worker spawn");
+    }
 
     info!("spawning network stack runner");
     spawner
@@ -351,18 +353,22 @@ async fn wifi_task(
     }
 }
 
+// Keep at least one worker in accept() even if another is occupied by SSE, avoiding
+// browser-side ECONNREFUSED while reusing the same HTTP port and stack.
+const HTTP_WORKER_COUNT: usize = 2;
 const HTTP_PORT: u16 = 80;
 
-#[embassy_executor::task]
-async fn http_server_task(
+#[embassy_executor::task(pool_size = HTTP_WORKER_COUNT)]
+async fn http_worker(
     stack: Stack<'static>,
     state: &'static WifiStateMutex,
     telemetry: &'static TelemetryMutex,
+    worker_id: usize,
 ) {
     let mut rx_buf = [0u8; 1024];
     let mut tx_buf = [0u8; 1024];
 
-    info!("HTTP server task starting (port={})", HTTP_PORT);
+    info!("HTTP worker {} starting (port={})", worker_id, HTTP_PORT);
 
     loop {
         // Ensure network is configured before accepting connections.
@@ -371,14 +377,19 @@ async fn http_server_task(
         let mut socket = TcpSocket::new(stack, &mut rx_buf, &mut tx_buf);
         socket.set_timeout(Some(Duration::from_secs(10)));
 
-        if let Err(err) = socket.accept(HTTP_PORT).await {
-            warn!("HTTP server accept error: {:?}", err);
-            Timer::after(Duration::from_secs(1)).await;
-            continue;
-        }
-
-        if let Err(err) = handle_http_connection(&mut socket, state, telemetry).await {
-            warn!("HTTP connection handling error: {:?}", err);
+        match socket.accept(HTTP_PORT).await {
+            Ok(()) => {
+                if let Err(err) = handle_http_connection(&mut socket, state, telemetry).await {
+                    warn!(
+                        "HTTP worker {} connection handling error: {:?}",
+                        worker_id, err
+                    );
+                }
+            }
+            Err(err) => {
+                warn!("HTTP worker {} accept error: {:?}", worker_id, err);
+                Timer::after(Duration::from_millis(200)).await;
+            }
         }
 
         socket.abort();

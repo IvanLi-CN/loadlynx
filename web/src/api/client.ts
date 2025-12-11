@@ -78,6 +78,26 @@ function mapHttpError(status: number, data: unknown): HttpApiError {
   });
 }
 
+// Per-device FIFO queue to serialize HTTP calls to a single device baseUrl.
+// Errors from previous requests must not stall the queue, so we always
+// advance the tail even when a request fails.
+const deviceQueues = new Map<string, Promise<unknown>>();
+
+function enqueueForDevice<T>(
+  baseUrl: string,
+  op: () => Promise<T>,
+): Promise<T> {
+  const tail = deviceQueues.get(baseUrl) ?? Promise.resolve();
+  const next = tail.catch(() => undefined).then(() => op());
+
+  deviceQueues.set(
+    baseUrl,
+    next.catch(() => undefined),
+  );
+
+  return next;
+}
+
 async function httpJson<T>(
   baseUrl: string,
   path: string,
@@ -141,6 +161,19 @@ async function httpJson<T>(
 
   return data as T;
 }
+
+async function httpJsonQueued<T>(
+  baseUrl: string,
+  path: string,
+  init?: RequestInit,
+): Promise<T> {
+  return enqueueForDevice(baseUrl, () => httpJson<T>(baseUrl, path, init));
+}
+
+// Test-only export to validate queue behaviour without widening public surface.
+export const __testHttpJsonQueued = httpJsonQueued;
+export const __testEnqueueForDevice = enqueueForDevice;
+export const __testClearDeviceQueues = () => deviceQueues.clear();
 
 // Simple in-memory mock of the HTTP API.
 // All functions mimic the shape of the real endpoints so we can later swap
@@ -348,7 +381,7 @@ export async function getIdentity(baseUrl: string): Promise<Identity> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetIdentity(baseUrl);
   }
-  return httpJson<Identity>(baseUrl, "/api/v1/identity");
+  return httpJsonQueued<Identity>(baseUrl, "/api/v1/identity");
 }
 
 export async function getStatus(baseUrl: string): Promise<FastStatusView> {
@@ -363,7 +396,7 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
     fault_flags_decoded: FastStatusView["fault_flags_decoded"];
   }
 
-  const payload = await httpJson<FastStatusHttpResponse>(
+  const payload = await httpJsonQueued<FastStatusHttpResponse>(
     baseUrl,
     "/api/v1/status",
   );
@@ -473,7 +506,7 @@ export async function getCc(baseUrl: string): Promise<CcControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetCc(baseUrl);
   }
-  return httpJson<CcControlView>(baseUrl, "/api/v1/cc");
+  return httpJsonQueued<CcControlView>(baseUrl, "/api/v1/cc");
 }
 
 export async function updateCc(
@@ -488,7 +521,7 @@ export async function updateCc(
 
   // Use POST + text/plain to stay within the CORS simple-request surface and
   // avoid私网预检；fetch 会发送 Content-Length，兼容设备端的小栈。
-  return httpJson<CcControlView>(baseUrl, "/api/v1/cc", {
+  return httpJsonQueued<CcControlView>(baseUrl, "/api/v1/cc", {
     method: "POST",
     body,
     headers: {
@@ -511,7 +544,7 @@ export async function postSoftReset(
 
   const body = JSON.stringify({ reason });
 
-  return httpJson<{ accepted: boolean; reason: string }>(
+  return httpJsonQueued<{ accepted: boolean; reason: string }>(
     baseUrl,
     "/api/v1/soft-reset",
     {

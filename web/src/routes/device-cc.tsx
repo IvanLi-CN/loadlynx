@@ -30,6 +30,7 @@ const MONO_FONT_FAMILY =
 
 const FAST_STATUS_REFETCH_MS = 400;
 const RETRY_DELAY_MS = 500;
+const jitterRetryDelay = () => 200 + Math.random() * 300;
 
 export function DeviceCcRoute() {
   const { deviceId } = useParams({
@@ -152,7 +153,8 @@ export function DeviceCcRoute() {
       streamStatus === null,
     refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
     refetchIntervalInBackground: false,
-    retryDelay: RETRY_DELAY_MS,
+    retry: 2,
+    retryDelay: jitterRetryDelay,
   });
 
   useEffect(() => {
@@ -206,9 +208,9 @@ export function DeviceCcRoute() {
 
     if (firstHttpError.status === 0 && code === "NETWORK_ERROR") {
       const hint =
-        "无法连接设备" +
+        "可能是短暂的网络抖动，已自动重试" +
         (baseUrl ? `（baseUrl=${baseUrl}）` : "") +
-        "，请检查网络与 IP 设置。";
+        "；若仍无法连接，请检查网络与 IP 设置。";
       return { summary, hint } as const;
     }
 
