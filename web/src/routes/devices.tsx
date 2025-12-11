@@ -136,12 +136,12 @@ export function DevicesRoute() {
               </div>
             ) : (
               <div className="text-xs text-base-content/60">
-                Add one or more devices by name and HTTP base URL. Recommended:
-                use{" "}
-                <code className="code">http://loadlynx-&lt;id&gt;.local</code>{" "}
-                (see device screen). IP address works as a fallback. Each device
-                will be probed via{" "}
-                <code className="code">/api/v1/identity</code>.
+                Enter the device <strong>Hostname</strong> (recommended) or IP
+                address.
+                <br />
+                Example:{" "}
+                <code className="code">http://loadlynx-d68638.local</code> (uses
+                the Short ID from the device screen).
               </div>
             )}
           </form>

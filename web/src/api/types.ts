@@ -26,6 +26,10 @@ export interface Identity {
   capabilities: DeviceCapabilities;
 
   // Added fields in digital firmware /api/v1/identity
+  // -----------------------------------------------------------------------
+  // hostname: The mDNS FQDN, e.g. "loadlynx-d68638.local".
+  // short_id: The unique 6-char hex ID derived from MAC, e.g. "d68638".
+  // Note: network.hostname is legay/NetBIOS and may differ or be less specific.
   hostname?: string;
   short_id?: string;
 }
