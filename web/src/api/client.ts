@@ -193,10 +193,44 @@ export const __testClearDeviceQueues = () => deviceQueues.clear();
 // All functions mimic the shape of the real endpoints so we can later swap
 // the internals for real fetch() calls without touching callers.
 
+// Mock Calibration Types & State
+import type {
+  CalibrationApplyRequest,
+  CalibrationCommitRequest,
+  CalibrationModeRequest,
+  CalibrationProfile,
+  CalibrationResetRequest,
+} from "./types.ts";
+
 interface MockDeviceState {
   identity: Identity;
   status: FastStatusView;
   cc: CcControlView;
+  calibrationMode: CalibrationModeRequest["kind"];
+  calibrationProfile: CalibrationProfile;
+}
+
+function createInitialCalibrationProfile(): CalibrationProfile {
+  return {
+    v_local_points: [
+      { raw: 0, mv: 0 },
+      // raw_v_* is reported in 100uV units => 40V is 400_000 * 100uV.
+      { raw: 400_000, mv: 40_000 },
+    ],
+    v_remote_points: [
+      { raw: 0, mv: 0 },
+      { raw: 400_000, mv: 40_000 },
+    ],
+    current_ch1_points: [
+      { raw: 0, ma: 0, dac_code: 0 },
+      // raw_cur_100uv is an arbitrary mock scaling of i_ma * 100.
+      { raw: 500_000, ma: 5_000, dac_code: 4095 },
+    ],
+    current_ch2_points: [
+      { raw: 0, ma: 0, dac_code: 0 },
+      { raw: 500_000, ma: 5_000, dac_code: 4095 },
+    ],
+  };
 }
 
 const mockDevices = new Map<string, MockDeviceState>();
@@ -290,8 +324,15 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
   const identity = createInitialIdentity(baseUrl, index);
   const status = createInitialStatus();
   const cc = createInitialCc();
+  const calibrationProfile = createInitialCalibrationProfile();
 
-  const state: MockDeviceState = { identity, status, cc };
+  const state: MockDeviceState = {
+    identity,
+    status,
+    cc,
+    calibrationMode: "off",
+    calibrationProfile,
+  };
   mockDevices.set(baseUrl, state);
   return state;
 }
@@ -306,6 +347,47 @@ async function mockGetStatus(baseUrl: string): Promise<FastStatusView> {
   const next = { ...state.status, raw: { ...state.status.raw } };
   // Simple uptime tick to show the value changing between refreshes.
   next.raw.uptime_ms += 1_000;
+
+  // Injection of raw values based on calibration mode
+  switch (state.calibrationMode) {
+    case "voltage":
+      // Inject dummy raw voltage values
+      // In a real device these would fluctuate; here we can just mirror the parsed values * 10 or similar
+      next.raw.cal_kind = 1; // dummy enum value for voltage
+      next.raw.raw_v_nr_100uv = next.raw.v_local_mv * 10;
+      next.raw.raw_v_rmt_100uv = next.raw.v_remote_mv * 10;
+      break;
+    case "current_ch1":
+      next.raw.cal_kind = 2; // dummy
+      next.raw.raw_cur_100uv = next.raw.i_local_ma * 100; // mA to 100uv roughly
+      next.raw.raw_dac_code = Math.floor(
+        (next.raw.target_value /
+          (state.cc.limit_profile.max_i_ma > 0
+            ? state.cc.limit_profile.max_i_ma
+            : 1)) *
+          4095,
+      );
+      break;
+    case "current_ch2":
+      next.raw.cal_kind = 3; // dummy
+      next.raw.raw_cur_100uv = next.raw.i_remote_ma * 100;
+      next.raw.raw_dac_code = Math.floor(
+        (next.raw.target_value /
+          (state.cc.limit_profile.max_i_ma > 0
+            ? state.cc.limit_profile.max_i_ma
+            : 1)) *
+          4095,
+      );
+      break;
+    default:
+      delete next.raw.cal_kind;
+      delete next.raw.raw_v_nr_100uv;
+      delete next.raw.raw_v_rmt_100uv;
+      delete next.raw.raw_cur_100uv;
+      delete next.raw.raw_dac_code;
+      break;
+  }
+
   state.status = next;
   return structuredClone(next);
 }
@@ -573,4 +655,138 @@ export async function postSoftReset(
       },
     },
   );
+}
+
+// Calibration API
+
+export async function getCalibrationProfile(
+  baseUrl: string,
+): Promise<CalibrationProfile> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockGetCalibrationProfile(baseUrl);
+  }
+  return httpJsonQueued<CalibrationProfile>(
+    baseUrl,
+    "/api/v1/calibration/profile",
+  );
+}
+
+export async function postCalibrationApply(
+  baseUrl: string,
+  payload: CalibrationApplyRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationApply(baseUrl, payload);
+  }
+  const body = JSON.stringify(payload);
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/apply", {
+    method: "POST",
+    body,
+  });
+}
+
+export async function postCalibrationCommit(
+  baseUrl: string,
+  payload: CalibrationCommitRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationCommit(baseUrl, payload);
+  }
+  const body = JSON.stringify(payload);
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/commit", {
+    method: "POST",
+    body,
+  });
+}
+
+export async function postCalibrationReset(
+  baseUrl: string,
+  payload: CalibrationResetRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationReset(baseUrl, payload);
+  }
+  const body = JSON.stringify(payload);
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/reset", {
+    method: "POST",
+    body,
+  });
+}
+
+export async function postCalibrationMode(
+  baseUrl: string,
+  payload: CalibrationModeRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationMode(baseUrl, payload);
+  }
+  const body = JSON.stringify(payload);
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/mode", {
+    method: "POST",
+    body,
+  });
+}
+
+// Mock Implementation Extensions (Calibration)
+
+async function mockGetCalibrationProfile(
+  baseUrl: string,
+): Promise<CalibrationProfile> {
+  const state = getOrCreateMockDevice(baseUrl);
+  return structuredClone(state.calibrationProfile);
+}
+
+async function mockPostCalibrationApply(
+  baseUrl: string,
+  payload: CalibrationApplyRequest,
+): Promise<void> {
+  const state = getOrCreateMockDevice(baseUrl);
+  // Update the transient profile
+  if (payload.kind === "v_local")
+    state.calibrationProfile.v_local_points = payload.points;
+  if (payload.kind === "v_remote")
+    state.calibrationProfile.v_remote_points = payload.points;
+  if (payload.kind === "current_ch1")
+    state.calibrationProfile.current_ch1_points = payload.points;
+  if (payload.kind === "current_ch2")
+    state.calibrationProfile.current_ch2_points = payload.points;
+}
+
+async function mockPostCalibrationCommit(
+  baseUrl: string,
+  _payload: CalibrationCommitRequest,
+): Promise<void> {
+  getOrCreateMockDevice(baseUrl);
+  // In mock, commit effectively just means "we accepted it".
+  // The applied profile is already in memory.
+  // The applied profile is already in memory.
+}
+
+async function mockPostCalibrationReset(
+  baseUrl: string,
+  payload: CalibrationResetRequest,
+): Promise<void> {
+  const state = getOrCreateMockDevice(baseUrl);
+  const initial = createInitialCalibrationProfile();
+
+  if (payload.kind === "v_local" || payload.kind === "both") {
+    state.calibrationProfile.v_local_points = initial.v_local_points;
+  }
+  if (payload.kind === "v_remote" || payload.kind === "both") {
+    state.calibrationProfile.v_remote_points = initial.v_remote_points;
+  }
+  if (payload.kind === "current_ch1") {
+    state.calibrationProfile.current_ch1_points = initial.current_ch1_points;
+  }
+  if (payload.kind === "current_ch2") {
+    state.calibrationProfile.current_ch2_points = initial.current_ch2_points;
+  }
+}
+
+async function mockPostCalibrationMode(
+  baseUrl: string,
+  payload: CalibrationModeRequest,
+): Promise<void> {
+  const state = getOrCreateMockDevice(baseUrl);
+  state.calibrationMode = payload.kind;
 }

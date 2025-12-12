@@ -59,6 +59,48 @@ export interface FastStatusJson {
   sink_exhaust_temp_mc: number;
   mcu_temp_mc: number;
   fault_flags: number;
+  // Optional raw fields for calibration (only present when mode != off)
+  cal_kind?: number;
+  raw_v_nr_100uv?: number;
+  raw_v_rmt_100uv?: number;
+  raw_cur_100uv?: number;
+  raw_dac_code?: number;
+}
+
+export interface CalibrationPointVoltage {
+  raw: number;
+  mv: number;
+}
+
+export interface CalibrationPointCurrent {
+  raw: number;
+  ma: number;
+  dac_code?: number;
+}
+
+export interface CalibrationProfile {
+  v_local_points: CalibrationPointVoltage[];
+  v_remote_points: CalibrationPointVoltage[];
+  current_ch1_points: CalibrationPointCurrent[];
+  current_ch2_points: CalibrationPointCurrent[];
+}
+
+export type CalibrationApplyRequest =
+  | { kind: "v_local"; points: CalibrationPointVoltage[] }
+  | { kind: "v_remote"; points: CalibrationPointVoltage[] }
+  | { kind: "current_ch1"; points: CalibrationPointCurrent[] }
+  | { kind: "current_ch2"; points: CalibrationPointCurrent[] };
+
+export interface CalibrationCommitRequest {
+  kind: "v_local" | "v_remote" | "current_ch1" | "current_ch2";
+}
+
+export interface CalibrationResetRequest {
+  kind: "v_local" | "v_remote" | "both" | "current_ch1" | "current_ch2";
+}
+
+export interface CalibrationModeRequest {
+  kind: "off" | "voltage" | "current_ch1" | "current_ch2";
 }
 
 export interface FastStatusView {

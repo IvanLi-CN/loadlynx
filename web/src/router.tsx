@@ -5,6 +5,7 @@ import {
   createRouter,
 } from "@tanstack/react-router";
 import { AppLayout } from "./routes/app-layout.tsx";
+import { DeviceCalibrationRoute } from "./routes/device-calibration.tsx";
 import { DeviceCcRoute } from "./routes/device-cc.tsx";
 import { DeviceSettingsRoute } from "./routes/device-settings.tsx";
 import { DeviceStatusRoute } from "./routes/device-status.tsx";
@@ -48,7 +49,14 @@ const deviceStatusRoute = createRoute({
 const deviceSettingsRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "$deviceId/settings",
+
   component: DeviceSettingsRoute,
+});
+
+const deviceCalibrationRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "$deviceId/calibration",
+  component: DeviceCalibrationRoute,
 });
 
 const routeTree = rootRoute.addChildren([
@@ -56,7 +64,9 @@ const routeTree = rootRoute.addChildren([
   devicesRoute,
   deviceCcRoute,
   deviceStatusRoute,
+
   deviceSettingsRoute,
+  deviceCalibrationRoute,
 ]);
 
 export function createAppRouter(queryClient: QueryClient) {

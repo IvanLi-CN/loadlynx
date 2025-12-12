@@ -114,6 +114,16 @@ export function AppLayout() {
                     Settings
                   </Link>
                 </li>
+                <li>
+                  <Link
+                    to="/$deviceId/calibration"
+                    params={{ deviceId }}
+                    activeProps={{ className: "active" }}
+                    className="rounded-box"
+                  >
+                    Calibration
+                  </Link>
+                </li>
               </>
             ) : (
               <>
