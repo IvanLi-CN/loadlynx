@@ -283,6 +283,7 @@ dependencies = [
  "esp-rtos",
  "heapless 0.8.0",
  "lcd-async",
+ "loadlynx-calibration-format",
  "loadlynx-protocol",
  "nb 1.1.0",
  "smoltcp",
@@ -1252,6 +1253,14 @@ name = "litrs"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
+
+[[package]]
+name = "loadlynx-calibration-format"
+version = "0.1.0"
+dependencies = [
+ "heapless 0.8.0",
+ "loadlynx-protocol",
+]
 
 [[package]]
 name = "loadlynx-protocol"

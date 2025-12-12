@@ -20,6 +20,7 @@ use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
 use embedded_io_async::Read as AsyncRead;
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::time::Instant as HalInstant;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::uhci::{self, RxConfig as UhciRxConfig, TxConfig as UhciTxConfig, Uhci};
@@ -53,12 +54,13 @@ use lcd_async::{
     raw_framebuf::RawFrameBuf,
 };
 use loadlynx_protocol::{
-    CRC_LEN, CalWrite, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, LimitProfile,
-    MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO, MSG_LIMIT_PROFILE, MSG_SET_POINT, MSG_SOFT_RESET,
-    SetEnable, SetPoint, SlipDecoder, SoftReset, SoftResetReason, crc16_ccitt_false,
-    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_soft_reset_frame,
-    encode_cal_write_frame, encode_limit_profile_frame, encode_set_enable_frame,
-    encode_set_point_frame, encode_soft_reset_frame, slip_encode,
+    CRC_LEN, CalKind, CalMode, FLAG_ACK_REQ, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
+    LimitProfile, MSG_CAL_MODE, MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO, MSG_LIMIT_PROFILE,
+    MSG_SET_POINT, MSG_SOFT_RESET, SetEnable, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
+    decode_cal_mode_frame, decode_fast_status_frame, decode_frame, decode_hello_frame,
+    decode_soft_reset_frame, encode_cal_mode_frame, encode_cal_write_frame,
+    encode_limit_profile_frame, encode_set_enable_frame, encode_set_point_frame,
+    encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -69,6 +71,8 @@ const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
 mod ui;
 use ui::{AnalogState, UiSnapshot};
+
+mod eeprom;
 
 // Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
 #[cfg(feature = "net_http")]
@@ -192,10 +196,56 @@ pub type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
 pub(crate) static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
 
+pub type EepromMutex = Mutex<CriticalSectionRawMutex, eeprom::M24c64>;
+static EEPROM: StaticCell<EepromMutex> = StaticCell::new();
+
+use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
+
+#[derive(Clone, Debug)]
+pub struct CalibrationState {
+    pub profile: ActiveProfile,
+    pub cal_mode: CalKind,
+}
+
+impl CalibrationState {
+    pub fn new(profile: ActiveProfile) -> Self {
+        Self {
+            profile,
+            cal_mode: CalKind::Off,
+        }
+    }
+}
+
+pub type CalibrationMutex = Mutex<CriticalSectionRawMutex, CalibrationState>;
+static CALIBRATION: StaticCell<CalibrationMutex> = StaticCell::new();
+
 // Soft-reset requests originating from the HTTP API are funneled through this
 // small channel so they can be serialized onto the existing UART TX task.
 #[cfg(feature = "net_http")]
 static SOFT_RESET_REQUESTS: Channel<CriticalSectionRawMutex, SoftResetReason, 4> = Channel::new();
+
+#[cfg(feature = "net_http")]
+#[derive(Clone, Copy, Debug)]
+pub enum CalUartCommand {
+    SendAllCurves,
+    SendCurve(CurveKind),
+    SetMode(CalKind),
+}
+
+#[cfg(feature = "net_http")]
+static CAL_UART_COMMANDS: Channel<CriticalSectionRawMutex, CalUartCommand, 8> = Channel::new();
+
+#[cfg(feature = "net_http")]
+pub(crate) fn enqueue_cal_uart(cmd: CalUartCommand) -> Result<(), &'static str> {
+    CAL_UART_COMMANDS
+        .try_send(cmd)
+        .map_err(|_| "CAL_UART_QUEUE_FULL")
+}
+
+#[cfg(feature = "net_http")]
+pub(crate) fn dequeue_cal_uart() -> Option<CalUartCommand> {
+    CAL_UART_COMMANDS.try_receive().ok()
+}
 
 #[cfg(feature = "net_http")]
 pub(crate) fn enqueue_soft_reset(reason: SoftResetReason) -> Result<(), &'static str> {
@@ -239,6 +289,7 @@ static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
+static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -1455,6 +1506,29 @@ async fn feed_decoder(
                                 decoder.reset();
                             }
                         },
+                        MSG_CAL_MODE => match decode_cal_mode_frame(&frame) {
+                            Ok((hdr, mode)) => {
+                                record_link_activity();
+                                if hdr.flags & FLAG_IS_ACK != 0 {
+                                    let total =
+                                        CAL_MODE_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+                                    info!(
+                                        "cal_mode ACK received: seq={} kind={:?} (ack_total={})",
+                                        hdr.seq, mode.kind, total
+                                    );
+                                } else {
+                                    warn!("cal_mode request received from analog side; ignoring");
+                                }
+                            }
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
+                                decoder.reset();
+                            }
+                        },
                         _ => {
                             rate_limited_proto_warn("unsupported msg", Some(frame.as_slice()));
                         }
@@ -1583,6 +1657,55 @@ async fn main(spawner: Spawner) {
     let alg_en_pin = peripherals.GPIO34;
     let mut alg_en = Output::new(alg_en_pin, Level::Low, OutputConfig::default());
 
+    // External I2C EEPROM (M24C64-FMC6TG) on GPIO8=SDA / GPIO9=SCL, 7-bit addr 0x50.
+    info!(
+        "initializing I2C0 EEPROM (GPIO8=SDA, GPIO9=SCL, addr=0x{:02x})",
+        calfmt::EEPROM_I2C_ADDR_7BIT
+    );
+    let i2c0 = I2c::new(
+        peripherals.I2C0,
+        I2cConfig::default().with_frequency(Rate::from_khz(400)),
+    )
+    .expect("i2c0 init")
+    .with_sda(peripherals.GPIO8)
+    .with_scl(peripherals.GPIO9)
+    .into_async();
+    let eeprom = EEPROM.init(Mutex::new(eeprom::M24c64::new(i2c0)));
+
+    // Load calibration profile from EEPROM; if invalid, fall back to firmware defaults.
+    let initial_profile = {
+        let mut guard = eeprom.lock().await;
+        match guard.read_profile_blob().await {
+            Ok(blob) => match calfmt::deserialize_profile(&blob, calfmt::DIGITAL_HW_REV) {
+                Ok(profile) => {
+                    info!(
+                        "EEPROM calibration profile loaded (fmt_version={}, hw_rev={})",
+                        profile.fmt_version, profile.hw_rev
+                    );
+                    profile
+                }
+                Err(err) => {
+                    let err_kind = match err {
+                        calfmt::ProfileLoadError::InvalidLength => "invalid_length",
+                        calfmt::ProfileLoadError::UnsupportedFmtVersion(_) => "fmt_version",
+                        calfmt::ProfileLoadError::HwRevMismatch { .. } => "hw_rev",
+                        calfmt::ProfileLoadError::InvalidCounts => "counts",
+                        calfmt::ProfileLoadError::CrcMismatch { .. } => "crc32",
+                    };
+                    warn!(
+                        "EEPROM calibration profile invalid; using factory-default (err={})",
+                        err_kind
+                    );
+                    ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV)
+                }
+            },
+            Err(err) => {
+                warn!("EEPROM read failed; using factory-default (err={:?})", err);
+                ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV)
+            }
+        }
+    };
+
     // SPI2 provides the high-speed channel for the TFT.
     let spi_peripheral = peripherals.SPI2;
     let sck = peripherals.GPIO12;
@@ -1688,6 +1811,7 @@ async fn main(spawner: Spawner) {
     });
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
+    let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
 
     #[cfg(not(feature = "mock_setpoint"))]
     let (encoder_button, encoder_unit, encoder_counter) = {
@@ -1856,7 +1980,7 @@ async fn main(spawner: Spawner) {
     if let Some(uhci_tx) = uhci_tx_opt.take() {
         info!("spawning setpoint tx task (UHCI TX, 20Hz fixed target)");
         spawner
-            .spawn(setpoint_tx_task(uhci_tx))
+            .spawn(setpoint_tx_task(uhci_tx, calibration))
             .expect("setpoint_tx_task spawn");
     } else {
         warn!("setpoint tx task not started (UHCI TX unavailable)");
@@ -1869,7 +1993,14 @@ async fn main(spawner: Spawner) {
     {
         let wifi_state = net::init_wifi_state();
         info!("spawning Wi-Fi + HTTP net tasks");
-        net::spawn_wifi_and_http(&spawner, peripherals.WIFI, wifi_state, telemetry);
+        net::spawn_wifi_and_http(
+            &spawner,
+            peripherals.WIFI,
+            wifi_state,
+            telemetry,
+            calibration,
+            eeprom,
+        );
         info!("spawning Wi-Fi UI bridge task");
         spawner
             .spawn(wifi_ui_task(wifi_state, telemetry))
@@ -1926,7 +2057,10 @@ async fn stats_task() {
 
 /// SetPoint 发送任务：20 Hz（或按需要），带 ACK 等待与退避重传，最新值优先。
 #[embassy_executor::task]
-async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
+async fn setpoint_tx_task(
+    mut uhci_tx: uhci::UhciTx<'static, Async>,
+    calibration: &'static CalibrationMutex,
+) {
     info!(
         "SetPoint TX task starting (ack_timeout={} ms, backoff={:?})",
         SETPOINT_ACK_TIMEOUT_MS, SETPOINT_RETRY_BACKOFF_MS
@@ -1957,49 +2091,18 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
 
     let mut seq: u8 = 1;
 
-    // 冷启动后先发送一次 CalWrite(index=0) 标定块，用于解锁模拟侧 CAL gating。
-    let mut cal = CalWrite {
-        index: 0,
-        payload: [0u8; 32],
-        crc: 0,
-    };
-    // 内部 CRC：沿用协议层 crc16_ccitt_false(index+payload)。
-    {
-        let mut buf = [0u8; 33];
-        buf[0] = cal.index;
-        buf[1..].copy_from_slice(&cal.payload);
-        cal.crc = crc16_ccitt_false(&buf);
-    }
-
-    match encode_cal_write_frame(seq, &cal, &mut raw) {
-        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
-            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-                Ok(written) if written == slip_len => {
-                    let _ = uhci_tx.uart_tx.flush_async().await;
-                    info!(
-                        "CalWrite(index={}, msg=0x{:02x}) frame sent seq={} len={} slip_len={}",
-                        cal.index, MSG_CAL_WRITE, seq, frame_len, slip_len
-                    );
-                }
-                Ok(written) => {
-                    warn!(
-                        "CalWrite short write {} < {} (seq={})",
-                        written, slip_len, seq
-                    );
-                }
-                Err(err) => {
-                    warn!("CalWrite uart write error for seq={}: {:?}", seq, err);
-                }
-            },
-            Err(err) => {
-                warn!("CalWrite slip_encode error: {:?}", err);
-            }
-        },
-        Err(err) => {
-            warn!("encode_cal_write_frame error: {:?}", err);
-        }
-    }
-    seq = seq.wrapping_add(1);
+    // Cold boot: send the full 4-curve calibration set so the analog side can
+    // reach CAL_READY (empty curves are rejected on G431).
+    let profile = { calibration.lock().await.profile.clone() };
+    send_all_calibration_curves(
+        &mut uhci_tx,
+        &mut seq,
+        &profile,
+        &mut raw,
+        &mut slip,
+        "boot",
+    )
+    .await;
 
     // 启动链路后发送一次 SetEnable(true)，用于拉起模拟侧输出 gating。
     let enable_cmd = SetEnable { enable: true };
@@ -2090,6 +2193,7 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
     let mut calmissing_since_ms: Option<u32> = None;
     let mut last_calmissing_warn_ms: u32 = 0;
     let mut last_calmissing_handshake_ms: u32 = 0;
+    let mut prev_link_up: bool = LINK_UP.load(Ordering::Relaxed);
 
     loop {
         yield_now().await;
@@ -2099,6 +2203,69 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
             let soft_seq = seq;
             seq = seq.wrapping_add(1);
             send_soft_reset_one_shot(&mut uhci_tx, soft_seq, &mut raw, &mut slip, reason).await;
+        }
+
+        // Handle low-frequency calibration UART commands from the HTTP API.
+        #[cfg(feature = "net_http")]
+        if let Some(cmd) = crate::dequeue_cal_uart() {
+            match cmd {
+                CalUartCommand::SendAllCurves => {
+                    let profile = { calibration.lock().await.profile.clone() };
+                    send_all_calibration_curves(
+                        &mut uhci_tx,
+                        &mut seq,
+                        &profile,
+                        &mut raw,
+                        &mut slip,
+                        "http-cal",
+                    )
+                    .await;
+                }
+                CalUartCommand::SendCurve(kind) => {
+                    let profile = { calibration.lock().await.profile.clone() };
+                    send_calibration_curve(
+                        &mut uhci_tx,
+                        &mut seq,
+                        &profile,
+                        kind,
+                        &mut raw,
+                        &mut slip,
+                        "http-cal",
+                    )
+                    .await;
+                }
+                CalUartCommand::SetMode(kind) => {
+                    let seq_now = seq;
+                    seq = seq.wrapping_add(1);
+                    let _ = send_cal_mode_frame(
+                        &mut uhci_tx,
+                        seq_now,
+                        kind,
+                        &mut raw,
+                        &mut slip,
+                        "http-cal",
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // On link recovery, re-send the full calibration set.
+        let link_up_now = LINK_UP.load(Ordering::Relaxed);
+        if link_up_now && !prev_link_up {
+            prev_link_up = true;
+            let profile = { calibration.lock().await.profile.clone() };
+            send_all_calibration_curves(
+                &mut uhci_tx,
+                &mut seq,
+                &profile,
+                &mut raw,
+                &mut slip,
+                "link-recover",
+            )
+            .await;
+        } else if !link_up_now && prev_link_up {
+            prev_link_up = false;
         }
 
         let now = now_ms32();
@@ -2230,56 +2397,18 @@ async fn setpoint_tx_task(mut uhci_tx: uhci::UhciTx<'static, Async>) {
                                 );
                             }
 
-                            // Re-send a minimal CalWrite(index=0) block.
-                            let mut cal = CalWrite {
-                                index: 0,
-                                payload: [0u8; 32],
-                                crc: 0,
-                            };
-                            let mut buf = [0u8; 33];
-                            buf[0] = cal.index;
-                            buf[1..].copy_from_slice(&cal.payload);
-                            cal.crc = crc16_ccitt_false(&buf);
-
-                            let cal_seq = seq;
-                            match encode_cal_write_frame(cal_seq, &cal, &mut raw) {
-                                Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
-                                    Ok(slip_len) => {
-                                        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-                                            Ok(written) if written == slip_len => {
-                                                let _ = uhci_tx.uart_tx.flush_async().await;
-                                                info!(
-                                                    "CalWrite(index={}, msg=0x{:02x}) frame re-sent seq={} len={} slip_len={}",
-                                                    cal.index,
-                                                    MSG_CAL_WRITE,
-                                                    cal_seq,
-                                                    frame_len,
-                                                    slip_len
-                                                );
-                                            }
-                                            Ok(written) => {
-                                                warn!(
-                                                    "CalWrite re-send short write {} < {} (seq={})",
-                                                    written, slip_len, cal_seq
-                                                );
-                                            }
-                                            Err(err) => {
-                                                warn!(
-                                                    "CalWrite re-send uart write error for seq={}: {:?}",
-                                                    cal_seq, err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(err) => {
-                                        warn!("CalWrite re-send slip_encode error: {:?}", err);
-                                    }
-                                },
-                                Err(err) => {
-                                    warn!("encode_cal_write_frame (retry) error: {:?}", err);
-                                }
-                            }
-                            seq = seq.wrapping_add(1);
+                            // Re-send the full calibration set (multi-chunk CalWrite) to unlock
+                            // CAL_READY on the analog side.
+                            let profile = { calibration.lock().await.profile.clone() };
+                            send_all_calibration_curves(
+                                &mut uhci_tx,
+                                &mut seq,
+                                &profile,
+                                &mut raw,
+                                &mut slip,
+                                "calmissing-recover",
+                            )
+                            .await;
 
                             // Re-send SetEnable(true) to re-arm ENABLE_REQUESTED on analog.
                             let enable_seq = seq;
@@ -2462,6 +2591,162 @@ async fn send_setpoint_frame(
             false
         }
     }
+}
+
+async fn send_cal_mode_frame(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    kind: CalKind,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) -> bool {
+    let mode = CalMode { kind };
+    let frame_len = match encode_cal_mode_frame(seq, &mode, raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: encode_cal_mode_frame error: {:?}", ctx, err);
+            return false;
+        }
+    };
+
+    let slip_len = match slip_encode(&raw[..frame_len], slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: CalMode slip_encode error: {:?}", ctx, err);
+            return false;
+        }
+    };
+
+    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+        Ok(written) if written == slip_len => {
+            let _ = uhci_tx.uart_tx.flush_async().await;
+            info!(
+                "{}: CalMode(kind={:?}, flags=0x{:02x}) sent seq={} len={} slip_len={}",
+                ctx, kind, FLAG_ACK_REQ, seq, frame_len, slip_len
+            );
+            true
+        }
+        Ok(written) => {
+            warn!(
+                "{}: CalMode short write {} < {} (seq={})",
+                ctx, written, slip_len, seq
+            );
+            false
+        }
+        Err(err) => {
+            warn!(
+                "{}: CalMode uart write error for seq={}: {:?}",
+                ctx, seq, err
+            );
+            false
+        }
+    }
+}
+
+async fn send_calibration_curve(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: &mut u8,
+    profile: &ActiveProfile,
+    kind: CurveKind,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) {
+    fn kind_name(kind: CurveKind) -> &'static str {
+        match kind {
+            CurveKind::VLocal => "v_local",
+            CurveKind::VRemote => "v_remote",
+            CurveKind::CurrentCh1 => "current_ch1",
+            CurveKind::CurrentCh2 => "current_ch2",
+        }
+    }
+
+    let points = profile.points_for(kind);
+    let chunks = calfmt::encode_calwrite_chunks(profile.fmt_version, profile.hw_rev, kind, points);
+
+    info!(
+        "{}: sending CalWrite curve kind={} points={} chunks={}",
+        ctx,
+        kind_name(kind),
+        points.len(),
+        chunks.len()
+    );
+
+    for chunk in chunks.iter() {
+        let seq_now = *seq;
+        *seq = seq_now.wrapping_add(1);
+
+        match encode_cal_write_frame(seq_now, chunk, raw) {
+            Ok(frame_len) => match slip_encode(&raw[..frame_len], slip) {
+                Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                    Ok(written) if written == slip_len => {
+                        let _ = uhci_tx.uart_tx.flush_async().await;
+                        info!(
+                            "{}: CalWrite(kind={}, chunk_index={}, msg=0x{:02x}) sent seq={} len={} slip_len={}",
+                            ctx,
+                            kind_name(kind),
+                            chunk.index,
+                            MSG_CAL_WRITE,
+                            seq_now,
+                            frame_len,
+                            slip_len
+                        );
+                    }
+                    Ok(written) => {
+                        warn!(
+                            "{}: CalWrite(kind={}, chunk_index={}) short write {} < {} (seq={})",
+                            ctx,
+                            kind_name(kind),
+                            chunk.index,
+                            written,
+                            slip_len,
+                            seq_now
+                        );
+                    }
+                    Err(err) => {
+                        warn!(
+                            "{}: CalWrite(kind={}, chunk_index={}) uart write error for seq={}: {:?}",
+                            ctx,
+                            kind_name(kind),
+                            chunk.index,
+                            seq_now,
+                            err
+                        );
+                    }
+                },
+                Err(err) => {
+                    warn!(
+                        "{}: CalWrite(kind={}) slip_encode error: {:?}",
+                        ctx,
+                        kind_name(kind),
+                        err
+                    );
+                }
+            },
+            Err(err) => {
+                warn!("{}: encode_cal_write_frame error: {:?}", ctx, err);
+            }
+        }
+
+        // Small yield gap to avoid UART bursty backpressure on cold boot.
+        cooperative_delay_ms(10).await;
+    }
+}
+
+async fn send_all_calibration_curves(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: &mut u8,
+    profile: &ActiveProfile,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) {
+    // Recommended order: current_ch1 → current_ch2 → v_local → v_remote
+    send_calibration_curve(uhci_tx, seq, profile, CurveKind::CurrentCh1, raw, slip, ctx).await;
+    send_calibration_curve(uhci_tx, seq, profile, CurveKind::CurrentCh2, raw, slip, ctx).await;
+    send_calibration_curve(uhci_tx, seq, profile, CurveKind::VLocal, raw, slip, ctx).await;
+    send_calibration_curve(uhci_tx, seq, profile, CurveKind::VRemote, raw, slip, ctx).await;
 }
 
 async fn send_soft_reset_one_shot(
