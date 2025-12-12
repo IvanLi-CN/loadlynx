@@ -23,14 +23,21 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use libm::logf;
 use loadlynx_protocol::{
-    CRC_LEN, Error as ProtocolError, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
-    FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello, MSG_SET_POINT,
-    SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_cal_write_frame,
-    decode_limit_profile_frame, decode_set_enable_frame, decode_set_point_frame,
-    decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame,
-    encode_soft_reset_frame, slip_encode,
+    CRC_LEN, CalKind, Error as ProtocolError, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT,
+    FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
+    Hello, MSG_CAL_MODE, MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason,
+    decode_cal_mode_frame, decode_cal_write_frame, decode_limit_profile_frame,
+    decode_set_enable_frame, decode_set_point_frame, decode_soft_reset_frame,
+    encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame,
+    slip_encode,
 };
 use static_cell::StaticCell;
+
+mod calibration;
+use calibration::{
+    CalibrationState, CurveKind, inverse_piecewise, mv_to_raw_100uv, piecewise_linear,
+    raw_100uv_to_dac_code,
+};
 
 // STM32G431 VREFBUF 基址/寄存器地址（同 pd-sink-stm32g431cbu6-rs 工程）
 const VREFBUF_BASE: u32 = 0x4001_0030;
@@ -131,8 +138,13 @@ const I_SHARE_THRESHOLD_MA: i32 = 2_000;
 //   - I_total ≥ 2 A：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(true);
-// 标定是否已加载完成。仅在接收到至少一帧有效 CalWrite 后置为 true。
+// 用户校准是否已加载完成。仅当四条曲线均接收并验证合法后置为 true。
 static CAL_READY: AtomicBool = AtomicBool::new(false);
+// 当前校准模式选择（CalMode.kind），默认 off。
+static CAL_MODE_KIND: AtomicU8 = AtomicU8::new(0);
+// 校准曲线与多块接收状态。
+static CAL_STATE: Mutex<CriticalSectionRawMutex, CalibrationState> =
+    Mutex::new(CalibrationState::new());
 // 最近一次成功接收到来自数字板的协议帧（SetPoint/SoftReset/SetEnable）的时间戳（ms）。
 // LED1 闪烁逻辑基于该时间差实现“当前是否通信异常”的粗略指示。
 static LAST_RX_GOOD_MS: AtomicU32 = AtomicU32::new(0);
@@ -536,10 +548,44 @@ async fn main(_spawner: Spawner) -> ! {
             ts2_code
         );
 
-        // 负载端电压（近端 / 远端），由差分放大器缩放关系反推：
+        // --- Raw (ADC pin voltage) in 100 µV units ---
+        let raw_v_nr_100uv = mv_to_raw_100uv(v_nr_sns_mv);
+        let raw_v_rmt_100uv = mv_to_raw_100uv(v_rmt_sns_mv);
+        let raw_cur1_100uv = mv_to_raw_100uv(cur1_sns_mv);
+        let raw_cur2_100uv = mv_to_raw_100uv(cur2_sns_mv);
+
+        // --- Ideal physical (fallback) ---
+        // Voltage ideal scaling:
         //   V_SNS = (10/124) * V_load  →  V_load = (124/10) * V_SNS
-        let v_local_mv = (v_nr_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
-        let v_remote_mv = (v_rmt_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        let v_local_mv_uncal = (v_nr_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        let v_remote_mv_uncal = (v_rmt_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        // Current ideal scaling:
+        //   I[mA] ≈ 2 * V_CUR[mV]
+        let i_ch1_ma_uncal = (2 * cur1_sns_mv) as i32;
+        let i_ch2_ma_uncal = (2 * cur2_sns_mv) as i32;
+
+        // Snapshot active calibration curves.
+        let curves = {
+            let state = CAL_STATE.lock().await;
+            state.snapshot()
+        };
+
+        // --- Active-calibrated physical values ---
+        let v_local_mv = if curves[CurveKind::VLocal.index()].is_empty() {
+            v_local_mv_uncal
+        } else {
+            piecewise_linear(curves[CurveKind::VLocal.index()].as_slice(), raw_v_nr_100uv)
+                .unwrap_or(v_local_mv_uncal)
+        };
+        let v_remote_mv = if curves[CurveKind::VRemote.index()].is_empty() {
+            v_remote_mv_uncal
+        } else {
+            piecewise_linear(
+                curves[CurveKind::VRemote.index()].as_slice(),
+                raw_v_rmt_100uv,
+            )
+            .unwrap_or(v_remote_mv_uncal)
+        };
 
         // 远端电压软判定：仅在电压处于合理范围且 ADC 原码未接近饱和时认为“看起来正常”。
         let remote_abs_mv = if v_remote_mv < 0 {
@@ -590,8 +636,24 @@ async fn main(_spawner: Spawner) -> ! {
         //   - i_ch1_ma 使用 CUR1_SNS，对应功率通道 1；
         //   - i_ch2_ma 使用 CUR2_SNS，对应功率通道 2；
         //   - i_total_ma = i_ch1_ma + i_ch2_ma，用于功率估算与闭环误差计算。
-        let i_ch1_ma = (2 * cur1_sns_mv) as i32;
-        let i_ch2_ma = (2 * cur2_sns_mv) as i32;
+        let i_ch1_ma = if curves[CurveKind::CurrentCh1.index()].is_empty() {
+            i_ch1_ma_uncal
+        } else {
+            piecewise_linear(
+                curves[CurveKind::CurrentCh1.index()].as_slice(),
+                raw_cur1_100uv,
+            )
+            .unwrap_or(i_ch1_ma_uncal)
+        };
+        let i_ch2_ma = if curves[CurveKind::CurrentCh2.index()].is_empty() {
+            i_ch2_ma_uncal
+        } else {
+            piecewise_linear(
+                curves[CurveKind::CurrentCh2.index()].as_slice(),
+                raw_cur2_100uv,
+            )
+            .unwrap_or(i_ch2_ma_uncal)
+        };
         let i_total_ma = i_ch1_ma.saturating_add(i_ch2_ma);
 
         let calc_p_mw =
@@ -674,20 +736,57 @@ async fn main(_spawner: Spawner) -> ! {
         //
         // - I_total < I_SHARE_THRESHOLD_MA：仅 CH1 承担全部电流，CH2=0；
         // - I_total ≥ I_SHARE_THRESHOLD_MA：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
+        let cal_kind = CalKind::from(CAL_MODE_KIND.load(Ordering::Relaxed));
         let (target_ch1_ma, target_ch2_ma) = if !effective_enable_with_fault {
             (0, 0)
-        } else if target_i_total_ma < I_SHARE_THRESHOLD_MA {
-            (target_i_total_ma, 0)
         } else {
-            let half = target_i_total_ma / 2;
-            let rem = target_i_total_ma - 2 * half;
-            (half + rem, half)
+            match cal_kind {
+                CalKind::CurrentCh1 => (target_i_total_ma, 0),
+                CalKind::CurrentCh2 => (0, target_i_total_ma),
+                _ => {
+                    if target_i_total_ma < I_SHARE_THRESHOLD_MA {
+                        (target_i_total_ma, 0)
+                    } else {
+                        let half = target_i_total_ma / 2;
+                        let rem = target_i_total_ma - 2 * half;
+                        (half + rem, half)
+                    }
+                }
+            }
         };
 
-        let dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * target_ch1_ma / DAC_CAL_REF_I_MA)
-            .clamp(0, ADC_FULL_SCALE as i32) as u16;
-        let dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * target_ch2_ma / DAC_CAL_REF_I_MA)
-            .clamp(0, ADC_FULL_SCALE as i32) as u16;
+        // Inverse mapping: physical target → raw 100 µV target.
+        let ideal_raw_ch1_des_100uv =
+            target_ch1_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+        let ideal_raw_ch2_des_100uv =
+            target_ch2_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+
+        let raw_ch1_des_100uv = if cal_kind == CalKind::CurrentCh2 {
+            0
+        } else if curves[CurveKind::CurrentCh1.index()].is_empty() {
+            ideal_raw_ch1_des_100uv
+        } else {
+            inverse_piecewise(
+                curves[CurveKind::CurrentCh1.index()].as_slice(),
+                target_ch1_ma,
+            )
+            .unwrap_or(ideal_raw_ch1_des_100uv)
+        };
+        let raw_ch2_des_100uv = if cal_kind == CalKind::CurrentCh1 {
+            0
+        } else if curves[CurveKind::CurrentCh2.index()].is_empty() {
+            ideal_raw_ch2_des_100uv
+        } else {
+            inverse_piecewise(
+                curves[CurveKind::CurrentCh2.index()].as_slice(),
+                target_ch2_ma,
+            )
+            .unwrap_or(ideal_raw_ch2_des_100uv)
+        };
+
+        // Raw 100 µV target → DAC code via existing 0.5 A reference mapping.
+        let dac_code_ch1 = raw_100uv_to_dac_code(raw_ch1_des_100uv, CC_0P5A_DAC_CODE_CH1);
+        let dac_code_ch2 = raw_100uv_to_dac_code(raw_ch2_des_100uv, CC_0P5A_DAC_CODE_CH2);
         dac.ch1().set(DacValue::Bit12Right(dac_code_ch1));
         dac.ch2().set(DacValue::Bit12Right(dac_code_ch2));
 
@@ -727,6 +826,33 @@ async fn main(_spawner: Spawner) -> ! {
         if effective_enable_with_fault {
             state_flags |= STATE_FLAG_ENABLED;
         }
+
+        // Optional Raw telemetry fields during calibration.
+        let (status_cal_kind, raw_v_nr_opt, raw_v_rmt_opt, raw_cur_opt, raw_dac_opt) =
+            match cal_kind {
+                CalKind::Voltage => (
+                    Some(u8::from(cal_kind)),
+                    Some(raw_v_nr_100uv),
+                    Some(raw_v_rmt_100uv),
+                    None,
+                    None,
+                ),
+                CalKind::CurrentCh1 => (
+                    Some(u8::from(cal_kind)),
+                    None,
+                    None,
+                    Some(raw_cur1_100uv),
+                    Some(dac_code_ch1),
+                ),
+                CalKind::CurrentCh2 => (
+                    Some(u8::from(cal_kind)),
+                    None,
+                    None,
+                    Some(raw_cur2_100uv),
+                    Some(dac_code_ch2),
+                ),
+                CalKind::Off => (None, None, None, None, None),
+            };
         let status = FastStatus {
             uptime_ms,
             mode: 1, // 简单视为 CC 模式
@@ -746,6 +872,11 @@ async fn main(_spawner: Spawner) -> ! {
             sink_exhaust_temp_mc,
             mcu_temp_mc,
             fault_flags,
+            cal_kind: status_cal_kind,
+            raw_v_nr_100uv: raw_v_nr_opt,
+            raw_v_rmt_100uv: raw_v_rmt_opt,
+            raw_cur_100uv: raw_cur_opt,
+            raw_dac_code: raw_dac_opt,
         };
 
         if ENABLE_FAST_STATUS_TX {
@@ -1098,21 +1229,26 @@ async fn uart_setpoint_rx_task(
                                                         }
                                                         Err(ProtocolError::UnsupportedMessage(
                                                             _,
-                                                        )) => {
-                                                            match decode_cal_write_frame(&frame) {
-                                                                Ok((_hdr, cal)) => {
-                                                                    let prev = CAL_READY.swap(
-                                                                        true,
-                                                                        Ordering::Relaxed,
-                                                                    );
+                                                        )) => match decode_cal_mode_frame(&frame) {
+                                                            Ok((hdr, mode)) => {
+                                                                if hdr.flags & FLAG_IS_ACK != 0 {
                                                                     info!(
-                                                                        "CalWrite received: index={} cal_ready={} (prev={})",
-                                                                        cal.index,
-                                                                        CAL_READY.load(
-                                                                            Ordering::Relaxed
-                                                                        ),
-                                                                        prev,
+                                                                        "CalMode ACK received (ignored): seq={} kind={:?}",
+                                                                        hdr.seq, mode.kind
                                                                     );
+                                                                } else {
+                                                                    let prev_raw = CAL_MODE_KIND
+                                                                        .swap(
+                                                                            u8::from(mode.kind),
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                    info!(
+                                                                        "CalMode received: kind={:?} (prev_raw={}) seq={}",
+                                                                        mode.kind,
+                                                                        prev_raw,
+                                                                        hdr.seq
+                                                                    );
+
                                                                     LAST_RX_GOOD_MS.store(
                                                                         timestamp_ms() as u32,
                                                                         Ordering::Relaxed,
@@ -1121,19 +1257,157 @@ async fn uart_setpoint_rx_task(
                                                                         true,
                                                                         Ordering::Relaxed,
                                                                     );
-                                                                }
-                                                                Err(err) => {
-                                                                    warn!(
-                                                                        "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
-                                                                        err,
-                                                                        frame.len(),
-                                                                        &frame
-                                                                            [..frame.len().min(8)],
-                                                                    );
-                                                                    decoder.reset();
+
+                                                                    let ack_len =
+                                                                        match encode_ack_only_frame(
+                                                                            hdr.seq,
+                                                                            MSG_CAL_MODE,
+                                                                            false,
+                                                                            &mut ack_raw,
+                                                                        ) {
+                                                                            Ok(len) => len,
+                                                                            Err(err) => {
+                                                                                warn!(
+                                                                                    "CalMode ack encode error: {:?}",
+                                                                                    err
+                                                                                );
+                                                                                continue;
+                                                                            }
+                                                                        };
+                                                                    let slip_len = match slip_encode(
+                                                                        &ack_raw[..ack_len],
+                                                                        &mut ack_slip,
+                                                                    ) {
+                                                                        Ok(len) => len,
+                                                                        Err(err) => {
+                                                                            warn!(
+                                                                                "CalMode ack slip encode error: {:?}",
+                                                                                err
+                                                                            );
+                                                                            continue;
+                                                                        }
+                                                                    };
+
+                                                                    let mut tx =
+                                                                        uart_tx.lock().await;
+                                                                    if let Err(err) = tx
+                                                                        .write(
+                                                                            &ack_slip[..slip_len],
+                                                                        )
+                                                                        .await
+                                                                    {
+                                                                        warn!(
+                                                                            "CalMode ack write error: {:?}",
+                                                                            err
+                                                                        );
+                                                                    } else {
+                                                                        info!(
+                                                                            "CalMode ACK sent: seq={} len={}B",
+                                                                            hdr.seq, slip_len
+                                                                        );
+                                                                    }
                                                                 }
                                                             }
-                                                        }
+                                                            Err(
+                                                                ProtocolError::UnsupportedMessage(
+                                                                    _,
+                                                                ),
+                                                            ) => {
+                                                                match decode_cal_write_frame(&frame)
+                                                                {
+                                                                    Ok((_hdr, cal)) => {
+                                                                        let payload = cal.payload;
+                                                                        let fmt_version =
+                                                                            payload[0];
+                                                                        let hw_rev = payload[1];
+                                                                        let kind_raw = payload[2];
+                                                                        let chunk_index =
+                                                                            payload[3];
+                                                                        let total_chunks =
+                                                                            payload[4];
+                                                                        let total_points =
+                                                                            payload[5];
+
+                                                                        info!(
+                                                                            "CalWrite chunk received: kind_raw={} chunk={}/{} total_points={} fmt_version={} hw_rev={} outer_index={}",
+                                                                            kind_raw,
+                                                                            chunk_index,
+                                                                            total_chunks,
+                                                                            total_points,
+                                                                            fmt_version,
+                                                                            hw_rev,
+                                                                            cal.index
+                                                                        );
+
+                                                                        let mut state =
+                                                                            CAL_STATE.lock().await;
+                                                                        match state
+                                                                            .ingest_cal_write(
+                                                                                cal.index,
+                                                                                &payload, cal.crc,
+                                                                            ) {
+                                                                            Ok(Some(done_kind)) => {
+                                                                                info!(
+                                                                                    "CalWrite curve completed: kind={:?}",
+                                                                                    done_kind
+                                                                                );
+                                                                            }
+                                                                            Ok(None) => {}
+                                                                            Err(err) => {
+                                                                                warn!(
+                                                                                    "CalWrite rejected for kind_raw={} chunk_index={}: {:?}",
+                                                                                    kind_raw,
+                                                                                    chunk_index,
+                                                                                    err
+                                                                                );
+                                                                            }
+                                                                        }
+
+                                                                        let all_valid =
+                                                                            state.all_valid();
+                                                                        let prev = CAL_READY.swap(
+                                                                            all_valid,
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                        if all_valid != prev {
+                                                                            info!(
+                                                                                "CAL_READY updated: {} (prev={})",
+                                                                                all_valid, prev
+                                                                            );
+                                                                        }
+
+                                                                        LAST_RX_GOOD_MS.store(
+                                                                            timestamp_ms() as u32,
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                        LINK_EVER_GOOD.store(
+                                                                            true,
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                    }
+                                                                    Err(err) => {
+                                                                        warn!(
+                                                                            "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                                            err,
+                                                                            frame.len(),
+                                                                            &frame[..frame
+                                                                                .len()
+                                                                                .min(8)],
+                                                                        );
+                                                                        decoder.reset();
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                warn!(
+                                                                    "CalMode decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                                    err,
+                                                                    frame.len(),
+                                                                    &frame[..frame.len().min(8)],
+                                                                );
+                                                                decoder.reset();
+                                                            }
+                                                        },
                                                         Err(err) => {
                                                             warn!(
                                                                 "LimitProfile decode error {:?} (len={}, head={=[u8]:#04x})",
