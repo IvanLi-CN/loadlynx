@@ -76,8 +76,9 @@
   - 0x22 `SetPoint`：S3→G431，恒流设定值（mA，带 ACK）；当前固件已实现 v0 版本，将 `target_i_ma` 视为**两通道合计目标电流**，由 G431 在本地按“<2 A 单通道、≥2 A 双通道近似均分”的策略在 CH1/CH2 间拆分电流，由 `setpoint_tx_task` 实现 ACK 等待与退避重传。
   - 0x23 `SetLimits`/`LIMIT_PROFILE`：S3→G431，功率/电流/温度限值；尚未实现，未来用于热降额与风扇协同。
   - 0x24 `GetStatus`：S3→G431，请求立即返回一帧 FastStatus；协议 crate 中已有类型与编码函数，但固件尚未在运行路径中使用。
+  - 0x25 `CalMode`：S3→G431，校准 Raw 遥测模式选择；仅在用户校准界面启用，用于指示模拟侧**按校准类型**附加 Raw ADC/DAC 字段（见 FastStatus 可选字段）。
   - 0x26 `SoftReset`：S3↔G431，软复位请求/确认；当前固件已实现 v0，使用同一 ID 配合 `FLAG_ACK_REQ/FLAG_IS_ACK` 区分请求与 ACK。
-  - 0x30 `CalWrite`：S3→G431，标定写入；当前固件仅实现单块 `index=0` 的下行写，用于置位 `CAL_READY`，payload 内容与 CRC 目前由数字侧自行管理。
+  - 0x30 `CalWrite`：S3→G431，标定写入；用于**多块**下发用户校准点/曲线，G431 收齐并校验后加载本地校准并置位 `CAL_READY`。
   - 0x31 `CalRead`：G431→S3，标定读回；尚未实现，未来用于上行 `CAL_CHUNK`/EEPROM 校验。
   - 0x40+ 调试/诊断（如 `ADC_CAPTURE`、FOTA 等）：尚未实现，仅在下文表格中用于容量评估。
 
@@ -115,10 +116,10 @@
 
 | 数据块 | 字段概要 | 单帧字节 | 更新频率 | 估算带宽 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `FAST_STATUS` (0x10) | `uptime_ms`、`seq`、`mode`、`state_flags`、`enable`、`target_value`、`i_local_ma`、`i_remote_ma`、`v_local_mv`、`v_remote_mv`、`calc_p_mw`、`dac_headroom_mv`、`loop_error`、`sink_core_temp_mc`、`sink_exhaust_temp_mc`、`mcu_temp_mc`、`fault_flags` | ≈46 B | 当前固件：20 Hz；规划：UI 刷新 <60 Hz 时可提升到 50–60 Hz | 2.8 kB/s ≈ 22.4 kbps（按 60 Hz 规划估算；当前 20 Hz 实际带宽约为其 1/3） | 高速遥测：同时上报本地/远端电压与两路电流、散热片 + PCB 温度；`fault_flags` 下发 4 个保护 bit（过流/过压/MCU 过温/散热片过温），阈值约为 5.5 A、55 V、110 °C/100 °C，用作兜底保护 |
+| `FAST_STATUS` (0x10) | 物理量字段：`uptime_ms`、`mode`、`state_flags`、`enable`、`target_value`、`i_local_ma`、`i_remote_ma`、`v_local_mv`、`v_remote_mv`、`calc_p_mw`、`dac_headroom_mv`、`loop_error`、`sink_core_temp_mc`、`sink_exhaust_temp_mc`、`mcu_temp_mc`、`fault_flags`；**校准模式下额外可选 Raw 字段**：`cal_kind`、`raw_v_nr_100uv`、`raw_v_rmt_100uv`（电压校准）、`raw_cur_100uv`、`raw_dac_code`（电流校准单通道） | ≈46 B（正常）/≈54–58 B（校准） | 当前固件：20 Hz；规划：UI 刷新 <60 Hz 时可提升到 50–60 Hz | 正常 2.8 kB/s；校准时增加 ≤0.5 kB/s | 高速遥测：正常工作仅发送物理量；当收到 `CalMode` 且进入校准时，模拟侧按类型只附加必要 Raw 数据以降低带宽 |
 | `SLOW_HOUSEKEEPING` (0x12) | `vin_mv`、`vref_mv`、`board_temp`、`cal_state`、`diag_counters`、预留 | ≈16 B | 5 Hz | 80 B/s ≈ 0.64 kbps | 提供供电、校准、累计计数等慢变化信息；当前固件尚未实现，仅用于协议规划与带宽估算 |
 | `FAULT_EVENT` (0x11) | `timestamp_ms`、`fault_bits`、`fault_code`、`latched`、`extra` | ≈12 B | 按事件触发（预计 <5 Hz 峰值） | ≤60 B/s ≈ 0.48 kbps | 故障瞬时上报，附带锁存状态与附加参数；当前版本尚未启用独立 `FAULT_EVENT` 帧，故障状态通过 `FAST_STATUS.fault_flags` 传输 |
-| `CAL_CHUNK` (0x30) | `offset_index`、`payload[32]`、`crc` | ≈48 B | 0.5–1 Hz，仅在标定模式 | ≤48 B/s ≈ 0.38 kbps | 标定/量产阶段启用，平时关闭；当前固件仅实现下行 `CalWrite(index=0)` 用于 `CAL_READY` gating，未实现上行 `CAL_CHUNK` |
+| `CAL_CHUNK` (0x30) | `offset_index`、`payload[32]`、`crc` | ≈48 B | 0.5–1 Hz，仅在标定模式 | ≤48 B/s ≈ 0.38 kbps | 标定阶段使用多块 `CalWrite` 下发校准点（见 `docs/dev-notes/user-calibration.md`）；上行 `CAL_CHUNK` 仍为预留 |
 | `ADC_CAPTURE` (0x40) | `sample_rate`、`count`、`samples[128×u16]`、`checksum` | ≈260 B | ≤5 Hz（诊断时短时开启） | ≤1.3 kB/s ≈ 10.4 kbps | 供调试/上位机抓波使用，默认不发；当前固件尚未实现该数据块，保留作为诊断扩展 |
 
 **典型带宽**（不含诊断）：`FAST_STATUS + SLOW_HK + 心跳/ACK 开销` ≈ 2.6 kB/s（≈ 20.8 kbps，按完整规划消息集估算；当前 v0 仅发送 `FAST_STATUS`，实际带宽显著更低）。<br>
@@ -131,8 +132,9 @@
 | `SET_POINT` (0x22) | `seq`、`target_i_ma`（mA，两通道合计 CC 设定值） | ≈18 B | 当前固件：10 Hz（编码器驱动）；规划：50–100 Hz | 0.9 kB/s ≈ 7.2 kbps（按 50 Hz 规划估算；当前 10 Hz 实际带宽约为其 1/5） | 当前固件已实现 v0：总电流恒流设定，全部要求 ACK；G431 将 `target_i_ma` clamp 到 `[0,5_000]` mA，并按 `<2 A 单通道、≥2 A 双通道近似均分` 在 CH1/CH2 间拆分目标电流；数字侧在 `setpoint_tx_task` 中实现 ACK 等待、退避重传与“最新值优先”，模拟侧应用后回 `FLAG_IS_ACK` 空载帧，并在 FastStatus 中回显 `target_value`（即总目标电流） |
 | `LIMIT_PROFILE` (0x23) | `max_i`、`max_p`、`ovp_mv`、`temp_trip`、`thermal_derate`、预留 | ≈20 B | 0.2–1 Hz（用户修改时） | ≤20 B/s ≈ 0.16 kbps | 每次下发表征最大允许功率/电流的参数，并附 ESP 根据风扇控制计算出的 `thermal_derate`，便于版本化；当前固件尚未实现此帧，风扇控制仅在文档与协议层预留 |
 | `CONTROL_CMD` (0x20/0x24/0x25 等) | `SetEnable`、`ModeSwitch`、`GetStatus`、`FaultClear` 等短指令 | 8–12 B | 0–20 Hz（按键/脚本触发） | ≤160 B/s ≈ 1.3 kbps | 均带 ACK_REQ，失败可按 5/10/20 ms 退避重试；当前固件仅实际使用 `SetEnable(0x20)`，其余命令仍在规划中 |
+| `CAL_MODE` (0x25) | `kind`（0=off,1=voltage,2=current_ch1,3=current_ch2） | ≈10 B | 仅在进入/退出校准 Tab 或切换通道时发送（<1 Hz） | ≈10 B/s | 用于让模拟侧按校准类型附加 Raw ADC/DAC 字段；正常工作保持 off |
 | `SOFT_RESET` (0x26) | `reason`（u8，0=manual、1=fw_update、2=ui_recover、3=link_recover）、`timestamp_ms` | 6 B | 上电后一次；或 UI/脚本按需触发（<0.2 Hz） | ≈1.2 B/s | 数字侧通过 `SoftReset` 请求模拟侧软复位：G431 进入安全态并清空状态，然后以同 ID、带 `FLAG_IS_ACK` 的帧确认；当前固件已实现 v0 版本，数字侧在 ACK 缺失时给出警告但仍继续后续握手 |
-| `CAL_RW` (0x30/0x31) | `index`、`payload[32]`、`crc` | ≈48 B | 0.5 Hz（标定/量产） | ≤24 B/s ≈ 0.19 kbps | 与上行 `CAL_CHUNK` 配对，用于 EEPROM/FLASH 同步；当前固件仅实现下行 `CalWrite(index=0)`，不进行分块/读回，主要用于解锁 `CAL_READY` gating |
+| `CAL_RW` (0x30/0x31) | `index`、`payload[32]`、`crc` | ≈48 B | 0.5 Hz（标定/量产） | ≤24 B/s ≈ 0.19 kbps | `CalWrite` 多块下发、`CalRead` 读回仍为预留；校准数据主存于 ESP EEPROM，模拟侧只缓存并执行校准 |
 | `PING/HEARTBEAT` (0x02) | `timestamp`、`nonce` | 6 B | 10 Hz | 60 B/s ≈ 0.48 kbps | 空闲期保持链路活跃，>300 ms 无回应即判为降级；当前固件未实现独立 `PING` 帧，心跳由 `FAST_STATUS` 与控制帧隐式承担 |
 | `RESERVED_FOTA` (0x50+) | （暂未定义——需后续 bootstub/升级协议落地） | 0 B | 0 Hz | 0 | 当前项目未实现固件块传输；仅保留 ID 以免未来扩展时与现有消息冲突 |
 
@@ -234,9 +236,9 @@
 
 - **持久化所在**：当前硬件未为 STM32G431 配置 EEPROM/Flash 分区；所有校准参数（增益/偏置/温补/风扇曲线等）原则上由 ESP32‑S3 通过其本地 EEPROM/Flash 保存，视作“唯一可信源”。
 - **当前固件实现（v0）**：
-  - 数字侧在链路建立后发送一次 `CalWrite(index=0)`，其中 payload 为由 ESP 管理的 32 字节不透明块；
-  - 模拟侧仅在成功解析任意 `CalWrite` 帧后将内部 `CAL_READY` 置为 true，用作 `SetEnable` gating 条件之一；
-  - 尚未实现 `CAL_REQ` 标志、多块 `CAL_RW` 下载或上行 `CAL_CHUNK`，也未将标定数据持久化到 STM32 Flash。
+  - 数字侧在链路建立后按 `CalWrite` 多块协议下发三条校准曲线（电流/近端电压/远端电压）；
+  - 模拟侧收齐并校验后加载点数组，运行时自行插值/反插值并置 `CAL_READY=true`；
+  - `CalRead`/上行 `CAL_CHUNK` 仍为规划中的扩展，当前不依赖模拟侧持久化。
 - **规划中的完整握手**：
   1. G431 上电即发送 `HELLO` 并置 `CAL_REQ` 标志，控制环保持保守安全值（仅允许 Idle）。
   2. S3 完成自检后，从本地 EEPROM 读取标定块，逐帧下发 `CAL_RW`（0x30/0x31）。

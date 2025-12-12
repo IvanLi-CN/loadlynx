@@ -171,6 +171,13 @@ interface FastStatusJson {
   sink_exhaust_temp_mc: number;
   mcu_temp_mc: number;
   fault_flags: number;      // 故障位掩码（uint32）
+
+  // Optional raw calibration telemetry (present only in calibration mode).
+  cal_kind?: number;        // 1=voltage, 2=current_ch1, 3=current_ch2
+  raw_v_nr_100uv?: number;  // near-end ADC pin voltage, 100 µV/LSB (i16)
+  raw_v_rmt_100uv?: number; // remote ADC pin voltage, 100 µV/LSB (i16)
+  raw_cur_100uv?: number;   // current-sense ADC pin voltage, 100 µV/LSB (i16)
+  raw_dac_code?: number;    // DAC code for selected channel (u16)
 }
 
 type FaultFlag =
@@ -291,6 +298,35 @@ data: {"status":{"uptime_ms":123456,"mode":0,...},"link_up":true,"hello_seen":tr
   - 当 UART 链路判定为断开或不健康时，可以：
     - 继续发送 `event: status`，其中 `link_up=false`、`analog_state="offline"`；
     - 或发送一次 `event: error` 后关闭连接，由前端负责重连。
+
+#### 3.2.3 校准 Raw 附加（按 Tab 选择性上报）
+
+为减轻链路压力，Raw ADC/DAC 字段**只在校准模式出现**，且按校准类型选择性附加：
+
+- Web 进入/切换校准 Tab 时先调用 `POST /api/v1/calibration/mode` 选择 `kind`；
+- ESP 将该 `kind` 转发为 UART `CalMode(0x25)` 给 G431；
+- G431 在 FastStatus 中按 `kind` 附加 Raw 字段：
+  - `kind="voltage"`：附加 `raw_v_nr_100uv`、`raw_v_rmt_100uv`；
+  - `kind="current_ch1"` 或 `"current_ch2"`：附加 `raw_cur_100uv`、`raw_dac_code`（仅当前通道）；
+  - `kind="off"`：不附加任何 Raw 字段。
+
+Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`raw_dac_code` 为 DAC 码（u16）。
+
+#### 3.2.4 `POST /api/v1/calibration/mode`
+
+选择 STM32 的 Raw 遥测模式，仅在校准界面使用。
+
+- 请求：
+
+```jsonc
+{ "kind": "off" | "voltage" | "current_ch1" | "current_ch2" }
+```
+
+- 响应（200）：无返回体或返回当前 kind。
+
+- 错误：
+  - UART 链路不可用 → `503 LINK_DOWN`；
+  - 模拟板故障 → `503 ANALOG_FAULTED`。
 
 ### 3.3 `GET /api/v1/cc`
 
