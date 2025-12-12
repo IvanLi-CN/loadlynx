@@ -36,6 +36,10 @@ pub const MSG_SET_LIMITS: u8 = 0x23;
 /// temperature, plus a simple thermal derate factor.
 pub const MSG_LIMIT_PROFILE: u8 = MSG_SET_LIMITS;
 pub const MSG_GET_STATUS: u8 = 0x24;
+/// Calibration mode control: S3 (digital) → G431 (analog).
+///
+/// Used to request optional raw telemetry in FastStatus during user calibration.
+pub const MSG_CAL_MODE: u8 = 0x25;
 /// Soft-reset request/ack handshake initiated by the digital side to reset
 /// analog-side state without power-cycling.
 pub const MSG_SOFT_RESET: u8 = 0x26;
@@ -103,6 +107,23 @@ pub struct FastStatus {
     pub mcu_temp_mc: i32,
     #[n(15)]
     pub fault_flags: u32,
+    /// Optional calibration kind currently active on the analog side.
+    ///
+    /// Present only when the link is in calibration mode.
+    #[n(16)]
+    pub cal_kind: Option<u8>,
+    /// Optional raw near‑sense voltage in 100 µV units.
+    #[n(17)]
+    pub raw_v_nr_100uv: Option<i16>,
+    /// Optional raw remote‑sense voltage in 100 µV units.
+    #[n(18)]
+    pub raw_v_rmt_100uv: Option<i16>,
+    /// Optional raw current (selected channel per `cal_kind`) in 100 µA units.
+    #[n(19)]
+    pub raw_cur_100uv: Option<i16>,
+    /// Optional raw DAC code used by the control loop.
+    #[n(20)]
+    pub raw_dac_code: Option<u16>,
 }
 
 /// Minimal control payload for adjusting the analog board's current setpoint.
@@ -239,6 +260,77 @@ pub struct SetEnable {
     pub enable: bool,
 }
 
+/// Calibration raw telemetry selection.
+///
+/// Unknown kinds received over the wire are mapped to `Off` to keep decoding
+/// forward compatible while defaulting to a safe "no raw telemetry" state.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalKind {
+    Off,
+    Voltage,
+    CurrentCh1,
+    CurrentCh2,
+}
+
+impl From<u8> for CalKind {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => CalKind::Off,
+            1 => CalKind::Voltage,
+            2 => CalKind::CurrentCh1,
+            3 => CalKind::CurrentCh2,
+            _ => CalKind::Off,
+        }
+    }
+}
+
+impl From<CalKind> for u8 {
+    fn from(kind: CalKind) -> Self {
+        match kind {
+            CalKind::Off => 0,
+            CalKind::Voltage => 1,
+            CalKind::CurrentCh1 => 2,
+            CalKind::CurrentCh2 => 3,
+        }
+    }
+}
+
+impl Default for CalKind {
+    fn default() -> Self {
+        CalKind::Off
+    }
+}
+
+impl<C> Encode<C> for CalKind {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.u8((*self).into())?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for CalKind {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let raw = d.u8()?;
+        Ok(raw.into())
+    }
+}
+
+/// Calibration mode control payload.
+///
+/// Sent from the digital side with `FLAG_ACK_REQ`.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
+#[cbor(map)]
+pub struct CalMode {
+    #[n(0)]
+    pub kind: CalKind,
+}
+
 /// Minimal single-block calibration write payload.
 ///
 /// This is intentionally small and opaque for now; the digital side owns the
@@ -248,16 +340,21 @@ pub struct SetEnable {
 #[derive(Debug, Clone, Copy, Encode, Decode, Default)]
 #[cbor(map)]
 pub struct CalWrite {
-    /// Chunk index for future multi-block support. For now only 0 is used.
+    /// Chunk index for multi-block calibration writes.
     #[n(0)]
     pub index: u8,
     /// Opaque 32-byte payload owned by the digital side.
     #[n(1)]
     pub payload: [u8; 32],
-    /// Optional inner CRC for the payload (e.g. CRC16 over index+payload).
+    /// Optional inner CRC16 for the payload (e.g. CRC16 over index+payload).
     #[n(2)]
     pub crc: u16,
 }
+
+/// Preferred name for the multi-block calibration write chunk.
+///
+/// This is an alias to `CalWrite` to preserve API and wire compatibility.
+pub type CalWriteChunk = CalWrite;
 
 /// Optional GetStatus request used by the digital side to ask for an immediate
 /// FastStatus update. The `request_id` field is reserved for correlating a
@@ -596,6 +693,44 @@ pub fn encode_get_status_frame(seq: u8, req: &GetStatus, out: &mut [u8]) -> Resu
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
+/// Encode a CalMode control frame from the digital side to the analog side.
+pub fn encode_cal_mode_frame(seq: u8, mode: &CalMode, out: &mut [u8]) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = FLAG_ACK_REQ;
+    out[2] = seq;
+    out[3] = MSG_CAL_MODE;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(mode).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
 /// Encode a soft-reset frame. Requests set `is_ack=false`; acknowledgements
 /// set `is_ack=true`. Requests automatically set `FLAG_ACK_REQ` to request a
 /// reply from the analog side.
@@ -720,6 +855,17 @@ pub fn decode_get_status_frame(frame: &[u8]) -> Result<(FrameHeader, GetStatus),
     let mut decoder = minicbor::Decoder::new(payload);
     let req: GetStatus = decoder.decode().map_err(map_decode_err)?;
     Ok((header, req))
+}
+
+/// Decode a CalMode frame.
+pub fn decode_cal_mode_frame(frame: &[u8]) -> Result<(FrameHeader, CalMode), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_CAL_MODE {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let mode: CalMode = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, mode))
 }
 
 /// Decode a soft-reset frame (request or ACK). Callers should inspect
@@ -925,6 +1071,7 @@ mod tests {
             sink_exhaust_temp_mc: 41000,
             mcu_temp_mc: 38000,
             fault_flags: 0,
+            ..FastStatus::default()
         };
 
         let mut raw = [0u8; 192];
@@ -945,6 +1092,168 @@ mod tests {
         }
         let recovered = recovered.expect("frame not recovered");
         assert_eq!(&recovered[..], &raw[..len]);
+    }
+
+    #[test]
+    fn cal_mode_roundtrip_and_ack_req() {
+        let mode = CalMode {
+            kind: CalKind::CurrentCh2,
+        };
+        let mut raw = [0u8; 64];
+        let len = encode_cal_mode_frame(1, &mode, &mut raw).unwrap();
+        let (hdr, decoded) = decode_cal_mode_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.msg, MSG_CAL_MODE);
+        assert_eq!(hdr.flags & FLAG_ACK_REQ, FLAG_ACK_REQ);
+        assert_eq!(decoded, mode);
+    }
+
+    #[test]
+    fn cal_mode_unknown_kind_maps_to_off() {
+        let mut payload_buf = [0u8; 16];
+        let payload_len = {
+            let mut cursor = Cursor::new(&mut payload_buf[..]);
+            let mut encoder = minicbor::Encoder::new(&mut cursor);
+            encoder.map(1).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.u8(99).unwrap();
+            cursor.position()
+        };
+
+        let mut raw = [0u8; 64];
+        raw[0] = PROTOCOL_VERSION;
+        raw[1] = FLAG_ACK_REQ;
+        raw[2] = 2;
+        raw[3] = MSG_CAL_MODE;
+        let len_bytes = (payload_len as u16).to_le_bytes();
+        raw[4] = len_bytes[0];
+        raw[5] = len_bytes[1];
+        raw[HEADER_LEN..HEADER_LEN + payload_len].copy_from_slice(&payload_buf[..payload_len]);
+        let frame_len_without_crc = HEADER_LEN + payload_len;
+        let crc = crc16_ccitt_false(&raw[..frame_len_without_crc]);
+        let crc_bytes = crc.to_le_bytes();
+        raw[frame_len_without_crc] = crc_bytes[0];
+        raw[frame_len_without_crc + 1] = crc_bytes[1];
+        let total_len = frame_len_without_crc + CRC_LEN;
+
+        let (_hdr, decoded) = decode_cal_mode_frame(&raw[..total_len]).unwrap();
+        assert_eq!(decoded.kind, CalKind::Off);
+    }
+
+    #[test]
+    fn fast_status_no_raw_bytes_match_v0() {
+        let status = FastStatus {
+            uptime_ms: 1234,
+            mode: 2,
+            state_flags: 0x01,
+            enable: true,
+            target_value: 2500,
+            i_local_ma: 2000,
+            i_remote_ma: 1980,
+            v_local_mv: 24500,
+            v_remote_mv: 24600,
+            calc_p_mw: 49_000,
+            dac_headroom_mv: 120,
+            loop_error: -12,
+            sink_core_temp_mc: 45000,
+            sink_exhaust_temp_mc: 41000,
+            mcu_temp_mc: 38000,
+            fault_flags: 0,
+            ..FastStatus::default()
+        };
+
+        let mut raw = [0u8; 192];
+        let len = encode_fast_status_frame(7, &status, &mut raw).unwrap();
+
+        const EXPECTED_FRAME_V0: [u8; 62] = [
+            1, 0, 7, 16, 54, 0, 176, 0, 25, 4, 210, 1, 2, 2, 1, 3, 245, 4, 25, 9, 196, 5, 25, 7,
+            208, 6, 25, 7, 188, 7, 25, 95, 180, 8, 25, 96, 24, 9, 25, 191, 104, 10, 24, 120, 11,
+            43, 12, 25, 175, 200, 13, 25, 160, 40, 14, 25, 148, 112, 15, 0, 187, 146,
+        ];
+
+        assert_eq!(len, EXPECTED_FRAME_V0.len());
+        assert_eq!(&raw[..len], &EXPECTED_FRAME_V0);
+    }
+
+    #[test]
+    fn fast_status_with_raw_roundtrip_and_missing_fields_default_none() {
+        let status = FastStatus {
+            uptime_ms: 1,
+            mode: 0,
+            state_flags: 0,
+            enable: false,
+            target_value: 0,
+            i_local_ma: 0,
+            i_remote_ma: 0,
+            v_local_mv: 0,
+            v_remote_mv: 0,
+            calc_p_mw: 0,
+            dac_headroom_mv: 0,
+            loop_error: 0,
+            sink_core_temp_mc: 0,
+            sink_exhaust_temp_mc: 0,
+            mcu_temp_mc: 0,
+            fault_flags: 0,
+            cal_kind: Some(1),
+            raw_v_nr_100uv: Some(-123),
+            raw_v_rmt_100uv: None,
+            raw_cur_100uv: Some(789),
+            raw_dac_code: None,
+        };
+
+        let mut raw = [0u8; 192];
+        let len = encode_fast_status_frame(1, &status, &mut raw).unwrap();
+        let (_hdr, decoded) = decode_fast_status_frame(&raw[..len]).unwrap();
+        assert_eq!(decoded.cal_kind, status.cal_kind);
+        assert_eq!(decoded.raw_v_nr_100uv, status.raw_v_nr_100uv);
+        assert_eq!(decoded.raw_v_rmt_100uv, None);
+        assert_eq!(decoded.raw_cur_100uv, status.raw_cur_100uv);
+        assert_eq!(decoded.raw_dac_code, None);
+    }
+
+    #[test]
+    fn cal_write_single_chunk_roundtrip() {
+        let chunk: CalWriteChunk = CalWrite {
+            index: 0,
+            payload: [0x11; 32],
+            crc: 0x1234,
+        };
+
+        let mut raw = [0u8; 96];
+        let len = encode_cal_write_frame(2, &chunk, &mut raw).unwrap();
+        let (_hdr, decoded) = decode_cal_write_frame(&raw[..len]).unwrap();
+        assert_eq!(decoded.index, chunk.index);
+        assert_eq!(decoded.payload, chunk.payload);
+        assert_eq!(decoded.crc, chunk.crc);
+    }
+
+    #[test]
+    fn cal_write_multi_chunk_roundtrip() {
+        let chunks: [CalWriteChunk; 3] = [
+            CalWrite {
+                index: 0,
+                payload: [0x00; 32],
+                crc: 0x0000,
+            },
+            CalWrite {
+                index: 1,
+                payload: [0x01; 32],
+                crc: 0x1111,
+            },
+            CalWrite {
+                index: 2,
+                payload: [0x02; 32],
+                crc: 0x2222,
+            },
+        ];
+
+        for (seq, chunk) in chunks.iter().enumerate() {
+            let mut raw = [0u8; 96];
+            let len = encode_cal_write_frame(seq as u8, chunk, &mut raw).unwrap();
+            let (_hdr, decoded) = decode_cal_write_frame(&raw[..len]).unwrap();
+            assert_eq!(decoded.index, chunk.index);
+            assert_eq!(decoded.payload, chunk.payload);
+            assert_eq!(decoded.crc, chunk.crc);
+        }
     }
 
     #[test]
