@@ -26,8 +26,9 @@ type RefetchProfile = () => Promise<
 
 interface VoltageCandidate {
   id: string;
-  raw: number;
   mv: number;
+  rawLocal?: number;
+  rawRemote?: number;
 }
 
 interface CurrentCandidate {
@@ -35,6 +36,30 @@ interface CurrentCandidate {
   raw: number;
   ma: number;
   dac_code?: number;
+}
+
+function mergeVoltageCandidatesByMv(
+  localPoints: CalibrationPointVoltage[],
+  remotePoints: CalibrationPointVoltage[],
+): Array<{ mv: number; rawLocal?: number; rawRemote?: number }> {
+  const byMv = new Map<
+    number,
+    { mv: number; rawLocal?: number; rawRemote?: number }
+  >();
+
+  for (const point of localPoints) {
+    const entry = byMv.get(point.mv) ?? { mv: point.mv };
+    entry.rawLocal = point.raw;
+    byMv.set(point.mv, entry);
+  }
+
+  for (const point of remotePoints) {
+    const entry = byMv.get(point.mv) ?? { mv: point.mv };
+    entry.rawRemote = point.raw;
+    byMv.set(point.mv, entry);
+  }
+
+  return Array.from(byMv.values()).sort((a, b) => a.mv - b.mv);
 }
 
 export function DeviceCalibrationRoute() {
@@ -191,33 +216,22 @@ function VoltageCalibration({
   onRefetchProfile: RefetchProfile;
   isOffline: boolean;
 }) {
-  const nextLocalId = useRef(0);
-  const nextRemoteId = useRef(0);
+  const nextCandidateId = useRef(0);
 
-  const [candidatesLocal, setCandidatesLocal] = useState<VoltageCandidate[]>(
-    [],
-  );
-  const [candidatesRemote, setCandidatesRemote] = useState<VoltageCandidate[]>(
-    [],
-  );
+  const [candidates, setCandidates] = useState<VoltageCandidate[]>([]);
 
   useEffect(() => {
-    nextLocalId.current = 0;
-    nextRemoteId.current = 0;
+    nextCandidateId.current = 0;
 
-    setCandidatesLocal(
-      (profile?.v_local_points ?? []).map((point) => ({
-        id: `l-${nextLocalId.current++}`,
-        raw: point.raw,
-        mv: point.mv,
-      })),
-    );
-
-    setCandidatesRemote(
-      (profile?.v_remote_points ?? []).map((point) => ({
-        id: `r-${nextRemoteId.current++}`,
-        raw: point.raw,
-        mv: point.mv,
+    const localPoints = profile?.v_local_points ?? [];
+    const remotePoints = profile?.v_remote_points ?? [];
+    const merged = mergeVoltageCandidatesByMv(localPoints, remotePoints);
+    setCandidates(
+      merged.map((entry) => ({
+        id: `v-${nextCandidateId.current++}`,
+        mv: entry.mv,
+        rawLocal: entry.rawLocal,
+        rawRemote: entry.rawRemote,
       })),
     );
   }, [profile]);
@@ -241,21 +255,17 @@ function VoltageCalibration({
     onSuccess: async () => {
       const result = await onRefetchProfile();
       if (result.data) {
-        nextLocalId.current = 0;
-        nextRemoteId.current = 0;
-
-        setCandidatesLocal(
-          (result.data.v_local_points ?? []).map((point) => ({
-            id: `l-${nextLocalId.current++}`,
-            raw: point.raw,
-            mv: point.mv,
-          })),
+        nextCandidateId.current = 0;
+        const merged = mergeVoltageCandidatesByMv(
+          result.data.v_local_points ?? [],
+          result.data.v_remote_points ?? [],
         );
-        setCandidatesRemote(
-          (result.data.v_remote_points ?? []).map((point) => ({
-            id: `r-${nextRemoteId.current++}`,
-            raw: point.raw,
-            mv: point.mv,
+        setCandidates(
+          merged.map((entry) => ({
+            id: `v-${nextCandidateId.current++}`,
+            mv: entry.mv,
+            rawLocal: entry.rawLocal,
+            rawRemote: entry.rawRemote,
           })),
         );
       }
@@ -277,31 +287,74 @@ function VoltageCalibration({
       return;
     }
 
-    setCandidatesLocal((prev) => [
+    if (candidates.length >= 5) {
+      alert("Too many points (max 5).");
+      return;
+    }
+
+    setCandidates((prev) => [
       ...prev,
-      { id: `l-${nextLocalId.current++}`, mv: measuredMv, raw: rawLocal },
-    ]);
-    setCandidatesRemote((prev) => [
-      ...prev,
-      { id: `r-${nextRemoteId.current++}`, mv: measuredMv, raw: rawRemote },
+      {
+        id: `v-${nextCandidateId.current++}`,
+        mv: measuredMv,
+        rawLocal,
+        rawRemote,
+      },
     ]);
   };
 
+  const handleDeleteCandidate = (id: string) => {
+    if (candidates.length <= 1) {
+      alert("At least 1 point is required.");
+      return;
+    }
+    setCandidates((prev) => prev.filter((point) => point.id !== id));
+  };
+
+  const localPreviewPoints = candidates.flatMap((point) => {
+    if (point.rawLocal == null) return [];
+    return [{ x: point.rawLocal, y: point.mv }];
+  });
+
+  const remotePreviewPoints = candidates.flatMap((point) => {
+    if (point.rawRemote == null) return [];
+    return [{ x: point.rawRemote, y: point.mv }];
+  });
+
   const previewLocalV =
-    status?.raw.raw_v_nr_100uv != null && candidatesLocal.length >= 2
-      ? piecewiseLinear(
-          candidatesLocal.map((p) => ({ x: p.raw, y: p.mv })),
-          status.raw.raw_v_nr_100uv,
-        ) / 1000
+    status?.raw.raw_v_nr_100uv != null && localPreviewPoints.length >= 2
+      ? piecewiseLinear(localPreviewPoints, status.raw.raw_v_nr_100uv) / 1000
       : null;
 
   const previewRemoteV =
-    status?.raw.raw_v_rmt_100uv != null && candidatesRemote.length >= 2
-      ? piecewiseLinear(
-          candidatesRemote.map((p) => ({ x: p.raw, y: p.mv })),
-          status.raw.raw_v_rmt_100uv,
-        ) / 1000
+    status?.raw.raw_v_rmt_100uv != null && remotePreviewPoints.length >= 2
+      ? piecewiseLinear(remotePreviewPoints, status.raw.raw_v_rmt_100uv) / 1000
       : null;
+
+  const localApplyPoints: CalibrationPointVoltage[] | null = (() => {
+    const out: CalibrationPointVoltage[] = [];
+    for (const point of candidates) {
+      if (point.rawLocal == null) return null;
+      out.push({ raw: point.rawLocal, mv: point.mv });
+    }
+    return out;
+  })();
+
+  const remoteApplyPoints: CalibrationPointVoltage[] | null = (() => {
+    const out: CalibrationPointVoltage[] = [];
+    for (const point of candidates) {
+      if (point.rawRemote == null) return null;
+      out.push({ raw: point.rawRemote, mv: point.mv });
+    }
+    return out;
+  })();
+
+  const canApplyOrCommit =
+    !isOffline &&
+    candidates.length >= 1 &&
+    candidates.length <= 5 &&
+    localApplyPoints != null &&
+    remoteApplyPoints != null;
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -326,7 +379,7 @@ function VoltageCalibration({
               type="button"
               className="btn btn-primary"
               onClick={handleCapture}
-              disabled={isOffline}
+              disabled={isOffline || candidates.length >= 5}
             >
               Capture Point
             </button>
@@ -348,22 +401,26 @@ function VoltageCalibration({
                 type="button"
                 className="btn btn-sm btn-ghost"
                 onClick={async () => {
+                  if (
+                    !canApplyOrCommit ||
+                    !localApplyPoints ||
+                    !remoteApplyPoints
+                  ) {
+                    alert(
+                      "Cannot apply: ensure you have 1..5 paired points (local+remote raw).",
+                    );
+                    return;
+                  }
                   await applyMutation.mutateAsync({
                     kind: "v_local",
-                    points: candidatesLocal.map((point) => ({
-                      raw: point.raw,
-                      mv: point.mv,
-                    })),
+                    points: localApplyPoints,
                   });
                   await applyMutation.mutateAsync({
                     kind: "v_remote",
-                    points: candidatesRemote.map((point) => ({
-                      raw: point.raw,
-                      mv: point.mv,
-                    })),
+                    points: remoteApplyPoints,
                   });
                 }}
-                disabled={isOffline || applyMutation.isPending}
+                disabled={!canApplyOrCommit || applyMutation.isPending}
               >
                 Apply Preview
               </button>
@@ -371,10 +428,16 @@ function VoltageCalibration({
                 type="button"
                 className="btn btn-sm btn-secondary"
                 onClick={() => {
+                  if (!canApplyOrCommit) {
+                    alert(
+                      "Cannot commit: ensure you have 1..5 paired points (local+remote raw).",
+                    );
+                    return;
+                  }
                   commitMutation.mutate("v_local");
                   commitMutation.mutate("v_remote");
                 }}
-                disabled={isOffline || commitMutation.isPending}
+                disabled={!canApplyOrCommit || commitMutation.isPending}
               >
                 Commit
               </button>
@@ -398,9 +461,7 @@ function VoltageCalibration({
           <div className="stat-value text-lg text-primary">
             {previewLocalV == null ? "--" : `${previewLocalV.toFixed(3)} V`}
           </div>
-          <div className="stat-desc">
-            Candidate points: {candidatesLocal.length}
-          </div>
+          <div className="stat-desc">Candidate points: {candidates.length}</div>
         </div>
       </div>
 
@@ -419,50 +480,40 @@ function VoltageCalibration({
           <div className="stat-value text-lg text-primary">
             {previewRemoteV == null ? "--" : `${previewRemoteV.toFixed(3)} V`}
           </div>
-          <div className="stat-desc">
-            Candidate points: {candidatesRemote.length}
-          </div>
+          <div className="stat-desc">Candidate points: {candidates.length}</div>
         </div>
       </div>
 
       <div className="card bg-base-100 shadow-xl border border-base-200 col-span-1 md:col-span-2">
         <div className="card-body">
-          <h4 className="font-bold">Candidates (Local)</h4>
-          <div className="overflow-x-auto">
-            <table className="table table-xs">
+          <h4 className="font-bold">Candidates</h4>
+          <div className="overflow-x-auto max-h-64">
+            <table className="table table-xs table-pin-rows">
               <thead>
                 <tr>
-                  <th>Raw</th>
                   <th>Value (mV)</th>
+                  <th>Raw Local</th>
+                  <th>Raw Remote</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
-                {candidatesLocal.map((point) => (
+                {candidates.map((point) => (
                   <tr key={point.id}>
-                    <td>{point.raw}</td>
                     <td>{point.mv}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          <div className="divider"></div>
-
-          <h4 className="font-bold">Candidates (Remote)</h4>
-          <div className="overflow-x-auto">
-            <table className="table table-xs">
-              <thead>
-                <tr>
-                  <th>Raw</th>
-                  <th>Value (mV)</th>
-                </tr>
-              </thead>
-              <tbody>
-                {candidatesRemote.map((point) => (
-                  <tr key={point.id}>
-                    <td>{point.raw}</td>
-                    <td>{point.mv}</td>
+                    <td>{point.rawLocal ?? "--"}</td>
+                    <td>{point.rawRemote ?? "--"}</td>
+                    <td className="text-right">
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-xs text-error"
+                        onClick={() => handleDeleteCandidate(point.id)}
+                        disabled={isOffline || candidates.length <= 1}
+                        aria-label={`Delete candidate ${point.id}`}
+                      >
+                        Delete
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -595,6 +646,11 @@ function CurrentCalibration({
       return;
     }
 
+    if (candidates.length >= 5) {
+      alert("Too many points (max 5).");
+      return;
+    }
+
     setCandidates((prev) => [
       ...prev,
       {
@@ -606,6 +662,14 @@ function CurrentCalibration({
     ]);
   };
 
+  const handleDeleteCandidate = (id: string) => {
+    if (candidates.length <= 1) {
+      alert("At least 1 point is required.");
+      return;
+    }
+    setCandidates((prev) => prev.filter((point) => point.id !== id));
+  };
+
   const activeMa =
     channel === "ch1" ? status?.raw.i_local_ma : status?.raw.i_remote_ma;
   const previewMa =
@@ -615,6 +679,9 @@ function CurrentCalibration({
           status.raw.raw_cur_100uv,
         )
       : null;
+
+  const canApplyOrCommit =
+    !isOffline && candidates.length >= 1 && candidates.length <= 5;
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
@@ -705,7 +772,7 @@ function CurrentCalibration({
                 type="button"
                 className="btn btn-secondary join-item"
                 onClick={handleCapture}
-                disabled={isOffline}
+                disabled={isOffline || candidates.length >= 5}
               >
                 Capture
               </button>
@@ -759,7 +826,7 @@ function CurrentCalibration({
                 type="button"
                 className="btn btn-sm btn-ghost"
                 onClick={() => applyMutation.mutate()}
-                disabled={isOffline || applyMutation.isPending}
+                disabled={!canApplyOrCommit || applyMutation.isPending}
               >
                 Apply
               </button>
@@ -767,7 +834,7 @@ function CurrentCalibration({
                 type="button"
                 className="btn btn-sm btn-secondary"
                 onClick={() => commitMutation.mutate()}
-                disabled={isOffline || commitMutation.isPending}
+                disabled={!canApplyOrCommit || commitMutation.isPending}
               >
                 Commit
               </button>
@@ -781,6 +848,7 @@ function CurrentCalibration({
                   <th>Raw</th>
                   <th>DAC</th>
                   <th>Value (mA)</th>
+                  <th></th>
                 </tr>
               </thead>
               <tbody>
@@ -789,6 +857,17 @@ function CurrentCalibration({
                     <td>{point.raw}</td>
                     <td>{point.dac_code ?? "--"}</td>
                     <td>{point.ma}</td>
+                    <td className="text-right">
+                      <button
+                        type="button"
+                        className="btn btn-ghost btn-xs text-error"
+                        onClick={() => handleDeleteCandidate(point.id)}
+                        disabled={isOffline || candidates.length <= 1}
+                        aria-label={`Delete candidate ${point.id}`}
+                      >
+                        Delete
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
