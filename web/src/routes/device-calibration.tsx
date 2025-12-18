@@ -35,7 +35,7 @@ interface CurrentCandidate {
   id: string;
   raw: number;
   ma: number;
-  dac_code?: number;
+  dac_code: number;
 }
 
 function mergeVoltageCandidatesByMv(
@@ -246,12 +246,18 @@ function VoltageCalibration({
   });
 
   const commitMutation = useMutation({
-    mutationFn: async (kind: "v_local" | "v_remote") =>
-      postCalibrationCommit(baseUrl, { kind }),
+    mutationFn: async (payload: {
+      kind: "v_local" | "v_remote";
+      points: CalibrationPointVoltage[];
+    }) => postCalibrationCommit(baseUrl, payload),
   });
 
   const resetMutation = useMutation({
-    mutationFn: async () => postCalibrationReset(baseUrl, { kind: "both" }),
+    mutationFn: async () => {
+      await postCalibrationReset(baseUrl, { kind: "v_local" });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      await postCalibrationReset(baseUrl, { kind: "v_remote" });
+    },
     onSuccess: async () => {
       const result = await onRefetchProfile();
       if (result.data) {
@@ -415,6 +421,7 @@ function VoltageCalibration({
                     kind: "v_local",
                     points: localApplyPoints,
                   });
+                  await new Promise((resolve) => setTimeout(resolve, 200));
                   await applyMutation.mutateAsync({
                     kind: "v_remote",
                     points: remoteApplyPoints,
@@ -427,15 +434,28 @@ function VoltageCalibration({
               <button
                 type="button"
                 className="btn btn-sm btn-secondary"
-                onClick={() => {
+                onClick={async () => {
                   if (!canApplyOrCommit) {
                     alert(
                       "Cannot commit: ensure you have 1..5 paired points (local+remote raw).",
                     );
                     return;
                   }
-                  commitMutation.mutate("v_local");
-                  commitMutation.mutate("v_remote");
+                  if (!localApplyPoints || !remoteApplyPoints) {
+                    alert(
+                      "Cannot commit: ensure you have 1..5 paired points (local+remote raw).",
+                    );
+                    return;
+                  }
+                  await commitMutation.mutateAsync({
+                    kind: "v_local",
+                    points: localApplyPoints,
+                  });
+                  await new Promise((resolve) => setTimeout(resolve, 200));
+                  await commitMutation.mutateAsync({
+                    kind: "v_remote",
+                    points: remoteApplyPoints,
+                  });
                 }}
                 disabled={!canApplyOrCommit || commitMutation.isPending}
               >
@@ -590,7 +610,14 @@ function CurrentCalibration({
   const commitMutation = useMutation({
     mutationFn: async () => {
       const kind = channel === "ch1" ? "current_ch1" : "current_ch2";
-      return postCalibrationCommit(baseUrl, { kind });
+      return postCalibrationCommit(baseUrl, {
+        kind,
+        points: candidates.map((point) => ({
+          raw: point.raw,
+          ma: point.ma,
+          dac_code: point.dac_code,
+        })),
+      });
     },
   });
 
