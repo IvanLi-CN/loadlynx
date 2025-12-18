@@ -60,6 +60,13 @@ const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
+// Calibration-only smoothing window:
+// FastStatus is emitted at 20 Hz (50 ms). A 6-frame window is ~300 ms.
+const CAL_SMOOTH_WINDOW_FRAMES: usize = 6;
+// Calibration-only oversampling (within a single FastStatus cycle) to suppress
+// 1–10 kHz ripple by time-averaging multiple ADC conversions.
+const CAL_OVERSAMPLE_SAMPLES: u32 = 256;
+
 // DAC1 → CC 环路：0.5 A 设计值对应的 DAC 码。
 // 物理链路（v4.1 vs v4.2，对应网表与 INA193 / OPA2365 手册）：
 //   - v4.1：Rsense = 25 mΩ，INA193 固定增益 20 V/V：
@@ -138,6 +145,153 @@ const I_SHARE_THRESHOLD_MA: i32 = 2_000;
 //   - I_total ≥ 2 A：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(true);
+
+#[derive(Copy, Clone)]
+struct WindowAvg<const N: usize> {
+    buf: [i32; N],
+    sum: i64,
+    idx: usize,
+    initialized: bool,
+}
+
+impl<const N: usize> WindowAvg<N> {
+    const fn new() -> Self {
+        Self {
+            buf: [0; N],
+            sum: 0,
+            idx: 0,
+            initialized: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.sum = 0;
+        self.idx = 0;
+        self.initialized = false;
+    }
+
+    fn reset_to(&mut self, x: i32) {
+        self.buf.fill(x);
+        self.sum = (x as i64) * (N as i64);
+        self.idx = 0;
+        self.initialized = true;
+    }
+
+    fn update(&mut self, x: i32) -> i32 {
+        if !self.initialized {
+            self.reset_to(x);
+            return x;
+        }
+
+        let old = self.buf[self.idx];
+        self.buf[self.idx] = x;
+        self.idx += 1;
+        if self.idx >= N {
+            self.idx = 0;
+        }
+        self.sum += (x - old) as i64;
+        (self.sum / (N as i64)) as i32
+    }
+}
+
+struct CalSmoother<const N: usize> {
+    last_kind_u8: u8,
+    v_nr_100uv: WindowAvg<N>,
+    v_rmt_100uv: WindowAvg<N>,
+    cur1_100uv: WindowAvg<N>,
+    cur2_100uv: WindowAvg<N>,
+}
+
+impl<const N: usize> CalSmoother<N> {
+    const fn new() -> Self {
+        Self {
+            last_kind_u8: 0, // CalKind::Off == 0 in the protocol.
+            v_nr_100uv: WindowAvg::new(),
+            v_rmt_100uv: WindowAvg::new(),
+            cur1_100uv: WindowAvg::new(),
+            cur2_100uv: WindowAvg::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.v_nr_100uv.clear();
+        self.v_rmt_100uv.clear();
+        self.cur1_100uv.clear();
+        self.cur2_100uv.clear();
+    }
+
+    fn update(
+        &mut self,
+        kind: CalKind,
+        raw_v_nr_100uv: i16,
+        raw_v_rmt_100uv: i16,
+        raw_cur1_100uv: i16,
+        raw_cur2_100uv: i16,
+    ) -> (i16, i16, i16, i16) {
+        let kind_u8 = u8::from(kind);
+
+        // Only smooth while in calibration mode. Leaving calibration clears state so the
+        // next entry starts from the current sample without stale history.
+        if kind == CalKind::Off {
+            self.last_kind_u8 = kind_u8;
+            self.clear();
+            return (
+                raw_v_nr_100uv,
+                raw_v_rmt_100uv,
+                raw_cur1_100uv,
+                raw_cur2_100uv,
+            );
+        }
+
+        if self.last_kind_u8 != kind_u8 {
+            self.last_kind_u8 = kind_u8;
+            self.v_nr_100uv.reset_to(raw_v_nr_100uv as i32);
+            self.v_rmt_100uv.reset_to(raw_v_rmt_100uv as i32);
+            self.cur1_100uv.reset_to(raw_cur1_100uv as i32);
+            self.cur2_100uv.reset_to(raw_cur2_100uv as i32);
+            return (
+                raw_v_nr_100uv,
+                raw_v_rmt_100uv,
+                raw_cur1_100uv,
+                raw_cur2_100uv,
+            );
+        }
+
+        let v_nr = self.v_nr_100uv.update(raw_v_nr_100uv as i32);
+        let v_rmt = self.v_rmt_100uv.update(raw_v_rmt_100uv as i32);
+        let cur1 = self.cur1_100uv.update(raw_cur1_100uv as i32);
+        let cur2 = self.cur2_100uv.update(raw_cur2_100uv as i32);
+
+        (
+            v_nr.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            v_rmt.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            cur1.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            cur2.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        )
+    }
+}
+
+fn raw_100uv_to_mv(raw_100uv: i16) -> u32 {
+    let raw = raw_100uv as i32;
+    if raw <= 0 { 0 } else { (raw as u32) / 10 }
+}
+
+macro_rules! adc_avg_from_first {
+    ($adc:expr, $ch:expr, $first:expr, $n:expr) => {{
+        let n_u32: u32 = $n;
+        if n_u32 <= 1 {
+            $first
+        } else {
+            let mut acc: u32 = $first as u32;
+            let mut i: u32 = 1;
+            while i < n_u32 {
+                acc = acc.saturating_add($adc.blocking_read($ch) as u32);
+                i += 1;
+            }
+            (acc / n_u32) as u16
+        }
+    }};
+}
 // 用户校准是否已加载完成。仅当四条曲线均接收并验证合法后置为 true。
 static CAL_READY: AtomicBool = AtomicBool::new(false);
 // 当前校准模式选择（CalMode.kind），默认 off。
@@ -431,6 +585,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut remote_good_streak: u8 = 0;
     let mut remote_bad_streak: u8 = 0;
 
+    // Calibration-only UI/RAW smoothing (see CAL_SMOOTH_WINDOW_FRAMES).
+    let mut cal_smoother: CalSmoother<CAL_SMOOTH_WINDOW_FRAMES> = CalSmoother::new();
+
     loop {
         info!("main loop top");
         if SOFT_RESET_PENDING.swap(false, Ordering::SeqCst) {
@@ -512,11 +669,43 @@ async fn main(_spawner: Spawner) -> ! {
 
         // --- 采样所有相关 ADC 通道（阻塞读取） ---
         // v4.2：电压单端采样在 ADC1，电流单端采样在 ADC2。
+        let cal_kind = CalKind::from(CAL_MODE_KIND.load(Ordering::Relaxed));
+
         let v_rmt_sns_code = adc1.blocking_read(&mut v_rmt_sns);
         let v_nr_sns_code = adc1.blocking_read(&mut v_nr_sns);
 
         let cur1_sns_code = adc2.blocking_read(&mut cur1_sns);
         let cur2_sns_code = adc2.blocking_read(&mut cur2_sns);
+
+        // Calibration-only oversampling to reduce 1–10 kHz ripple influence on capture/display.
+        // Keep instantaneous samples above for fault detection and edge conditions.
+        let (v_rmt_sns_code_cal, v_nr_sns_code_cal, cur1_sns_code_cal, cur2_sns_code_cal) =
+            match cal_kind {
+                CalKind::Voltage => (
+                    adc_avg_from_first!(
+                        adc1,
+                        &mut v_rmt_sns,
+                        v_rmt_sns_code,
+                        CAL_OVERSAMPLE_SAMPLES
+                    ),
+                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    cur1_sns_code,
+                    cur2_sns_code,
+                ),
+                CalKind::CurrentCh1 => (
+                    v_rmt_sns_code,
+                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    adc_avg_from_first!(adc2, &mut cur1_sns, cur1_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    cur2_sns_code,
+                ),
+                CalKind::CurrentCh2 => (
+                    v_rmt_sns_code,
+                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    cur1_sns_code,
+                    adc_avg_from_first!(adc2, &mut cur2_sns, cur2_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                ),
+                CalKind::Off => (v_rmt_sns_code, v_nr_sns_code, cur1_sns_code, cur2_sns_code),
+            };
 
         let sns_5v_code = adc1.blocking_read(&mut sns_5v);
         let ts1_code = adc1.blocking_read(&mut ts1);
@@ -531,6 +720,11 @@ async fn main(_spawner: Spawner) -> ! {
 
         let cur1_sns_mv = adc_to_mv(cur1_sns_code);
         let cur2_sns_mv = adc_to_mv(cur2_sns_code);
+
+        let v_rmt_sns_mv_cal = adc_to_mv(v_rmt_sns_code_cal);
+        let v_nr_sns_mv_cal = adc_to_mv(v_nr_sns_code_cal);
+        let cur1_sns_mv_cal = adc_to_mv(cur1_sns_code_cal);
+        let cur2_sns_mv_cal = adc_to_mv(cur2_sns_code_cal);
 
         let v_5v_sns_mv = adc_to_mv(sns_5v_code);
         let ts1_mv = adc_to_mv(ts1_code);
@@ -553,6 +747,11 @@ async fn main(_spawner: Spawner) -> ! {
         let raw_v_rmt_100uv = mv_to_raw_100uv(v_rmt_sns_mv);
         let raw_cur1_100uv = mv_to_raw_100uv(cur1_sns_mv);
         let raw_cur2_100uv = mv_to_raw_100uv(cur2_sns_mv);
+
+        let raw_v_nr_100uv_cal = mv_to_raw_100uv(v_nr_sns_mv_cal);
+        let raw_v_rmt_100uv_cal = mv_to_raw_100uv(v_rmt_sns_mv_cal);
+        let raw_cur1_100uv_cal = mv_to_raw_100uv(cur1_sns_mv_cal);
+        let raw_cur2_100uv_cal = mv_to_raw_100uv(cur2_sns_mv_cal);
 
         // --- Ideal physical (fallback) ---
         // Voltage ideal scaling:
@@ -736,7 +935,6 @@ async fn main(_spawner: Spawner) -> ! {
         //
         // - I_total < I_SHARE_THRESHOLD_MA：仅 CH1 承担全部电流，CH2=0；
         // - I_total ≥ I_SHARE_THRESHOLD_MA：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
-        let cal_kind = CalKind::from(CAL_MODE_KIND.load(Ordering::Relaxed));
         let (target_ch1_ma, target_ch2_ma) = if !effective_enable_with_fault {
             (0, 0)
         } else {
@@ -799,6 +997,82 @@ async fn main(_spawner: Spawner) -> ! {
         // 目标恒流（远端设定，单位 mA），用于 loop_error 与 UI 显示。
         let loop_error = target_i_total_ma - i_total_ma;
 
+        // Calibration-only smoothing for UI + capture: smooth the RAW fields that the
+        // web UI captures, then derive a smoothed view of the displayed physical values.
+        //
+        // IMPORTANT: Protection/fault detection above uses the instantaneous values
+        // (`v_local_mv`, `i_ch1_ma`, ...) and MUST remain unaffected by smoothing.
+        let (raw_v_nr_100uv_sm, raw_v_rmt_100uv_sm, raw_cur1_100uv_sm, raw_cur2_100uv_sm) =
+            cal_smoother.update(
+                cal_kind,
+                raw_v_nr_100uv_cal,
+                raw_v_rmt_100uv_cal,
+                raw_cur1_100uv_cal,
+                raw_cur2_100uv_cal,
+            );
+
+        let (status_v_local_mv, status_v_remote_mv, status_i_ch1_ma, status_i_ch2_ma) = if cal_kind
+            == CalKind::Off
+        {
+            (v_local_mv, v_remote_mv, i_ch1_ma, i_ch2_ma)
+        } else {
+            let v_nr_sns_mv_sm = raw_100uv_to_mv(raw_v_nr_100uv_sm);
+            let v_rmt_sns_mv_sm = raw_100uv_to_mv(raw_v_rmt_100uv_sm);
+            let cur1_sns_mv_sm = raw_100uv_to_mv(raw_cur1_100uv_sm);
+            let cur2_sns_mv_sm = raw_100uv_to_mv(raw_cur2_100uv_sm);
+
+            let v_local_mv_uncal_sm = (v_nr_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+            let v_remote_mv_uncal_sm = (v_rmt_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+
+            let i_ch1_ma_uncal_sm = (2 * cur1_sns_mv_sm) as i32;
+            let i_ch2_ma_uncal_sm = (2 * cur2_sns_mv_sm) as i32;
+
+            let v_local_sm = if curves[CurveKind::VLocal.index()].is_empty() {
+                v_local_mv_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::VLocal.index()].as_slice(),
+                    raw_v_nr_100uv_sm,
+                )
+                .unwrap_or(v_local_mv_uncal_sm)
+            };
+            let v_remote_sm = if curves[CurveKind::VRemote.index()].is_empty() {
+                v_remote_mv_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::VRemote.index()].as_slice(),
+                    raw_v_rmt_100uv_sm,
+                )
+                .unwrap_or(v_remote_mv_uncal_sm)
+            };
+
+            let i_ch1_sm = if curves[CurveKind::CurrentCh1.index()].is_empty() {
+                i_ch1_ma_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::CurrentCh1.index()].as_slice(),
+                    raw_cur1_100uv_sm,
+                )
+                .unwrap_or(i_ch1_ma_uncal_sm)
+            };
+            let i_ch2_sm = if curves[CurveKind::CurrentCh2.index()].is_empty() {
+                i_ch2_ma_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::CurrentCh2.index()].as_slice(),
+                    raw_cur2_100uv_sm,
+                )
+                .unwrap_or(i_ch2_ma_uncal_sm)
+            };
+
+            (v_local_sm, v_remote_sm, i_ch1_sm, i_ch2_sm)
+        };
+
+        let status_i_total_ma = status_i_ch1_ma.saturating_add(status_i_ch2_ma);
+        let status_calc_p_mw = ((status_i_total_ma as i64 * status_v_local_mv as i64) / 1_000)
+            .clamp(0, u32::MAX as i64) as u32;
+        let status_loop_error = target_i_total_ma - status_i_total_ma;
+
         info!(
             "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_ch1={}mA i_ch2={}mA i_total={}mA target_total={}mA ch1_target={}mA ch2_target={}mA dac1={} dac2={} loop_err={}",
             v_local_mv,
@@ -832,8 +1106,8 @@ async fn main(_spawner: Spawner) -> ! {
             match cal_kind {
                 CalKind::Voltage => (
                     Some(u8::from(cal_kind)),
-                    Some(raw_v_nr_100uv),
-                    Some(raw_v_rmt_100uv),
+                    Some(raw_v_nr_100uv_sm),
+                    Some(raw_v_rmt_100uv_sm),
                     None,
                     None,
                 ),
@@ -841,14 +1115,14 @@ async fn main(_spawner: Spawner) -> ! {
                     Some(u8::from(cal_kind)),
                     None,
                     None,
-                    Some(raw_cur1_100uv),
+                    Some(raw_cur1_100uv_sm),
                     Some(dac_code_ch1),
                 ),
                 CalKind::CurrentCh2 => (
                     Some(u8::from(cal_kind)),
                     None,
                     None,
-                    Some(raw_cur2_100uv),
+                    Some(raw_cur2_100uv_sm),
                     Some(dac_code_ch2),
                 ),
                 CalKind::Off => (None, None, None, None, None),
@@ -861,13 +1135,13 @@ async fn main(_spawner: Spawner) -> ! {
             // target_value 表示两通道合计目标电流（mA）。
             target_value: target_i_total_ma,
             // i_local_ma / i_remote_ma 对应通道 1 / 通道 2 实测电流。
-            i_local_ma: i_ch1_ma,
-            i_remote_ma: i_ch2_ma,
-            v_local_mv,
-            v_remote_mv,
-            calc_p_mw,
+            i_local_ma: status_i_ch1_ma,
+            i_remote_ma: status_i_ch2_ma,
+            v_local_mv: status_v_local_mv,
+            v_remote_mv: status_v_remote_mv,
+            calc_p_mw: status_calc_p_mw,
             dac_headroom_mv,
-            loop_error,
+            loop_error: status_loop_error,
             sink_core_temp_mc,
             sink_exhaust_temp_mc,
             mcu_temp_mc,
