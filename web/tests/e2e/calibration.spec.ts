@@ -20,7 +20,7 @@ test.describe("Calibration UI", () => {
     );
 
     // Mock should be online.
-    await expect(page.locator(".badge")).toHaveText("ONLINE");
+    await expect(page.locator(".badge.gap-2")).toHaveText("ONLINE");
 
     // Wait for raw values to appear (voltage calibration mode).
     const localStat = page.locator(".stat", { hasText: "Local Voltage" });
@@ -28,10 +28,18 @@ test.describe("Calibration UI", () => {
     await expect(localStat.getByText("Raw:")).not.toContainText("--");
     await expect(remoteStat.getByText("Raw:")).not.toContainText("--");
 
+    // Draft starts empty (no user calibration points).
+    const localDraftCardVoltage = page.locator(".card", {
+      hasText: "Local Draft",
+    });
+    await expect(localDraftCardVoltage.locator("table")).toContainText(
+      "No draft points.",
+    );
+
     // Capture a voltage point at 12V.
     await page.getByLabel("Measured Voltage (V)").fill("12.00");
-    await page.getByRole("button", { name: "Capture Point" }).click();
-    await expect(page.locator("table").first()).toContainText("12000");
+    await page.getByRole("button", { name: "Capture" }).click();
+    await expect(localDraftCardVoltage.locator("table")).toContainText("12000");
 
     // Switch to current tab.
     await page.getByRole("tab", { name: "Current" }).click();
@@ -51,17 +59,35 @@ test.describe("Calibration UI", () => {
     await page.getByLabel("Meter Reading (Local) (A)").fill("0.950");
     await page.getByRole("button", { name: "Capture" }).click();
 
-    await expect(page.locator("table")).toContainText("950");
-    await expect(page.locator("tbody tr")).toHaveCount(3);
+    const localDraftCardCurrent = page.locator(".card", {
+      hasText: "Local Draft",
+    });
+    await expect(localDraftCardCurrent.locator("table")).toContainText("950");
+    const draftRows = localDraftCardCurrent.locator("tbody tr");
+    expect(await draftRows.count()).toBeGreaterThan(0);
 
     // Apply and commit.
-    await page.getByRole("button", { name: "Apply" }).click();
-    await page.getByRole("button", { name: "Commit" }).click();
+    const deviceSyncCard = page.locator(".card", { hasText: "Device Sync" });
+    await deviceSyncCard
+      .getByRole("button", { name: "Sync calibration to device (Apply)" })
+      .click();
+    await deviceSyncCard
+      .getByRole("button", { name: "Sync calibration to device (Commit)" })
+      .click();
 
     // Reset back to initial profile.
-    await page.getByRole("button", { name: "Reset" }).click();
-    await expect(page.locator("table")).not.toContainText("950");
-    await expect(page.locator("tbody tr")).toHaveCount(2);
+    await deviceSyncCard
+      .getByRole("button", { name: "Reset", exact: true })
+      .click();
+    await page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Reset", exact: true })
+      .click();
+
+    await expect(localDraftCardCurrent.locator("table")).not.toContainText("950");
+    await expect(localDraftCardCurrent.locator("table")).toContainText(
+      "No draft points.",
+    );
 
     await page.goto("/");
   });
