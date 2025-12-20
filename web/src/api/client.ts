@@ -12,6 +12,7 @@ import type {
   FastStatusView,
   Identity,
 } from "./types.ts";
+import { CALIBRATION_MAX_POINTS } from "../calibration/validation.ts";
 
 // Mock backend selection is based solely on the device URL scheme. The
 // ENABLE_MOCK flag remains exported for other modules but no longer gates the
@@ -215,11 +216,11 @@ interface MockCalibrationState {
 }
 
 function createInitialCalibrationProfileWire(): CalibrationProfileWire {
-  // Match firmware expectations: raw_100uv is i16, points are 1..5, and meas is
+  // Match firmware expectations: raw_100uv is i16, points are 1..7, and meas is
   // strictly increasing (after raw-sorted normalization).
   const active = {
     source: "factory-default" as const,
-    fmt_version: 1,
+    fmt_version: 3,
     hw_rev: 1,
   };
 
@@ -851,10 +852,10 @@ function mockNormalizeWirePointsByRaw100uv<T extends { raw_100uv: number }>(
   getMeas: (point: T) => number,
 ): T[] {
   if (points.length === 0) {
-    mockCalValidationError("points must contain 1..5 items");
+    mockCalValidationError(`points must contain 1..${CALIBRATION_MAX_POINTS} items`);
   }
-  if (points.length > 5) {
-    mockCalValidationError("too many points (max 5)");
+  if (points.length > CALIBRATION_MAX_POINTS) {
+    mockCalValidationError(`too many points (max ${CALIBRATION_MAX_POINTS})`);
   }
 
   for (const point of points) {
@@ -872,7 +873,7 @@ function mockNormalizeWirePointsByRaw100uv<T extends { raw_100uv: number }>(
     }
   }
 
-  // Small N (<=5): stable insertion sort by raw_100uv, then drop duplicates.
+  // Small N (<=7): stable insertion sort by raw_100uv, then drop duplicates.
   const sorted = points.slice();
   for (let i = 1; i < sorted.length; i++) {
     let j = i;

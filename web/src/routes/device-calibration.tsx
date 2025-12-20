@@ -23,6 +23,7 @@ import { piecewiseLinear } from "../calibration/piecewise.ts";
 import {
   calibrationProfilesPointsEqual,
   type ValidationIssue,
+  CALIBRATION_MAX_POINTS,
   validateAndNormalizeCurrentPoints,
   validateAndNormalizeVoltagePoints,
 } from "../calibration/validation.ts";
@@ -32,18 +33,207 @@ type RefetchProfile = () => Promise<
   QueryObserverResult<CalibrationProfile, HttpApiError>
 >;
 
+interface VoltageSample {
+  mv: number;
+  rawLocal: number;
+  rawRemote: number;
+}
+
+interface StoredCalibrationDraftV1 {
+  version: 1;
+  saved_at: string;
+  device_id: string;
+  base_url: string;
+  active_tab: "voltage" | "current";
+  voltage_samples: VoltageSample[];
+  current_ch1_samples: CalibrationPointCurrent[];
+  current_ch2_samples: CalibrationPointCurrent[];
+}
+
+const CALIBRATION_DRAFT_STORAGE_VERSION = 1;
+
+function getCalibrationDraftStorageKey(deviceId: string, baseUrl: string): string {
+  const encodedBase = encodeURIComponent(baseUrl);
+  return `loadlynx:calibration-draft:v${CALIBRATION_DRAFT_STORAGE_VERSION}:${deviceId}:${encodedBase}`;
+}
+
+function readCalibrationDraftFromStorage(
+  deviceId: string,
+  baseUrl: string,
+): StoredCalibrationDraftV1 | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const key = getCalibrationDraftStorageKey(deviceId, baseUrl);
+    const raw = window.localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed: unknown = JSON.parse(raw);
+    if (typeof parsed !== "object" || parsed === null) return null;
+    const obj = parsed as Record<string, unknown>;
+    if (obj.version !== 1) return null;
+    if (obj.device_id !== deviceId) return null;
+    if (obj.base_url !== baseUrl) return null;
+    if (obj.active_tab !== "voltage" && obj.active_tab !== "current") return null;
+    const readFiniteNumber = (value: unknown): number | null => {
+      if (typeof value !== "number" || !Number.isFinite(value)) return null;
+      return value;
+    };
+
+    const parseVoltageSamples = (value: unknown): VoltageSample[] => {
+      if (!Array.isArray(value)) return [];
+      const out: VoltageSample[] = [];
+      for (const entry of value) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const e = entry as Record<string, unknown>;
+        const mv = readFiniteNumber(e.mv);
+        const rawLocal = readFiniteNumber(e.rawLocal);
+        const rawRemote = readFiniteNumber(e.rawRemote);
+        if (mv == null || rawLocal == null || rawRemote == null) continue;
+        out.push({ mv, rawLocal, rawRemote });
+      }
+      return out;
+    };
+
+    const parseCurrentSamples = (value: unknown): CalibrationPointCurrent[] => {
+      if (!Array.isArray(value)) return [];
+      const out: CalibrationPointCurrent[] = [];
+      for (const entry of value) {
+        if (typeof entry !== "object" || entry === null) continue;
+        const e = entry as Record<string, unknown>;
+        const raw = readFiniteNumber(e.raw);
+        const ma = readFiniteNumber(e.ma);
+        const dac_code = readFiniteNumber(e.dac_code);
+        if (raw == null || ma == null || dac_code == null) continue;
+        out.push({ raw, ma, dac_code });
+      }
+      return out;
+    };
+
+    return {
+      version: 1,
+      saved_at: typeof obj.saved_at === "string" ? obj.saved_at : "",
+      device_id: deviceId,
+      base_url: baseUrl,
+      active_tab: obj.active_tab as "voltage" | "current",
+      voltage_samples: parseVoltageSamples(obj.voltage_samples),
+      current_ch1_samples: parseCurrentSamples(obj.current_ch1_samples),
+      current_ch2_samples: parseCurrentSamples(obj.current_ch2_samples),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function writeCalibrationDraftToStorage(
+  deviceId: string,
+  baseUrl: string,
+  draft: StoredCalibrationDraftV1 | null,
+): void {
+  if (typeof window === "undefined") return;
+  try {
+    const key = getCalibrationDraftStorageKey(deviceId, baseUrl);
+    if (!draft) {
+      window.localStorage.removeItem(key);
+      return;
+    }
+    window.localStorage.setItem(key, JSON.stringify(draft));
+  } catch {
+    // best-effort (quota exceeded, storage disabled, etc.)
+  }
+}
+
+function pickModeOrMedian(values: number[]): number {
+  if (values.length === 0) return 0;
+  if (values.length === 1) return values[0]!;
+
+  const counts = new Map<number, number>();
+  for (const v of values) counts.set(v, (counts.get(v) ?? 0) + 1);
+
+  const entries = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+  if (entries.length >= 2 && entries[0]![1] > entries[1]![1]) {
+    return entries[0]![0];
+  }
+  if (entries.length === 1) {
+    return entries[0]![0];
+  }
+
+  const sorted = values.slice().sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 1) return sorted[mid]!;
+  const a = sorted[mid - 1]!;
+  const b = sorted[mid]!;
+  return Math.round((a + b) / 2);
+}
+
+function aggregateVoltagePointsByRaw(
+  samples: VoltageSample[],
+  side: "local" | "remote",
+): CalibrationPointVoltage[] {
+  const byRaw = new Map<number, number[]>();
+  for (const s of samples) {
+    const raw = side === "local" ? s.rawLocal : s.rawRemote;
+    const arr = byRaw.get(raw);
+    if (arr) arr.push(s.mv);
+    else byRaw.set(raw, [s.mv]);
+  }
+  const out: CalibrationPointVoltage[] = [];
+  for (const [raw, mvs] of byRaw.entries()) {
+    out.push({ raw, mv: pickModeOrMedian(mvs) });
+  }
+  return out;
+}
+
+function aggregateCurrentPointsByRaw(
+  samples: CalibrationPointCurrent[],
+): CalibrationPointCurrent[] {
+  const byRaw = new Map<number, CalibrationPointCurrent[]>();
+  for (const s of samples) {
+    const group = byRaw.get(s.raw);
+    if (group) group.push(s);
+    else byRaw.set(s.raw, [s]);
+  }
+
+  const out: CalibrationPointCurrent[] = [];
+  for (const [raw, group] of byRaw.entries()) {
+    const maPicked = pickModeOrMedian(group.map((p) => p.ma));
+    const dacMode = (() => {
+      const counts = new Map<number, number>();
+      for (const p of group) counts.set(p.dac_code, (counts.get(p.dac_code) ?? 0) + 1);
+      const entries = Array.from(counts.entries()).sort((a, b) => b[1] - a[1]);
+      if (entries.length >= 2 && entries[0]![1] > entries[1]![1]) return entries[0]![0];
+      if (entries.length === 1) return entries[0]![0];
+      return null;
+    })();
+
+    let chosen: CalibrationPointCurrent | null = null;
+    for (let i = group.length - 1; i >= 0; i--) {
+      const p = group[i]!;
+      if (dacMode != null && p.dac_code !== dacMode) continue;
+      if (!chosen) {
+        chosen = p;
+        continue;
+      }
+      const bestDist = Math.abs(chosen.ma - maPicked);
+      const dist = Math.abs(p.ma - maPicked);
+      if (dist < bestDist) chosen = p;
+    }
+    if (!chosen) chosen = group[group.length - 1]!;
+
+    out.push({ raw, ma: maPicked, dac_code: chosen.dac_code });
+  }
+  return out;
+}
+
 type UndoAction =
   | {
-      kind: "voltage";
-      mv: number;
-      local?: { index: number; point: CalibrationPointVoltage };
-      remote?: { index: number; point: CalibrationPointVoltage };
+      kind: "voltage_sample";
+      index: number;
+      sample: VoltageSample;
     }
   | {
-      kind: "current";
+      kind: "current_sample";
       curve: "current_ch1" | "current_ch2";
       index: number;
-      point: CalibrationPointCurrent;
+      sample: CalibrationPointCurrent;
     };
 
 interface UndoToastEntry {
@@ -221,6 +411,15 @@ function DeviceCalibrationPage({
   const [draftProfile, setDraftProfile] = useState<CalibrationProfile>(() =>
     makeEmptyDraftProfile(),
   );
+  const [draftVoltageSamples, setDraftVoltageSamples] = useState<VoltageSample[]>(
+    [],
+  );
+  const [draftCurrentCh1Samples, setDraftCurrentCh1Samples] = useState<
+    CalibrationPointCurrent[]
+  >([]);
+  const [draftCurrentCh2Samples, setDraftCurrentCh2Samples] = useState<
+    CalibrationPointCurrent[]
+  >([]);
   const [previewProfile, setPreviewProfile] = useState<CalibrationProfile | null>(
     null,
   );
@@ -230,6 +429,7 @@ function DeviceCalibrationPage({
   const [undoToasts, setUndoToasts] = useState<UndoToastEntry[]>([]);
   const [infoToasts, setInfoToasts] = useState<InfoToastEntry[]>([]);
   const [undoNow, setUndoNow] = useState(() => Date.now());
+  const [draftStorageReady, setDraftStorageReady] = useState(false);
 
   const clearToasts = () => {
     setUndoToasts((prev) => {
@@ -255,35 +455,31 @@ function DeviceCalibrationPage({
   };
 
   const applyUndoAction = (action: UndoAction) => {
-    setDraftProfile((prev) => {
-      const next = structuredClone(prev);
-
-      if (action.kind === "voltage") {
-        if (action.local) {
-          const idx = Math.max(
-            0,
-            Math.min(action.local.index, next.v_local_points.length),
-          );
-          next.v_local_points.splice(idx, 0, action.local.point);
-        }
-        if (action.remote) {
-          const idx = Math.max(
-            0,
-            Math.min(action.remote.index, next.v_remote_points.length),
-          );
-          next.v_remote_points.splice(idx, 0, action.remote.point);
-        }
+    if (action.kind === "voltage_sample") {
+      setDraftVoltageSamples((prev) => {
+        const next = prev.slice();
+        const idx = Math.max(0, Math.min(action.index, next.length));
+        next.splice(idx, 0, action.sample);
         return next;
-      }
+      });
+      return;
+    }
 
-      const idx = Math.max(0, Math.min(action.index, 5));
-      if (action.curve === "current_ch1") {
-        next.current_ch1_points.splice(idx, 0, action.point);
-      } else {
-        next.current_ch2_points.splice(idx, 0, action.point);
-      }
-      return next;
-    });
+    if (action.curve === "current_ch1") {
+      setDraftCurrentCh1Samples((prev) => {
+        const next = prev.slice();
+        const idx = Math.max(0, Math.min(action.index, next.length));
+        next.splice(idx, 0, action.sample);
+        return next;
+      });
+    } else {
+      setDraftCurrentCh2Samples((prev) => {
+        const next = prev.slice();
+        const idx = Math.max(0, Math.min(action.index, next.length));
+        next.splice(idx, 0, action.sample);
+        return next;
+      });
+    }
   };
 
   const undoToast = (toast: UndoToastEntry) => {
@@ -313,13 +509,49 @@ function DeviceCalibrationPage({
 
   const resetDraftToEmpty = (message = "Draft cleared.") => {
     clearToasts();
+    writeCalibrationDraftToStorage(deviceId, baseUrl, null);
     setDraftProfile(makeEmptyDraftProfile(profileQuery.data?.active));
+    setDraftVoltageSamples([]);
+    setDraftCurrentCh1Samples([]);
+    setDraftCurrentCh2Samples([]);
     setPreviewProfile(null);
     setPreviewAppliedAt(null);
     setImportError(null);
     setImportIssues(null);
     enqueueInfoToast(message);
   };
+
+  useEffect(() => {
+    setDraftProfile((prev) => {
+      const active = profileQuery.data?.active ?? prev.active ?? DEFAULT_ACTIVE_PROFILE;
+      const vLocalSamples = aggregateVoltagePointsByRaw(draftVoltageSamples, "local");
+      const vRemoteSamples = aggregateVoltagePointsByRaw(draftVoltageSamples, "remote");
+      return {
+        active,
+        v_local_points: validateAndNormalizeVoltagePoints(
+          "v_local",
+          vLocalSamples,
+        ).normalized,
+        v_remote_points: validateAndNormalizeVoltagePoints(
+          "v_remote",
+          vRemoteSamples,
+        ).normalized,
+        current_ch1_points: validateAndNormalizeCurrentPoints(
+          "current_ch1",
+          aggregateCurrentPointsByRaw(draftCurrentCh1Samples),
+        ).normalized,
+        current_ch2_points: validateAndNormalizeCurrentPoints(
+          "current_ch2",
+          aggregateCurrentPointsByRaw(draftCurrentCh2Samples),
+        ).normalized,
+      };
+    });
+  }, [
+    profileQuery.data?.active,
+    draftVoltageSamples,
+    draftCurrentCh1Samples,
+    draftCurrentCh2Samples,
+  ]);
 
   useEffect(() => {
     if (undoToasts.length === 0) return;
@@ -336,10 +568,15 @@ function DeviceCalibrationPage({
     const now = new Date();
     const stamp = now.toISOString().replaceAll(":", "-");
     const payload = {
-      schema_version: 1,
+      schema_version: 2,
       generated_at: now.toISOString(),
       device_id: deviceId,
       active_snapshot: profileQuery.data?.active ?? draftProfile.active,
+      samples: {
+        voltage: draftVoltageSamples,
+        current_ch1_points: draftCurrentCh1Samples,
+        current_ch2_points: draftCurrentCh2Samples,
+      },
       curves: {
         v_local_points: draftProfile.v_local_points,
         v_remote_points: draftProfile.v_remote_points,
@@ -369,6 +606,11 @@ function DeviceCalibrationPage({
     const root =
       typeof parsed === "object" && parsed !== null
         ? (parsed as Record<string, unknown>)
+        : null;
+
+    const samplesCandidate =
+      root && typeof root.samples === "object" && root.samples !== null
+        ? (root.samples as Record<string, unknown>)
         : null;
 
     const curvesCandidate =
@@ -411,6 +653,24 @@ function DeviceCalibrationPage({
       if (mv == null) issues.push({ path: `${path}.mv`, message: "mv must be a number" });
       if (raw == null || mv == null) return null;
       return { raw, mv };
+    };
+
+    const parseVoltageSample = (value: unknown, path: string): VoltageSample | null => {
+      if (typeof value !== "object" || value === null) {
+        issues.push({ path, message: "sample must be an object" });
+        return null;
+      }
+      const obj = value as Record<string, unknown>;
+      const mv = readNumber(obj.mv ?? obj.meas_mv);
+      const rawLocal = readNumber(obj.rawLocal ?? obj.raw_local ?? obj.raw_v_nr_100uv);
+      const rawRemote = readNumber(obj.rawRemote ?? obj.raw_remote ?? obj.raw_v_rmt_100uv);
+      if (mv == null) issues.push({ path: `${path}.mv`, message: "mv must be a number" });
+      if (rawLocal == null)
+        issues.push({ path: `${path}.rawLocal`, message: "rawLocal must be a number" });
+      if (rawRemote == null)
+        issues.push({ path: `${path}.rawRemote`, message: "rawRemote must be a number" });
+      if (mv == null || rawLocal == null || rawRemote == null) return null;
+      return { mv, rawLocal, rawRemote };
     };
 
     const parseCurrentPoint = (
@@ -467,6 +727,43 @@ function DeviceCalibrationPage({
       profileQuery.data?.active ??
       draftProfile.active ??
       DEFAULT_ACTIVE_PROFILE;
+
+    const voltageSamples = (() => {
+      const arr = samplesCandidate ? readArray(samplesCandidate.voltage) : null;
+      if (!arr) return null;
+      const out: VoltageSample[] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const sample = parseVoltageSample(arr[i], `samples.voltage[${i}]`);
+        if (sample) out.push(sample);
+      }
+      return out;
+    })();
+
+    const currentCh1Samples = (() => {
+      const arr = samplesCandidate
+        ? readArray(samplesCandidate.current_ch1_points ?? samplesCandidate.current_ch1_samples)
+        : null;
+      if (!arr) return null;
+      const out: CalibrationPointCurrent[] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const sample = parseCurrentPoint(arr[i], `samples.current_ch1_points[${i}]`);
+        if (sample) out.push(sample);
+      }
+      return out;
+    })();
+
+    const currentCh2Samples = (() => {
+      const arr = samplesCandidate
+        ? readArray(samplesCandidate.current_ch2_points ?? samplesCandidate.current_ch2_samples)
+        : null;
+      if (!arr) return null;
+      const out: CalibrationPointCurrent[] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const sample = parseCurrentPoint(arr[i], `samples.current_ch2_points[${i}]`);
+        if (sample) out.push(sample);
+      }
+      return out;
+    })();
 
     const nextProfile: CalibrationProfile = {
       active: activeFallback,
@@ -538,6 +835,65 @@ function DeviceCalibrationPage({
       current_ch2_points: c2.normalized,
     };
 
+    if (voltageSamples) {
+      setDraftVoltageSamples(voltageSamples);
+    } else {
+      // Back-compat import: only accept voltage points if we can pair by measured mv (unique).
+      const localByMv = new Map<number, number>();
+      const remoteByMv = new Map<number, number>();
+      for (const p of normalized.v_local_points) {
+        if (localByMv.has(p.mv)) {
+          issues.push({
+            path: "v_local_points",
+            message: "duplicate meas mv not supported without samples.voltage",
+          });
+          break;
+        }
+        localByMv.set(p.mv, p.raw);
+      }
+      for (const p of normalized.v_remote_points) {
+        if (remoteByMv.has(p.mv)) {
+          issues.push({
+            path: "v_remote_points",
+            message: "duplicate meas mv not supported without samples.voltage",
+          });
+          break;
+        }
+        remoteByMv.set(p.mv, p.raw);
+      }
+
+      if (issues.length > 0) {
+        setImportError("Import validation failed (voltage pairing).");
+        setImportIssues(issues);
+        return;
+      }
+
+      const mvs = new Set<number>([
+        ...Array.from(localByMv.keys()),
+        ...Array.from(remoteByMv.keys()),
+      ]);
+      const paired: VoltageSample[] = [];
+      for (const mv of mvs) {
+        const rawLocal = localByMv.get(mv);
+        const rawRemote = remoteByMv.get(mv);
+        if (rawLocal == null || rawRemote == null) {
+          issues.push({
+            path: "curves",
+            message: `voltage points must include both local+remote for mv=${mv}`,
+          });
+          continue;
+        }
+        paired.push({ mv, rawLocal, rawRemote });
+      }
+      if (issues.length > 0) {
+        setImportError("Import validation failed (voltage pairing).");
+        setImportIssues(issues);
+        return;
+      }
+      setDraftVoltageSamples(paired);
+    }
+    setDraftCurrentCh1Samples(currentCh1Samples ?? normalized.current_ch1_points);
+    setDraftCurrentCh2Samples(currentCh2Samples ?? normalized.current_ch2_points);
     setDraftProfile(normalized);
     setPreviewProfile(structuredClone(normalized));
     setPreviewAppliedAt(Date.now());
@@ -587,7 +943,7 @@ function DeviceCalibrationPage({
 
   const deviceUsingDefaults = profileQuery.data?.active.source === "factory-default";
 
-  // Reset local state while switching devices/URLs.
+  // Load draft from browser storage (or reset if none) while switching devices/URLs.
   useEffect(() => {
     clearToasts();
     setDraftProfile(makeEmptyDraftProfile());
@@ -595,7 +951,56 @@ function DeviceCalibrationPage({
     setPreviewAppliedAt(null);
     setImportError(null);
     setImportIssues(null);
+
+    setDraftStorageReady(false);
+    const stored = readCalibrationDraftFromStorage(deviceId, baseUrl);
+    if (stored) {
+      setActiveTab(stored.active_tab);
+      setDraftVoltageSamples(stored.voltage_samples);
+      setDraftCurrentCh1Samples(stored.current_ch1_samples);
+      setDraftCurrentCh2Samples(stored.current_ch2_samples);
+    } else {
+      setActiveTab("voltage");
+      setDraftVoltageSamples([]);
+      setDraftCurrentCh1Samples([]);
+      setDraftCurrentCh2Samples([]);
+    }
+    setDraftStorageReady(true);
   }, [baseUrl, deviceId]);
+
+  // Persist drafts immediately to the browser to prevent accidental loss.
+  useEffect(() => {
+    if (!draftStorageReady) return;
+
+    const empty =
+      draftVoltageSamples.length === 0 &&
+      draftCurrentCh1Samples.length === 0 &&
+      draftCurrentCh2Samples.length === 0;
+
+    if (empty) {
+      writeCalibrationDraftToStorage(deviceId, baseUrl, null);
+      return;
+    }
+
+    writeCalibrationDraftToStorage(deviceId, baseUrl, {
+      version: 1,
+      saved_at: new Date().toISOString(),
+      device_id: deviceId,
+      base_url: baseUrl,
+      active_tab: activeTab,
+      voltage_samples: draftVoltageSamples,
+      current_ch1_samples: draftCurrentCh1Samples,
+      current_ch2_samples: draftCurrentCh2Samples,
+    });
+  }, [
+    draftStorageReady,
+    deviceId,
+    baseUrl,
+    activeTab,
+    draftVoltageSamples,
+    draftCurrentCh1Samples,
+    draftCurrentCh2Samples,
+  ]);
 
   // Always attempt to reset mode when leaving the page.
   useEffect(() => {
@@ -747,8 +1152,9 @@ function DeviceCalibrationPage({
           status={status}
           deviceProfile={profileQuery.data}
           draftProfile={draftProfile}
+          draftSamples={draftVoltageSamples}
           previewProfile={previewProfile}
-          onSetDraftProfile={setDraftProfile}
+          onSetDraftSamples={setDraftVoltageSamples}
           onSetPreviewProfile={setPreviewProfile}
           onSetPreviewAppliedAt={setPreviewAppliedAt}
           deviceId={deviceId}
@@ -765,8 +1171,11 @@ function DeviceCalibrationPage({
           status={status}
           deviceProfile={profileQuery.data}
           draftProfile={draftProfile}
+          draftCh1Samples={draftCurrentCh1Samples}
+          draftCh2Samples={draftCurrentCh2Samples}
           previewProfile={previewProfile}
-          onSetDraftProfile={setDraftProfile}
+          onSetDraftCh1Samples={setDraftCurrentCh1Samples}
+          onSetDraftCh2Samples={setDraftCurrentCh2Samples}
           onSetPreviewProfile={setPreviewProfile}
           onSetPreviewAppliedAt={setPreviewAppliedAt}
           deviceId={deviceId}
@@ -824,8 +1233,9 @@ function VoltageCalibration({
   status,
   deviceProfile,
   draftProfile,
+  draftSamples,
   previewProfile,
-  onSetDraftProfile,
+  onSetDraftSamples,
   onSetPreviewProfile,
   onSetPreviewAppliedAt,
   deviceId,
@@ -840,10 +1250,9 @@ function VoltageCalibration({
   status: FastStatusView | null;
   deviceProfile: CalibrationProfile | undefined;
   draftProfile: CalibrationProfile;
+  draftSamples: VoltageSample[];
   previewProfile: CalibrationProfile | null;
-  onSetDraftProfile: React.Dispatch<
-    React.SetStateAction<CalibrationProfile>
-  >;
+  onSetDraftSamples: React.Dispatch<React.SetStateAction<VoltageSample[]>>;
   onSetPreviewProfile: React.Dispatch<
     React.SetStateAction<CalibrationProfile | null>
   >;
@@ -869,7 +1278,6 @@ function VoltageCalibration({
   const previewLocalPoints = effectivePreview?.v_local_points ?? [];
   const previewRemotePoints = effectivePreview?.v_remote_points ?? [];
 
-  const mergedDraft = mergeVoltageCandidatesByMv(draftLocalPoints, draftRemotePoints);
   const mergedDevice = mergeVoltageCandidatesByMv(
     deviceProfile?.v_local_points ?? [],
     deviceProfile?.v_remote_points ?? [],
@@ -909,57 +1317,33 @@ function VoltageCalibration({
       return;
     }
 
-    if (draftLocalPoints.length >= 5 || draftRemotePoints.length >= 5) {
-      alert("Too many points (max 5).");
+    const localUnique = new Set(draftSamples.map((s) => s.rawLocal)).size;
+    const remoteUnique = new Set(draftSamples.map((s) => s.rawRemote)).size;
+    const localHasRaw = draftSamples.some((s) => s.rawLocal === rawLocal);
+    const remoteHasRaw = draftSamples.some((s) => s.rawRemote === rawRemote);
+    if (!localHasRaw && localUnique >= CALIBRATION_MAX_POINTS) {
+      alert(`Too many unique points (max ${CALIBRATION_MAX_POINTS}).`);
+      return;
+    }
+    if (!remoteHasRaw && remoteUnique >= CALIBRATION_MAX_POINTS) {
+      alert(`Too many unique points (max ${CALIBRATION_MAX_POINTS}).`);
       return;
     }
 
-    onSetDraftProfile((prev) => {
-      const next = structuredClone(prev);
-      next.v_local_points = validateAndNormalizeVoltagePoints("v_local", [
-        ...prev.v_local_points,
-        { raw: rawLocal, mv: measuredMv },
-      ]).normalized;
-
-      next.v_remote_points = validateAndNormalizeVoltagePoints("v_remote", [
-        ...prev.v_remote_points,
-        { raw: rawRemote, mv: measuredMv },
-      ]).normalized;
-
-      return next;
-    });
+    onSetDraftSamples((prev) => [
+      ...prev,
+      { rawLocal, rawRemote, mv: measuredMv },
+    ]);
   };
 
-  const handleDeleteByMv = (mv: number) => {
-    const localIndex = draftProfile.v_local_points.findIndex((p) => p.mv === mv);
-    const remoteIndex = draftProfile.v_remote_points.findIndex((p) => p.mv === mv);
-
-    const local =
-      localIndex !== -1
-        ? { index: localIndex, point: draftProfile.v_local_points[localIndex] }
-        : undefined;
-    const remote =
-      remoteIndex !== -1
-        ? { index: remoteIndex, point: draftProfile.v_remote_points[remoteIndex] }
-        : undefined;
-
-    if (local || remote) {
-      onEnqueueUndo(
-        { kind: "voltage", mv, local, remote },
-        `Point deleted (${mv} mV)`,
-      );
-    }
-
-    onSetDraftProfile((prev) => {
-      const next = structuredClone(prev);
-      const nextLocalIndex = next.v_local_points.findIndex((p) => p.mv === mv);
-      const nextRemoteIndex = next.v_remote_points.findIndex((p) => p.mv === mv);
-
-      if (nextLocalIndex !== -1) next.v_local_points.splice(nextLocalIndex, 1);
-      if (nextRemoteIndex !== -1) next.v_remote_points.splice(nextRemoteIndex, 1);
-
-      return next;
-    });
+  const handleDeleteSample = (index: number) => {
+    const removed = draftSamples[index];
+    if (!removed) return;
+    onEnqueueUndo(
+      { kind: "voltage_sample", index, sample: removed },
+      `Deleted voltage sample #${index + 1}`,
+    );
+    onSetDraftSamples((prev) => prev.filter((_, i) => i !== index));
   };
 
   const previewLocalDataset = previewLocalPoints.map((point) => ({
@@ -1139,7 +1523,7 @@ function VoltageCalibration({
               type="button"
               className="btn btn-primary"
               onClick={handleCapture}
-              disabled={isOffline || draftLocalPoints.length >= 5}
+              disabled={isOffline}
             >
               Capture
             </button>
@@ -1200,33 +1584,31 @@ function VoltageCalibration({
             <table className="table table-xs table-pin-rows">
               <thead>
                 <tr>
-                  <th>Value (mV)</th>
                   <th>Raw Local</th>
                   <th>Raw Remote</th>
+                  <th>Value (mV)</th>
                   <th></th>
                 </tr>
               </thead>
               <tbody>
-                {mergedDraft.map((row) => (
-                  <tr key={row.mv}>
-                    <td>{row.mv}</td>
-                    <td>{row.rawLocal ?? "--"}</td>
-                    <td>{row.rawRemote ?? "--"}</td>
+                {draftSamples.map((sample, idx) => (
+                  <tr key={`${idx}-${sample.rawLocal}-${sample.rawRemote}-${sample.mv}`}>
+                    <td>{sample.rawLocal}</td>
+                    <td>{sample.rawRemote}</td>
+                    <td>{sample.mv}</td>
                     <td className="text-right">
                       <button
                         type="button"
                         className="btn btn-ghost btn-xs text-error"
-                        onClick={() => handleDeleteByMv(row.mv)}
-                        disabled={
-                          isOffline
-                        }
+                        onClick={() => handleDeleteSample(idx)}
+                        disabled={isOffline}
                       >
                         Delete
                       </button>
                     </td>
                   </tr>
                 ))}
-                {mergedDraft.length === 0 && (
+                {draftSamples.length === 0 && (
                   <tr>
                     <td colSpan={4} className="text-center text-base-content/50">
                       No draft points.
@@ -1266,7 +1648,7 @@ function VoltageCalibration({
               onClick={() => applyToDeviceMutation.mutate()}
               disabled={!canWriteToDevice || applyToDeviceMutation.isPending}
             >
-              Sync calibration to device (Apply)
+              Apply
             </button>
             <button
               type="button"
@@ -1274,7 +1656,7 @@ function VoltageCalibration({
               onClick={() => commitToDeviceMutation.mutate()}
               disabled={!canWriteToDevice || commitToDeviceMutation.isPending}
             >
-              Sync calibration to device (Commit)
+              Commit
             </button>
             <button
               type="button"
@@ -1377,8 +1759,11 @@ function CurrentCalibration({
   status,
   deviceProfile,
   draftProfile,
+  draftCh1Samples,
+  draftCh2Samples,
   previewProfile,
-  onSetDraftProfile,
+  onSetDraftCh1Samples,
+  onSetDraftCh2Samples,
   onSetPreviewProfile,
   onSetPreviewAppliedAt,
   deviceId,
@@ -1393,9 +1778,14 @@ function CurrentCalibration({
   status: FastStatusView | null;
   deviceProfile: CalibrationProfile | undefined;
   draftProfile: CalibrationProfile;
+  draftCh1Samples: CalibrationPointCurrent[];
+  draftCh2Samples: CalibrationPointCurrent[];
   previewProfile: CalibrationProfile | null;
-  onSetDraftProfile: React.Dispatch<
-    React.SetStateAction<CalibrationProfile>
+  onSetDraftCh1Samples: React.Dispatch<
+    React.SetStateAction<CalibrationPointCurrent[]>
+  >;
+  onSetDraftCh2Samples: React.Dispatch<
+    React.SetStateAction<CalibrationPointCurrent[]>
   >;
   onSetPreviewProfile: React.Dispatch<
     React.SetStateAction<CalibrationProfile | null>
@@ -1429,6 +1819,9 @@ function CurrentCalibration({
     channel === "ch1"
       ? draftProfile.current_ch1_points
       : draftProfile.current_ch2_points;
+  const draftSamples = channel === "ch1" ? draftCh1Samples : draftCh2Samples;
+  const setDraftSamples =
+    channel === "ch1" ? onSetDraftCh1Samples : onSetDraftCh2Samples;
 
   const previewPoints =
     channel === "ch1"
@@ -1473,56 +1866,24 @@ function CurrentCalibration({
       return;
     }
 
-    if (draftPoints.length >= 5) {
-      alert("Too many points (max 5).");
+    const unique = new Set(draftSamples.map((p) => p.raw)).size;
+    const hasRaw = draftSamples.some((p) => p.raw === rawCur);
+    if (!hasRaw && unique >= CALIBRATION_MAX_POINTS) {
+      alert(`Too many unique points (max ${CALIBRATION_MAX_POINTS}).`);
       return;
     }
 
-    onSetDraftProfile((prev) => {
-      const next = structuredClone(prev);
-      const existingPoints =
-        channel === "ch1" ? prev.current_ch1_points : prev.current_ch2_points;
-      const nextPoints = validateAndNormalizeCurrentPoints(kind, [
-        ...existingPoints,
-        { raw: rawCur, ma: measuredMa, dac_code: rawDac },
-      ]).normalized;
-
-      if (channel === "ch1") {
-        next.current_ch1_points = nextPoints;
-      } else {
-        next.current_ch2_points = nextPoints;
-      }
-      return next;
-    });
+    setDraftSamples((prev) => [...prev, { raw: rawCur, ma: measuredMa, dac_code: rawDac }]);
   };
 
-  const handleDeleteCandidate = (index: number) => {
-    const removed = draftPoints[index];
-    if (removed) {
-      onEnqueueUndo(
-        {
-          kind: "current",
-          curve: kind,
-          index,
-          point: removed,
-        },
-        `Point deleted (${removed.ma} mA)`,
-      );
-    }
-
-    onSetDraftProfile((prev) => {
-      const next = structuredClone(prev);
-      const existingPoints =
-        channel === "ch1" ? prev.current_ch1_points : prev.current_ch2_points;
-      const updated = existingPoints.slice();
-      updated.splice(index, 1);
-      if (channel === "ch1") {
-        next.current_ch1_points = updated;
-      } else {
-        next.current_ch2_points = updated;
-      }
-      return next;
-    });
+  const handleDeleteSample = (index: number) => {
+    const removed = draftSamples[index];
+    if (!removed) return;
+    onEnqueueUndo(
+      { kind: "current_sample", curve: kind, index, sample: removed },
+      `Deleted current sample #${index + 1} (raw=${removed.raw})`,
+    );
+    setDraftSamples((prev) => prev.filter((_, i) => i !== index));
   };
 
   const activeMa =
@@ -1697,7 +2058,7 @@ function CurrentCalibration({
                   type="button"
                   className="btn btn-secondary join-item"
                   onClick={handleCapture}
-                  disabled={isOffline || draftPoints.length >= 5}
+                  disabled={isOffline}
                 >
                   Capture
                 </button>
@@ -1752,16 +2113,16 @@ function CurrentCalibration({
                   </tr>
                 </thead>
                 <tbody>
-                  {draftPoints.map((point, idx) => (
-                    <tr key={`${point.raw}-${point.ma}-${idx}`}>
-                      <td>{point.raw}</td>
-                      <td>{point.dac_code ?? "--"}</td>
-                      <td>{point.ma}</td>
+                  {draftSamples.map((sample, idx) => (
+                    <tr key={`${idx}-${sample.raw}-${sample.ma}-${sample.dac_code}`}>
+                      <td>{sample.raw}</td>
+                      <td>{sample.dac_code ?? "--"}</td>
+                      <td>{sample.ma}</td>
                       <td className="text-right">
                         <button
                           type="button"
                           className="btn btn-ghost btn-xs text-error"
-                          onClick={() => handleDeleteCandidate(idx)}
+                          onClick={() => handleDeleteSample(idx)}
                           disabled={isOffline}
                         >
                           Delete
@@ -1769,7 +2130,7 @@ function CurrentCalibration({
                       </td>
                     </tr>
                   ))}
-                  {draftPoints.length === 0 && (
+                  {draftSamples.length === 0 && (
                     <tr>
                       <td colSpan={4} className="text-center text-base-content/50">
                         No draft points.
@@ -1811,7 +2172,7 @@ function CurrentCalibration({
                 onClick={() => applyToDeviceMutation.mutate()}
                 disabled={!canWriteToDevice || applyToDeviceMutation.isPending}
               >
-                Sync calibration to device (Apply)
+                Apply
               </button>
               <button
                 type="button"
@@ -1819,7 +2180,7 @@ function CurrentCalibration({
                 onClick={() => commitToDeviceMutation.mutate()}
                 disabled={!canWriteToDevice || commitToDeviceMutation.isPending}
               >
-                Sync calibration to device (Commit)
+                Commit
               </button>
               <button
                 type="button"
@@ -1852,9 +2213,30 @@ function CurrentCalibration({
                   <button
                     type="button"
                     className="btn btn-xs"
+                    onClick={() => setTargetIMa("2000")}
+                  >
+                    2A
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs"
                     onClick={() => setTargetIMa("3000")}
                   >
                     3A
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs"
+                    onClick={() => setTargetIMa("4000")}
+                  >
+                    4A
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-xs"
+                    onClick={() => setTargetIMa("5000")}
+                  >
+                    5A
                   </button>
                   <input
                     type="number"

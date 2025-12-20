@@ -5,7 +5,7 @@
 
 use loadlynx_protocol::crc16_ccitt_false;
 
-pub const MAX_POINTS: usize = 5;
+pub const MAX_POINTS: usize = 24;
 pub const POINTS_PER_CHUNK: usize = 3;
 pub const MAX_CHUNKS: usize = 8;
 
@@ -96,7 +96,7 @@ pub fn prepare_curve(points: &mut [CalPoint; MAX_POINTS], len: usize) -> Result<
         return Err(CalError::EmptyPoints);
     }
     let slice = &mut points[..len];
-    // Insertion sort by raw_100uv (len ≤ 5, no_std friendly).
+    // Insertion sort by raw_100uv (len ≤ 7, no_std friendly).
     for i in 1..slice.len() {
         let key = slice[i];
         let mut j = i;
@@ -107,12 +107,16 @@ pub fn prepare_curve(points: &mut [CalPoint; MAX_POINTS], len: usize) -> Result<
         slice[j] = key;
     }
 
-    // Dedup by raw_100uv, keeping the first occurrence after sort.
+    // Dedup by raw_100uv, keeping the last occurrence after sort (matches the
+    // digital side + web preview behavior).
     let mut w = 0usize;
     for i in 0..slice.len() {
         if w == 0 || slice[i].raw_100uv != slice[w - 1].raw_100uv {
             slice[w] = slice[i];
             w += 1;
+        } else {
+            // Same raw: overwrite prior entry so the last occurrence wins.
+            slice[w - 1] = slice[i];
         }
     }
 
@@ -350,7 +354,7 @@ impl CalibrationState {
         let total_chunks = payload[4];
         let total_points = payload[5];
 
-        if fmt_version != 1 {
+        if fmt_version != 1 && fmt_version != 2 && fmt_version != 3 {
             return Err(CalError::VersionMismatch);
         }
         if total_points as usize > MAX_POINTS {
@@ -501,6 +505,8 @@ mod tests {
         let mut pts = [
             pt(1000, 1000),
             pt(2000, 900),
+            CalPoint::default(),
+            CalPoint::default(),
             CalPoint::default(),
             CalPoint::default(),
             CalPoint::default(),

@@ -6,19 +6,32 @@ use loadlynx_protocol::{CalWrite, crc16_ccitt_false};
 #[cfg(test)]
 extern crate std;
 
-pub const CAL_FMT_VERSION: u8 = 1;
+pub const CAL_FMT_VERSION_V1: u8 = 1;
+pub const CAL_FMT_VERSION_V2: u8 = 2;
+pub const CAL_FMT_VERSION_V3: u8 = 3;
+pub const CAL_FMT_VERSION_LATEST: u8 = CAL_FMT_VERSION_V3;
+pub const CAL_FMT_VERSION: u8 = CAL_FMT_VERSION_LATEST;
 
 // v4.2 -> 42 (see docs/dev-notes/user-calibration.md examples).
 pub const DIGITAL_HW_REV: u8 = 42;
+
+// EEPROM profile is fixed at 256 bytes; with 8-byte points we can fit:
+// 8B header + 4 curves * N points * 8B + 4B CRC32 <= 252B payload
+// => N <= 7.
+pub const MAX_POINTS_V1: usize = 5;
+pub const MAX_POINTS_V2: usize = 7;
+pub const MAX_POINTS_V3: usize = 24;
 
 // M24C64 (64 Kbit = 8 KiB) external EEPROM.
 pub const EEPROM_I2C_ADDR_7BIT: u8 = 0x50;
 
 // Fixed layout for the calibration profile blob.
 pub const EEPROM_PROFILE_BASE_ADDR: u16 = 0x0000;
-pub const EEPROM_PROFILE_LEN: usize = 256;
+pub const EEPROM_PROFILE_LEN_V1V2: usize = 256;
+pub const EEPROM_PROFILE_LEN_V3: usize = 1024;
+pub const EEPROM_PROFILE_LEN_MAX: usize = EEPROM_PROFILE_LEN_V3;
 pub const EEPROM_PROFILE_CRC32_LEN: usize = 4;
-pub const EEPROM_PROFILE_CRC32_OFFSET: usize = EEPROM_PROFILE_LEN - EEPROM_PROFILE_CRC32_LEN;
+pub const EEPROM_PROFILE_LEN: usize = EEPROM_PROFILE_LEN_MAX;
 
 // ST M24C64 page write supports up to 32 bytes; we keep this constant explicit
 // and never write across page boundaries.
@@ -30,6 +43,7 @@ pub const CALWRITE_HEADER_LEN: usize = 8;
 pub const CALWRITE_POINTS_REGION_LEN: usize = 24;
 pub const CALWRITE_POINTS_PER_CHUNK: usize = 3;
 pub const CALWRITE_POINT_LEN: usize = 8;
+pub const CALWRITE_MAX_CHUNKS: usize = 8;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ProfileSource {
@@ -63,10 +77,10 @@ pub struct ActiveProfile {
     pub source: ProfileSource,
     pub fmt_version: u8,
     pub hw_rev: u8,
-    pub current_ch1: Vec<CalPoint, 5>,
-    pub current_ch2: Vec<CalPoint, 5>,
-    pub v_local: Vec<CalPoint, 5>,
-    pub v_remote: Vec<CalPoint, 5>,
+    pub current_ch1: Vec<CalPoint, MAX_POINTS_V3>,
+    pub current_ch2: Vec<CalPoint, MAX_POINTS_V3>,
+    pub v_local: Vec<CalPoint, MAX_POINTS_V3>,
+    pub v_remote: Vec<CalPoint, MAX_POINTS_V3>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,10 +100,10 @@ impl ActiveProfile {
         //
         // - Current: at least 2 points, raw_dac_code unused and set to 0.
         // - Voltage: at least 2 points, V_load ≈ (124/100) * raw_max(mV-equivalent).
-        let mut current_ch1 = Vec::<CalPoint, 5>::new();
-        let mut current_ch2 = Vec::<CalPoint, 5>::new();
-        let mut v_local = Vec::<CalPoint, 5>::new();
-        let mut v_remote = Vec::<CalPoint, 5>::new();
+        let mut current_ch1 = Vec::<CalPoint, MAX_POINTS_V3>::new();
+        let mut current_ch2 = Vec::<CalPoint, MAX_POINTS_V3>::new();
+        let mut v_local = Vec::<CalPoint, MAX_POINTS_V3>::new();
+        let mut v_remote = Vec::<CalPoint, MAX_POINTS_V3>::new();
 
         let _ = current_ch1.push(CalPoint {
             raw_100uv: 0,
@@ -119,7 +133,7 @@ impl ActiveProfile {
 
         Self {
             source: ProfileSource::FactoryDefault,
-            fmt_version: CAL_FMT_VERSION,
+            fmt_version: CAL_FMT_VERSION_LATEST,
             hw_rev,
             current_ch1,
             current_ch2,
@@ -137,7 +151,7 @@ impl ActiveProfile {
         }
     }
 
-    pub fn points_for_mut(&mut self, kind: CurveKind) -> &mut Vec<CalPoint, 5> {
+    pub fn points_for_mut(&mut self, kind: CurveKind) -> &mut Vec<CalPoint, MAX_POINTS_V3> {
         match kind {
             CurveKind::VLocal => &mut self.v_local,
             CurveKind::VRemote => &mut self.v_remote,
@@ -147,8 +161,8 @@ impl ActiveProfile {
     }
 }
 
-pub fn normalize_points(mut points: Vec<CalPoint, 5>) -> Vec<CalPoint, 5> {
-    // Small N (<=5): stable insertion sort by raw_100uv, then drop duplicates.
+pub fn normalize_points(mut points: Vec<CalPoint, MAX_POINTS_V3>) -> Vec<CalPoint, MAX_POINTS_V3> {
+    // Small N (<=24): stable insertion sort by raw_100uv, then drop duplicates.
     let len = points.len();
     let slice = points.as_mut_slice();
     for i in 1..len {
@@ -160,7 +174,7 @@ pub fn normalize_points(mut points: Vec<CalPoint, 5>) -> Vec<CalPoint, 5> {
     }
 
     // Dedup by raw_100uv (keep last occurrence).
-    let mut out = Vec::<CalPoint, 5>::new();
+    let mut out = Vec::<CalPoint, MAX_POINTS_V3>::new();
     for p in slice.iter().copied() {
         if let Some(last) = out.last() {
             if last.raw_100uv == p.raw_100uv {
@@ -186,12 +200,19 @@ pub fn encode_calwrite_chunks(
     hw_rev: u8,
     kind: CurveKind,
     points: &[CalPoint],
-) -> Vec<CalWrite, 2> {
-    let total_points = points.len().min(5);
+) -> Vec<CalWrite, CALWRITE_MAX_CHUNKS> {
+    let max_points = match fmt_version {
+        CAL_FMT_VERSION_V1 => MAX_POINTS_V1,
+        CAL_FMT_VERSION_V2 => MAX_POINTS_V2,
+        CAL_FMT_VERSION_V3 => MAX_POINTS_V3,
+        _ => MAX_POINTS_V3,
+    };
+
+    let total_points = points.len().min(max_points);
     let total_chunks =
         ((total_points + (CALWRITE_POINTS_PER_CHUNK - 1)) / CALWRITE_POINTS_PER_CHUNK).max(1);
 
-    let mut chunks = Vec::<CalWrite, 2>::new();
+    let mut chunks = Vec::<CalWrite, CALWRITE_MAX_CHUNKS>::new();
     for chunk_index in 0..total_chunks {
         let mut payload = [0u8; CALWRITE_PAYLOAD_LEN];
         payload[0] = fmt_version;
@@ -236,28 +257,37 @@ pub fn serialize_profile(profile: &ActiveProfile) -> [u8; EEPROM_PROFILE_LEN] {
     // 1: hw_rev      (u8)
     // 2..6: counts   (u8 x4): current_ch1, current_ch2, v_local, v_remote
     // 6..8: reserved
-    // 8..168: points (4 curves x 5 points x 8B)
+    // fmt_version=1: 8..168 points (4 curves x 5 points x 8B)
+    // fmt_version=2: 8..232 points (4 curves x 7 points x 8B)
     // 252..256: crc32 (u32 LE) over 0..252
     const OFF_FMT: usize = 0;
     const OFF_HW_REV: usize = 1;
     const OFF_COUNTS: usize = 2;
     const OFF_POINTS: usize = 8;
 
+    let (profile_len, points_per_curve) = match profile.fmt_version {
+        CAL_FMT_VERSION_V1 => (EEPROM_PROFILE_LEN_V1V2, MAX_POINTS_V1),
+        CAL_FMT_VERSION_V2 => (EEPROM_PROFILE_LEN_V1V2, MAX_POINTS_V2),
+        CAL_FMT_VERSION_V3 => (EEPROM_PROFILE_LEN_V3, MAX_POINTS_V3),
+        _ => (EEPROM_PROFILE_LEN_V1V2, MAX_POINTS_V2),
+    };
+    let crc_offset = profile_len - EEPROM_PROFILE_CRC32_LEN;
+
     let mut out = [0u8; EEPROM_PROFILE_LEN];
     out[OFF_FMT] = profile.fmt_version;
     out[OFF_HW_REV] = profile.hw_rev;
 
     let counts = [
-        profile.current_ch1.len() as u8,
-        profile.current_ch2.len() as u8,
-        profile.v_local.len() as u8,
-        profile.v_remote.len() as u8,
+        (profile.current_ch1.len().min(points_per_curve)) as u8,
+        (profile.current_ch2.len().min(points_per_curve)) as u8,
+        (profile.v_local.len().min(points_per_curve)) as u8,
+        (profile.v_remote.len().min(points_per_curve)) as u8,
     ];
     out[OFF_COUNTS..OFF_COUNTS + 4].copy_from_slice(&counts);
 
     let mut write_curve = |curve_idx: usize, points: &[CalPoint]| {
-        for i in 0..5 {
-            let dst = OFF_POINTS + (curve_idx * 5 + i) * CALWRITE_POINT_LEN;
+        for i in 0..points_per_curve {
+            let dst = OFF_POINTS + (curve_idx * points_per_curve + i) * CALWRITE_POINT_LEN;
             if i < points.len() {
                 let p = points[i];
                 out[dst..dst + 2].copy_from_slice(&p.raw_100uv.to_le_bytes());
@@ -273,8 +303,8 @@ pub fn serialize_profile(profile: &ActiveProfile) -> [u8; EEPROM_PROFILE_LEN] {
     write_curve(2, profile.v_local.as_slice());
     write_curve(3, profile.v_remote.as_slice());
 
-    let crc = crc32_ieee(&out[..EEPROM_PROFILE_CRC32_OFFSET]);
-    out[EEPROM_PROFILE_CRC32_OFFSET..].copy_from_slice(&crc.to_le_bytes());
+    let crc = crc32_ieee(&out[..crc_offset]);
+    out[crc_offset..crc_offset + EEPROM_PROFILE_CRC32_LEN].copy_from_slice(&crc.to_le_bytes());
     out
 }
 
@@ -288,9 +318,13 @@ pub fn deserialize_profile(
     const OFF_POINTS: usize = 8;
 
     let fmt_version = bytes[OFF_FMT];
-    if fmt_version != CAL_FMT_VERSION {
-        return Err(ProfileLoadError::UnsupportedFmtVersion(fmt_version));
-    }
+    let (profile_len, points_per_curve) = match fmt_version {
+        CAL_FMT_VERSION_V1 => (EEPROM_PROFILE_LEN_V1V2, MAX_POINTS_V1),
+        CAL_FMT_VERSION_V2 => (EEPROM_PROFILE_LEN_V1V2, MAX_POINTS_V2),
+        CAL_FMT_VERSION_V3 => (EEPROM_PROFILE_LEN_V3, MAX_POINTS_V3),
+        _ => return Err(ProfileLoadError::UnsupportedFmtVersion(fmt_version)),
+    };
+    let crc_offset = profile_len - EEPROM_PROFILE_CRC32_LEN;
     let hw_rev = bytes[OFF_HW_REV];
     if hw_rev != expected_hw_rev {
         return Err(ProfileLoadError::HwRevMismatch {
@@ -299,8 +333,12 @@ pub fn deserialize_profile(
         });
     }
 
-    let stored_crc = u32::from_le_bytes(bytes[EEPROM_PROFILE_CRC32_OFFSET..].try_into().unwrap());
-    let computed_crc = crc32_ieee(&bytes[..EEPROM_PROFILE_CRC32_OFFSET]);
+    let stored_crc = u32::from_le_bytes(
+        bytes[crc_offset..crc_offset + EEPROM_PROFILE_CRC32_LEN]
+            .try_into()
+            .unwrap(),
+    );
+    let computed_crc = crc32_ieee(&bytes[..crc_offset]);
     if stored_crc != computed_crc {
         return Err(ProfileLoadError::CrcMismatch {
             stored: stored_crc,
@@ -309,14 +347,17 @@ pub fn deserialize_profile(
     }
 
     let counts = &bytes[OFF_COUNTS..OFF_COUNTS + 4];
-    if counts.iter().any(|&c| c == 0 || c > 5) {
+    if counts
+        .iter()
+        .any(|&c| c == 0 || c as usize > points_per_curve)
+    {
         return Err(ProfileLoadError::InvalidCounts);
     }
 
-    let read_curve = |curve_idx: usize, count: usize| -> Vec<CalPoint, 5> {
-        let mut out = Vec::<CalPoint, 5>::new();
-        for i in 0..count.min(5) {
-            let src = OFF_POINTS + (curve_idx * 5 + i) * CALWRITE_POINT_LEN;
+    let read_curve = |curve_idx: usize, count: usize| -> Vec<CalPoint, MAX_POINTS_V3> {
+        let mut out = Vec::<CalPoint, MAX_POINTS_V3>::new();
+        for i in 0..count.min(points_per_curve) {
+            let src = OFF_POINTS + (curve_idx * points_per_curve + i) * CALWRITE_POINT_LEN;
             let raw_100uv = i16::from_le_bytes([bytes[src], bytes[src + 1]]);
             let raw_dac_code = u16::from_le_bytes([bytes[src + 2], bytes[src + 3]]);
             let meas_physical = i32::from_le_bytes([
@@ -387,26 +428,93 @@ mod tests {
             p(10, 11, 12),
             p(13, 14, 15),
         ];
+        let pts6 = [
+            p(1, 2, 3),
+            p(4, 5, 6),
+            p(7, 8, 9),
+            p(10, 11, 12),
+            p(13, 14, 15),
+            p(16, 17, 18),
+        ];
+        let pts7 = [
+            p(1, 2, 3),
+            p(4, 5, 6),
+            p(7, 8, 9),
+            p(10, 11, 12),
+            p(13, 14, 15),
+            p(16, 17, 18),
+            p(19, 20, 21),
+        ];
 
         assert_eq!(
-            encode_calwrite_chunks(CAL_FMT_VERSION, DIGITAL_HW_REV, CurveKind::VLocal, &pts1).len(),
+            encode_calwrite_chunks(
+                CAL_FMT_VERSION_LATEST,
+                DIGITAL_HW_REV,
+                CurveKind::VLocal,
+                &pts1
+            )
+            .len(),
             1
         );
         assert_eq!(
-            encode_calwrite_chunks(CAL_FMT_VERSION, DIGITAL_HW_REV, CurveKind::VLocal, &pts2).len(),
+            encode_calwrite_chunks(
+                CAL_FMT_VERSION_LATEST,
+                DIGITAL_HW_REV,
+                CurveKind::VLocal,
+                &pts2
+            )
+            .len(),
             1
         );
         assert_eq!(
-            encode_calwrite_chunks(CAL_FMT_VERSION, DIGITAL_HW_REV, CurveKind::VLocal, &pts3).len(),
+            encode_calwrite_chunks(
+                CAL_FMT_VERSION_LATEST,
+                DIGITAL_HW_REV,
+                CurveKind::VLocal,
+                &pts3
+            )
+            .len(),
             1
         );
         assert_eq!(
-            encode_calwrite_chunks(CAL_FMT_VERSION, DIGITAL_HW_REV, CurveKind::VLocal, &pts4).len(),
+            encode_calwrite_chunks(
+                CAL_FMT_VERSION_LATEST,
+                DIGITAL_HW_REV,
+                CurveKind::VLocal,
+                &pts4
+            )
+            .len(),
             2
         );
         assert_eq!(
-            encode_calwrite_chunks(CAL_FMT_VERSION, DIGITAL_HW_REV, CurveKind::VLocal, &pts5).len(),
+            encode_calwrite_chunks(
+                CAL_FMT_VERSION_LATEST,
+                DIGITAL_HW_REV,
+                CurveKind::VLocal,
+                &pts5
+            )
+            .len(),
             2
+        );
+        assert_eq!(
+            encode_calwrite_chunks(
+                CAL_FMT_VERSION_LATEST,
+                DIGITAL_HW_REV,
+                CurveKind::VLocal,
+                &pts6
+            )
+            .len(),
+            2
+        );
+        assert_eq!(
+            encode_calwrite_chunks(
+                CAL_FMT_VERSION_LATEST,
+                DIGITAL_HW_REV,
+                CurveKind::VLocal,
+                &pts7
+            )
+            .len(),
+            3
         );
     }
 
@@ -447,12 +555,14 @@ mod tests {
         let _ = prof.current_ch1.push(p(30, 31, 32));
         let _ = prof.current_ch1.push(p(40, 41, 42));
         let _ = prof.current_ch1.push(p(50, 51, 52));
+        let _ = prof.current_ch1.push(p(60, 61, 62));
+        let _ = prof.current_ch1.push(p(70, 71, 72));
 
         let bytes = serialize_profile(&prof);
         let decoded = deserialize_profile((&bytes).try_into().unwrap(), DIGITAL_HW_REV).unwrap();
-        assert_eq!(decoded.fmt_version, CAL_FMT_VERSION);
+        assert_eq!(decoded.fmt_version, CAL_FMT_VERSION_LATEST);
         assert_eq!(decoded.hw_rev, DIGITAL_HW_REV);
-        assert_eq!(decoded.current_ch1.len(), 5);
+        assert_eq!(decoded.current_ch1.len(), 7);
         assert_eq!(decoded.current_ch1[2].raw_dac_code, 31);
 
         let mut corrupted = bytes;

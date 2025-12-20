@@ -4,6 +4,8 @@ import type {
   CalibrationProfile,
 } from "../api/types.ts";
 
+export const CALIBRATION_MAX_POINTS = 24;
+
 export interface ValidationIssue {
   path: string;
   message: string;
@@ -13,7 +15,7 @@ function normalizeByRaw100uv<T>(
   points: T[],
   getRaw: (point: T) => number,
 ): T[] {
-  // Small N (<=5): stable insertion sort by raw, then drop duplicates (keep
+  // Small N (<=24): stable insertion sort by raw, then drop duplicates (keep
   // last occurrence). Mirrors libs/calibration-format and firmware behavior.
   const sorted = points.slice();
   for (let i = 1; i < sorted.length; i++) {
@@ -57,13 +59,6 @@ function validateCommonRawAndMeas<T>(
     basePath: string;
   },
 ): T[] {
-  if (points.length === 0) {
-    addIssue(issues, options.basePath, "points must contain 1..5 items");
-  }
-  if (points.length > 5) {
-    addIssue(issues, options.basePath, "too many points (max 5)");
-  }
-
   for (let i = 0; i < points.length; i++) {
     const point = points[i];
     const raw = options.getRaw(point);
@@ -92,6 +87,19 @@ function validateCommonRawAndMeas<T>(
   }
 
   const normalized = normalizeByRaw100uv(points, options.getRaw);
+  if (normalized.length === 0) {
+    addIssue(
+      issues,
+      options.basePath,
+      `points must contain 1..${CALIBRATION_MAX_POINTS} items`,
+    );
+  } else if (normalized.length > CALIBRATION_MAX_POINTS) {
+    addIssue(
+      issues,
+      options.basePath,
+      `too many points (max ${CALIBRATION_MAX_POINTS})`,
+    );
+  }
   for (let i = 1; i < normalized.length; i++) {
     if (options.getMeas(normalized[i]) <= options.getMeas(normalized[i - 1])) {
       addIssue(
@@ -218,4 +226,3 @@ export function calibrationProfilesPointsEqual(
     currentPointsEqualNormalized(a.current_ch2_points, b.current_ch2_points)
   );
 }
-

@@ -1801,9 +1801,9 @@ fn parse_points_array(body: &str) -> Result<&str, &'static str> {
     Ok(&s[..end])
 }
 
-fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 5>, &'static str> {
+fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 24>, &'static str> {
     let arr = parse_points_array(body)?;
-    let mut out: Vec<CalPoint, 5> = Vec::new();
+    let mut out: Vec<CalPoint, 24> = Vec::new();
 
     let mut rest = arr;
     while let Some(start) = rest.find('{') {
@@ -1847,12 +1847,12 @@ fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 5>
             })
             .is_err()
         {
-            return Err("too many points (max 5)");
+            return Err("too many points (max 24)");
         }
     }
 
     if out.is_empty() {
-        return Err("points must contain 1..5 items");
+        return Err("points must contain 1..24 items");
     }
     let normalized = calfmt::normalize_points(out);
     if !calfmt::meas_is_strictly_increasing(normalized.as_slice()) {
@@ -1893,6 +1893,7 @@ async fn handle_calibration_apply(
         *guard.profile.points_for_mut(kind) = points;
         // Apply is RAM-only (no EEPROM write), but the active profile is now user-supplied.
         guard.profile.source = ProfileSource::UserCalibrated;
+        guard.profile.fmt_version = calfmt::CAL_FMT_VERSION_LATEST;
     }
 
     body_out.clear();
@@ -1936,6 +1937,7 @@ async fn handle_calibration_commit(
         let prev = guard.profile.clone();
         *guard.profile.points_for_mut(kind) = points;
         guard.profile.source = ProfileSource::UserCalibrated;
+        guard.profile.fmt_version = calfmt::CAL_FMT_VERSION_LATEST;
         let blob = calfmt::serialize_profile(&guard.profile);
         (prev, blob)
     };
