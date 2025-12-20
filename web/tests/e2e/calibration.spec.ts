@@ -15,7 +15,7 @@ test.describe("Calibration UI", () => {
     await expect(page.getByRole("heading", { level: 2 })).toHaveText(
       "Calibration",
     );
-    await expect(page.getByRole("tab", { name: "Voltage" })).toHaveClass(
+    await expect(page.getByRole("tab", { name: "电压" })).toHaveClass(
       /tab-active/,
     );
 
@@ -41,9 +41,9 @@ test.describe("Calibration UI", () => {
     await page.getByRole("button", { name: "Capture" }).click();
     await expect(localDraftCardVoltage.locator("table")).toContainText("12000");
 
-    // Switch to current tab.
-    await page.getByRole("tab", { name: "Current" }).click();
-    await expect(page.getByRole("tab", { name: "Current" })).toHaveClass(
+    // Switch to current tab (CH1).
+    await page.getByRole("tab", { name: "电流通道1" }).click();
+    await expect(page.getByRole("tab", { name: "电流通道1" })).toHaveClass(
       /tab-active/,
     );
 
@@ -68,12 +68,8 @@ test.describe("Calibration UI", () => {
 
     // Apply and commit.
     const deviceSyncCard = page.locator(".card", { hasText: "Device Sync" });
-    await deviceSyncCard
-      .getByRole("button", { name: "Sync calibration to device (Apply)" })
-      .click();
-    await deviceSyncCard
-      .getByRole("button", { name: "Sync calibration to device (Commit)" })
-      .click();
+    await deviceSyncCard.getByRole("button", { name: "Apply" }).click();
+    await deviceSyncCard.getByRole("button", { name: "Commit" }).click();
 
     // Reset back to initial profile.
     await deviceSyncCard
@@ -84,7 +80,9 @@ test.describe("Calibration UI", () => {
       .getByRole("button", { name: "Reset", exact: true })
       .click();
 
-    await expect(localDraftCardCurrent.locator("table")).not.toContainText("950");
+    await expect(localDraftCardCurrent.locator("table")).not.toContainText(
+      "950",
+    );
     await expect(localDraftCardCurrent.locator("table")).toContainText(
       "No draft points.",
     );
