@@ -1167,7 +1167,7 @@ function DeviceCalibrationPage({
         </div>
       </div>
 
-      <div role="tablist" className="tabs tabs-boxed">
+      <div role="tablist" className="tabs tabs-boxed mt-4">
         <button
           type="button"
           role="tab"
@@ -1348,6 +1348,7 @@ function VoltageCalibration({
   onRefetchProfile: RefetchProfile;
   isOffline: boolean;
 }) {
+  const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
   const [inputV, setInputV] = useState("12.00");
   const [confirmKind, setConfirmKind] = useState<
     "reset_draft" | "reset_device_voltage" | null
@@ -1576,84 +1577,151 @@ function VoltageCalibration({
 
   return (
     <>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card bg-base-100 shadow-xl border border-base-200">
+      <div role="tablist" className="tabs tabs-boxed">
+        <button
+          type="button"
+          role="tab"
+          className={`tab ${viewTab === "draft" ? "tab-active" : ""}`}
+          onClick={() => setViewTab("draft")}
+        >
+          本地草稿
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className={`tab ${viewTab === "device" ? "tab-active" : ""}`}
+          onClick={() => setViewTab("device")}
+        >
+          设备数据
+        </button>
+      </div>
+
+      {viewTab === "draft" ? (
+        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
           <div className="card-body gap-4">
             <div className="flex items-start justify-between gap-3">
               <h3 className="card-title flex flex-col items-start leading-tight">
-                <span>Local Draft</span>
+                <span>本地草稿</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Web
                 </span>
               </h3>
-              <div className="badge badge-neutral">No device writes</div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => {
-                  onSetPreviewProfile(structuredClone(draftProfile));
-                  onSetPreviewAppliedAt(Date.now());
-                }}
-                disabled={isDraftEmpty(draftProfile)}
-              >
-                Apply Preview
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => setConfirmKind("reset_draft")}
-                disabled={isDraftEmpty(draftProfile)}
-              >
-                Reset Draft
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={onReadDeviceToDraft}
-                disabled={isOffline || readDeviceToDraftPending}
-                title={
-                  isOffline
-                    ? "Device offline/faulted."
-                    : readDeviceToDraftPending
-                      ? "Reading device profile..."
-                      : "Reads device calibration profile and overwrites the local draft."
-                }
-              >
-                Read Device → Draft
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={onExportDraft}
-                disabled={isDraftEmpty(draftProfile)}
-                title={
-                  isDraftEmpty(draftProfile)
-                    ? "Export is disabled when the draft is empty."
-                    : undefined
-                }
-              >
-                Export
-              </button>
-              <label
-                htmlFor={`calibration-import-${deviceId}-voltage`}
-                className="btn btn-sm btn-outline"
-              >
-                Import
-              </label>
-              <input
-                id={`calibration-import-${deviceId}-voltage`}
-                type="file"
-                accept="application/json"
-                className="hidden"
-                onChange={(event) => {
-                  const file = event.currentTarget.files?.[0] ?? null;
-                  void onImportDraftFile(file);
-                  event.currentTarget.value = "";
-                }}
-              />
+            <div className="card bg-base-200/40 border border-base-200">
+              <div className="card-body py-4 gap-3">
+                <div className="flex items-start justify-between gap-3">
+                  <h4 className="font-bold text-sm">仅本地（不读写设备）</h4>
+                  <div className="badge badge-neutral whitespace-nowrap shrink-0">
+                    不读写设备
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => {
+                      onSetPreviewProfile(structuredClone(draftProfile));
+                      onSetPreviewAppliedAt(Date.now());
+                    }}
+                    disabled={isDraftEmpty(draftProfile)}
+                  >
+                    Apply Preview
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => setConfirmKind("reset_draft")}
+                    disabled={isDraftEmpty(draftProfile)}
+                  >
+                    Reset Draft
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={onExportDraft}
+                    disabled={isDraftEmpty(draftProfile)}
+                    title={
+                      isDraftEmpty(draftProfile)
+                        ? "Export is disabled when the draft is empty."
+                        : undefined
+                    }
+                  >
+                    Export
+                  </button>
+                  <label
+                    htmlFor={`calibration-import-${deviceId}-voltage`}
+                    className="btn btn-sm btn-outline"
+                  >
+                    Import
+                  </label>
+                  <input
+                    id={`calibration-import-${deviceId}-voltage`}
+                    type="file"
+                    accept="application/json"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0] ?? null;
+                      void onImportDraftFile(file);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="card bg-base-200/40 border border-base-200">
+              <div className="card-body py-4 gap-3">
+                <div className="flex items-start justify-between gap-3">
+                  <h4 className="font-bold text-sm">硬件 I/O</h4>
+                  <div className="flex items-center gap-2">
+                    <div className="badge badge-info whitespace-nowrap">
+                      读设备
+                    </div>
+                    <div className="badge badge-warning whitespace-nowrap">
+                      写设备
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={onReadDeviceToDraft}
+                    disabled={isOffline || readDeviceToDraftPending}
+                    title={
+                      isOffline
+                        ? "Device offline/faulted."
+                        : readDeviceToDraftPending
+                          ? "Reading device profile..."
+                          : "Reads device calibration profile and overwrites the local draft."
+                    }
+                  >
+                    Read Device → Draft
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => applyToDeviceMutation.mutate()}
+                    disabled={
+                      !canWriteToDevice || applyToDeviceMutation.isPending
+                    }
+                  >
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => commitToDeviceMutation.mutate()}
+                    disabled={
+                      !canWriteToDevice || commitToDeviceMutation.isPending
+                    }
+                  >
+                    Commit
+                  </button>
+                </div>
+              </div>
             </div>
 
             <div className="divider my-0"></div>
@@ -1784,18 +1852,21 @@ function VoltageCalibration({
             </div>
           </div>
         </div>
-
-        <div className="card bg-base-100 shadow-xl border border-base-200">
+      ) : (
+        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
           <div className="card-body gap-4">
             <div className="flex items-start justify-between gap-3">
               <h3 className="card-title flex flex-col items-start leading-tight">
-                <span>Device Sync</span>
+                <span>设备数据</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Hardware
                 </span>
               </h3>
-              <div className="badge badge-warning whitespace-nowrap shrink-0">
-                Writes device
+              <div className="flex items-center gap-2">
+                <div className="badge badge-info whitespace-nowrap">读设备</div>
+                <div className="badge badge-warning whitespace-nowrap">
+                  写设备
+                </div>
               </div>
             </div>
 
@@ -1807,22 +1878,6 @@ function VoltageCalibration({
                 disabled={readMutation.isPending}
               >
                 Read
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => applyToDeviceMutation.mutate()}
-                disabled={!canWriteToDevice || applyToDeviceMutation.isPending}
-              >
-                Apply
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-secondary"
-                onClick={() => commitToDeviceMutation.mutate()}
-                disabled={!canWriteToDevice || commitToDeviceMutation.isPending}
-              >
-                Commit
               </button>
               <button
                 type="button"
@@ -1873,7 +1928,7 @@ function VoltageCalibration({
             </div>
           </div>
         </div>
-      </div>
+      )}
 
       <ConfirmDialog
         open={confirmKind !== null}
@@ -1965,6 +2020,7 @@ function CurrentCalibration({
   onRefetchProfile: RefetchProfile;
   isOffline: boolean;
 }) {
+  const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
   const [confirmKind, setConfirmKind] = useState<
     "reset_draft" | "reset_device_current" | null
   >(null);
@@ -2154,84 +2210,216 @@ function CurrentCalibration({
 
   return (
     <>
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <div className="card bg-base-100 shadow-xl border border-base-200">
+      <div role="tablist" className="tabs tabs-boxed mt-4">
+        <button
+          type="button"
+          role="tab"
+          className={`tab ${viewTab === "draft" ? "tab-active" : ""}`}
+          onClick={() => setViewTab("draft")}
+        >
+          本地草稿
+        </button>
+        <button
+          type="button"
+          role="tab"
+          className={`tab ${viewTab === "device" ? "tab-active" : ""}`}
+          onClick={() => setViewTab("device")}
+        >
+          设备数据
+        </button>
+      </div>
+
+      {viewTab === "draft" ? (
+        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
           <div className="card-body gap-4">
             <div className="flex items-start justify-between gap-3">
               <h3 className="card-title flex flex-col items-start leading-tight">
-                <span>Local Draft</span>
+                <span>本地草稿</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Web
                 </span>
               </h3>
-              <div className="badge badge-neutral">No device writes</div>
             </div>
 
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => {
-                  onSetPreviewProfile(structuredClone(draftProfile));
-                  onSetPreviewAppliedAt(Date.now());
-                }}
-                disabled={isDraftEmpty(draftProfile)}
-              >
-                Apply Preview
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => setConfirmKind("reset_draft")}
-                disabled={isDraftEmpty(draftProfile)}
-              >
-                Reset Draft
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={onReadDeviceToDraft}
-                disabled={isOffline || readDeviceToDraftPending}
-                title={
-                  isOffline
-                    ? "Device offline/faulted."
-                    : readDeviceToDraftPending
-                      ? "Reading device profile..."
-                      : "Reads device calibration profile and overwrites the local draft."
-                }
-              >
-                Read Device → Draft
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-outline"
-                onClick={onExportDraft}
-                disabled={isDraftEmpty(draftProfile)}
-                title={
-                  isDraftEmpty(draftProfile)
-                    ? "Export is disabled when the draft is empty."
-                    : undefined
-                }
-              >
-                Export
-              </button>
-              <label
-                htmlFor={`calibration-import-${deviceId}-current`}
-                className="btn btn-sm btn-outline"
-              >
-                Import
-              </label>
-              <input
-                id={`calibration-import-${deviceId}-current`}
-                type="file"
-                accept="application/json"
-                className="hidden"
-                onChange={(event) => {
-                  const file = event.currentTarget.files?.[0] ?? null;
-                  void onImportDraftFile(file);
-                  event.currentTarget.value = "";
-                }}
-              />
+            <div className="card bg-base-200/40 border border-base-200">
+              <div className="card-body py-4 gap-3">
+                <div className="flex items-start justify-between gap-3">
+                  <h4 className="font-bold text-sm">仅本地（不读写设备）</h4>
+                  <div className="badge badge-neutral whitespace-nowrap shrink-0">
+                    不读写设备
+                  </div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => {
+                      onSetPreviewProfile(structuredClone(draftProfile));
+                      onSetPreviewAppliedAt(Date.now());
+                    }}
+                    disabled={isDraftEmpty(draftProfile)}
+                  >
+                    Apply Preview
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => setConfirmKind("reset_draft")}
+                    disabled={isDraftEmpty(draftProfile)}
+                  >
+                    Reset Draft
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={onExportDraft}
+                    disabled={isDraftEmpty(draftProfile)}
+                    title={
+                      isDraftEmpty(draftProfile)
+                        ? "Export is disabled when the draft is empty."
+                        : undefined
+                    }
+                  >
+                    Export
+                  </button>
+                  <label
+                    htmlFor={`calibration-import-${deviceId}-current`}
+                    className="btn btn-sm btn-outline"
+                  >
+                    Import
+                  </label>
+                  <input
+                    id={`calibration-import-${deviceId}-current`}
+                    type="file"
+                    accept="application/json"
+                    className="hidden"
+                    onChange={(event) => {
+                      const file = event.currentTarget.files?.[0] ?? null;
+                      void onImportDraftFile(file);
+                      event.currentTarget.value = "";
+                    }}
+                  />
+                </div>
+              </div>
+            </div>
+
+            <div className="card bg-base-200/40 border border-base-200">
+              <div className="card-body py-4 gap-3">
+                <div className="flex items-start justify-between gap-3">
+                  <h4 className="font-bold text-sm">硬件 I/O</h4>
+                  <div className="flex items-center gap-2">
+                    <div className="badge badge-info whitespace-nowrap">
+                      读设备
+                    </div>
+                    <div className="badge badge-warning whitespace-nowrap">
+                      写设备
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={onReadDeviceToDraft}
+                    disabled={isOffline || readDeviceToDraftPending}
+                    title={
+                      isOffline
+                        ? "Device offline/faulted."
+                        : readDeviceToDraftPending
+                          ? "Reading device profile..."
+                          : "Reads device calibration profile and overwrites the local draft."
+                    }
+                  >
+                    Read Device → Draft
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline"
+                    onClick={() => applyToDeviceMutation.mutate()}
+                    disabled={
+                      !canWriteToDevice || applyToDeviceMutation.isPending
+                    }
+                  >
+                    Apply
+                  </button>
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-secondary"
+                    onClick={() => commitToDeviceMutation.mutate()}
+                    disabled={
+                      !canWriteToDevice || commitToDeviceMutation.isPending
+                    }
+                  >
+                    Commit
+                  </button>
+                </div>
+
+                <div className="card bg-base-200/40 border border-base-200">
+                  <div className="card-body py-4 gap-3">
+                    <h4 className="font-bold text-sm">Output control (CC)</h4>
+                    <div className="flex gap-2 flex-wrap">
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => setTargetIMa("500")}
+                      >
+                        0.5A
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => setTargetIMa("1000")}
+                      >
+                        1A
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => setTargetIMa("2000")}
+                      >
+                        2A
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => setTargetIMa("3000")}
+                      >
+                        3A
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => setTargetIMa("4000")}
+                      >
+                        4A
+                      </button>
+                      <button
+                        type="button"
+                        className="btn btn-xs"
+                        onClick={() => setTargetIMa("5000")}
+                      >
+                        5A
+                      </button>
+                      <input
+                        type="number"
+                        className="input input-sm input-bordered w-28"
+                        value={targetIMa}
+                        onChange={(event) => setTargetIMa(event.target.value)}
+                        disabled={isOffline}
+                      />
+                      <button
+                        type="button"
+                        className="btn btn-sm btn-primary"
+                        disabled={isOffline}
+                        onClick={handleSetOutput}
+                      >
+                        Set Output
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div className="divider my-0"></div>
@@ -2348,18 +2536,21 @@ function CurrentCalibration({
             </div>
           </div>
         </div>
-
-        <div className="card bg-base-100 shadow-xl border border-base-200">
+      ) : (
+        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
           <div className="card-body gap-4">
             <div className="flex items-start justify-between gap-3">
               <h3 className="card-title flex flex-col items-start leading-tight">
-                <span>Device Sync</span>
+                <span>设备数据</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Hardware
                 </span>
               </h3>
-              <div className="badge badge-warning whitespace-nowrap shrink-0">
-                Writes device
+              <div className="flex items-center gap-2">
+                <div className="badge badge-info whitespace-nowrap">读设备</div>
+                <div className="badge badge-warning whitespace-nowrap">
+                  写设备
+                </div>
               </div>
             </div>
 
@@ -2374,93 +2565,12 @@ function CurrentCalibration({
               </button>
               <button
                 type="button"
-                className="btn btn-sm btn-outline"
-                onClick={() => applyToDeviceMutation.mutate()}
-                disabled={!canWriteToDevice || applyToDeviceMutation.isPending}
-              >
-                Apply
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-secondary"
-                onClick={() => commitToDeviceMutation.mutate()}
-                disabled={!canWriteToDevice || commitToDeviceMutation.isPending}
-              >
-                Commit
-              </button>
-              <button
-                type="button"
                 className="btn btn-sm btn-error"
                 onClick={() => setConfirmKind("reset_device_current")}
                 disabled={isOffline || resetDeviceCurrentMutation.isPending}
               >
                 Reset
               </button>
-            </div>
-
-            <div className="card bg-base-200/40 border border-base-200">
-              <div className="card-body py-4 gap-3">
-                <h4 className="font-bold text-sm">Output control (CC)</h4>
-                <div className="flex gap-2 flex-wrap">
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setTargetIMa("500")}
-                  >
-                    0.5A
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setTargetIMa("1000")}
-                  >
-                    1A
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setTargetIMa("2000")}
-                  >
-                    2A
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setTargetIMa("3000")}
-                  >
-                    3A
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setTargetIMa("4000")}
-                  >
-                    4A
-                  </button>
-                  <button
-                    type="button"
-                    className="btn btn-xs"
-                    onClick={() => setTargetIMa("5000")}
-                  >
-                    5A
-                  </button>
-                  <input
-                    type="number"
-                    className="input input-sm input-bordered w-28"
-                    value={targetIMa}
-                    onChange={(event) => setTargetIMa(event.target.value)}
-                    disabled={isOffline}
-                  />
-                  <button
-                    type="button"
-                    className="btn btn-sm btn-primary"
-                    disabled={isOffline}
-                    onClick={handleSetOutput}
-                  >
-                    Set Output
-                  </button>
-                </div>
-              </div>
             </div>
 
             <div className="divider my-0"></div>
@@ -2502,7 +2612,7 @@ function CurrentCalibration({
             </div>
           </div>
         </div>
-      </div>
+      )}
 
       <ConfirmDialog
         open={confirmKind !== null}
