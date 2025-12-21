@@ -2335,7 +2335,7 @@ function CurrentCalibration({
 }) {
   const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
   const [confirmKind, setConfirmKind] = useState<
-    "reset_draft" | "reset_device_current" | null
+    "reset_draft" | "reset_device_current" | "copy_ch1_to_ch2" | null
   >(null);
 
   const channelLabel = curve === "current_ch1" ? "CH1" : "CH2";
@@ -2512,6 +2512,49 @@ function CurrentCalibration({
     [curve, draftPoints],
   );
   const canWriteToDevice = !isOffline && draftPoints.length > 0;
+
+  const copyCh1DevicePoints = deviceProfile?.current_ch1_points ?? [];
+  const copyCh1SourcePoints =
+    draftProfile.current_ch1_points.length > 0
+      ? draftProfile.current_ch1_points
+      : copyCh1DevicePoints;
+  const copyCh1SourceLabel =
+    draftProfile.current_ch1_points.length > 0 ? "Draft" : "Device";
+
+  const performCopyCh1ToCh2 = () => {
+    if (copyCh1SourcePoints.length === 0) {
+      onAlert(
+        "Cannot Copy",
+        "CH1 has no calibration points to copy (draft and device).",
+      );
+      return;
+    }
+    onSetDraftProfile((prev) => {
+      const source =
+        prev.current_ch1_points.length > 0
+          ? prev.current_ch1_points
+          : copyCh1DevicePoints;
+      return {
+        ...prev,
+        current_ch2_points: source.map((p) => ({ ...p })),
+      };
+    });
+  };
+
+  const handleCopyCh1ToCh2 = () => {
+    if (copyCh1SourcePoints.length === 0) {
+      onAlert(
+        "Cannot Copy",
+        "CH1 has no calibration points to copy (draft and device).",
+      );
+      return;
+    }
+    if (draftProfile.current_ch2_points.length > 0) {
+      setConfirmKind("copy_ch1_to_ch2");
+      return;
+    }
+    performCopyCh1ToCh2();
+  };
 
   const handleUnitChange = (next: CurrentInputUnit) => {
     if (next === inputUnit) return;
@@ -2792,6 +2835,23 @@ function CurrentCalibration({
                   >
                     Reset Draft
                   </button>
+                  {curve === "current_ch2" && (
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline"
+                      onClick={handleCopyCh1ToCh2}
+                      disabled={copyCh1SourcePoints.length === 0}
+                      title={
+                        copyCh1SourcePoints.length === 0
+                          ? "No CH1 points available to copy."
+                          : draftProfile.current_ch2_points.length > 0
+                            ? "Overwrites CH2 draft points."
+                            : `Copies CH1 (${copyCh1SourceLabel}) points into CH2 draft.`
+                      }
+                    >
+                      Copy CH1 → CH2
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="btn btn-sm btn-outline"
@@ -3234,12 +3294,16 @@ function CurrentCalibration({
         title={
           confirmKind === "reset_draft"
             ? "Reset Draft (Web only)"
-            : `Reset Device Calibration (Current ${channelLabel})`
+            : confirmKind === "copy_ch1_to_ch2"
+              ? "Copy CH1 → CH2 (Draft)"
+              : `Reset Device Calibration (Current ${channelLabel})`
         }
         body={
           confirmKind === "reset_draft"
             ? "This clears the local draft (user calibration points). The device is unchanged."
-            : "This resets current calibration on the device."
+            : confirmKind === "copy_ch1_to_ch2"
+              ? "This overwrites CH2 draft points with CH1 calibration points. The device is unchanged."
+              : "This resets current calibration on the device."
         }
         details={
           confirmKind === "reset_draft"
@@ -3248,23 +3312,40 @@ function CurrentCalibration({
                 "Writes device: No.",
                 "This clears all local draft points (export first if needed).",
               ]
-            : [
-                `Affects: ${curve}.`,
-                "Writes device: Yes.",
-                "Irreversible: Yes (re-calibrate + commit to recover).",
-              ]
+            : confirmKind === "copy_ch1_to_ch2"
+              ? [
+                  "Affects: current_ch2 (local draft only).",
+                  `Source: current_ch1 (${copyCh1SourceLabel}).`,
+                  "Writes device: No.",
+                  "Irreversible locally: Yes (export draft first if needed).",
+                ]
+              : [
+                  `Affects: ${curve}.`,
+                  "Writes device: Yes.",
+                  "Irreversible: Yes (re-calibrate + commit to recover).",
+                ]
         }
-        confirmLabel={confirmKind === "reset_draft" ? "Reset Draft" : "Reset"}
+        confirmLabel={
+          confirmKind === "reset_draft"
+            ? "Reset Draft"
+            : confirmKind === "copy_ch1_to_ch2"
+              ? "Copy"
+              : "Reset"
+        }
         destructive={confirmKind === "reset_device_current"}
         confirmDisabled={
           confirmKind === "reset_draft"
             ? isDraftEmpty(draftProfile)
-            : resetDeviceCurrentMutation.isPending || isOffline
+            : confirmKind === "copy_ch1_to_ch2"
+              ? copyCh1SourcePoints.length === 0
+              : resetDeviceCurrentMutation.isPending || isOffline
         }
         onCancel={() => setConfirmKind(null)}
         onConfirm={() => {
           if (confirmKind === "reset_draft") {
             onResetDraftToEmpty();
+          } else if (confirmKind === "copy_ch1_to_ch2") {
+            performCopyCh1ToCh2();
           } else if (confirmKind === "reset_device_current") {
             resetDeviceCurrentMutation.mutate();
           }

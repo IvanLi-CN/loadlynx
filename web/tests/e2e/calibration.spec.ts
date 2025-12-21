@@ -64,6 +64,25 @@ test.describe("Calibration UI", () => {
     const draftRowsA = draftCurrentTableA.locator("tbody tr");
     expect(await draftRowsA.count()).toBe(1);
 
+    // Switch to current tab (CH2) and copy CH1 calibration into CH2 draft.
+    await page.getByRole("tab", { name: "电流通道2" }).click();
+    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
+      /tab-active/,
+    );
+
+    await expect(draftCurrentTableA).toContainText("No draft points.");
+    await page
+      .getByRole("button", { name: "Copy CH1 → CH2", exact: true })
+      .click();
+    await expect(draftCurrentTableA).toContainText("0.900000");
+    expect(await draftRowsA.count()).toBe(1);
+
+    // Switch back to CH1.
+    await page.getByRole("tab", { name: "电流通道1" }).click();
+    await expect(page.getByRole("tab", { name: "电流通道1" })).toHaveClass(
+      /tab-active/,
+    );
+
     // Unit toggle + precision: in mA mode, inputs are 1µA steps (0.001mA).
     await page.getByRole("button", { name: "mA", exact: true }).click();
     const baselineInput = page.getByLabel("基础电流扣除 (Local) (mA)");
