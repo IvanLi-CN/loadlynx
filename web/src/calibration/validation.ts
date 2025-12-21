@@ -11,6 +11,48 @@ export interface ValidationIssue {
   message: string;
 }
 
+type RepresentativeKind = "mode" | "median";
+
+function computeRepresentativeInt(values: number[]): {
+  value: number;
+  kind: RepresentativeKind;
+} {
+  if (values.length === 0) {
+    return { value: 0, kind: "median" };
+  }
+
+  // Prefer a unique mode when it exists (i.e., we actually have repeated
+  // samples). Otherwise fall back to the median which is robust against
+  // outliers.
+  const counts = new Map<number, number>();
+  let maxCount = 0;
+  for (const value of values) {
+    const next = (counts.get(value) ?? 0) + 1;
+    counts.set(value, next);
+    if (next > maxCount) {
+      maxCount = next;
+    }
+  }
+
+  if (maxCount > 1) {
+    let winner: number | null = null;
+    for (const [value, count] of counts.entries()) {
+      if (count !== maxCount) continue;
+      if (winner != null) {
+        winner = null;
+        break;
+      }
+      winner = value;
+    }
+    if (winner != null) {
+      return { value: winner, kind: "mode" };
+    }
+  }
+
+  const sorted = values.slice().sort((a, b) => a - b);
+  return { value: sorted[Math.floor((sorted.length - 1) / 2)], kind: "median" };
+}
+
 function normalizeByRaw100uv<T>(
   points: T[],
   getRaw: (point: T) => number,
@@ -48,7 +90,253 @@ function addIssue(
   issues.push({ path, message });
 }
 
-function validateCommonRawAndMeas<T>(
+function sanitizeVoltagePoints(
+  issues: ValidationIssue[],
+  kind: "v_local" | "v_remote",
+  points: CalibrationPointVoltage[],
+): CalibrationPointVoltage[] {
+  const basePath = `${kind}_points`;
+  const valid: CalibrationPointVoltage[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const raw = points[i].raw;
+    const mv = points[i].mv;
+    if (!Number.isFinite(raw) || !Number.isInteger(raw)) {
+      addIssue(issues, `${basePath}[${i}].raw`, "raw_100uv must be an integer");
+      continue;
+    }
+    if (raw < -32768 || raw > 32767) {
+      addIssue(
+        issues,
+        `${basePath}[${i}].raw`,
+        "raw_100uv out of range for i16",
+      );
+      continue;
+    }
+    if (!Number.isFinite(mv) || !Number.isInteger(mv)) {
+      addIssue(issues, `${basePath}[${i}].mv`, "mv must be an integer");
+      continue;
+    }
+    valid.push({ raw, mv });
+  }
+
+  // Allow repeated samples for the same measured value (mv). We collapse them
+  // at apply time using mode/median on raw_100uv, then enforce firmware
+  // constraints afterwards.
+  const byMv = new Map<number, number[]>();
+  for (const point of valid) {
+    const list = byMv.get(point.mv) ?? [];
+    list.push(point.raw);
+    byMv.set(point.mv, list);
+  }
+
+  const aggregatedByMv: CalibrationPointVoltage[] = [];
+  for (const [mv, raws] of byMv.entries()) {
+    const rep = computeRepresentativeInt(raws);
+    if (raws.length > 1) {
+      addIssue(
+        issues,
+        basePath,
+        `duplicate mv=${mv} (${raws.length} samples): using ${rep.kind}`,
+      );
+    }
+    aggregatedByMv.push({ raw: rep.value, mv });
+  }
+
+  // Also handle cases where multiple measurements land on the same raw_100uv
+  // (ADC quantization). Collapse by raw using mode/median on mv.
+  const byRaw = new Map<number, number[]>();
+  for (const point of aggregatedByMv) {
+    const list = byRaw.get(point.raw) ?? [];
+    list.push(point.mv);
+    byRaw.set(point.raw, list);
+  }
+
+  const aggregatedByRaw: CalibrationPointVoltage[] = [];
+  for (const [raw, mvs] of byRaw.entries()) {
+    const rep = computeRepresentativeInt(mvs);
+    if (mvs.length > 1) {
+      addIssue(
+        issues,
+        basePath,
+        `duplicate raw=${raw} (${mvs.length} samples): using ${rep.kind}`,
+      );
+    }
+    aggregatedByRaw.push({ raw, mv: rep.value });
+  }
+
+  // Sort by raw and enforce strictly increasing meas (drop conflicts).
+  const normalized = normalizeByRaw100uv(aggregatedByRaw, (p) => p.raw);
+  const strictlyIncreasing: CalibrationPointVoltage[] = [];
+  let droppedNonMonotonic = 0;
+  for (const point of normalized) {
+    const last = strictlyIncreasing[strictlyIncreasing.length - 1];
+    if (last && point.mv <= last.mv) {
+      droppedNonMonotonic += 1;
+      continue;
+    }
+    strictlyIncreasing.push(point);
+  }
+  if (droppedNonMonotonic > 0) {
+    addIssue(
+      issues,
+      basePath,
+      `non-monotonic mv after sort: dropped ${droppedNonMonotonic} point(s)`,
+    );
+  }
+
+  if (strictlyIncreasing.length === 0) {
+    addIssue(
+      issues,
+      basePath,
+      `points must contain 1..${CALIBRATION_MAX_POINTS} items`,
+    );
+    return [];
+  }
+
+  if (strictlyIncreasing.length > CALIBRATION_MAX_POINTS) {
+    addIssue(
+      issues,
+      basePath,
+      `too many points (max ${CALIBRATION_MAX_POINTS}); keeping first ${CALIBRATION_MAX_POINTS}`,
+    );
+    return strictlyIncreasing.slice(0, CALIBRATION_MAX_POINTS);
+  }
+
+  return strictlyIncreasing;
+}
+
+function sanitizeCurrentPoints(
+  issues: ValidationIssue[],
+  kind: "current_ch1" | "current_ch2",
+  points: CalibrationPointCurrent[],
+): CalibrationPointCurrent[] {
+  const basePath = `${kind}_points`;
+  const valid: CalibrationPointCurrent[] = [];
+  for (let i = 0; i < points.length; i++) {
+    const raw = points[i].raw;
+    const ma = points[i].ma;
+    const dac = points[i].dac_code;
+    if (!Number.isFinite(raw) || !Number.isInteger(raw)) {
+      addIssue(issues, `${basePath}[${i}].raw`, "raw_100uv must be an integer");
+      continue;
+    }
+    if (raw < -32768 || raw > 32767) {
+      addIssue(
+        issues,
+        `${basePath}[${i}].raw`,
+        "raw_100uv out of range for i16",
+      );
+      continue;
+    }
+    if (!Number.isFinite(dac) || !Number.isInteger(dac)) {
+      addIssue(
+        issues,
+        `${basePath}[${i}].dac_code`,
+        "raw_dac_code must be an integer",
+      );
+      continue;
+    }
+    if (dac < 0 || dac > 65535) {
+      addIssue(
+        issues,
+        `${basePath}[${i}].dac_code`,
+        "raw_dac_code out of range for u16",
+      );
+      continue;
+    }
+    if (!Number.isFinite(ma) || !Number.isInteger(ma)) {
+      addIssue(issues, `${basePath}[${i}].ma`, "ma must be an integer");
+      continue;
+    }
+    valid.push({ raw, ma, dac_code: dac });
+  }
+
+  const byMa = new Map<number, { raws: number[]; dacs: number[] }>();
+  for (const point of valid) {
+    const entry = byMa.get(point.ma) ?? { raws: [], dacs: [] };
+    entry.raws.push(point.raw);
+    entry.dacs.push(point.dac_code);
+    byMa.set(point.ma, entry);
+  }
+
+  const aggregatedByMa: CalibrationPointCurrent[] = [];
+  for (const [ma, entry] of byMa.entries()) {
+    const repRaw = computeRepresentativeInt(entry.raws);
+    const repDac = computeRepresentativeInt(entry.dacs);
+    const samples = entry.raws.length;
+    if (samples > 1) {
+      addIssue(
+        issues,
+        basePath,
+        `duplicate ma=${ma} (${samples} samples): raw uses ${repRaw.kind}, dac uses ${repDac.kind}`,
+      );
+    }
+    aggregatedByMa.push({ raw: repRaw.value, ma, dac_code: repDac.value });
+  }
+
+  const byRaw = new Map<number, { mas: number[]; dacs: number[] }>();
+  for (const point of aggregatedByMa) {
+    const entry = byRaw.get(point.raw) ?? { mas: [], dacs: [] };
+    entry.mas.push(point.ma);
+    entry.dacs.push(point.dac_code);
+    byRaw.set(point.raw, entry);
+  }
+
+  const aggregatedByRaw: CalibrationPointCurrent[] = [];
+  for (const [raw, entry] of byRaw.entries()) {
+    const repMa = computeRepresentativeInt(entry.mas);
+    const repDac = computeRepresentativeInt(entry.dacs);
+    const samples = entry.mas.length;
+    if (samples > 1) {
+      addIssue(
+        issues,
+        basePath,
+        `duplicate raw=${raw} (${samples} samples): ma uses ${repMa.kind}, dac uses ${repDac.kind}`,
+      );
+    }
+    aggregatedByRaw.push({ raw, ma: repMa.value, dac_code: repDac.value });
+  }
+
+  const normalized = normalizeByRaw100uv(aggregatedByRaw, (p) => p.raw);
+  const strictlyIncreasing: CalibrationPointCurrent[] = [];
+  let droppedNonMonotonic = 0;
+  for (const point of normalized) {
+    const last = strictlyIncreasing[strictlyIncreasing.length - 1];
+    if (last && point.ma <= last.ma) {
+      droppedNonMonotonic += 1;
+      continue;
+    }
+    strictlyIncreasing.push(point);
+  }
+  if (droppedNonMonotonic > 0) {
+    addIssue(
+      issues,
+      basePath,
+      `non-monotonic ma after sort: dropped ${droppedNonMonotonic} point(s)`,
+    );
+  }
+
+  if (strictlyIncreasing.length === 0) {
+    addIssue(
+      issues,
+      basePath,
+      `points must contain 1..${CALIBRATION_MAX_POINTS} items`,
+    );
+    return [];
+  }
+  if (strictlyIncreasing.length > CALIBRATION_MAX_POINTS) {
+    addIssue(
+      issues,
+      basePath,
+      `too many points (max ${CALIBRATION_MAX_POINTS}); keeping first ${CALIBRATION_MAX_POINTS}`,
+    );
+    return strictlyIncreasing.slice(0, CALIBRATION_MAX_POINTS);
+  }
+
+  return strictlyIncreasing;
+}
+
+function _validateCommonRawAndMeas<T>(
   issues: ValidationIssue[],
   kind: string,
   points: T[],
@@ -59,6 +347,7 @@ function validateCommonRawAndMeas<T>(
     basePath: string;
   },
 ): T[] {
+  // Legacy helper retained for any future consumers.
   for (let i = 0; i < points.length; i++) {
     const point = points[i];
     const raw = options.getRaw(point);
@@ -118,12 +407,10 @@ export function validateAndNormalizeVoltagePoints(
   points: CalibrationPointVoltage[],
 ): { normalized: CalibrationPointVoltage[]; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
-  const normalized = validateCommonRawAndMeas(issues, kind, points, {
-    measKey: "mv",
-    basePath: `${kind}_points`,
-    getRaw: (p) => p.raw,
-    getMeas: (p) => p.mv,
-  });
+  if (points.length === 0) {
+    return { normalized: [], issues };
+  }
+  const normalized = sanitizeVoltagePoints(issues, kind, points);
   return { normalized, issues };
 }
 
@@ -132,30 +419,10 @@ export function validateAndNormalizeCurrentPoints(
   points: CalibrationPointCurrent[],
 ): { normalized: CalibrationPointCurrent[]; issues: ValidationIssue[] } {
   const issues: ValidationIssue[] = [];
-
-  for (let i = 0; i < points.length; i++) {
-    const dac = points[i].dac_code;
-    if (!Number.isFinite(dac) || !Number.isInteger(dac)) {
-      addIssue(
-        issues,
-        `${kind}_points[${i}].dac_code`,
-        "raw_dac_code must be an integer",
-      );
-    } else if (dac < 0 || dac > 65535) {
-      addIssue(
-        issues,
-        `${kind}_points[${i}].dac_code`,
-        "raw_dac_code out of range for u16",
-      );
-    }
+  if (points.length === 0) {
+    return { normalized: [], issues };
   }
-
-  const normalized = validateCommonRawAndMeas(issues, kind, points, {
-    measKey: "ma",
-    basePath: `${kind}_points`,
-    getRaw: (p) => p.raw,
-    getMeas: (p) => p.ma,
-  });
+  const normalized = sanitizeCurrentPoints(issues, kind, points);
 
   return { normalized, issues };
 }
@@ -173,12 +440,16 @@ export function validateCalibrationProfile(
       .issues,
   );
   issues.push(
-    ...validateAndNormalizeCurrentPoints("current_ch1", profile.current_ch1_points)
-      .issues,
+    ...validateAndNormalizeCurrentPoints(
+      "current_ch1",
+      profile.current_ch1_points,
+    ).issues,
   );
   issues.push(
-    ...validateAndNormalizeCurrentPoints("current_ch2", profile.current_ch2_points)
-      .issues,
+    ...validateAndNormalizeCurrentPoints(
+      "current_ch2",
+      profile.current_ch2_points,
+    ).issues,
   );
   return issues;
 }
@@ -187,8 +458,8 @@ function voltagePointsEqualNormalized(
   a: CalibrationPointVoltage[],
   b: CalibrationPointVoltage[],
 ): boolean {
-  const na = normalizeByRaw100uv(a, (p) => p.raw);
-  const nb = normalizeByRaw100uv(b, (p) => p.raw);
+  const na = sanitizeVoltagePoints([], "v_local", a);
+  const nb = sanitizeVoltagePoints([], "v_local", b);
   if (na.length !== nb.length) return false;
   for (let i = 0; i < na.length; i++) {
     if (na[i].raw !== nb[i].raw || na[i].mv !== nb[i].mv) return false;
@@ -200,8 +471,8 @@ function currentPointsEqualNormalized(
   a: CalibrationPointCurrent[],
   b: CalibrationPointCurrent[],
 ): boolean {
-  const na = normalizeByRaw100uv(a, (p) => p.raw);
-  const nb = normalizeByRaw100uv(b, (p) => p.raw);
+  const na = sanitizeCurrentPoints([], "current_ch1", a);
+  const nb = sanitizeCurrentPoints([], "current_ch1", b);
   if (na.length !== nb.length) return false;
   for (let i = 0; i < na.length; i++) {
     if (

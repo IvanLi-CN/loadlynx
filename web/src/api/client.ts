@@ -1,3 +1,4 @@
+import { CALIBRATION_MAX_POINTS } from "../calibration/validation.ts";
 import type {
   CalibrationApplyRequest,
   CalibrationCommitRequest,
@@ -12,7 +13,6 @@ import type {
   FastStatusView,
   Identity,
 } from "./types.ts";
-import { CALIBRATION_MAX_POINTS } from "../calibration/validation.ts";
 
 // Mock backend selection is based solely on the device URL scheme. The
 // ENABLE_MOCK flag remains exported for other modules but no longer gates the
@@ -851,13 +851,6 @@ function mockNormalizeWirePointsByRaw100uv<T extends { raw_100uv: number }>(
   measKey: string,
   getMeas: (point: T) => number,
 ): T[] {
-  if (points.length === 0) {
-    mockCalValidationError(`points must contain 1..${CALIBRATION_MAX_POINTS} items`);
-  }
-  if (points.length > CALIBRATION_MAX_POINTS) {
-    mockCalValidationError(`too many points (max ${CALIBRATION_MAX_POINTS})`);
-  }
-
   for (const point of points) {
     const raw = point.raw_100uv;
     if (!Number.isFinite(raw) || !Number.isInteger(raw)) {
@@ -873,8 +866,17 @@ function mockNormalizeWirePointsByRaw100uv<T extends { raw_100uv: number }>(
     }
   }
 
-  // Small N (<=7): stable insertion sort by raw_100uv, then drop duplicates.
-  const sorted = points.slice();
+  // Allow repeated captures at the same measured value (keep the most recent).
+  const measDeduped: T[] = [];
+  for (const point of points) {
+    const meas = getMeas(point);
+    const idx = measDeduped.findIndex((p) => getMeas(p) === meas);
+    if (idx < 0) measDeduped.push(point);
+    else measDeduped[idx] = point;
+  }
+
+  // Small N (<=24): stable insertion sort by raw_100uv, then drop duplicates.
+  const sorted = measDeduped.slice();
   for (let i = 1; i < sorted.length; i++) {
     let j = i;
     while (j > 0 && sorted[j - 1].raw_100uv > sorted[j].raw_100uv) {
@@ -900,6 +902,15 @@ function mockNormalizeWirePointsByRaw100uv<T extends { raw_100uv: number }>(
     if (getMeas(deduped[i]) <= getMeas(deduped[i - 1])) {
       mockCalValidationError(`meas must be strictly increasing for ${kind}`);
     }
+  }
+
+  if (deduped.length === 0) {
+    mockCalValidationError(
+      `points must contain 1..${CALIBRATION_MAX_POINTS} items`,
+    );
+  }
+  if (deduped.length > CALIBRATION_MAX_POINTS) {
+    mockCalValidationError(`too many points (max ${CALIBRATION_MAX_POINTS})`);
   }
 
   return deduped;

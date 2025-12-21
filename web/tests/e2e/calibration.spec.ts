@@ -29,17 +29,13 @@ test.describe("Calibration UI", () => {
     await expect(remoteStat.getByText("Raw:")).not.toContainText("--");
 
     // Draft starts empty (no user calibration points).
-    const localDraftCardVoltage = page.locator(".card", {
-      hasText: "Local Draft",
-    });
-    await expect(localDraftCardVoltage.locator("table")).toContainText(
-      "No draft points.",
-    );
+    const draftVoltageTable = page.locator("table", { hasText: "Value (mV)" });
+    await expect(draftVoltageTable).toContainText("No draft points.");
 
     // Capture a voltage point at 12V.
     await page.getByLabel("Measured Voltage (V)").fill("12.00");
     await page.getByRole("button", { name: "Capture" }).click();
-    await expect(localDraftCardVoltage.locator("table")).toContainText("12000");
+    await expect(draftVoltageTable).toContainText("12000");
 
     // Switch to current tab (CH1).
     await page.getByRole("tab", { name: "电流通道1" }).click();
@@ -59,33 +55,48 @@ test.describe("Calibration UI", () => {
     await page.getByLabel("Meter Reading (Local) (A)").fill("0.950");
     await page.getByRole("button", { name: "Capture" }).click();
 
-    const localDraftCardCurrent = page.locator(".card", {
-      hasText: "Local Draft",
-    });
-    await expect(localDraftCardCurrent.locator("table")).toContainText("950");
-    const draftRows = localDraftCardCurrent.locator("tbody tr");
-    expect(await draftRows.count()).toBeGreaterThan(0);
+    const draftCurrentTable = page.locator("table", { hasText: "Value (mA)" });
+    await expect(draftCurrentTable).toContainText("950");
+    const draftRows = draftCurrentTable.locator("tbody tr");
+    expect(await draftRows.count()).toBe(1);
+
+    // Re-capture the same meter reading after changing the output. Draft should
+    // allow duplicate samples; apply/commit will later clean them (mode/median)
+    // and show a warning.
+    await page.getByRole("button", { name: "2A" }).click();
+    await page.getByRole("button", { name: "Set Output" }).click();
+    await expect(currentStat.locator(".stat-value")).toContainText("1.7100 A");
+    await page.getByRole("button", { name: "Capture" }).click();
+    expect(await draftRows.count()).toBe(2);
 
     // Apply and commit.
-    const deviceSyncCard = page.locator(".card", { hasText: "Device Sync" });
-    await deviceSyncCard.getByRole("button", { name: "Apply" }).click();
-    await deviceSyncCard.getByRole("button", { name: "Commit" }).click();
+    const hardwareIoCard = page.locator(".card", { hasText: "硬件 I/O" });
+    await hardwareIoCard
+      .getByRole("button", { name: "Apply", exact: true })
+      .click();
+    await page
+      .getByRole("dialog")
+      .locator(".modal-action")
+      .getByRole("button", { name: "Close" })
+      .click();
+    await hardwareIoCard.getByRole("button", { name: "Commit" }).click();
+    await page
+      .getByRole("dialog")
+      .locator(".modal-action")
+      .getByRole("button", { name: "Close" })
+      .click();
 
     // Reset back to initial profile.
-    await deviceSyncCard
-      .getByRole("button", { name: "Reset", exact: true })
-      .click();
+    await page.getByRole("tab", { name: "设备数据" }).click();
+    await page.getByRole("button", { name: "Reset", exact: true }).click();
     await page
       .getByRole("dialog")
       .getByRole("button", { name: "Reset", exact: true })
       .click();
+    await page.getByRole("tab", { name: "本地草稿" }).click();
 
-    await expect(localDraftCardCurrent.locator("table")).not.toContainText(
-      "950",
-    );
-    await expect(localDraftCardCurrent.locator("table")).toContainText(
-      "No draft points.",
-    );
+    await expect(draftCurrentTable).not.toContainText("950");
+    await expect(draftCurrentTable).toContainText("No draft points.");
 
     await page.goto("/");
   });

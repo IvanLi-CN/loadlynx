@@ -1801,6 +1801,128 @@ fn parse_points_array(body: &str) -> Result<&str, &'static str> {
     Ok(&s[..end])
 }
 
+fn representative_i16(values: &mut [i16]) -> i16 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    // Mode (unique winner) if we have repeated samples; otherwise median.
+    let mut max_count = 0usize;
+    let mut winner: Option<i16> = None;
+    let mut winner_tied = false;
+    for i in 0..values.len() {
+        let v = values[i];
+        let mut count = 0usize;
+        for u in values.iter().copied() {
+            if u == v {
+                count += 1;
+            }
+        }
+        if count > max_count {
+            max_count = count;
+            winner = Some(v);
+            winner_tied = false;
+        } else if count == max_count && Some(v) != winner {
+            winner_tied = true;
+        }
+    }
+    if max_count > 1 && !winner_tied {
+        return winner.unwrap_or(0);
+    }
+
+    // Insertion sort for median.
+    for i in 1..values.len() {
+        let key = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > key {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = key;
+    }
+    values[(values.len() - 1) / 2]
+}
+
+fn representative_u16(values: &mut [u16]) -> u16 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    let mut max_count = 0usize;
+    let mut winner: Option<u16> = None;
+    let mut winner_tied = false;
+    for i in 0..values.len() {
+        let v = values[i];
+        let mut count = 0usize;
+        for u in values.iter().copied() {
+            if u == v {
+                count += 1;
+            }
+        }
+        if count > max_count {
+            max_count = count;
+            winner = Some(v);
+            winner_tied = false;
+        } else if count == max_count && Some(v) != winner {
+            winner_tied = true;
+        }
+    }
+    if max_count > 1 && !winner_tied {
+        return winner.unwrap_or(0);
+    }
+
+    for i in 1..values.len() {
+        let key = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > key {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = key;
+    }
+    values[(values.len() - 1) / 2]
+}
+
+fn representative_i32(values: &mut [i32]) -> i32 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    let mut max_count = 0usize;
+    let mut winner: Option<i32> = None;
+    let mut winner_tied = false;
+    for i in 0..values.len() {
+        let v = values[i];
+        let mut count = 0usize;
+        for u in values.iter().copied() {
+            if u == v {
+                count += 1;
+            }
+        }
+        if count > max_count {
+            max_count = count;
+            winner = Some(v);
+            winner_tied = false;
+        } else if count == max_count && Some(v) != winner {
+            winner_tied = true;
+        }
+    }
+    if max_count > 1 && !winner_tied {
+        return winner.unwrap_or(0);
+    }
+
+    for i in 1..values.len() {
+        let key = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > key {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = key;
+    }
+    values[(values.len() - 1) / 2]
+}
+
 fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 24>, &'static str> {
     let arr = parse_points_array(body)?;
     let mut out: Vec<CalPoint, 24> = Vec::new();
@@ -1854,11 +1976,103 @@ fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 24
     if out.is_empty() {
         return Err("points must contain 1..24 items");
     }
-    let normalized = calfmt::normalize_points(out);
-    if !calfmt::meas_is_strictly_increasing(normalized.as_slice()) {
-        return Err("meas must be strictly increasing");
+
+    // Cleanup policy (web UI mirrors this):
+    // 1) Allow repeated samples for the same measured value; collapse by meas
+    //    using mode/median on raw + dac (mode requires unique winner).
+    // 2) Collapse duplicate raw points using mode/median on meas (+ dac).
+    // 3) Enforce strictly increasing meas by dropping non-monotonic points
+    //    after sorting by raw.
+
+    // Sort by meas_physical to group duplicates.
+    {
+        let len = out.len();
+        let slice = out.as_mut_slice();
+        for i in 1..len {
+            let key = slice[i];
+            let mut j = i;
+            while j > 0 && slice[j - 1].meas_physical > key.meas_physical {
+                slice[j] = slice[j - 1];
+                j -= 1;
+            }
+            slice[j] = key;
+        }
     }
-    Ok(normalized)
+
+    let mut by_meas: Vec<CalPoint, 24> = Vec::new();
+    let mut idx = 0usize;
+    while idx < out.len() {
+        let meas = out[idx].meas_physical;
+        let mut raws = [0i16; 24];
+        let mut dacs = [0u16; 24];
+        let mut n = 0usize;
+        while idx < out.len() && out[idx].meas_physical == meas {
+            raws[n] = out[idx].raw_100uv;
+            dacs[n] = out[idx].raw_dac_code;
+            n += 1;
+            idx += 1;
+        }
+        let raw_rep = representative_i16(&mut raws[..n]);
+        let dac_rep = representative_u16(&mut dacs[..n]);
+        let _ = by_meas.push(CalPoint {
+            raw_100uv: raw_rep,
+            raw_dac_code: dac_rep,
+            meas_physical: meas,
+        });
+    }
+
+    // Sort by raw_100uv to group duplicates.
+    {
+        let len = by_meas.len();
+        let slice = by_meas.as_mut_slice();
+        for i in 1..len {
+            let key = slice[i];
+            let mut j = i;
+            while j > 0 && slice[j - 1].raw_100uv > key.raw_100uv {
+                slice[j] = slice[j - 1];
+                j -= 1;
+            }
+            slice[j] = key;
+        }
+    }
+
+    let mut by_raw: Vec<CalPoint, 24> = Vec::new();
+    let mut r = 0usize;
+    while r < by_meas.len() {
+        let raw = by_meas[r].raw_100uv;
+        let mut meass = [0i32; 24];
+        let mut dacs = [0u16; 24];
+        let mut n = 0usize;
+        while r < by_meas.len() && by_meas[r].raw_100uv == raw {
+            meass[n] = by_meas[r].meas_physical;
+            dacs[n] = by_meas[r].raw_dac_code;
+            n += 1;
+            r += 1;
+        }
+        let meas_rep = representative_i32(&mut meass[..n]);
+        let dac_rep = representative_u16(&mut dacs[..n]);
+        let _ = by_raw.push(CalPoint {
+            raw_100uv: raw,
+            raw_dac_code: dac_rep,
+            meas_physical: meas_rep,
+        });
+    }
+
+    // Enforce strictly increasing meas by dropping non-monotonic points.
+    let mut cleaned: Vec<CalPoint, 24> = Vec::new();
+    for p in by_raw.into_iter() {
+        if let Some(last) = cleaned.last() {
+            if p.meas_physical <= last.meas_physical {
+                continue;
+            }
+        }
+        let _ = cleaned.push(p);
+    }
+
+    if cleaned.is_empty() {
+        return Err("points must contain 1..24 items");
+    }
+    Ok(cleaned)
 }
 
 async fn handle_calibration_apply(
