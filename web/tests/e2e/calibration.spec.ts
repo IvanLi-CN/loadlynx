@@ -51,14 +51,34 @@ test.describe("Calibration UI", () => {
     const currentStat = page.locator(".stat", { hasText: "Active Current" });
     await expect(currentStat.getByText("Raw:")).not.toContainText("--");
 
+    // Advanced: subtract baseline current (e.g., adapters/fixtures).
+    await page.locator("summary", { hasText: "高级选项" }).click();
+    await page.getByLabel("基础电流扣除 (Local) (A)").fill("0.050");
+
     // Capture current point based on meter reading.
     await page.getByLabel("Meter Reading (Local) (A)").fill("0.950");
     await page.getByRole("button", { name: "Capture" }).click();
 
-    const draftCurrentTable = page.locator("table", { hasText: "Value (mA)" });
-    await expect(draftCurrentTable).toContainText("950");
-    const draftRows = draftCurrentTable.locator("tbody tr");
-    expect(await draftRows.count()).toBe(1);
+    const draftCurrentTableA = page.locator("table", { hasText: "Value (A)" });
+    await expect(draftCurrentTableA).toContainText("0.900000");
+    const draftRowsA = draftCurrentTableA.locator("tbody tr");
+    expect(await draftRowsA.count()).toBe(1);
+
+    // Unit toggle + precision: in mA mode, inputs are 1µA steps (0.001mA).
+    await page.getByRole("button", { name: "mA", exact: true }).click();
+    const baselineInput = page.getByLabel("基础电流扣除 (Local) (mA)");
+    await baselineInput.fill("0.952");
+    await page.getByLabel("Meter Reading (Local) (mA)").click(); // blur
+    await expect(baselineInput).toHaveValue("0.952");
+
+    const draftCurrentTableMA = page.locator("table", {
+      hasText: "Value (mA)",
+    });
+    const draftRowsMA = draftCurrentTableMA.locator("tbody tr");
+
+    // Restore baseline/meter to keep the duplicate-measurement warning path.
+    await baselineInput.fill("50.000");
+    await page.getByLabel("Meter Reading (Local) (mA)").fill("950.000");
 
     // Re-capture the same meter reading after changing the output. Draft should
     // allow duplicate samples; apply/commit will later clean them (mode/median)
@@ -67,7 +87,7 @@ test.describe("Calibration UI", () => {
     await page.getByRole("button", { name: "Set Output" }).click();
     await expect(currentStat.locator(".stat-value")).toContainText("1.7100 A");
     await page.getByRole("button", { name: "Capture" }).click();
-    expect(await draftRows.count()).toBe(2);
+    expect(await draftRowsMA.count()).toBe(2);
 
     // Apply and commit.
     const hardwareIoCard = page.locator(".card", { hasText: "硬件 I/O" });
@@ -95,8 +115,8 @@ test.describe("Calibration UI", () => {
       .click();
     await page.getByRole("tab", { name: "本地草稿" }).click();
 
-    await expect(draftCurrentTable).not.toContainText("950");
-    await expect(draftCurrentTable).toContainText("No draft points.");
+    await expect(draftCurrentTableMA).not.toContainText("900.000");
+    await expect(draftCurrentTableMA).toContainText("No draft points.");
 
     await page.goto("/");
   });

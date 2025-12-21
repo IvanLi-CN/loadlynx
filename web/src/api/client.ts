@@ -715,12 +715,12 @@ function mapCalibrationProfileWireToUi(
     })),
     current_ch1_points: profile.current_ch1_points.map((point) => ({
       raw: point.raw_100uv,
-      ma: point.meas_ma,
+      ua: point.meas_ma * 1000,
       dac_code: point.raw_dac_code,
     })),
     current_ch2_points: profile.current_ch2_points.map((point) => ({
       raw: point.raw_100uv,
-      ma: point.meas_ma,
+      ua: point.meas_ma * 1000,
       dac_code: point.raw_dac_code,
     })),
   };
@@ -746,7 +746,7 @@ function mapCalibrationWriteRequestToWire(
         points: payload.points.map((point) => ({
           raw_100uv: point.raw,
           raw_dac_code: point.dac_code,
-          meas_ma: point.ma,
+          meas_ma: Math.round(point.ua / 1000),
         })),
       };
   }

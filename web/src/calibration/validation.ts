@@ -214,7 +214,7 @@ function sanitizeCurrentPoints(
   const valid: CalibrationPointCurrent[] = [];
   for (let i = 0; i < points.length; i++) {
     const raw = points[i].raw;
-    const ma = points[i].ma;
+    const ua = points[i].ua;
     const dac = points[i].dac_code;
     if (!Number.isFinite(raw) || !Number.isInteger(raw)) {
       addIssue(issues, `${basePath}[${i}].raw`, "raw_100uv must be an integer");
@@ -244,23 +244,23 @@ function sanitizeCurrentPoints(
       );
       continue;
     }
-    if (!Number.isFinite(ma) || !Number.isInteger(ma)) {
-      addIssue(issues, `${basePath}[${i}].ma`, "ma must be an integer");
+    if (!Number.isFinite(ua) || !Number.isInteger(ua)) {
+      addIssue(issues, `${basePath}[${i}].ua`, "ua must be an integer");
       continue;
     }
-    valid.push({ raw, ma, dac_code: dac });
+    valid.push({ raw, ua, dac_code: dac });
   }
 
-  const byMa = new Map<number, { raws: number[]; dacs: number[] }>();
+  const byUa = new Map<number, { raws: number[]; dacs: number[] }>();
   for (const point of valid) {
-    const entry = byMa.get(point.ma) ?? { raws: [], dacs: [] };
+    const entry = byUa.get(point.ua) ?? { raws: [], dacs: [] };
     entry.raws.push(point.raw);
     entry.dacs.push(point.dac_code);
-    byMa.set(point.ma, entry);
+    byUa.set(point.ua, entry);
   }
 
   const aggregatedByMa: CalibrationPointCurrent[] = [];
-  for (const [ma, entry] of byMa.entries()) {
+  for (const [ua, entry] of byUa.entries()) {
     const repRaw = computeRepresentativeInt(entry.raws);
     const repDac = computeRepresentativeInt(entry.dacs);
     const samples = entry.raws.length;
@@ -268,33 +268,33 @@ function sanitizeCurrentPoints(
       addIssue(
         issues,
         basePath,
-        `duplicate ma=${ma} (${samples} samples): raw uses ${repRaw.kind}, dac uses ${repDac.kind}`,
+        `duplicate ua=${ua} (${samples} samples): raw uses ${repRaw.kind}, dac uses ${repDac.kind}`,
       );
     }
-    aggregatedByMa.push({ raw: repRaw.value, ma, dac_code: repDac.value });
+    aggregatedByMa.push({ raw: repRaw.value, ua, dac_code: repDac.value });
   }
 
-  const byRaw = new Map<number, { mas: number[]; dacs: number[] }>();
+  const byRaw = new Map<number, { uas: number[]; dacs: number[] }>();
   for (const point of aggregatedByMa) {
-    const entry = byRaw.get(point.raw) ?? { mas: [], dacs: [] };
-    entry.mas.push(point.ma);
+    const entry = byRaw.get(point.raw) ?? { uas: [], dacs: [] };
+    entry.uas.push(point.ua);
     entry.dacs.push(point.dac_code);
     byRaw.set(point.raw, entry);
   }
 
   const aggregatedByRaw: CalibrationPointCurrent[] = [];
   for (const [raw, entry] of byRaw.entries()) {
-    const repMa = computeRepresentativeInt(entry.mas);
+    const repUa = computeRepresentativeInt(entry.uas);
     const repDac = computeRepresentativeInt(entry.dacs);
-    const samples = entry.mas.length;
+    const samples = entry.uas.length;
     if (samples > 1) {
       addIssue(
         issues,
         basePath,
-        `duplicate raw=${raw} (${samples} samples): ma uses ${repMa.kind}, dac uses ${repDac.kind}`,
+        `duplicate raw=${raw} (${samples} samples): ua uses ${repUa.kind}, dac uses ${repDac.kind}`,
       );
     }
-    aggregatedByRaw.push({ raw, ma: repMa.value, dac_code: repDac.value });
+    aggregatedByRaw.push({ raw, ua: repUa.value, dac_code: repDac.value });
   }
 
   const normalized = normalizeByRaw100uv(aggregatedByRaw, (p) => p.raw);
@@ -302,7 +302,7 @@ function sanitizeCurrentPoints(
   let droppedNonMonotonic = 0;
   for (const point of normalized) {
     const last = strictlyIncreasing[strictlyIncreasing.length - 1];
-    if (last && point.ma <= last.ma) {
+    if (last && point.ua <= last.ua) {
       droppedNonMonotonic += 1;
       continue;
     }
@@ -312,7 +312,7 @@ function sanitizeCurrentPoints(
     addIssue(
       issues,
       basePath,
-      `non-monotonic ma after sort: dropped ${droppedNonMonotonic} point(s)`,
+      `non-monotonic ua after sort: dropped ${droppedNonMonotonic} point(s)`,
     );
   }
 
@@ -336,7 +336,9 @@ function sanitizeCurrentPoints(
   return strictlyIncreasing;
 }
 
-function _validateCommonRawAndMeas<T>(
+// Legacy helper retained for potential future consumers (exported to avoid
+// TypeScript noUnusedLocals errors when building the web bundle).
+export function _validateCommonRawAndMeas<T>(
   issues: ValidationIssue[],
   kind: string,
   points: T[],
@@ -477,7 +479,7 @@ function currentPointsEqualNormalized(
   for (let i = 0; i < na.length; i++) {
     if (
       na[i].raw !== nb[i].raw ||
-      na[i].ma !== nb[i].ma ||
+      na[i].ua !== nb[i].ua ||
       na[i].dac_code !== nb[i].dac_code
     ) {
       return false;

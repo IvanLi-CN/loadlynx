@@ -86,7 +86,7 @@ export interface CalibrationPointVoltage {
 
 export interface CalibrationPointCurrent {
   raw: number;
-  ma: number;
+  ua: number;
   dac_code: number;
 }
 

@@ -33,7 +33,7 @@ type RefetchProfile = () => Promise<
 >;
 
 type VoltagePair = [raw: number, mv: number];
-type CurrentPair = [[raw: number, dac_code: number], ma: number];
+type CurrentPair = [[raw: number, dac_code: number], value: number];
 
 type CalibrationTab = "voltage" | "current_ch1" | "current_ch2";
 
@@ -66,8 +66,22 @@ interface StoredCalibrationDraftV3 {
   };
 }
 
-interface ParsedCalibrationDraftV3 {
-  version: 3;
+interface StoredCalibrationDraftV4 {
+  version: 4;
+  saved_at: string;
+  device_id: string;
+  base_url: string;
+  active_tab: CalibrationTab;
+  draft_profile: {
+    v_local_points: VoltagePair[];
+    v_remote_points: VoltagePair[];
+    current_ch1_points: CurrentPair[];
+    current_ch2_points: CurrentPair[];
+  };
+}
+
+interface ParsedCalibrationDraftV4 {
+  version: 4;
   saved_at: string;
   device_id: string;
   base_url: string;
@@ -80,7 +94,10 @@ interface ParsedCalibrationDraftV3 {
   };
 }
 
-const CALIBRATION_DRAFT_STORAGE_VERSION = 3;
+type ParsedCalibrationDraft = ParsedCalibrationDraftV4;
+
+const CALIBRATION_DRAFT_STORAGE_VERSION = 4;
+const CALIBRATION_CURRENT_OPTIONS_STORAGE_VERSION = 2;
 
 function getCalibrationDraftStorageKey(
   deviceId: string,
@@ -91,27 +108,95 @@ function getCalibrationDraftStorageKey(
   return `loadlynx:calibration-draft:v${version}:${deviceId}:${encodedBase}`;
 }
 
+function getCalibrationCurrentOptionsStorageKey(
+  deviceId: string,
+  baseUrl: string,
+  curve: "current_ch1" | "current_ch2",
+  version = CALIBRATION_CURRENT_OPTIONS_STORAGE_VERSION,
+): string {
+  const encodedBase = encodeURIComponent(baseUrl);
+  return `loadlynx:calibration-current-options:v${version}:${deviceId}:${encodedBase}:${curve}`;
+}
+
+type CurrentInputUnit = "A" | "mA";
+
+function parseNonNegativeDecimalToScaledInt(
+  input: string,
+  decimals: number,
+): number | null {
+  const trimmed = input.trim();
+  if (trimmed === "") return null;
+  const match = /^(\d+)(?:\.(\d*))?$/.exec(trimmed);
+  if (!match) return null;
+  const intPart = Number.parseInt(match[1], 10);
+  if (!Number.isFinite(intPart) || intPart < 0) return null;
+
+  const fracRaw = match[2] ?? "";
+  const scale = 10 ** decimals;
+
+  const padded = (fracRaw + "0".repeat(decimals + 1)).slice(0, decimals + 1);
+  const fracMainRaw = padded.slice(0, decimals);
+  const roundDigit = padded[decimals] ?? "0";
+
+  let fracPart = fracMainRaw === "" ? 0 : Number.parseInt(fracMainRaw, 10) || 0;
+  if (Number.parseInt(roundDigit, 10) >= 5) {
+    fracPart += 1;
+  }
+
+  let value = intPart * scale + fracPart;
+  if (fracPart >= scale) {
+    value = (intPart + 1) * scale;
+  }
+  return value;
+}
+
+function currentUnitDecimals(unit: CurrentInputUnit): number {
+  return unit === "A" ? 6 : 3;
+}
+
+function parseCurrentInputToUa(
+  input: string,
+  unit: CurrentInputUnit,
+): number | null {
+  const decimals = currentUnitDecimals(unit);
+  return parseNonNegativeDecimalToScaledInt(input, decimals);
+}
+
+function formatUaToUnit(ua: number, unit: CurrentInputUnit): string {
+  const decimals = currentUnitDecimals(unit);
+  const scale = 10 ** decimals;
+  const abs = Math.max(0, Math.trunc(ua));
+  const intPart = Math.floor(abs / scale);
+  const fracPart = abs % scale;
+  return `${intPart}.${fracPart.toString().padStart(decimals, "0")}`;
+}
+
 function readCalibrationDraftFromStorage(
   deviceId: string,
   baseUrl: string,
-): ParsedCalibrationDraftV3 | null {
+): ParsedCalibrationDraft | null {
   if (typeof window === "undefined") return null;
   try {
-    const tryRead = (version: 2 | 3): unknown | null => {
+    const tryRead = (version: 2 | 3 | 4): unknown | null => {
       const key = getCalibrationDraftStorageKey(deviceId, baseUrl, version);
       const raw = window.localStorage.getItem(key);
       if (!raw) return null;
       return JSON.parse(raw) as unknown;
     };
 
-    const parsedV3 = tryRead(3);
-    const parsedV2 = parsedV3 ? null : tryRead(2);
-    const parsed = parsedV3 ?? parsedV2;
+    const parsedV4 = tryRead(4);
+    const parsedV3 = parsedV4 ? null : tryRead(3);
+    const parsedV2 = parsedV4 || parsedV3 ? null : tryRead(2);
+    const parsed = parsedV4 ?? parsedV3 ?? parsedV2;
     if (!parsed) return null;
 
     if (typeof parsed !== "object" || parsed === null) return null;
-    const obj = parsed as StoredCalibrationDraftV2 | StoredCalibrationDraftV3;
-    if (obj.version !== 2 && obj.version !== 3) return null;
+    const obj = parsed as
+      | StoredCalibrationDraftV2
+      | StoredCalibrationDraftV3
+      | StoredCalibrationDraftV4;
+    if (obj.version !== 2 && obj.version !== 3 && obj.version !== 4)
+      return null;
     if (obj.device_id !== deviceId) return null;
     if (obj.base_url !== baseUrl) return null;
     const storedTab = (obj as unknown as Record<string, unknown>).active_tab;
@@ -152,7 +237,10 @@ function readCalibrationDraftFromStorage(
       return out;
     };
 
-    const parseCurrentPoints = (value: unknown): CalibrationPointCurrent[] => {
+    const parseCurrentPoints = (
+      value: unknown,
+      storedVersion: 2 | 3 | 4,
+    ): CalibrationPointCurrent[] => {
       if (!Array.isArray(value)) return [];
       const out: CalibrationPointCurrent[] = [];
       for (const entry of value) {
@@ -163,18 +251,26 @@ function readCalibrationDraftFromStorage(
         ) {
           const raw = readFiniteNumber(entry[0][0]);
           const dac_code = readFiniteNumber(entry[0][1]);
-          const ma = readFiniteNumber(entry[1]);
-          if (raw == null || ma == null || dac_code == null) continue;
-          out.push({ raw, ma, dac_code });
+          const value = readFiniteNumber(entry[1]);
+          if (raw == null || value == null || dac_code == null) continue;
+          const ua = storedVersion >= 4 ? value : value * 1000;
+          out.push({ raw, ua, dac_code });
           continue;
         }
         if (typeof entry !== "object" || entry === null) continue;
         const e = entry as Record<string, unknown>;
         const raw = readFiniteNumber(e.raw ?? e.raw_100uv);
+        const ua = readFiniteNumber(e.ua ?? e.meas_ua);
         const ma = readFiniteNumber(e.ma ?? e.meas_ma);
         const dac_code = readFiniteNumber(e.dac_code ?? e.raw_dac_code);
-        if (raw == null || ma == null || dac_code == null) continue;
-        out.push({ raw, ma, dac_code });
+        if (raw == null || dac_code == null) continue;
+        if (ua != null) {
+          out.push({ raw, ua, dac_code });
+          continue;
+        }
+        if (ma != null) {
+          out.push({ raw, ua: ma * 1000, dac_code });
+        }
       }
       return out;
     };
@@ -190,7 +286,7 @@ function readCalibrationDraftFromStorage(
         : null;
 
     return {
-      version: 3,
+      version: 4,
       saved_at:
         typeof (obj as unknown as Record<string, unknown>).saved_at === "string"
           ? ((obj as unknown as Record<string, unknown>).saved_at as string)
@@ -203,9 +299,11 @@ function readCalibrationDraftFromStorage(
         v_remote_points: parseVoltagePoints(profileCandidate?.v_remote_points),
         current_ch1_points: parseCurrentPoints(
           profileCandidate?.current_ch1_points,
+          obj.version,
         ),
         current_ch2_points: parseCurrentPoints(
           profileCandidate?.current_ch2_points,
+          obj.version,
         ),
       },
     };
@@ -217,20 +315,23 @@ function readCalibrationDraftFromStorage(
 function writeCalibrationDraftToStorage(
   deviceId: string,
   baseUrl: string,
-  draft: StoredCalibrationDraftV3 | null,
+  draft: StoredCalibrationDraftV4 | null,
 ): void {
   if (typeof window === "undefined") return;
   try {
     const keyV2 = getCalibrationDraftStorageKey(deviceId, baseUrl, 2);
     const keyV3 = getCalibrationDraftStorageKey(deviceId, baseUrl, 3);
+    const keyV4 = getCalibrationDraftStorageKey(deviceId, baseUrl, 4);
     if (!draft) {
       window.localStorage.removeItem(keyV2);
       window.localStorage.removeItem(keyV3);
+      window.localStorage.removeItem(keyV4);
       return;
     }
-    // Migrate to v3 and drop the legacy key.
+    // Migrate to v4 and drop the legacy keys.
     window.localStorage.removeItem(keyV2);
-    window.localStorage.setItem(keyV3, JSON.stringify(draft));
+    window.localStorage.removeItem(keyV3);
+    window.localStorage.setItem(keyV4, JSON.stringify(draft));
   } catch {
     // best-effort (quota exceeded, storage disabled, etc.)
   }
@@ -590,7 +691,7 @@ function DeviceCalibrationPage({
     const now = new Date();
     const stamp = now.toISOString().replaceAll(":", "-");
     const payload = {
-      schema_version: 2,
+      schema_version: 3,
       generated_at: now.toISOString(),
       device_id: deviceId,
       active_snapshot: profileQuery.data?.active ?? draftProfile.active,
@@ -599,11 +700,11 @@ function DeviceCalibrationPage({
         v_remote_points: draftProfile.v_remote_points.map((p) => [p.raw, p.mv]),
         current_ch1_points: draftProfile.current_ch1_points.map((p) => [
           [p.raw, p.dac_code],
-          p.ma,
+          p.ua,
         ]),
         current_ch2_points: draftProfile.current_ch2_points.map((p) => [
           [p.raw, p.dac_code],
-          p.ma,
+          p.ua,
         ]),
       },
     };
@@ -633,6 +734,13 @@ function DeviceCalibrationPage({
       typeof parsed === "object" && parsed !== null
         ? (parsed as Record<string, unknown>)
         : null;
+
+    const schemaVersion =
+      root && typeof root.schema_version === "number"
+        ? root.schema_version
+        : root && typeof root.version === "number"
+          ? root.version
+          : null;
 
     const curvesCandidate =
       root && typeof root.curves === "object" && root.curves !== null
@@ -696,7 +804,7 @@ function DeviceCalibrationPage({
         if (value.length >= 2 && Array.isArray(value[0])) {
           const raw = readNumber(value[0][0]);
           const dac = readNumber(value[0][1]);
-          const ma = readNumber(value[1]);
+          const stored = readNumber(value[1]);
           if (raw == null)
             issues.push({
               path: `${path}[0][0]`,
@@ -707,29 +815,43 @@ function DeviceCalibrationPage({
               path: `${path}[0][1]`,
               message: "dac_code must be a number",
             });
-          if (ma == null)
-            issues.push({ path: `${path}[1]`, message: "ma must be a number" });
-          if (raw == null || ma == null || dac == null) return null;
-          return { raw, ma, dac_code: dac };
+          if (stored == null)
+            issues.push({
+              path: `${path}[1]`,
+              message: "measured current must be a number",
+            });
+          if (raw == null || stored == null || dac == null) return null;
+          const ua =
+            schemaVersion != null && schemaVersion >= 3
+              ? stored
+              : stored * 1000;
+          return { raw, ua, dac_code: dac };
         }
         if (value.length >= 3) {
           const raw = readNumber(value[0]);
-          const ma = readNumber(value[1]);
+          const stored = readNumber(value[1]);
           const dac = readNumber(value[2]);
           if (raw == null)
             issues.push({
               path: `${path}[0]`,
               message: "raw must be a number",
             });
-          if (ma == null)
-            issues.push({ path: `${path}[1]`, message: "ma must be a number" });
+          if (stored == null)
+            issues.push({
+              path: `${path}[1]`,
+              message: "measured current must be a number",
+            });
           if (dac == null)
             issues.push({
               path: `${path}[2]`,
               message: "dac_code must be a number",
             });
-          if (raw == null || ma == null || dac == null) return null;
-          return { raw, ma, dac_code: dac };
+          if (raw == null || stored == null || dac == null) return null;
+          const ua =
+            schemaVersion != null && schemaVersion >= 3
+              ? stored
+              : stored * 1000;
+          return { raw, ua, dac_code: dac };
         }
       }
       if (typeof value !== "object" || value === null) {
@@ -738,19 +860,25 @@ function DeviceCalibrationPage({
       }
       const obj = value as Record<string, unknown>;
       const raw = readNumber(obj.raw ?? obj.raw_100uv);
+      const ua = readNumber(obj.ua ?? obj.meas_ua);
       const ma = readNumber(obj.ma ?? obj.meas_ma);
       const dac = readNumber(obj.dac_code ?? obj.raw_dac_code);
       if (raw == null)
         issues.push({ path: `${path}.raw`, message: "raw must be a number" });
-      if (ma == null)
-        issues.push({ path: `${path}.ma`, message: "ma must be a number" });
+      if (ua == null && ma == null)
+        issues.push({
+          path: `${path}.ua`,
+          message: "measured current must be a number",
+        });
       if (dac == null)
         issues.push({
           path: `${path}.dac_code`,
           message: "dac_code must be a number",
         });
-      if (raw == null || ma == null || dac == null) return null;
-      return { raw, ma, dac_code: dac };
+      if (raw == null || dac == null) return null;
+      if (ua != null) return { raw, ua, dac_code: dac };
+      if (ma != null) return { raw, ua: ma * 1000, dac_code: dac };
+      return null;
     };
 
     const parseVoltagePoints = (
@@ -984,7 +1112,7 @@ function DeviceCalibrationPage({
     }
 
     writeCalibrationDraftToStorage(deviceId, baseUrl, {
-      version: 3,
+      version: 4,
       saved_at: new Date().toISOString(),
       device_id: deviceId,
       base_url: baseUrl,
@@ -994,11 +1122,11 @@ function DeviceCalibrationPage({
         v_remote_points: draftProfile.v_remote_points.map((p) => [p.raw, p.mv]),
         current_ch1_points: draftProfile.current_ch1_points.map((p) => [
           [p.raw, p.dac_code],
-          p.ma,
+          p.ua,
         ]),
         current_ch2_points: draftProfile.current_ch2_points.map((p) => [
           [p.raw, p.dac_code],
-          p.ma,
+          p.ua,
         ]),
       },
     });
@@ -2044,8 +2172,149 @@ function CurrentCalibration({
   const channelLabel = curve === "current_ch1" ? "CH1" : "CH2";
   const channelDisplay = curve === "current_ch1" ? "Local" : "Remote";
 
-  const [meterReadingA, setMeterReadingA] = useState("1.000");
+  const [inputUnit, setInputUnit] = useState<CurrentInputUnit>("A");
+  const [meterReading, setMeterReading] = useState("1.000000");
+  const [baselineInputByCurve, setBaselineInputByCurve] = useState<{
+    current_ch1: string;
+    current_ch2: string;
+  }>({ current_ch1: "0.000000", current_ch2: "0.000000" });
+  const [baselineUaByCurve, setBaselineUaByCurve] = useState<{
+    current_ch1: number;
+    current_ch2: number;
+  }>({ current_ch1: 0, current_ch2: 0 });
+  const [currentOptionsLoaded, setCurrentOptionsLoaded] = useState(false);
   const [targetIMa, setTargetIMa] = useState("1000");
+
+  const baselineInput = baselineInputByCurve[curve];
+  const baselineUa = baselineUaByCurve[curve];
+
+  const setBaselineInputForCurve = useCallback(
+    (value: string) => {
+      setBaselineInputByCurve((prev) => ({ ...prev, [curve]: value }));
+      const parsed = parseCurrentInputToUa(value, inputUnit);
+      if (parsed != null) {
+        setBaselineUaByCurve((prev) => ({ ...prev, [curve]: parsed }));
+      }
+    },
+    [curve, inputUnit],
+  );
+
+  const meterUa = useMemo(() => {
+    return parseCurrentInputToUa(meterReading, inputUnit);
+  }, [inputUnit, meterReading]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setCurrentOptionsLoaded(false);
+
+    const readOptionsV2 = (
+      curveKey: "current_ch1" | "current_ch2",
+    ): { baselineUa: number | null; unit: CurrentInputUnit | null } => {
+      const key = getCalibrationCurrentOptionsStorageKey(
+        deviceId,
+        baseUrl,
+        curveKey,
+      );
+      const raw = window.localStorage.getItem(key);
+      if (!raw) return { baselineUa: null, unit: null };
+      const parsed = JSON.parse(raw) as unknown;
+      if (typeof parsed !== "object" || parsed === null)
+        return { baselineUa: null, unit: null };
+      const obj = parsed as Record<string, unknown>;
+      const baselineRaw = obj.baseline_ua;
+      const unitRaw = obj.unit;
+      const baselineUa =
+        typeof baselineRaw === "number" &&
+        Number.isFinite(baselineRaw) &&
+        Number.isInteger(baselineRaw) &&
+        baselineRaw >= 0
+          ? baselineRaw
+          : null;
+      const unit =
+        unitRaw === "A" || unitRaw === "mA"
+          ? (unitRaw as CurrentInputUnit)
+          : null;
+      return { baselineUa, unit };
+    };
+
+    const readBaselineV1 = (
+      curveKey: "current_ch1" | "current_ch2",
+    ): number | null => {
+      const keyV1 = getCalibrationCurrentOptionsStorageKey(
+        deviceId,
+        baseUrl,
+        curveKey,
+        1,
+      );
+      const raw = window.localStorage.getItem(keyV1);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw) as unknown;
+      if (typeof parsed !== "object" || parsed === null) return null;
+      const obj = parsed as Record<string, unknown>;
+      const stored = obj.baseline_a;
+      if (typeof stored !== "string") return null;
+      return parseNonNegativeDecimalToScaledInt(stored, 6);
+    };
+
+    try {
+      const ch1 = readOptionsV2("current_ch1");
+      const ch2 = readOptionsV2("current_ch2");
+      const unit = ch1.unit ?? ch2.unit ?? "A";
+      const baselineUaCh1 =
+        ch1.baselineUa ?? readBaselineV1("current_ch1") ?? 0;
+      const baselineUaCh2 =
+        ch2.baselineUa ?? readBaselineV1("current_ch2") ?? 0;
+
+      setInputUnit(unit);
+      setBaselineUaByCurve({
+        current_ch1: baselineUaCh1,
+        current_ch2: baselineUaCh2,
+      });
+      setBaselineInputByCurve({
+        current_ch1: formatUaToUnit(baselineUaCh1, unit),
+        current_ch2: formatUaToUnit(baselineUaCh2, unit),
+      });
+      setMeterReading(formatUaToUnit(1_000_000, unit));
+    } catch {
+      // ignore
+    } finally {
+      setCurrentOptionsLoaded(true);
+    }
+  }, [baseUrl, deviceId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (!currentOptionsLoaded) return;
+    try {
+      for (const curveKey of ["current_ch1", "current_ch2"] as const) {
+        const key = getCalibrationCurrentOptionsStorageKey(
+          deviceId,
+          baseUrl,
+          curveKey,
+        );
+        const keyV1 = getCalibrationCurrentOptionsStorageKey(
+          deviceId,
+          baseUrl,
+          curveKey,
+          1,
+        );
+        window.localStorage.setItem(
+          key,
+          JSON.stringify({
+            baseline_ua: baselineUaByCurve[curveKey],
+            unit: inputUnit,
+          }),
+        );
+        window.localStorage.removeItem(keyV1);
+      }
+    } catch {
+      // ignore
+    }
+  }, [baselineUaByCurve, currentOptionsLoaded, baseUrl, deviceId, inputUnit]);
+
+  const inputUnitStep = inputUnit === "A" ? "0.000001" : "0.001";
+  const meterAdjustedUa =
+    meterUa == null ? null : Math.max(0, meterUa - baselineUa);
 
   const effectivePreview = previewProfile ?? deviceProfile ?? null;
 
@@ -2070,6 +2339,17 @@ function CurrentCalibration({
   );
   const canWriteToDevice = !isOffline && draftPoints.length > 0;
 
+  const handleUnitChange = (next: CurrentInputUnit) => {
+    if (next === inputUnit) return;
+    const currentMeterUa = parseCurrentInputToUa(meterReading, inputUnit) ?? 0;
+    setInputUnit(next);
+    setMeterReading(formatUaToUnit(currentMeterUa, next));
+    setBaselineInputByCurve({
+      current_ch1: formatUaToUnit(baselineUaByCurve.current_ch1, next),
+      current_ch2: formatUaToUnit(baselineUaByCurve.current_ch2, next),
+    });
+  };
+
   const handleSetOutput = () => {
     const parsed = Number.parseInt(targetIMa, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) {
@@ -2093,15 +2373,30 @@ function CurrentCalibration({
       return;
     }
 
-    const measuredMa = Math.round(Number.parseFloat(meterReadingA) * 1000);
-    if (!Number.isFinite(measuredMa) || measuredMa <= 0) {
+    const meterUaParsed = parseCurrentInputToUa(meterReading, inputUnit);
+    if (meterUaParsed == null) {
       onAlert("Cannot Capture Current Point", "Invalid current input.");
+      return;
+    }
+
+    const baselineUaParsed = parseCurrentInputToUa(baselineInput, inputUnit);
+    if (baselineUaParsed == null) {
+      onAlert("Cannot Capture Current Point", "Invalid baseline current.");
+      return;
+    }
+
+    const measuredUa = meterUaParsed - baselineUaParsed;
+    if (measuredUa < 0) {
+      onAlert(
+        "Cannot Capture Current Point",
+        "Baseline current is larger than the meter reading.",
+      );
       return;
     }
 
     const point: CalibrationPointCurrent = {
       raw: rawCur,
-      ma: measuredMa,
+      ua: measuredUa,
       dac_code: rawDac,
     };
     onSetDraftProfile((prev) => {
@@ -2141,10 +2436,10 @@ function CurrentCalibration({
 
   const activeMa =
     curve === "current_ch1" ? status?.raw.i_local_ma : status?.raw.i_remote_ma;
-  const previewMa =
+  const previewUa =
     status?.raw.raw_cur_100uv != null && previewPoints.length >= 1
       ? piecewiseLinear(
-          previewPoints.map((point) => ({ x: point.raw, y: point.ma })),
+          previewPoints.map((point) => ({ x: point.raw, y: point.ua })),
           status.raw.raw_cur_100uv,
         )
       : null;
@@ -2464,19 +2759,103 @@ function CurrentCalibration({
 
             <div className="divider my-0"></div>
 
+            <div className="flex items-center justify-between gap-3">
+              <div className="text-sm font-bold">电流单位</div>
+              <div className="join">
+                <button
+                  type="button"
+                  className={`btn btn-sm join-item ${inputUnit === "A" ? "btn-active" : ""}`}
+                  onClick={() => handleUnitChange("A")}
+                  disabled={isOffline}
+                >
+                  A
+                </button>
+                <button
+                  type="button"
+                  className={`btn btn-sm join-item ${inputUnit === "mA" ? "btn-active" : ""}`}
+                  onClick={() => handleUnitChange("mA")}
+                  disabled={isOffline}
+                >
+                  mA
+                </button>
+              </div>
+            </div>
+
+            <details className="collapse collapse-arrow bg-base-200/40 border border-base-200">
+              <summary className="collapse-title text-sm font-bold">
+                高级选项
+              </summary>
+              <div className="collapse-content">
+                <label className="form-control w-full max-w-lg">
+                  <div className="label">
+                    <span className="label-text">
+                      基础电流扣除 ({channelDisplay}) ({inputUnit})
+                    </span>
+                  </div>
+                  <div className="join w-full">
+                    <input
+                      type="number"
+                      step={inputUnitStep}
+                      min="0"
+                      className="input input-sm input-bordered join-item w-full"
+                      value={baselineInput}
+                      onChange={(event) =>
+                        setBaselineInputForCurve(event.target.value)
+                      }
+                      onBlur={() =>
+                        setBaselineInputForCurve(
+                          formatUaToUnit(baselineUa, inputUnit),
+                        )
+                      }
+                      disabled={isOffline}
+                    />
+                    <button
+                      type="button"
+                      className="btn btn-sm btn-outline join-item"
+                      onClick={() => {
+                        setBaselineUaByCurve((prev) => ({
+                          ...prev,
+                          [curve]: 0,
+                        }));
+                        setBaselineInputForCurve(formatUaToUnit(0, inputUnit));
+                      }}
+                      disabled={isOffline}
+                      title="Clear baseline subtraction."
+                    >
+                      Clear
+                    </button>
+                  </div>
+                  <div className="label">
+                    <span className="label-text-alt text-base-content/70">
+                      Capture 会保存：Meter -
+                      Baseline（用于扣除转接器/夹具等恒定消耗）。同步到设备时会四舍五入到
+                      1mA。
+                    </span>
+                  </div>
+                </label>
+              </div>
+            </details>
+
             <label className="form-control w-full">
               <div className="label">
                 <span className="label-text">
-                  Meter Reading ({channelDisplay}) (A)
+                  Meter Reading ({channelDisplay}) ({inputUnit})
                 </span>
               </div>
               <div className="join">
                 <input
                   type="number"
-                  step="0.001"
+                  step={inputUnitStep}
                   className="input input-bordered join-item w-full"
-                  value={meterReadingA}
-                  onChange={(event) => setMeterReadingA(event.target.value)}
+                  value={meterReading}
+                  onChange={(event) => setMeterReading(event.target.value)}
+                  onBlur={() => {
+                    const parsed = parseCurrentInputToUa(
+                      meterReading,
+                      inputUnit,
+                    );
+                    setMeterReading(formatUaToUnit(parsed ?? 0, inputUnit));
+                  }}
                   disabled={isOffline}
                 />
                 <button
@@ -2488,6 +2867,14 @@ function CurrentCalibration({
                   Capture
                 </button>
               </div>
+              {meterAdjustedUa != null && baselineUa > 0 && (
+                <div className="label">
+                  <span className="label-text-alt text-base-content/70">
+                    Adjusted: {formatUaToUnit(meterAdjustedUa, inputUnit)}{" "}
+                    {inputUnit}
+                  </span>
+                </div>
+              )}
             </label>
 
             {currentDraft.issues.length > 0 && draftPoints.length > 0 && (
@@ -2523,9 +2910,9 @@ function CurrentCalibration({
               <div className="stat">
                 <div className="stat-title">Preview Current</div>
                 <div className="stat-value text-lg text-primary">
-                  {previewMa == null
+                  {previewUa == null
                     ? "--"
-                    : `${(previewMa / 1000).toFixed(4)} A`}
+                    : `${(previewUa / 1_000_000).toFixed(6)} A`}
                 </div>
                 <div className="stat-desc">Uses applied preview</div>
               </div>
@@ -2537,18 +2924,18 @@ function CurrentCalibration({
                   <tr>
                     <th>Raw</th>
                     <th>DAC</th>
-                    <th>Value (mA)</th>
+                    <th>Value ({inputUnit})</th>
                     <th></th>
                   </tr>
                 </thead>
                 <tbody>
                   {draftPoints.map((sample, idx) => (
                     <tr
-                      key={`${idx}-${sample.raw}-${sample.ma}-${sample.dac_code}`}
+                      key={`${idx}-${sample.raw}-${sample.ua}-${sample.dac_code}`}
                     >
                       <td>{sample.raw}</td>
                       <td>{sample.dac_code ?? "--"}</td>
-                      <td>{sample.ma}</td>
+                      <td>{formatUaToUnit(sample.ua, inputUnit)}</td>
                       <td className="text-right">
                         <button
                           type="button"
@@ -2626,15 +3013,15 @@ function CurrentCalibration({
                   <tr>
                     <th>Raw</th>
                     <th>DAC</th>
-                    <th>Value (mA)</th>
+                    <th>Value ({inputUnit})</th>
                   </tr>
                 </thead>
                 <tbody>
                   {devicePoints.map((point, idx) => (
-                    <tr key={`${point.raw}-${point.ma}-${idx}`}>
+                    <tr key={`${point.raw}-${point.ua}-${idx}`}>
                       <td>{point.raw}</td>
                       <td>{point.dac_code ?? "--"}</td>
-                      <td>{point.ma}</td>
+                      <td>{formatUaToUnit(point.ua, inputUnit)}</td>
                     </tr>
                   ))}
                   {devicePoints.length === 0 && (
