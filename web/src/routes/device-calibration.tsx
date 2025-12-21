@@ -1469,6 +1469,7 @@ function DeviceCalibrationPage({
           onReadDeviceToDraft={requestReadDeviceToDraft}
           readDeviceToDraftPending={readDeviceToDraftPending}
           onAlert={showAlert}
+          onInfoToast={enqueueInfoToast}
           onEnqueueUndo={enqueueUndo}
           onResetDraftToEmpty={resetDraftToEmpty}
           onRefetchProfile={profileQuery.refetch}
@@ -1492,6 +1493,7 @@ function DeviceCalibrationPage({
           onReadDeviceToDraft={requestReadDeviceToDraft}
           readDeviceToDraftPending={readDeviceToDraftPending}
           onAlert={showAlert}
+          onInfoToast={enqueueInfoToast}
           onEnqueueUndo={enqueueUndo}
           onResetDraftToEmpty={resetDraftToEmpty}
           onRefetchProfile={profileQuery.refetch}
@@ -1583,6 +1585,7 @@ function VoltageCalibration({
   onReadDeviceToDraft,
   readDeviceToDraftPending,
   onAlert,
+  onInfoToast,
   onEnqueueUndo,
   onResetDraftToEmpty,
   onRefetchProfile,
@@ -1605,6 +1608,7 @@ function VoltageCalibration({
   onReadDeviceToDraft: () => void;
   readDeviceToDraftPending: boolean;
   onAlert: (title: string, body: string, details?: string[]) => void;
+  onInfoToast: (message: string) => void;
   onEnqueueUndo: (action: UndoAction, message: string) => void;
   onResetDraftToEmpty: (message?: string) => void;
   onRefetchProfile: RefetchProfile;
@@ -1675,25 +1679,73 @@ function VoltageCalibration({
       return;
     }
 
+    const existingIndex = (() => {
+      const n = Math.min(draftLocalPoints.length, draftRemotePoints.length);
+      for (let i = 0; i < n; i++) {
+        const local = draftLocalPoints[i];
+        const remote = draftRemotePoints[i];
+        if (
+          local &&
+          remote &&
+          local.raw === rawLocal &&
+          local.mv === measuredMv &&
+          remote.raw === rawRemote &&
+          remote.mv === measuredMv
+        ) {
+          return i;
+        }
+      }
+      return null;
+    })();
+
     onSetDraftProfile((prev) => {
+      const localPoint = { raw: rawLocal, mv: measuredMv };
+      const remotePoint = { raw: rawRemote, mv: measuredMv };
+      const n = Math.min(
+        prev.v_local_points.length,
+        prev.v_remote_points.length,
+      );
+      let dupIndex: number | null = null;
+      for (let i = 0; i < n; i++) {
+        const local = prev.v_local_points[i];
+        const remote = prev.v_remote_points[i];
+        if (
+          local &&
+          remote &&
+          local.raw === localPoint.raw &&
+          local.mv === localPoint.mv &&
+          remote.raw === remotePoint.raw &&
+          remote.mv === remotePoint.mv
+        ) {
+          dupIndex = i;
+          break;
+        }
+      }
+
       return {
         ...prev,
-        v_local_points: [
-          ...prev.v_local_points,
-          {
-            raw: rawLocal,
-            mv: measuredMv,
-          },
-        ],
-        v_remote_points: [
-          ...prev.v_remote_points,
-          {
-            raw: rawRemote,
-            mv: measuredMv,
-          },
-        ],
+        v_local_points:
+          dupIndex == null
+            ? [...prev.v_local_points, localPoint]
+            : [
+                ...prev.v_local_points.filter((_, i) => i !== dupIndex),
+                localPoint,
+              ],
+        v_remote_points:
+          dupIndex == null
+            ? [...prev.v_remote_points, remotePoint]
+            : [
+                ...prev.v_remote_points.filter((_, i) => i !== dupIndex),
+                remotePoint,
+              ],
       };
     });
+
+    if (existingIndex != null) {
+      onInfoToast(
+        `Duplicate voltage sample replaced (${(measuredMv / 1000).toFixed(3)} V).`,
+      );
+    }
   };
 
   const handleDeleteDraftRow = (index: number) => {
@@ -2305,6 +2357,7 @@ function CurrentCalibration({
   onReadDeviceToDraft,
   readDeviceToDraftPending,
   onAlert,
+  onInfoToast,
   onEnqueueUndo,
   onResetDraftToEmpty,
   onRefetchProfile,
@@ -2328,6 +2381,7 @@ function CurrentCalibration({
   onReadDeviceToDraft: () => void;
   readDeviceToDraftPending: boolean;
   onAlert: (title: string, body: string, details?: string[]) => void;
+  onInfoToast: (message: string) => void;
   onEnqueueUndo: (action: UndoAction, message: string) => void;
   onResetDraftToEmpty: (message?: string) => void;
   onRefetchProfile: RefetchProfile;
@@ -2630,19 +2684,48 @@ function CurrentCalibration({
       ua: measuredUa,
       dac_code: rawDac,
     };
+
+    const existingIndex = draftPoints.findIndex(
+      (existing) =>
+        existing.raw === point.raw &&
+        existing.ua === point.ua &&
+        existing.dac_code === point.dac_code,
+    );
     onSetDraftProfile((prev) => {
+      const existingPoints =
+        curve === "current_ch1"
+          ? prev.current_ch1_points
+          : prev.current_ch2_points;
+      let removed = false;
+      const nextPoints: CalibrationPointCurrent[] = [];
+      for (const existing of existingPoints) {
+        if (
+          !removed &&
+          existing.raw === point.raw &&
+          existing.ua === point.ua &&
+          existing.dac_code === point.dac_code
+        ) {
+          removed = true;
+          continue;
+        }
+        nextPoints.push(existing);
+      }
+      nextPoints.push(point);
+
       return {
         ...prev,
         current_ch1_points:
-          curve === "current_ch1"
-            ? [...prev.current_ch1_points, point]
-            : prev.current_ch1_points,
+          curve === "current_ch1" ? nextPoints : prev.current_ch1_points,
         current_ch2_points:
-          curve === "current_ch2"
-            ? [...prev.current_ch2_points, point]
-            : prev.current_ch2_points,
+          curve === "current_ch2" ? nextPoints : prev.current_ch2_points,
       };
     });
+
+    if (existingIndex !== -1) {
+      onInfoToast(
+        `Duplicate ${channelLabel} current sample replaced (raw=${point.raw}, dac=${point.dac_code}, value=${formatUaToUnit(point.ua, inputUnit)} ${inputUnit}).`,
+      );
+    }
   };
 
   const handleDeleteSample = (index: number) => {

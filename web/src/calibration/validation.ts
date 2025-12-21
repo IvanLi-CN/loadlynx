@@ -133,11 +133,15 @@ function sanitizeVoltagePoints(
   for (const [mv, raws] of byMv.entries()) {
     const rep = computeRepresentativeInt(raws);
     if (raws.length > 1) {
-      addIssue(
-        issues,
-        basePath,
-        `duplicate mv=${mv} (${raws.length} samples): using ${rep.kind}`,
-      );
+      const raw0 = raws[0];
+      const isExactDuplicate = raws.every((raw) => raw === raw0);
+      if (!isExactDuplicate) {
+        addIssue(
+          issues,
+          basePath,
+          `duplicate mv=${mv} (${raws.length} samples): using ${rep.kind}`,
+        );
+      }
     }
     aggregatedByMv.push({ raw: rep.value, mv });
   }
@@ -265,11 +269,18 @@ function sanitizeCurrentPoints(
     const repDac = computeRepresentativeInt(entry.dacs);
     const samples = entry.raws.length;
     if (samples > 1) {
-      addIssue(
-        issues,
-        basePath,
-        `duplicate ua=${ua} (${samples} samples): raw uses ${repRaw.kind}, dac uses ${repDac.kind}`,
-      );
+      const raw0 = entry.raws[0];
+      const dac0 = entry.dacs[0];
+      const isExactDuplicate =
+        entry.raws.every((raw) => raw === raw0) &&
+        entry.dacs.every((dac) => dac === dac0);
+      if (!isExactDuplicate) {
+        addIssue(
+          issues,
+          basePath,
+          `duplicate ua=${ua} (${samples} samples): raw uses ${repRaw.kind}, dac uses ${repDac.kind}`,
+        );
+      }
     }
     aggregatedByMa.push({ raw: repRaw.value, ua, dac_code: repDac.value });
   }
