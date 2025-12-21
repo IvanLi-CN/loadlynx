@@ -862,6 +862,20 @@ fn write_error_body(
     buf.push_str("}}");
 }
 
+async fn socket_write_all(
+    socket: &mut TcpSocket<'_>,
+    mut buf: &[u8],
+) -> Result<(), embassy_net::tcp::Error> {
+    while !buf.is_empty() {
+        let written = socket.write(buf).await?;
+        if written == 0 {
+            return Err(embassy_net::tcp::Error::ConnectionReset);
+        }
+        buf = &buf[written..];
+    }
+    Ok(())
+}
+
 async fn write_http_response(
     socket: &mut TcpSocket<'_>,
     version: &str,
@@ -895,8 +909,8 @@ async fn write_http_response(
         CORS_ALLOW_PRIVATE_NETWORK,
         body.as_bytes().len()
     );
-    socket.write(head.as_bytes()).await?;
-    socket.write(body.as_bytes()).await?;
+    socket_write_all(socket, head.as_bytes()).await?;
+    socket_write_all(socket, body.as_bytes()).await?;
     Ok(())
 }
 
@@ -926,7 +940,7 @@ async fn write_sse_response_head(
         CORS_ALLOW_PRIVATE_NETWORK,
     );
 
-    socket.write(head.as_bytes()).await.map(|_| ())
+    socket_write_all(socket, head.as_bytes()).await
 }
 
 /// Render the JSON body for `GET /api/v1/identity`.
@@ -1190,7 +1204,7 @@ async fn handle_status_sse(
                 frame.push_str("data: ");
                 frame.push_str(&json_body);
                 frame.push_str("\r\n\r\n");
-                socket.write(frame.as_bytes()).await?;
+                socket_write_all(socket, frame.as_bytes()).await?;
                 socket.flush().await?;
             }
             Err(err_status) => {
@@ -1199,7 +1213,7 @@ async fn handle_status_sse(
                 frame.push_str("data: \"");
                 write_json_string_escaped(&mut frame, err_status);
                 frame.push_str("\"\r\n\r\n");
-                socket.write(frame.as_bytes()).await?;
+                socket_write_all(socket, frame.as_bytes()).await?;
                 socket.flush().await?;
                 return Ok(());
             }
