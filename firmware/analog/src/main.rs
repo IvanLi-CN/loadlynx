@@ -12,7 +12,7 @@ use embassy_stm32::adc::{
     Adc, AdcChannel, SampleTime, Temperature as AdcTemperature, VREF_CALIB_MV,
 };
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::dac::{Dac, Value as DacValue};
+use embassy_stm32::dac::{Dac, Mode as DacMode, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async as UartAsync;
 use embassy_stm32::usart::{
@@ -503,7 +503,18 @@ async fn main(_spawner: Spawner) -> ! {
     // DAC1：PA4/PA5 → CH1/CH2。上电默认按总目标电流应用通道调度：
     //   - I_total < 2 A：仅 CH1 有输出，CH2=0；
     //   - I_total ≥ 2 A：CH1/CH2 近似均分。
-    let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
+    let mut dac = {
+        let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
+
+        // Disable the output buffer (unbuffered mode) for both channels.
+        dac.ch1().set_mode(DacMode::NormalExternalUnbuffered);
+        dac.ch1().enable();
+        dac.ch2().set_mode(DacMode::NormalExternalUnbuffered);
+        dac.ch2().enable();
+
+        info!("DAC mode: external unbuffered (buffer disabled)");
+        dac
+    };
     let init_total_i_ma = DEFAULT_TARGET_I_LOCAL_MA;
     let (init_ch1_ma, init_ch2_ma) = if init_total_i_ma < I_SHARE_THRESHOLD_MA {
         (init_total_i_ma, 0)
