@@ -1,7 +1,7 @@
 import type { QueryObserverResult } from "@tanstack/react-query";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
 import {
   getCalibrationProfile,
@@ -14,6 +14,7 @@ import {
 } from "../api/client.ts";
 import type {
   CalibrationActiveProfile,
+  CalibrationModeRequest,
   CalibrationPointCurrent,
   CalibrationPointVoltage,
   CalibrationProfile,
@@ -478,6 +479,31 @@ function isDraftEmpty(profile: CalibrationProfile): boolean {
   );
 }
 
+function formatDeviceCalKind(kind: number | null | undefined): string {
+  if (kind == null) return "off";
+  switch (kind) {
+    case 1:
+      return "voltage";
+    case 2:
+      return "current_ch1";
+    case 3:
+      return "current_ch2";
+    default:
+      return `unknown(${kind})`;
+  }
+}
+
+function expectedCalKindForTab(tab: CalibrationTab): number {
+  switch (tab) {
+    case "voltage":
+      return 1;
+    case "current_ch1":
+      return 2;
+    case "current_ch2":
+      return 3;
+  }
+}
+
 export function DeviceCalibrationRoute() {
   const { deviceId } = useParams({
     from: "/$deviceId/calibration",
@@ -530,6 +556,10 @@ function DeviceCalibrationPage({
 
   // Live status stream (includes optional RAW fields in calibration mode).
   const [status, setStatus] = useState<FastStatusView | null>(null);
+  const statusRef = useRef<FastStatusView | null>(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   useEffect(() => {
     // Reset state while switching devices/URLs.
@@ -548,6 +578,10 @@ function DeviceCalibrationPage({
     status === null ||
     status.analog_state === "offline" ||
     status.analog_state === "faulted";
+
+  const deviceCalKind = status?.raw.cal_kind ?? null;
+  const expectedCalKind = expectedCalKindForTab(activeTab);
+  const statusTick = status?.raw.uptime_ms ?? 0;
 
   const profileQuery = useQuery<CalibrationProfile, HttpApiError>({
     queryKey: ["device", deviceId, "calibration", "profile"],
@@ -967,9 +1001,12 @@ function DeviceCalibrationPage({
     details: string[];
   } | null>(null);
 
-  const showAlert = (title: string, body: string, details: string[] = []) => {
-    setAlertDialog({ title, body, details });
-  };
+  const showAlert = useCallback(
+    (title: string, body: string, details: string[] = []) => {
+      setAlertDialog({ title, body, details });
+    },
+    [],
+  );
 
   const performReadDeviceToDraft = async () => {
     if (readDeviceToDraftPending) return;
@@ -1139,13 +1176,113 @@ function DeviceCalibrationPage({
     };
   }, [baseUrl]);
 
-  // Switch mode when changing tabs. Current tab selection is refined by the
-  // active tab selection.
+  const modeSyncInFlightRef = useRef<Promise<void> | null>(null);
+  const autoSyncStateRef = useRef<{
+    lastAttemptMs: number;
+    attempts: number;
+  }>({ lastAttemptMs: 0, attempts: 0 });
+
+  const ensureActiveTabCalMode = useCallback(
+    async (action: string, opts?: { silent?: boolean }): Promise<boolean> => {
+      // De-dupe concurrent mode sync attempts (auto-sync + user click).
+      if (modeSyncInFlightRef.current) {
+        try {
+          await modeSyncInFlightRef.current;
+        } catch {
+          // ignore
+        }
+      }
+
+      if (isOffline) {
+        return false;
+      }
+
+      const already = statusRef.current?.raw.cal_kind ?? null;
+      if (already === expectedCalKind) return true;
+
+      const kind: CalibrationModeRequest["kind"] =
+        activeTab === "voltage" ? "voltage" : activeTab;
+
+      const attempt = (async (): Promise<void> => {
+        await postCalibrationMode(baseUrl, { kind });
+      })();
+
+      modeSyncInFlightRef.current = attempt;
+      try {
+        await attempt;
+      } catch (err) {
+        console.error(err);
+        if (!opts?.silent) {
+          showAlert(
+            `Cannot ${action}`,
+            "Failed to set device calibration mode. Check network/API availability.",
+          );
+        }
+        return false;
+      } finally {
+        if (modeSyncInFlightRef.current === attempt) {
+          modeSyncInFlightRef.current = null;
+        }
+      }
+
+      const deadline = Date.now() + 1500;
+      while (Date.now() < deadline) {
+        const seen = statusRef.current?.raw.cal_kind ?? null;
+        if (seen === expectedCalKind) return true;
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+      }
+
+      if (!opts?.silent) {
+        const seen = statusRef.current?.raw.cal_kind ?? null;
+        showAlert(
+          "Calibration mode mismatch",
+          "Device did not switch to the expected calibration mode.",
+          [
+            `expected=${formatDeviceCalKind(expectedCalKind)}`,
+            `device=${formatDeviceCalKind(seen)}`,
+          ],
+        );
+      }
+      return false;
+    },
+    [activeTab, baseUrl, expectedCalKind, isOffline, showAlert],
+  );
+
+  // Auto-sync mode on entry and while the page is open. This avoids "tab says
+  // current_ch2 but device is still off/other" after refresh or link glitches.
   useEffect(() => {
-    postCalibrationMode(baseUrl, {
-      kind: activeTab === "voltage" ? "voltage" : activeTab,
-    }).catch(console.error);
-  }, [activeTab, baseUrl]);
+    void statusTick;
+    if (isOffline) return;
+    if (statusRef.current === null) return;
+
+    if (deviceCalKind === expectedCalKind) {
+      autoSyncStateRef.current.attempts = 0;
+      return;
+    }
+
+    const now = Date.now();
+    const state = autoSyncStateRef.current;
+    const minIntervalMs = state.attempts <= 2 ? 300 : 1200;
+    if (now - state.lastAttemptMs < minIntervalMs) return;
+
+    state.lastAttemptMs = now;
+    state.attempts = Math.min(20, state.attempts + 1);
+    void ensureActiveTabCalMode("Sync", { silent: true });
+  }, [
+    deviceCalKind,
+    ensureActiveTabCalMode,
+    expectedCalKind,
+    isOffline,
+    statusTick,
+  ]);
+
+  // Reset auto-sync backoff when the user switches tabs, then attempt a fast sync.
+  useEffect(() => {
+    void activeTab;
+    autoSyncStateRef.current.attempts = 0;
+    autoSyncStateRef.current.lastAttemptMs = 0;
+    void ensureActiveTabCalMode("Sync", { silent: true });
+  }, [activeTab, ensureActiveTabCalMode]);
 
   return (
     <div className="flex flex-col gap-6 max-w-5xl mx-auto">
@@ -1208,6 +1345,24 @@ function DeviceCalibrationPage({
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
+              <div
+                className={`badge ${deviceCalKind === expectedCalKind ? "badge-success" : "badge-warning"}`}
+                title={`device=${formatDeviceCalKind(deviceCalKind)} expected=${formatDeviceCalKind(expectedCalKind)}`}
+              >
+                cal_mode: {formatDeviceCalKind(deviceCalKind)}
+              </div>
+              {deviceCalKind !== expectedCalKind && !isOffline ? (
+                <button
+                  type="button"
+                  className="btn btn-xs btn-ghost"
+                  onClick={() => {
+                    void ensureActiveTabCalMode("Sync");
+                  }}
+                >
+                  Sync
+                </button>
+              ) : null}
+
               {draftEmpty ? (
                 <div className="badge badge-neutral">Draft: none</div>
               ) : (
@@ -1301,6 +1456,7 @@ function DeviceCalibrationPage({
         <VoltageCalibration
           baseUrl={baseUrl}
           status={status}
+          ensureMode={ensureActiveTabCalMode}
           deviceProfile={profileQuery.data}
           draftProfile={draftProfile}
           previewProfile={previewProfile}
@@ -1323,6 +1479,7 @@ function DeviceCalibrationPage({
           curve={activeTab}
           baseUrl={baseUrl}
           status={status}
+          ensureMode={ensureActiveTabCalMode}
           deviceProfile={profileQuery.data}
           draftProfile={draftProfile}
           previewProfile={previewProfile}
@@ -1413,6 +1570,7 @@ function DeviceCalibrationPage({
 function VoltageCalibration({
   baseUrl,
   status,
+  ensureMode,
   deviceProfile,
   draftProfile,
   previewProfile,
@@ -1432,6 +1590,7 @@ function VoltageCalibration({
 }: {
   baseUrl: string;
   status: FastStatusView | null;
+  ensureMode: (action: string, opts?: { silent?: boolean }) => Promise<boolean>;
   deviceProfile: CalibrationProfile | undefined;
   draftProfile: CalibrationProfile;
   previewProfile: CalibrationProfile | null;
@@ -1456,6 +1615,11 @@ function VoltageCalibration({
   const [confirmKind, setConfirmKind] = useState<
     "reset_draft" | "reset_device_voltage" | null
   >(null);
+
+  const statusRef = useRef<FastStatusView | null>(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   const effectivePreview = previewProfile ?? deviceProfile ?? null;
 
@@ -1490,9 +1654,12 @@ function VoltageCalibration({
   const canWriteToDevice =
     !isOffline && (draftLocalPoints.length > 0 || draftRemotePoints.length > 0);
 
-  const handleCapture = () => {
-    const rawLocal = status?.raw.raw_v_nr_100uv;
-    const rawRemote = status?.raw.raw_v_rmt_100uv;
+  const handleCapture = async () => {
+    const ok = await ensureMode("Capture");
+    if (!ok) return;
+
+    const rawLocal = statusRef.current?.raw.raw_v_nr_100uv;
+    const rawRemote = statusRef.current?.raw.raw_v_rmt_100uv;
 
     if (rawLocal == null || rawRemote == null) {
       onAlert(
@@ -2125,6 +2292,7 @@ function CurrentCalibration({
   curve,
   baseUrl,
   status,
+  ensureMode,
   deviceProfile,
   draftProfile,
   previewProfile,
@@ -2145,6 +2313,7 @@ function CurrentCalibration({
   curve: "current_ch1" | "current_ch2";
   baseUrl: string;
   status: FastStatusView | null;
+  ensureMode: (action: string, opts?: { silent?: boolean }) => Promise<boolean>;
   deviceProfile: CalibrationProfile | undefined;
   draftProfile: CalibrationProfile;
   previewProfile: CalibrationProfile | null;
@@ -2187,6 +2356,11 @@ function CurrentCalibration({
 
   const baselineInput = baselineInputByCurve[curve];
   const baselineUa = baselineUaByCurve[curve];
+
+  const statusRef = useRef<FastStatusView | null>(status);
+  useEffect(() => {
+    statusRef.current = status;
+  }, [status]);
 
   const setBaselineInputForCurve = useCallback(
     (value: string) => {
@@ -2350,20 +2524,34 @@ function CurrentCalibration({
     });
   };
 
-  const handleSetOutput = () => {
+  const handleSetOutput = async () => {
     const parsed = Number.parseInt(targetIMa, 10);
     if (!Number.isFinite(parsed) || parsed <= 0) {
       onAlert("Cannot Set Output", "Invalid target current.");
       return;
     }
-    updateCc(baseUrl, { enable: true, target_i_ma: parsed }).catch(
-      console.error,
-    );
+
+    const ok = await ensureMode("Set Output");
+    if (!ok) return;
+
+    try {
+      await updateCc(baseUrl, { enable: true, target_i_ma: parsed });
+    } catch (err) {
+      console.error(err);
+      onAlert(
+        "Cannot Set Output",
+        "Device rejected or failed to apply CC setpoint.",
+      );
+    }
   };
 
-  const handleCapture = () => {
-    const rawCur = status?.raw.raw_cur_100uv;
-    const rawDac = status?.raw.raw_dac_code;
+  const handleCapture = async () => {
+    const ok = await ensureMode("Capture");
+    if (!ok) return;
+
+    const latest = statusRef.current;
+    const rawCur = latest?.raw.raw_cur_100uv;
+    const rawDac = latest?.raw.raw_dac_code;
 
     if (rawCur == null || rawDac == null) {
       onAlert(
