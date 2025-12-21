@@ -36,7 +36,7 @@ use static_cell::StaticCell;
 mod calibration;
 use calibration::{
     CalibrationState, CurveKind, inverse_piecewise, mv_to_raw_100uv, piecewise_linear,
-    raw_100uv_to_dac_code,
+    raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
 };
 
 // STM32G431 VREFBUF 基址/寄存器地址（同 pd-sink-stm32g431cbu6-rs 工程）
@@ -66,22 +66,6 @@ const CAL_SMOOTH_WINDOW_FRAMES: usize = 6;
 // Calibration-only oversampling (within a single FastStatus cycle) to suppress
 // 1–10 kHz ripple by time-averaging multiple ADC conversions.
 const CAL_OVERSAMPLE_SAMPLES: u32 = 256;
-
-// DAC1 → CC 环路：0.5 A 设计值对应的 DAC 码。
-// 物理链路（v4.1 vs v4.2，对应网表与 INA193 / OPA2365 手册）：
-//   - v4.1：Rsense = 25 mΩ，INA193 固定增益 20 V/V：
-//       V_CUR1 ≈ 20 * 0.025 Ω * I = 0.5 * I [V/A]
-//   - v4.2：Rsense = 50 mΩ，OPA2365 同相放大 G=10：
-//       V_CUR1 ≈ 10 * 0.05 Ω * I = 0.5 * I [V/A]
-//   两版硬件在 CC 环采样节点上都满足 V_CUR1 ≈ 0.5 * I [V/A]，CC 运放比较 V_CUR1 与 DAC_CH1，
-//   经 100 Ω/100 kΩ 网络，直流近似 V_DAC ≈ V_CUR1。
-//
-// 假设 DAC 参考电压约 2.9 V，DAC 12bit 满量程 4095：
-//   I = 0.5 A → V_CUR1 ≈ 0.25 V
-//   CODE_0p5A ≈ 0.25 / 2.9 * 4095 ≈ 353
-const CC_0P5A_DAC_CODE_CH1: u16 = 353;
-// 当前固件假定两路 CC 通道在 0.5 A 标定点的 DAC 码相同；如后续量产需要分别标定，可独立调整。
-const CC_0P5A_DAC_CODE_CH2: u16 = CC_0P5A_DAC_CODE_CH1;
 
 // ADC 公共参数（G431 12bit ADC）。
 // 电压换算遵循 STM32G4 官方推荐流程：
@@ -121,8 +105,6 @@ const SENSE_GAIN_DEN: u32 = 10;
 
 // 默认恒流目标（mA）：1.0 A，用于未接收到任何远端 SetPoint 时的启动值。
 const DEFAULT_TARGET_I_LOCAL_MA: i32 = 1_000;
-// DAC 标定参考点（mA）：0.5 A → CC_0P5A_DAC_CODE_CH1。
-const DAC_CAL_REF_I_MA: i32 = 500;
 // 可接受的目标电流范围（mA），用于防止异常指令导致过流。
 const TARGET_I_MIN_MA: i32 = 0;
 const TARGET_I_MAX_MA: i32 = 5_000;
@@ -530,10 +512,10 @@ async fn main(_spawner: Spawner) -> ! {
         let rem = init_total_i_ma - 2 * half;
         (half + rem, half)
     };
-    let init_dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * init_ch1_ma / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
-    let init_dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * init_ch2_ma / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
+    let init_raw_ch1_100uv = init_ch1_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+    let init_raw_ch2_100uv = init_ch2_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+    let init_dac_code_ch1 = raw_100uv_to_dac_code_vref(init_raw_ch1_100uv, vref_mv);
+    let init_dac_code_ch2 = raw_100uv_to_dac_code_vref(init_raw_ch2_100uv, vref_mv);
     dac.ch1().set(DacValue::Bit12Right(init_dac_code_ch1));
     dac.ch2().set(DacValue::Bit12Right(init_dac_code_ch2));
 
@@ -903,7 +885,7 @@ async fn main(_spawner: Spawner) -> ! {
         let effective_enable = enable_requested && cal_ready;
         let effective_enable_with_fault = effective_enable && !has_fault;
 
-        // 目标总电流（两通道合计，单位 mA）。标定点：0.5 A → CC_0P5A_DAC_CODE_CHx。
+        // 目标总电流（两通道合计，单位 mA）。
         let mut target_i_total_ma = if effective_enable_with_fault {
             TARGET_I_LOCAL_MA.load(Ordering::Relaxed)
         } else {
@@ -982,9 +964,28 @@ async fn main(_spawner: Spawner) -> ! {
             .unwrap_or(ideal_raw_ch2_des_100uv)
         };
 
-        // Raw 100 µV target → DAC code via existing 0.5 A reference mapping.
-        let dac_code_ch1 = raw_100uv_to_dac_code(raw_ch1_des_100uv, CC_0P5A_DAC_CODE_CH1);
-        let dac_code_ch2 = raw_100uv_to_dac_code(raw_ch2_des_100uv, CC_0P5A_DAC_CODE_CH2);
+        // Raw 100 µV target → DAC code.
+        //
+        // Prefer user calibration (raw_100uv ↔ raw_dac_code captured during current calibration).
+        // Fallback to reference-voltage scaling when DAC samples are not present (e.g. factory defaults).
+        let dac_code_ch1 = if curves[CurveKind::CurrentCh1.index()].is_empty() {
+            raw_100uv_to_dac_code_vref(raw_ch1_des_100uv, vref_mv)
+        } else {
+            raw_100uv_to_dac_code_calibrated(
+                curves[CurveKind::CurrentCh1.index()].as_slice(),
+                raw_ch1_des_100uv,
+            )
+            .unwrap_or_else(|_| raw_100uv_to_dac_code_vref(raw_ch1_des_100uv, vref_mv))
+        };
+        let dac_code_ch2 = if curves[CurveKind::CurrentCh2.index()].is_empty() {
+            raw_100uv_to_dac_code_vref(raw_ch2_des_100uv, vref_mv)
+        } else {
+            raw_100uv_to_dac_code_calibrated(
+                curves[CurveKind::CurrentCh2.index()].as_slice(),
+                raw_ch2_des_100uv,
+            )
+            .unwrap_or_else(|_| raw_100uv_to_dac_code_vref(raw_ch2_des_100uv, vref_mv))
+        };
         dac.ch1().set(DacValue::Bit12Right(dac_code_ch1));
         dac.ch2().set(DacValue::Bit12Right(dac_code_ch2));
 
@@ -1193,10 +1194,8 @@ async fn apply_soft_reset_safing(
     // SOFT_RESET：清零总目标电流，等待数字板重新下发 SetPoint。
     let reset_target_total = 0;
     TARGET_I_LOCAL_MA.store(reset_target_total, Ordering::Relaxed);
-    let reset_dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * reset_target_total / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
-    let reset_dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * reset_target_total / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
+    let reset_dac_code_ch1 = 0u16;
+    let reset_dac_code_ch2 = 0u16;
     dac.ch1().set(DacValue::Bit12Right(reset_dac_code_ch1));
     dac.ch2().set(DacValue::Bit12Right(reset_dac_code_ch2));
 

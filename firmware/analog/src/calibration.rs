@@ -9,11 +9,10 @@ pub const MAX_POINTS: usize = 24;
 pub const POINTS_PER_CHUNK: usize = 3;
 pub const MAX_CHUNKS: usize = 8;
 
-/// Raw current reference at 0.5 A in 100 µV units.
-///
-/// Derived from the hardware ideal ratio `V_CUR ≈ 0.5 * I[A]`:
-/// 0.5 A → 0.25 V → 250 mV → 2500 * 100 µV.
-pub const RAW_CUR_0P5A_100UV: i32 = 2_500;
+// NOTE: The firmware no longer uses a fixed 0.5 A reference point for output
+// mapping; DAC codes are derived either from user calibration samples
+// (`raw_100uv` ↔ `raw_dac_code`) or from the measured reference voltage
+// (`raw_100uv_to_dac_code_vref`).
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct CalPoint {
@@ -259,13 +258,116 @@ pub fn mv_to_raw_100uv(mv: u32) -> i16 {
     raw.clamp(0, i16::MAX as i32) as i16
 }
 
-pub fn raw_100uv_to_dac_code(raw_100uv: i16, dac_ref_code: u16) -> u16 {
+/// Piecewise linear mapping from raw (100 µV units) to DAC code using the
+/// current calibration curve's `raw_dac_code` field.
+///
+/// The input curve is expected to be the active curve produced by
+/// [`prepare_curve`] (sorted by raw, deduped by raw, meas monotonic). This
+/// helper additionally enforces strictly increasing `raw_dac_code` by dropping
+/// non-monotonic DAC samples so interpolation remains well-defined.
+pub fn raw_100uv_to_dac_code_calibrated(
+    points: &[CalPoint],
+    raw_100uv: i16,
+) -> Result<u16, CalError> {
+    if points.is_empty() {
+        return Err(CalError::EmptyPoints);
+    }
+
     let raw_i32 = raw_100uv as i32;
     if raw_i32 <= 0 {
+        return Ok(0);
+    }
+
+    // Build a monotonic (raw -> dac) mapping from the received calibration curve.
+    // Keep the first point, then only accept points whose DAC code is strictly
+    // increasing. This drops spurious/noisy DAC samples without rejecting the
+    // entire curve.
+    let mut raws = [0i16; MAX_POINTS];
+    let mut dacs = [0u16; MAX_POINTS];
+    let mut n = 0usize;
+
+    for (idx, p) in points.iter().enumerate() {
+        if idx > 0 && p.raw_100uv <= points[idx - 1].raw_100uv {
+            // Active curves should already be strictly increasing in raw.
+            return Err(CalError::InvalidCurve);
+        }
+
+        if n == 0 {
+            raws[0] = p.raw_100uv;
+            dacs[0] = p.raw_dac_code;
+            n = 1;
+            continue;
+        }
+
+        // Enforce strictly increasing DAC codes.
+        if p.raw_dac_code <= dacs[n - 1] {
+            continue;
+        }
+        raws[n] = p.raw_100uv;
+        dacs[n] = p.raw_dac_code;
+        n += 1;
+        if n >= MAX_POINTS {
+            break;
+        }
+    }
+
+    if n < 2 {
+        return Err(CalError::InvalidCurve);
+    }
+
+    // Helper: interpolate/extrapolate within a segment.
+    fn interp(raw_a: i16, raw_b: i16, dac_a: u16, dac_b: u16, raw: i32) -> Result<u16, CalError> {
+        let raw_a_i32 = raw_a as i32;
+        let raw_b_i32 = raw_b as i32;
+        let den = (raw_b_i32 - raw_a_i32) as i64;
+        if den == 0 {
+            return Err(CalError::InvalidCurve);
+        }
+        let t_num = (raw - raw_a_i32) as i64;
+        let dac_a_i64 = dac_a as i64;
+        let dac_b_i64 = dac_b as i64;
+        let out = dac_a_i64 + (dac_b_i64 - dac_a_i64) * t_num / den;
+        Ok(out.clamp(0, 4095) as u16)
+    }
+
+    // Segment selection mirrors `piecewise_linear` (extrapolate using end segments).
+    if raw_i32 <= raws[0] as i32 {
+        return interp(raws[0], raws[1], dacs[0], dacs[1], raw_i32);
+    }
+    let last = n - 1;
+    if raw_i32 >= raws[last] as i32 {
+        return interp(
+            raws[last - 1],
+            raws[last],
+            dacs[last - 1],
+            dacs[last],
+            raw_i32,
+        );
+    }
+
+    for i in 0..(n - 1) {
+        let a_raw = raws[i] as i32;
+        let b_raw = raws[i + 1] as i32;
+        if raw_i32 >= a_raw && raw_i32 <= b_raw {
+            return interp(raws[i], raws[i + 1], dacs[i], dacs[i + 1], raw_i32);
+        }
+    }
+
+    Err(CalError::InvalidCurve)
+}
+
+/// Fallback mapping from raw (100 µV units) to DAC code using the current ADC
+/// reference voltage (`vref_mv`), assuming `V_DAC ≈ V_SNS`.
+pub fn raw_100uv_to_dac_code_vref(raw_100uv: i16, vref_mv: u32) -> u16 {
+    let raw_i32 = raw_100uv as i32;
+    if raw_i32 <= 0 || vref_mv == 0 {
         return 0;
     }
-    let code = (raw_i32 as i64 * dac_ref_code as i64) / (RAW_CUR_0P5A_100UV as i64);
-    code.clamp(0, 4095) as u16
+    // raw_100uv -> mV: raw/10.
+    // dac_code = V(mV) / vref_mv * 4095 = raw * 4095 / (vref_mv * 10).
+    let num = raw_i32 as i64 * 4095;
+    let den = (vref_mv as i64) * 10;
+    (num / den).clamp(0, 4095) as u16
 }
 
 #[derive(Copy, Clone, Debug, Default)]
@@ -458,6 +560,14 @@ mod tests {
         }
     }
 
+    fn pt_dac(raw: i16, dac: u16, meas: i32) -> CalPoint {
+        CalPoint {
+            raw_100uv: raw,
+            raw_dac_code: dac,
+            meas_physical: meas,
+        }
+    }
+
     #[test]
     fn piecewise_one_point_scale() {
         let points = [pt(1000, 2000)];
@@ -477,6 +587,45 @@ mod tests {
         let points = [pt(1000, 1000), pt(2000, 2000), pt(4000, 3000)];
         assert_eq!(piecewise_linear(&points, 1500).unwrap(), 1500);
         assert_eq!(piecewise_linear(&points, 3000).unwrap(), 2500);
+    }
+
+    #[test]
+    fn raw_to_dac_calibrated_basic_interpolation() {
+        let points = [pt_dac(0, 0, 0), pt_dac(2500, 353, 500)];
+        assert_eq!(
+            raw_100uv_to_dac_code_calibrated(&points, 1250).unwrap(),
+            176
+        );
+    }
+
+    #[test]
+    fn raw_to_dac_calibrated_drops_non_monotonic_dac_points() {
+        let points = [
+            pt_dac(0, 0, 0),
+            pt_dac(1000, 200, 100),
+            pt_dac(2000, 150, 200), // non-monotonic DAC, should be dropped
+            pt_dac(3000, 400, 300),
+        ];
+        // Interpolate between (1000->200) and (3000->400).
+        assert_eq!(
+            raw_100uv_to_dac_code_calibrated(&points, 2000).unwrap(),
+            300
+        );
+    }
+
+    #[test]
+    fn raw_to_dac_calibrated_rejects_all_zero_dac_curve() {
+        let points = [pt_dac(0, 0, 0), pt_dac(25_000, 0, 5000)];
+        assert_eq!(
+            raw_100uv_to_dac_code_calibrated(&points, 1000).unwrap_err(),
+            CalError::InvalidCurve
+        );
+    }
+
+    #[test]
+    fn raw_to_dac_vref_matches_2p9v_expectation() {
+        // 0.5A -> 0.25V -> 250mV -> raw=2500 (100uV).
+        assert_eq!(raw_100uv_to_dac_code_vref(2500, 2900), 353);
     }
 
     #[test]
@@ -502,15 +651,9 @@ mod tests {
 
     #[test]
     fn prepare_rejects_non_monotonic_meas() {
-        let mut pts = [
-            pt(1000, 1000),
-            pt(2000, 900),
-            CalPoint::default(),
-            CalPoint::default(),
-            CalPoint::default(),
-            CalPoint::default(),
-            CalPoint::default(),
-        ];
+        let mut pts = [CalPoint::default(); MAX_POINTS];
+        pts[0] = pt(1000, 1000);
+        pts[1] = pt(2000, 900);
         let err = prepare_curve(&mut pts, 2).unwrap_err();
         assert_eq!(err, CalError::NonMonotonicMeas);
     }
