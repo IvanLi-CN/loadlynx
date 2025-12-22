@@ -6,12 +6,14 @@ import {
   isMockBaseUrl,
 } from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
-import { loadDevices, type StoredDevice, saveDevices } from "./device-store.ts";
+import type { StoredDevice } from "./device-store.ts";
+import { useDeviceStore } from "./store-context.tsx";
 
 export function useDevicesQuery() {
+  const store = useDeviceStore();
   return useQuery({
     queryKey: ["devices"],
-    queryFn: async () => loadDevices(),
+    queryFn: async () => store.getDevices(),
   });
 }
 
@@ -49,6 +51,7 @@ export function useDeviceIdentity(device: StoredDevice | null | undefined) {
 export function useAddDeviceMutation() {
   // Adds a demo device backed by the in-memory mock backend. This is only
   // available when ENABLE_MOCK is true.
+  const store = useDeviceStore();
   const queryClient = useQueryClient();
 
   return useMutation({
@@ -56,7 +59,7 @@ export function useAddDeviceMutation() {
       if (!ENABLE_MOCK) {
         throw new Error("Mock backend is disabled");
       }
-      const current = loadDevices();
+      const current = store.getDevices();
       const demoCount = current.filter((device) =>
         device.baseUrl.startsWith("mock://"),
       ).length;
@@ -67,7 +70,7 @@ export function useAddDeviceMutation() {
         baseUrl: `mock://demo-${index}`,
       };
       const next = [...current, nextDevice];
-      saveDevices(next);
+      store.setDevices(next);
       return next;
     },
     onSuccess: (next) => {
@@ -82,11 +85,12 @@ export interface AddRealDeviceInput {
 }
 
 export function useAddRealDeviceMutation() {
+  const store = useDeviceStore();
   const queryClient = useQueryClient();
 
   return useMutation({
     mutationFn: async (input: AddRealDeviceInput) => {
-      const current = loadDevices();
+      const current = store.getDevices();
       const index = current.length + 1;
       const nextDevice: StoredDevice = {
         id: `device-${String(index).padStart(3, "0")}`,
@@ -94,7 +98,7 @@ export function useAddRealDeviceMutation() {
         baseUrl: input.baseUrl,
       };
       const next = [...current, nextDevice];
-      saveDevices(next);
+      store.setDevices(next);
       return next;
     },
     onSuccess: (next) => {
