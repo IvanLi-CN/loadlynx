@@ -1,5 +1,5 @@
-import { createContext, useContext } from "react";
 import type { ReactNode } from "react";
+import { createContext, useContext } from "react";
 import type { DeviceStore } from "./device-store.ts";
 
 const DeviceStoreContext = createContext<DeviceStore | null>(null);
@@ -22,4 +22,3 @@ export function useDeviceStore(): DeviceStore {
   }
   return store;
 }
-

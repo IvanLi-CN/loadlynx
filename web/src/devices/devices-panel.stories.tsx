@@ -1,8 +1,8 @@
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { Meta, StoryObj } from "@storybook/react";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { useState } from "react";
-import { DevicesPanel } from "./devices-panel.tsx";
 import { MemoryDeviceStore } from "./device-store.ts";
+import { DevicesPanel } from "./devices-panel.tsx";
 import { DeviceStoreProvider } from "./store-context.tsx";
 
 function StoryRoot() {
@@ -51,4 +51,3 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {};
-

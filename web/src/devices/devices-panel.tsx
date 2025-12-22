@@ -13,7 +13,8 @@ export function DevicesPanel() {
         <div className="space-y-1">
           <h2 className="text-2xl font-bold">Devices</h2>
           <p className="text-sm text-base-content/70">
-            Storybook-safe device persistence via injected <code>DeviceStore</code>.
+            Storybook-safe device persistence via injected{" "}
+            <code>DeviceStore</code>.
           </p>
         </div>
 
@@ -65,4 +66,3 @@ export function DevicesPanel() {
     </div>
   );
 }
-
