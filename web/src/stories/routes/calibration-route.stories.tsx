@@ -28,4 +28,3 @@ export const Default: Story = {
     await expect(currentCh1Tab).toHaveClass("tab-active");
   },
 };
-
