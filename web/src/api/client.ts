@@ -44,6 +44,10 @@ export function isMockBaseUrl(baseUrl: string): boolean {
   return normalized.startsWith("mock://");
 }
 
+function isStorybookRuntime(): boolean {
+  return globalThis.__LOADLYNX_STORYBOOK__ === true;
+}
+
 export interface HttpApiErrorInit {
   status: number;
   code?: string;
@@ -132,6 +136,14 @@ async function httpJson<T>(
   path: string,
   init?: RequestInit,
 ): Promise<T> {
+  const method = init?.method ?? "GET";
+
+  if (isStorybookRuntime() && !isMockBaseUrl(baseUrl)) {
+    throw new Error(
+      `[LoadLynx] Real device HTTP is disabled in Storybook. This request tried to call ${method} ${path} with baseUrl="${baseUrl}". Use a mock:// baseUrl instead.`,
+    );
+  }
+
   const url = new URL(path, baseUrl);
 
   const headers: Record<string, string> = {
@@ -142,7 +154,6 @@ async function httpJson<T>(
   // connection close to avoid keeping sockets busy between polls/mutations.
   headers.Connection ||= "close";
 
-  const method = init?.method ?? "GET";
   const hasBody = init?.body !== undefined && init.body !== null;
   if (hasBody || method.toUpperCase() !== "GET") {
     headers["Content-Type"] ||= "application/json";
@@ -585,6 +596,12 @@ export function subscribeStatusStream(
       stopped = true;
       clearInterval(timer);
     };
+  }
+
+  if (isStorybookRuntime()) {
+    throw new Error(
+      `[LoadLynx] Real device status streaming is disabled in Storybook. Use a mock:// baseUrl instead (attempted baseUrl="${baseUrl}").`,
+    );
   }
 
   const url = new URL("/api/v1/status", baseUrl);
