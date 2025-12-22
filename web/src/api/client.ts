@@ -588,6 +588,7 @@ export function subscribeStatusStream(
   }
 
   const url = new URL("/api/v1/status", baseUrl);
+  let closed = false;
 
   const isFastStatusView = (val: unknown): val is FastStatusView => {
     return (
@@ -597,6 +598,22 @@ export function subscribeStatusStream(
       "link_up" in val &&
       "hello_seen" in val
     );
+  };
+
+  const emitMessage = (view: FastStatusView) => {
+    if (closed) {
+      return;
+    }
+    onMessage(view);
+  };
+
+  const emitError = (error: Event | Error) => {
+    if (closed) {
+      return;
+    }
+    if (onError) {
+      onError(error);
+    }
   };
 
   const parseAndEmit = (payload: string) => {
@@ -621,13 +638,11 @@ export function subscribeStatusStream(
             fault_flags_decoded: parsed.fault_flags_decoded ?? [],
           };
 
-      onMessage(view);
+      emitMessage(view);
     } catch (error) {
-      if (onError) {
-        onError(
-          error instanceof Error ? error : new Error("invalid SSE payload"),
-        );
-      }
+      emitError(
+        error instanceof Error ? error : new Error("invalid SSE payload"),
+      );
     }
   };
 
@@ -636,9 +651,7 @@ export function subscribeStatusStream(
   };
 
   const handleError = (event: Event) => {
-    if (onError) {
-      onError(event);
-    }
+    emitError(event);
   };
 
   // Prevent multiple browser tabs from opening parallel SSE connections to the
@@ -656,6 +669,7 @@ export function subscribeStatusStream(
     source.addEventListener("error", handleError);
 
     return () => {
+      closed = true;
       source.removeEventListener("status", handleStatus as EventListener);
       source.removeEventListener("message", handleStatus as EventListener);
       source.removeEventListener("error", handleError);
@@ -663,86 +677,90 @@ export function subscribeStatusStream(
     };
   }
 
-  const lockName = `llx-status-sse:${baseUrl}`;
+  const lockName = `llx-status-sse:${new URL(baseUrl).origin}`;
   const channel = new BroadcastChannel(lockName);
 
-  let closed = false;
-  let leaderAttemptInFlight = false;
-  let source: EventSource | null = null;
   let releaseLeader: (() => void) | null = null;
-  let leaderStatusHandler: ((event: MessageEvent) => void) | null = null;
-  let leaderErrorHandler: ((event: Event) => void) | null = null;
 
   type BroadcastEnvelope =
     | { t: "status"; d: string; from: string }
     | { t: "bye"; from: string };
 
-  const startLeaderIfAvailable = () => {
-    if (closed || leaderAttemptInFlight || releaseLeader) {
-      return;
-    }
-    leaderAttemptInFlight = true;
+  void navigator.locks
+    .request(lockName, { mode: "exclusive" }, async () => {
+      if (closed) {
+        return;
+      }
 
-    void navigator.locks.request(
-      lockName,
-      { mode: "exclusive", ifAvailable: true },
-      async (lock) => {
-        leaderAttemptInFlight = false;
-        if (!lock || closed) {
-          return;
-        }
+      let resolveRelease: (() => void) | null = null;
+      const waitRelease = new Promise<void>((resolve) => {
+        resolveRelease = resolve;
+      });
+      releaseLeader = () => {
+        resolveRelease?.();
+      };
 
-        let resolveRelease: (() => void) | null = null;
-        const waitRelease = new Promise<void>((resolve) => {
-          resolveRelease = resolve;
-        });
-        releaseLeader = () => {
-          resolveRelease?.();
-        };
+      const leaderSource = new EventSource(url.toString());
 
-        source = new EventSource(url.toString());
-
-        const broadcastStatus = (event: MessageEvent) => {
-          const msg: BroadcastEnvelope = {
-            t: "status",
-            d: event.data,
-            from: TAB_ID,
-          };
-          channel.postMessage(msg);
-          parseAndEmit(event.data);
-        };
-        const broadcastError = (event: Event) => {
-          handleError(event);
-        };
-
-        leaderStatusHandler = broadcastStatus;
-        leaderErrorHandler = broadcastError;
-
-        source.addEventListener("status", broadcastStatus as EventListener);
-        source.addEventListener("message", broadcastStatus as EventListener);
-        source.addEventListener("error", broadcastError);
-
-        await waitRelease;
-
-        source.removeEventListener("status", broadcastStatus as EventListener);
-        source.removeEventListener("message", broadcastStatus as EventListener);
-        source.removeEventListener("error", broadcastError);
-        source.close();
-        source = null;
-
-        leaderStatusHandler = null;
-        leaderErrorHandler = null;
-
-        channel.postMessage({
-          t: "bye",
+      const broadcastStatus = (event: MessageEvent) => {
+        const msg: BroadcastEnvelope = {
+          t: "status",
+          d: event.data,
           from: TAB_ID,
-        } satisfies BroadcastEnvelope);
+        };
+        try {
+          channel.postMessage(msg);
+        } catch {
+          // Best-effort fan-out; the channel may already be closed during cleanup.
+        }
+        parseAndEmit(event.data);
+      };
+      const broadcastError = (event: Event) => {
+        handleError(event);
+      };
+
+      leaderSource.addEventListener("status", broadcastStatus as EventListener);
+      leaderSource.addEventListener(
+        "message",
+        broadcastStatus as EventListener,
+      );
+      leaderSource.addEventListener("error", broadcastError);
+
+      try {
+        await waitRelease;
+      } finally {
+        leaderSource.removeEventListener(
+          "status",
+          broadcastStatus as EventListener,
+        );
+        leaderSource.removeEventListener(
+          "message",
+          broadcastStatus as EventListener,
+        );
+        leaderSource.removeEventListener("error", broadcastError);
+        leaderSource.close();
+
+        try {
+          channel.postMessage({
+            t: "bye",
+            from: TAB_ID,
+          } satisfies BroadcastEnvelope);
+        } catch {
+          // ignore
+        }
         releaseLeader = null;
-      },
-    );
-  };
+      }
+    })
+    .catch((error) => {
+      emitError(
+        error instanceof Error ? error : new Error("status lock error"),
+      );
+    });
 
   const onChannelMessage = (event: MessageEvent) => {
+    if (closed) {
+      return;
+    }
     const payload = event.data as Partial<BroadcastEnvelope> | null;
     if (!payload || typeof payload !== "object" || payload.from === TAB_ID) {
       return;
@@ -751,34 +769,14 @@ export function subscribeStatusStream(
       parseAndEmit(payload.d);
       return;
     }
-    if (payload.t === "bye") {
-      startLeaderIfAvailable();
-    }
   };
 
   channel.addEventListener("message", onChannelMessage);
-  startLeaderIfAvailable();
 
   return () => {
     closed = true;
     releaseLeader?.();
-    if (source) {
-      if (leaderStatusHandler) {
-        source.removeEventListener(
-          "status",
-          leaderStatusHandler as EventListener,
-        );
-        source.removeEventListener(
-          "message",
-          leaderStatusHandler as EventListener,
-        );
-      }
-      if (leaderErrorHandler) {
-        source.removeEventListener("error", leaderErrorHandler);
-      }
-      source.close();
-      source = null;
-    }
+    releaseLeader = null;
     channel.removeEventListener("message", onChannelMessage);
     channel.close();
   };

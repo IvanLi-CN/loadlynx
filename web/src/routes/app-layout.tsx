@@ -1,12 +1,19 @@
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
-import { Link, Outlet, useParams, useRouterState } from "@tanstack/react-router";
+import {
+  Link,
+  Outlet,
+  useParams,
+  useRouterState,
+} from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/router-devtools";
 import { useEffect, useRef } from "react";
 import { postCalibrationMode } from "../api/client.ts";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
 export function AppLayout() {
-  const pathname = useRouterState({ select: (state) => state.location.pathname });
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const isCalibrationPage = /\/calibration$/.test(pathname);
   const { deviceId } = useParams({ strict: false }) as {
     deviceId?: string;
