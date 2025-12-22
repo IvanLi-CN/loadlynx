@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
+import { createMemoryHistory, RouterProvider } from "@tanstack/react-router";
 import { useState } from "react";
 import type { StoredDevice } from "../../devices/device-store.ts";
 import { MemoryDeviceStore } from "../../devices/device-store.ts";
@@ -42,7 +42,9 @@ export function RouteStoryHarness(props: {
   );
 
   const [router] = useState(() => {
-    const history = createMemoryHistory({ initialEntries: [props.initialPath] });
+    const history = createMemoryHistory({
+      initialEntries: [props.initialPath],
+    });
     return createAppRouter(queryClient, history);
   });
 
