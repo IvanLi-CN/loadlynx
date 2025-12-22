@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use core::{fmt::Write as _, str::FromStr, sync::atomic::Ordering};
+use core::{
+    fmt::Write as _,
+    str::FromStr,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use alloc::{format, string::String};
 use defmt::*;
@@ -34,6 +38,10 @@ use crate::{
 };
 
 use loadlynx_calibration_format::{self as calfmt, CalPoint, CurveKind, ProfileSource};
+
+/// Allow only one active status SSE stream at a time to prevent exhausting the
+/// small HTTP worker pool.
+static STATUS_SSE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Shared Wi‑Fi/IPv4 state for future HTTP APIs.
 #[derive(Clone, Copy, Debug)]
@@ -463,14 +471,17 @@ async fn http_worker(
                         worker_id, err
                     );
                 }
+                // Close the connection gracefully (FIN) instead of aborting it
+                // with a TCP RST. Browsers may treat RST as a network error even
+                // after receiving a complete HTTP response.
+                socket.close();
+                let _ = socket.flush().await;
             }
             Err(err) => {
                 warn!("HTTP worker {} accept error: {:?}", worker_id, err);
                 Timer::after(Duration::from_millis(200)).await;
             }
         }
-
-        socket.abort();
     }
 }
 
@@ -1221,6 +1232,30 @@ async fn handle_status_sse(
     // Conservative rate to keep CPU/stack usage low while still improving
     // smoothness over 400 ms polling.
     const SSE_INTERVAL_MS: u64 = 200;
+
+    if STATUS_SSE_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let mut body = String::new();
+        write_error_body(
+            &mut body,
+            "UNAVAILABLE",
+            "status SSE stream already active",
+            true,
+            None,
+        );
+        write_http_response(socket, "HTTP/1.1", "503 Service Unavailable", &body).await?;
+        return Ok(());
+    }
+
+    struct ClearSseActive;
+    impl Drop for ClearSseActive {
+        fn drop(&mut self) {
+            STATUS_SSE_ACTIVE.store(false, Ordering::Release);
+        }
+    }
+    let _guard = ClearSseActive;
 
     write_sse_response_head(socket).await?;
 
