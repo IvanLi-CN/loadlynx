@@ -4,6 +4,8 @@ import { INITIAL_VIEWPORTS } from "storybook/viewport";
 
 import "../src/index.css";
 
+globalThis.__LOADLYNX_STORYBOOK__ = true;
+
 const withDarkTheme: Decorator = (Story) => {
   document.documentElement.setAttribute("data-theme", "dark");
   document.body.classList.add(
