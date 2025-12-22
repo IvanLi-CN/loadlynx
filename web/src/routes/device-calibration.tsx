@@ -2,9 +2,11 @@ import type { QueryObserverResult } from "@tanstack/react-query";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { HttpApiError } from "../api/client.ts";
 import {
   getCalibrationProfile,
+  getStatus,
+  type HttpApiError,
+  isHttpApiError,
   postCalibrationApply,
   postCalibrationCommit,
   postCalibrationMode,
@@ -37,6 +39,7 @@ type VoltagePair = [raw: number, mv: number];
 type CurrentPair = [[raw: number, dac_code: number], value: number];
 
 type CalibrationTab = "voltage" | "current_ch1" | "current_ch2";
+type WithStatusStreamPaused = <T>(op: () => Promise<T>) => Promise<T>;
 
 interface StoredCalibrationDraftV2 {
   version: 2;
@@ -364,11 +367,49 @@ interface InfoToastEntry {
   timeoutId: number;
 }
 
+interface StatusWaiter {
+  id: string;
+  predicate: (view: FastStatusView) => boolean;
+  resolve: (view: FastStatusView) => void;
+  reject: (error: Error) => void;
+  timeoutId: number;
+}
+
 function makeUndoId(): string {
   if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
     return crypto.randomUUID();
   }
   return `undo-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function retryDeviceCall<T>(
+  op: () => Promise<T>,
+  opts?: { attempts?: number; firstDelayMs?: number; maxDelayMs?: number },
+): Promise<T> {
+  const attempts = Math.max(1, opts?.attempts ?? 6);
+  let delayMs = Math.max(0, opts?.firstDelayMs ?? 150);
+  const maxDelayMs = Math.max(delayMs, opts?.maxDelayMs ?? 1200);
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await op();
+    } catch (error) {
+      const retryable =
+        isHttpApiError(error) &&
+        (error.retryable ?? (error.status === 0 || error.status >= 500));
+      if (!retryable || attempt === attempts) {
+        throw error;
+      }
+      await sleep(delayMs);
+      delayMs = Math.min(maxDelayMs, delayMs * 2);
+    }
+  }
+
+  throw new Error("unreachable");
 }
 
 function mergeVoltageCandidatesByMv(
@@ -556,14 +597,99 @@ function DeviceCalibrationPage({
 
   // Live status stream (includes optional RAW fields in calibration mode).
   const [status, setStatus] = useState<FastStatusView | null>(null);
+  const [statusStreamPaused, setStatusStreamPaused] = useState(false);
   const statusRef = useRef<FastStatusView | null>(status);
+  const statusWaitersRef = useRef<StatusWaiter[]>([]);
+
+  const statusPauseDepthRef = useRef(0);
+  const withStatusStreamPaused = useCallback<WithStatusStreamPaused>(
+    async (op) => {
+      statusPauseDepthRef.current += 1;
+      if (statusPauseDepthRef.current === 1) {
+        setStatusStreamPaused(true);
+        // Give the device time to notice and free the SSE HTTP worker.
+        await sleep(350);
+      }
+      try {
+        return await op();
+      } finally {
+        statusPauseDepthRef.current -= 1;
+        if (statusPauseDepthRef.current === 0) {
+          setStatusStreamPaused(false);
+        }
+      }
+    },
+    [],
+  );
+
+  const rejectStatusWaiters = useCallback((error: Error) => {
+    for (const waiter of statusWaitersRef.current) {
+      window.clearTimeout(waiter.timeoutId);
+      waiter.reject(error);
+    }
+    statusWaitersRef.current = [];
+  }, []);
+
   useEffect(() => {
     statusRef.current = status;
+    if (!status) {
+      return;
+    }
+    const remaining: StatusWaiter[] = [];
+    for (const waiter of statusWaitersRef.current) {
+      if (waiter.predicate(status)) {
+        window.clearTimeout(waiter.timeoutId);
+        waiter.resolve(status);
+      } else {
+        remaining.push(waiter);
+      }
+    }
+    statusWaitersRef.current = remaining;
   }, [status]);
+
+  const waitForStatus = useCallback(
+    (
+      predicate: (view: FastStatusView) => boolean,
+      timeoutMs: number,
+    ): Promise<FastStatusView> => {
+      const current = statusRef.current;
+      if (current && predicate(current)) {
+        return Promise.resolve(current);
+      }
+      return new Promise((resolve, reject) => {
+        const id = makeUndoId();
+        const timeoutId = window.setTimeout(
+          () => {
+            statusWaitersRef.current = statusWaitersRef.current.filter(
+              (w) => w.id !== id,
+            );
+            reject(new Error("Timed out waiting for device status"));
+          },
+          Math.max(0, timeoutMs),
+        );
+        statusWaitersRef.current.push({
+          id,
+          predicate,
+          resolve,
+          reject,
+          timeoutId,
+        });
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     // Reset state while switching devices/URLs.
+    void baseUrl;
     setStatus(null);
+    rejectStatusWaiters(new Error("Status stream reset"));
+  }, [baseUrl, rejectStatusWaiters]);
+
+  useEffect(() => {
+    if (statusStreamPaused) {
+      return undefined;
+    }
 
     const unsubscribe = subscribeStatusStream(
       baseUrl,
@@ -571,8 +697,11 @@ function DeviceCalibrationPage({
       () => setStatus(null),
     );
 
-    return () => unsubscribe();
-  }, [baseUrl]);
+    return () => {
+      unsubscribe();
+      rejectStatusWaiters(new Error("Status stream closed"));
+    };
+  }, [baseUrl, rejectStatusWaiters, statusStreamPaused]);
 
   const isOffline =
     status === null ||
@@ -581,7 +710,6 @@ function DeviceCalibrationPage({
 
   const deviceCalKind = status?.raw.cal_kind ?? null;
   const expectedCalKind = expectedCalKindForTab(activeTab);
-  const statusTick = status?.raw.uptime_ms ?? 0;
 
   const profileQuery = useQuery<CalibrationProfile, HttpApiError>({
     queryKey: ["device", deviceId, "calibration", "profile"],
@@ -1169,18 +1297,7 @@ function DeviceCalibrationPage({
     });
   }, [draftStorageReady, deviceId, baseUrl, activeTab, draftProfile]);
 
-  // Always attempt to reset mode when leaving the page.
-  useEffect(() => {
-    return () => {
-      postCalibrationMode(baseUrl, { kind: "off" }).catch(console.error);
-    };
-  }, [baseUrl]);
-
   const modeSyncInFlightRef = useRef<Promise<void> | null>(null);
-  const autoSyncStateRef = useRef<{
-    lastAttemptMs: number;
-    attempts: number;
-  }>({ lastAttemptMs: 0, attempts: 0 });
 
   const ensureActiveTabCalMode = useCallback(
     async (action: string, opts?: { silent?: boolean }): Promise<boolean> => {
@@ -1193,7 +1310,10 @@ function DeviceCalibrationPage({
         }
       }
 
-      if (isOffline) {
+      // If status is still loading (null), try anyway so the device can enter
+      // calibration mode and start reporting RAW fields. Only block once we
+      // know the device is offline/faulted.
+      if (statusRef.current !== null && isOffline) {
         return false;
       }
 
@@ -1204,7 +1324,12 @@ function DeviceCalibrationPage({
         activeTab === "voltage" ? "voltage" : activeTab;
 
       const attempt = (async (): Promise<void> => {
-        await postCalibrationMode(baseUrl, { kind });
+        await withStatusStreamPaused(async () => {
+          await retryDeviceCall(
+            () => postCalibrationMode(baseUrl, { kind }),
+            { attempts: 4, firstDelayMs: 120, maxDelayMs: 600 },
+          );
+        });
       })();
 
       modeSyncInFlightRef.current = attempt;
@@ -1225,64 +1350,62 @@ function DeviceCalibrationPage({
         }
       }
 
-      const deadline = Date.now() + 1500;
-      while (Date.now() < deadline) {
-        const seen = statusRef.current?.raw.cal_kind ?? null;
-        if (seen === expectedCalKind) return true;
-        await new Promise<void>((resolve) => setTimeout(resolve, 50));
-      }
-
-      if (!opts?.silent) {
-        const seen = statusRef.current?.raw.cal_kind ?? null;
-        showAlert(
-          "Calibration mode mismatch",
-          "Device did not switch to the expected calibration mode.",
-          [
-            `expected=${formatDeviceCalKind(expectedCalKind)}`,
-            `device=${formatDeviceCalKind(seen)}`,
-          ],
+      try {
+        await waitForStatus(
+          (view) => (view.raw.cal_kind ?? null) === expectedCalKind,
+          1500,
         );
+        return true;
+      } catch {
+        try {
+          const snapshot = await retryDeviceCall(() => getStatus(baseUrl), {
+            attempts: 2,
+            firstDelayMs: 100,
+            maxDelayMs: 400,
+          });
+          setStatus(snapshot);
+          if ((snapshot.raw.cal_kind ?? null) === expectedCalKind) {
+            return true;
+          }
+        } catch (err) {
+          console.error(err);
+        }
+
+        if (!opts?.silent) {
+          const seen = statusRef.current?.raw.cal_kind ?? null;
+          showAlert(
+            "Calibration mode mismatch",
+            "Device did not switch to the expected calibration mode.",
+            [
+              `expected=${formatDeviceCalKind(expectedCalKind)}`,
+              `device=${formatDeviceCalKind(seen)}`,
+            ],
+          );
+        }
+        return false;
       }
-      return false;
     },
-    [activeTab, baseUrl, expectedCalKind, isOffline, showAlert],
+    [
+      activeTab,
+      baseUrl,
+      expectedCalKind,
+      isOffline,
+      showAlert,
+      waitForStatus,
+      withStatusStreamPaused,
+    ],
   );
 
-  // Auto-sync mode on entry and while the page is open. This avoids "tab says
-  // current_ch2 but device is still off/other" after refresh or link glitches.
+  const ensureModeRef = useRef(ensureActiveTabCalMode);
   useEffect(() => {
-    void statusTick;
-    if (isOffline) return;
-    if (statusRef.current === null) return;
+    ensureModeRef.current = ensureActiveTabCalMode;
+  }, [ensureActiveTabCalMode]);
 
-    if (deviceCalKind === expectedCalKind) {
-      autoSyncStateRef.current.attempts = 0;
-      return;
-    }
-
-    const now = Date.now();
-    const state = autoSyncStateRef.current;
-    const minIntervalMs = state.attempts <= 2 ? 300 : 1200;
-    if (now - state.lastAttemptMs < minIntervalMs) return;
-
-    state.lastAttemptMs = now;
-    state.attempts = Math.min(20, state.attempts + 1);
-    void ensureActiveTabCalMode("Sync", { silent: true });
-  }, [
-    deviceCalKind,
-    ensureActiveTabCalMode,
-    expectedCalKind,
-    isOffline,
-    statusTick,
-  ]);
-
-  // Reset auto-sync backoff when the user switches tabs, then attempt a fast sync.
+  // Attempt a best-effort mode sync whenever the user changes tabs.
   useEffect(() => {
     void activeTab;
-    autoSyncStateRef.current.attempts = 0;
-    autoSyncStateRef.current.lastAttemptMs = 0;
-    void ensureActiveTabCalMode("Sync", { silent: true });
-  }, [activeTab, ensureActiveTabCalMode]);
+    void ensureModeRef.current("Sync", { silent: true });
+  }, [activeTab]);
 
   return (
     <div className="flex flex-col gap-6 max-w-5xl mx-auto">
@@ -1457,6 +1580,7 @@ function DeviceCalibrationPage({
           baseUrl={baseUrl}
           status={status}
           ensureMode={ensureActiveTabCalMode}
+          withStatusStreamPaused={withStatusStreamPaused}
           deviceProfile={profileQuery.data}
           draftProfile={draftProfile}
           previewProfile={previewProfile}
@@ -1481,6 +1605,7 @@ function DeviceCalibrationPage({
           baseUrl={baseUrl}
           status={status}
           ensureMode={ensureActiveTabCalMode}
+          withStatusStreamPaused={withStatusStreamPaused}
           deviceProfile={profileQuery.data}
           draftProfile={draftProfile}
           previewProfile={previewProfile}
@@ -1573,6 +1698,7 @@ function VoltageCalibration({
   baseUrl,
   status,
   ensureMode,
+  withStatusStreamPaused,
   deviceProfile,
   draftProfile,
   previewProfile,
@@ -1594,6 +1720,7 @@ function VoltageCalibration({
   baseUrl: string;
   status: FastStatusView | null;
   ensureMode: (action: string, opts?: { silent?: boolean }) => Promise<boolean>;
+  withStatusStreamPaused: WithStatusStreamPaused;
   deviceProfile: CalibrationProfile | undefined;
   draftProfile: CalibrationProfile;
   previewProfile: CalibrationProfile | null;
@@ -1793,44 +1920,50 @@ function VoltageCalibration({
 
   const applyToDeviceMutation = useMutation({
     mutationFn: async () => {
-      if (draftLocalPoints.length === 0 && draftRemotePoints.length === 0) {
-        throw new Error("Draft is empty. Nothing to sync.");
-      }
+      await withStatusStreamPaused(async () => {
+        if (draftLocalPoints.length === 0 && draftRemotePoints.length === 0) {
+          throw new Error("Draft is empty. Nothing to sync.");
+        }
 
-      const local = validateAndNormalizeVoltagePoints(
-        "v_local",
-        draftLocalPoints,
-      );
-      const remote = validateAndNormalizeVoltagePoints(
-        "v_remote",
-        draftRemotePoints,
-      );
-      const issues = [...local.issues, ...remote.issues];
-      if (issues.length > 0) {
-        onAlert(
-          "Calibration data cleanup (Apply)",
-          "Draft contains duplicate/conflicting samples. Apply will use a cleaned curve and may drop/merge points.",
-          issues.map((i) => `${i.path}: ${i.message}`),
+        const local = validateAndNormalizeVoltagePoints(
+          "v_local",
+          draftLocalPoints,
         );
-      }
+        const remote = validateAndNormalizeVoltagePoints(
+          "v_remote",
+          draftRemotePoints,
+        );
+        const issues = [...local.issues, ...remote.issues];
+        if (issues.length > 0) {
+          onAlert(
+            "Calibration data cleanup (Apply)",
+            "Draft contains duplicate/conflicting samples. Apply will use a cleaned curve and may drop/merge points.",
+            issues.map((i) => `${i.path}: ${i.message}`),
+          );
+        }
 
-      if (local.normalized.length === 0 && remote.normalized.length === 0) {
-        throw new Error("No valid points after cleanup. Nothing to apply.");
-      }
+        if (local.normalized.length === 0 && remote.normalized.length === 0) {
+          throw new Error("No valid points after cleanup. Nothing to apply.");
+        }
 
-      if (local.normalized.length > 0) {
-        await postCalibrationApply(baseUrl, {
-          kind: "v_local",
-          points: local.normalized,
-        });
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
-      if (remote.normalized.length > 0) {
-        await postCalibrationApply(baseUrl, {
-          kind: "v_remote",
-          points: remote.normalized,
-        });
-      }
+        if (local.normalized.length > 0) {
+          await retryDeviceCall(() =>
+            postCalibrationApply(baseUrl, {
+              kind: "v_local",
+              points: local.normalized,
+            }),
+          );
+          await sleep(200);
+        }
+        if (remote.normalized.length > 0) {
+          await retryDeviceCall(() =>
+            postCalibrationApply(baseUrl, {
+              kind: "v_remote",
+              points: remote.normalized,
+            }),
+          );
+        }
+      });
     },
     onSuccess: async () => {
       await onRefetchProfile();
@@ -1839,44 +1972,50 @@ function VoltageCalibration({
 
   const commitToDeviceMutation = useMutation({
     mutationFn: async () => {
-      if (draftLocalPoints.length === 0 && draftRemotePoints.length === 0) {
-        throw new Error("Draft is empty. Nothing to sync.");
-      }
+      await withStatusStreamPaused(async () => {
+        if (draftLocalPoints.length === 0 && draftRemotePoints.length === 0) {
+          throw new Error("Draft is empty. Nothing to sync.");
+        }
 
-      const local = validateAndNormalizeVoltagePoints(
-        "v_local",
-        draftLocalPoints,
-      );
-      const remote = validateAndNormalizeVoltagePoints(
-        "v_remote",
-        draftRemotePoints,
-      );
-      const issues = [...local.issues, ...remote.issues];
-      if (issues.length > 0) {
-        onAlert(
-          "Calibration data cleanup (Commit)",
-          "Draft contains duplicate/conflicting samples. Commit will use a cleaned curve and may drop/merge points.",
-          issues.map((i) => `${i.path}: ${i.message}`),
+        const local = validateAndNormalizeVoltagePoints(
+          "v_local",
+          draftLocalPoints,
         );
-      }
+        const remote = validateAndNormalizeVoltagePoints(
+          "v_remote",
+          draftRemotePoints,
+        );
+        const issues = [...local.issues, ...remote.issues];
+        if (issues.length > 0) {
+          onAlert(
+            "Calibration data cleanup (Commit)",
+            "Draft contains duplicate/conflicting samples. Commit will use a cleaned curve and may drop/merge points.",
+            issues.map((i) => `${i.path}: ${i.message}`),
+          );
+        }
 
-      if (local.normalized.length === 0 && remote.normalized.length === 0) {
-        throw new Error("No valid points after cleanup. Nothing to commit.");
-      }
+        if (local.normalized.length === 0 && remote.normalized.length === 0) {
+          throw new Error("No valid points after cleanup. Nothing to commit.");
+        }
 
-      if (local.normalized.length > 0) {
-        await postCalibrationCommit(baseUrl, {
-          kind: "v_local",
-          points: local.normalized,
-        });
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
-      if (remote.normalized.length > 0) {
-        await postCalibrationCommit(baseUrl, {
-          kind: "v_remote",
-          points: remote.normalized,
-        });
-      }
+        if (local.normalized.length > 0) {
+          await retryDeviceCall(() =>
+            postCalibrationCommit(baseUrl, {
+              kind: "v_local",
+              points: local.normalized,
+            }),
+          );
+          await sleep(200);
+        }
+        if (remote.normalized.length > 0) {
+          await retryDeviceCall(() =>
+            postCalibrationCommit(baseUrl, {
+              kind: "v_remote",
+              points: remote.normalized,
+            }),
+          );
+        }
+      });
     },
     onSuccess: async () => {
       await onRefetchProfile();
@@ -1885,10 +2024,16 @@ function VoltageCalibration({
 
   const resetDeviceVoltageMutation = useMutation({
     mutationFn: async () => {
-      // "Reset All" for voltage: only reset v_local + v_remote (not current).
-      await postCalibrationReset(baseUrl, { kind: "v_local" });
-      await new Promise((resolve) => setTimeout(resolve, 200));
-      await postCalibrationReset(baseUrl, { kind: "v_remote" });
+      await withStatusStreamPaused(async () => {
+        // "Reset All" for voltage: only reset v_local + v_remote (not current).
+        await retryDeviceCall(() =>
+          postCalibrationReset(baseUrl, { kind: "v_local" }),
+        );
+        await sleep(200);
+        await retryDeviceCall(() =>
+          postCalibrationReset(baseUrl, { kind: "v_remote" }),
+        );
+      });
     },
     onSuccess: async () => {
       await onRefetchProfile();
@@ -2345,6 +2490,7 @@ function CurrentCalibration({
   baseUrl,
   status,
   ensureMode,
+  withStatusStreamPaused,
   deviceProfile,
   draftProfile,
   previewProfile,
@@ -2367,6 +2513,7 @@ function CurrentCalibration({
   baseUrl: string;
   status: FastStatusView | null;
   ensureMode: (action: string, opts?: { silent?: boolean }) => Promise<boolean>;
+  withStatusStreamPaused: WithStatusStreamPaused;
   deviceProfile: CalibrationProfile | undefined;
   draftProfile: CalibrationProfile;
   previewProfile: CalibrationProfile | null;
@@ -2764,23 +2911,27 @@ function CurrentCalibration({
 
   const applyToDeviceMutation = useMutation({
     mutationFn: async () => {
-      if (draftPoints.length === 0) {
-        throw new Error("Draft is empty. Nothing to sync.");
-      }
-      const validated = validateAndNormalizeCurrentPoints(curve, draftPoints);
-      if (validated.issues.length > 0) {
-        onAlert(
-          "Calibration data cleanup (Apply)",
-          "Draft contains duplicate/conflicting samples. Apply will use a cleaned curve and may drop/merge points.",
-          validated.issues.map((i) => `${i.path}: ${i.message}`),
+      await withStatusStreamPaused(async () => {
+        if (draftPoints.length === 0) {
+          throw new Error("Draft is empty. Nothing to sync.");
+        }
+        const validated = validateAndNormalizeCurrentPoints(curve, draftPoints);
+        if (validated.issues.length > 0) {
+          onAlert(
+            "Calibration data cleanup (Apply)",
+            "Draft contains duplicate/conflicting samples. Apply will use a cleaned curve and may drop/merge points.",
+            validated.issues.map((i) => `${i.path}: ${i.message}`),
+          );
+        }
+        if (validated.normalized.length === 0) {
+          throw new Error("No valid points after cleanup. Nothing to apply.");
+        }
+        await retryDeviceCall(() =>
+          postCalibrationApply(baseUrl, {
+            kind: curve,
+            points: validated.normalized,
+          }),
         );
-      }
-      if (validated.normalized.length === 0) {
-        throw new Error("No valid points after cleanup. Nothing to apply.");
-      }
-      return postCalibrationApply(baseUrl, {
-        kind: curve,
-        points: validated.normalized,
       });
     },
     onSuccess: async () => {
@@ -2790,23 +2941,27 @@ function CurrentCalibration({
 
   const commitToDeviceMutation = useMutation({
     mutationFn: async () => {
-      if (draftPoints.length === 0) {
-        throw new Error("Draft is empty. Nothing to sync.");
-      }
-      const validated = validateAndNormalizeCurrentPoints(curve, draftPoints);
-      if (validated.issues.length > 0) {
-        onAlert(
-          "Calibration data cleanup (Commit)",
-          "Draft contains duplicate/conflicting samples. Commit will use a cleaned curve and may drop/merge points.",
-          validated.issues.map((i) => `${i.path}: ${i.message}`),
+      await withStatusStreamPaused(async () => {
+        if (draftPoints.length === 0) {
+          throw new Error("Draft is empty. Nothing to sync.");
+        }
+        const validated = validateAndNormalizeCurrentPoints(curve, draftPoints);
+        if (validated.issues.length > 0) {
+          onAlert(
+            "Calibration data cleanup (Commit)",
+            "Draft contains duplicate/conflicting samples. Commit will use a cleaned curve and may drop/merge points.",
+            validated.issues.map((i) => `${i.path}: ${i.message}`),
+          );
+        }
+        if (validated.normalized.length === 0) {
+          throw new Error("No valid points after cleanup. Nothing to commit.");
+        }
+        await retryDeviceCall(() =>
+          postCalibrationCommit(baseUrl, {
+            kind: curve,
+            points: validated.normalized,
+          }),
         );
-      }
-      if (validated.normalized.length === 0) {
-        throw new Error("No valid points after cleanup. Nothing to commit.");
-      }
-      return postCalibrationCommit(baseUrl, {
-        kind: curve,
-        points: validated.normalized,
       });
     },
     onSuccess: async () => {
@@ -2815,7 +2970,13 @@ function CurrentCalibration({
   });
 
   const resetDeviceCurrentMutation = useMutation({
-    mutationFn: async () => postCalibrationReset(baseUrl, { kind: curve }),
+    mutationFn: async () => {
+      await withStatusStreamPaused(async () => {
+        await retryDeviceCall(() =>
+          postCalibrationReset(baseUrl, { kind: curve }),
+        );
+      });
+    },
     onSuccess: async () => {
       await onRefetchProfile();
       onResetDraftToEmpty("Device reset to defaults. Draft cleared.");
