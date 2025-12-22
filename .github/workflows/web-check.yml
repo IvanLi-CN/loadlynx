@@ -65,6 +65,10 @@ jobs:
         working-directory: web
         run: bun run build
 
+      - name: Storybook tests
+        working-directory: web
+        run: bun run test:storybook:ci
+
       - name: E2E tests
         working-directory: web
         run: bun run test:e2e
