@@ -59,7 +59,113 @@ export interface FastStatusJson {
   sink_exhaust_temp_mc: number;
   mcu_temp_mc: number;
   fault_flags: number;
+  // Optional raw fields for calibration (only present when mode != off)
+  cal_kind?: number;
+  raw_v_nr_100uv?: number;
+  raw_v_rmt_100uv?: number;
+  raw_cur_100uv?: number;
+  raw_dac_code?: number;
 }
+
+export type CalibrationCurveKind =
+  | "v_local"
+  | "v_remote"
+  | "current_ch1"
+  | "current_ch2";
+
+export interface CalibrationActiveProfile {
+  source: "factory-default" | "user-calibrated";
+  fmt_version: number;
+  hw_rev: number;
+}
+
+export interface CalibrationPointVoltage {
+  raw: number;
+  mv: number;
+}
+
+export interface CalibrationPointCurrent {
+  raw: number;
+  ua: number;
+  dac_code: number;
+}
+
+export interface CalibrationProfile {
+  active: CalibrationActiveProfile;
+  v_local_points: CalibrationPointVoltage[];
+  v_remote_points: CalibrationPointVoltage[];
+  current_ch1_points: CalibrationPointCurrent[];
+  current_ch2_points: CalibrationPointCurrent[];
+}
+
+export type CalibrationWriteRequest =
+  | { kind: "v_local"; points: CalibrationPointVoltage[] }
+  | { kind: "v_remote"; points: CalibrationPointVoltage[] }
+  | { kind: "current_ch1"; points: CalibrationPointCurrent[] }
+  | { kind: "current_ch2"; points: CalibrationPointCurrent[] };
+
+export type CalibrationApplyRequest = CalibrationWriteRequest;
+
+export type CalibrationCommitRequest = CalibrationWriteRequest;
+
+export interface CalibrationResetRequest {
+  kind: "all" | CalibrationCurveKind;
+}
+
+export interface CalibrationModeRequest {
+  kind: "off" | "voltage" | "current_ch1" | "current_ch2";
+}
+
+// Calibration wire protocol types (ESP32-S3 firmware net_http)
+
+export interface CalibrationPointVoltageWire {
+  raw_100uv: number;
+  meas_mv: number;
+}
+
+export interface CalibrationPointCurrentWire {
+  raw_100uv: number;
+  raw_dac_code: number;
+  meas_ma: number;
+}
+
+// Compact request encoding (reduces payload size for embedded HTTP parsers).
+export type CalibrationPointVoltageWireCompact = [
+  raw_100uv: number,
+  meas_mv: number,
+];
+
+export type CalibrationPointCurrentWireCompact = [
+  raw_100uv: number,
+  raw_dac_code: number,
+  meas_ma: number,
+];
+
+export interface CalibrationProfileWire {
+  active: CalibrationActiveProfile;
+  current_ch1_points: CalibrationPointCurrentWire[];
+  current_ch2_points: CalibrationPointCurrentWire[];
+  v_local_points: CalibrationPointVoltageWire[];
+  v_remote_points: CalibrationPointVoltageWire[];
+}
+
+export type CalibrationWriteRequestWire =
+  | {
+      kind: "v_local";
+      points: CalibrationPointVoltageWireCompact[];
+    }
+  | {
+      kind: "v_remote";
+      points: CalibrationPointVoltageWireCompact[];
+    }
+  | {
+      kind: "current_ch1";
+      points: CalibrationPointCurrentWireCompact[];
+    }
+  | {
+      kind: "current_ch2";
+      points: CalibrationPointCurrentWireCompact[];
+    };
 
 export interface FastStatusView {
   raw: FastStatusJson;

@@ -1,9 +1,20 @@
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
-import { Link, Outlet, useParams } from "@tanstack/react-router";
+import {
+  Link,
+  Outlet,
+  useParams,
+  useRouterState,
+} from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/router-devtools";
+import { useEffect, useRef } from "react";
+import { postCalibrationMode } from "../api/client.ts";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
 export function AppLayout() {
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  const isCalibrationPage = /\/calibration$/.test(pathname);
   const { deviceId } = useParams({ strict: false }) as {
     deviceId?: string;
   };
@@ -13,6 +24,31 @@ export function AppLayout() {
     deviceId && devices
       ? devices.find((device) => device.id === deviceId)
       : undefined;
+
+  const lastDeviceBaseUrlRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (currentDevice?.baseUrl) {
+      lastDeviceBaseUrlRef.current = currentDevice.baseUrl;
+    }
+  }, [currentDevice?.baseUrl]);
+
+  // Enforce calibration mode based on the current page:
+  // - /calibration manages its own mode (voltage/current tabs)
+  // - all other pages should keep mode off
+  //
+  // This makes page entry resilient even if the previous page failed to clean up
+  // (e.g., refresh, navigation glitches, tab close).
+  useEffect(() => {
+    void pathname;
+    if (isCalibrationPage) return;
+
+    const baseUrl = currentDevice?.baseUrl ?? lastDeviceBaseUrlRef.current;
+    if (!baseUrl) return;
+
+    postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
+      // Best-effort; do not block navigation or show UI errors here.
+    });
+  }, [currentDevice?.baseUrl, isCalibrationPage, pathname]);
 
   return (
     <div className="flex flex-col min-h-screen bg-base-100 text-base-content antialiased">
@@ -112,6 +148,16 @@ export function AppLayout() {
                     className="rounded-box"
                   >
                     Settings
+                  </Link>
+                </li>
+                <li>
+                  <Link
+                    to="/$deviceId/calibration"
+                    params={{ deviceId }}
+                    activeProps={{ className: "active" }}
+                    className="rounded-box"
+                  >
+                    Calibration
                   </Link>
                 </li>
               </>

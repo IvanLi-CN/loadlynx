@@ -12,7 +12,7 @@ use embassy_stm32::adc::{
     Adc, AdcChannel, SampleTime, Temperature as AdcTemperature, VREF_CALIB_MV,
 };
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::dac::{Dac, Value as DacValue};
+use embassy_stm32::dac::{Dac, Mode as DacMode, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async as UartAsync;
 use embassy_stm32::usart::{
@@ -23,14 +23,21 @@ use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embassy_time::{Instant, Timer};
 use libm::logf;
 use loadlynx_protocol::{
-    CRC_LEN, Error as ProtocolError, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
-    FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello, MSG_SET_POINT,
-    SLIP_END, SlipDecoder, SoftReset, SoftResetReason, decode_cal_write_frame,
-    decode_limit_profile_frame, decode_set_enable_frame, decode_set_point_frame,
-    decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame,
-    encode_soft_reset_frame, slip_encode,
+    CRC_LEN, CalKind, Error as ProtocolError, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT,
+    FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
+    Hello, MSG_CAL_MODE, MSG_SET_POINT, SLIP_END, SlipDecoder, SoftReset, SoftResetReason,
+    decode_cal_mode_frame, decode_cal_write_frame, decode_limit_profile_frame,
+    decode_set_enable_frame, decode_set_point_frame, decode_soft_reset_frame,
+    encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame,
+    slip_encode,
 };
 use static_cell::StaticCell;
+
+mod calibration;
+use calibration::{
+    CalibrationState, CurveKind, inverse_piecewise, mv_to_raw_100uv, piecewise_linear,
+    raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
+};
 
 // STM32G431 VREFBUF 基址/寄存器地址（同 pd-sink-stm32g431cbu6-rs 工程）
 const VREFBUF_BASE: u32 = 0x4001_0030;
@@ -53,21 +60,12 @@ const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
-// DAC1 → CC 环路：0.5 A 设计值对应的 DAC 码。
-// 物理链路（v4.1 vs v4.2，对应网表与 INA193 / OPA2365 手册）：
-//   - v4.1：Rsense = 25 mΩ，INA193 固定增益 20 V/V：
-//       V_CUR1 ≈ 20 * 0.025 Ω * I = 0.5 * I [V/A]
-//   - v4.2：Rsense = 50 mΩ，OPA2365 同相放大 G=10：
-//       V_CUR1 ≈ 10 * 0.05 Ω * I = 0.5 * I [V/A]
-//   两版硬件在 CC 环采样节点上都满足 V_CUR1 ≈ 0.5 * I [V/A]，CC 运放比较 V_CUR1 与 DAC_CH1，
-//   经 100 Ω/100 kΩ 网络，直流近似 V_DAC ≈ V_CUR1。
-//
-// 假设 DAC 参考电压约 2.9 V，DAC 12bit 满量程 4095：
-//   I = 0.5 A → V_CUR1 ≈ 0.25 V
-//   CODE_0p5A ≈ 0.25 / 2.9 * 4095 ≈ 353
-const CC_0P5A_DAC_CODE_CH1: u16 = 353;
-// 当前固件假定两路 CC 通道在 0.5 A 标定点的 DAC 码相同；如后续量产需要分别标定，可独立调整。
-const CC_0P5A_DAC_CODE_CH2: u16 = CC_0P5A_DAC_CODE_CH1;
+// Calibration-only smoothing window:
+// FastStatus is emitted at 20 Hz (50 ms). A 6-frame window is ~300 ms.
+const CAL_SMOOTH_WINDOW_FRAMES: usize = 6;
+// Calibration-only oversampling (within a single FastStatus cycle) to suppress
+// 1–10 kHz ripple by time-averaging multiple ADC conversions.
+const CAL_OVERSAMPLE_SAMPLES: u32 = 256;
 
 // ADC 公共参数（G431 12bit ADC）。
 // 电压换算遵循 STM32G4 官方推荐流程：
@@ -107,8 +105,6 @@ const SENSE_GAIN_DEN: u32 = 10;
 
 // 默认恒流目标（mA）：1.0 A，用于未接收到任何远端 SetPoint 时的启动值。
 const DEFAULT_TARGET_I_LOCAL_MA: i32 = 1_000;
-// DAC 标定参考点（mA）：0.5 A → CC_0P5A_DAC_CODE_CH1。
-const DAC_CAL_REF_I_MA: i32 = 500;
 // 可接受的目标电流范围（mA），用于防止异常指令导致过流。
 const TARGET_I_MIN_MA: i32 = 0;
 const TARGET_I_MAX_MA: i32 = 5_000;
@@ -131,8 +127,160 @@ const I_SHARE_THRESHOLD_MA: i32 = 2_000;
 //   - I_total ≥ 2 A：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
 static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(true);
-// 标定是否已加载完成。仅在接收到至少一帧有效 CalWrite 后置为 true。
+
+#[derive(Copy, Clone)]
+struct WindowAvg<const N: usize> {
+    buf: [i32; N],
+    sum: i64,
+    idx: usize,
+    initialized: bool,
+}
+
+impl<const N: usize> WindowAvg<N> {
+    const fn new() -> Self {
+        Self {
+            buf: [0; N],
+            sum: 0,
+            idx: 0,
+            initialized: false,
+        }
+    }
+
+    fn clear(&mut self) {
+        self.sum = 0;
+        self.idx = 0;
+        self.initialized = false;
+    }
+
+    fn reset_to(&mut self, x: i32) {
+        self.buf.fill(x);
+        self.sum = (x as i64) * (N as i64);
+        self.idx = 0;
+        self.initialized = true;
+    }
+
+    fn update(&mut self, x: i32) -> i32 {
+        if !self.initialized {
+            self.reset_to(x);
+            return x;
+        }
+
+        let old = self.buf[self.idx];
+        self.buf[self.idx] = x;
+        self.idx += 1;
+        if self.idx >= N {
+            self.idx = 0;
+        }
+        self.sum += (x - old) as i64;
+        (self.sum / (N as i64)) as i32
+    }
+}
+
+struct CalSmoother<const N: usize> {
+    last_kind_u8: u8,
+    v_nr_100uv: WindowAvg<N>,
+    v_rmt_100uv: WindowAvg<N>,
+    cur1_100uv: WindowAvg<N>,
+    cur2_100uv: WindowAvg<N>,
+}
+
+impl<const N: usize> CalSmoother<N> {
+    const fn new() -> Self {
+        Self {
+            last_kind_u8: 0, // CalKind::Off == 0 in the protocol.
+            v_nr_100uv: WindowAvg::new(),
+            v_rmt_100uv: WindowAvg::new(),
+            cur1_100uv: WindowAvg::new(),
+            cur2_100uv: WindowAvg::new(),
+        }
+    }
+
+    fn clear(&mut self) {
+        self.v_nr_100uv.clear();
+        self.v_rmt_100uv.clear();
+        self.cur1_100uv.clear();
+        self.cur2_100uv.clear();
+    }
+
+    fn update(
+        &mut self,
+        kind: CalKind,
+        raw_v_nr_100uv: i16,
+        raw_v_rmt_100uv: i16,
+        raw_cur1_100uv: i16,
+        raw_cur2_100uv: i16,
+    ) -> (i16, i16, i16, i16) {
+        let kind_u8 = u8::from(kind);
+
+        // Only smooth while in calibration mode. Leaving calibration clears state so the
+        // next entry starts from the current sample without stale history.
+        if kind == CalKind::Off {
+            self.last_kind_u8 = kind_u8;
+            self.clear();
+            return (
+                raw_v_nr_100uv,
+                raw_v_rmt_100uv,
+                raw_cur1_100uv,
+                raw_cur2_100uv,
+            );
+        }
+
+        if self.last_kind_u8 != kind_u8 {
+            self.last_kind_u8 = kind_u8;
+            self.v_nr_100uv.reset_to(raw_v_nr_100uv as i32);
+            self.v_rmt_100uv.reset_to(raw_v_rmt_100uv as i32);
+            self.cur1_100uv.reset_to(raw_cur1_100uv as i32);
+            self.cur2_100uv.reset_to(raw_cur2_100uv as i32);
+            return (
+                raw_v_nr_100uv,
+                raw_v_rmt_100uv,
+                raw_cur1_100uv,
+                raw_cur2_100uv,
+            );
+        }
+
+        let v_nr = self.v_nr_100uv.update(raw_v_nr_100uv as i32);
+        let v_rmt = self.v_rmt_100uv.update(raw_v_rmt_100uv as i32);
+        let cur1 = self.cur1_100uv.update(raw_cur1_100uv as i32);
+        let cur2 = self.cur2_100uv.update(raw_cur2_100uv as i32);
+
+        (
+            v_nr.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            v_rmt.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            cur1.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+            cur2.clamp(i16::MIN as i32, i16::MAX as i32) as i16,
+        )
+    }
+}
+
+fn raw_100uv_to_mv(raw_100uv: i16) -> u32 {
+    let raw = raw_100uv as i32;
+    if raw <= 0 { 0 } else { (raw as u32) / 10 }
+}
+
+macro_rules! adc_avg_from_first {
+    ($adc:expr, $ch:expr, $first:expr, $n:expr) => {{
+        let n_u32: u32 = $n;
+        if n_u32 <= 1 {
+            $first
+        } else {
+            let mut acc: u32 = $first as u32;
+            let mut i: u32 = 1;
+            while i < n_u32 {
+                acc = acc.saturating_add($adc.blocking_read($ch) as u32);
+                i += 1;
+            }
+            (acc / n_u32) as u16
+        }
+    }};
+}
+// 用户校准是否已加载完成。仅当四条曲线均接收并验证合法后置为 true。
 static CAL_READY: AtomicBool = AtomicBool::new(false);
+// 当前校准模式选择（CalMode.kind），默认 off。
+static CAL_MODE_KIND: AtomicU8 = AtomicU8::new(0);
+// 校准曲线与多块接收状态。
+static CAL_STATE: Mutex<CriticalSectionRawMutex, CalibrationState> =
+    Mutex::new(CalibrationState::new());
 // 最近一次成功接收到来自数字板的协议帧（SetPoint/SoftReset/SetEnable）的时间戳（ms）。
 // LED1 闪烁逻辑基于该时间差实现“当前是否通信异常”的粗略指示。
 static LAST_RX_GOOD_MS: AtomicU32 = AtomicU32::new(0);
@@ -355,7 +503,18 @@ async fn main(_spawner: Spawner) -> ! {
     // DAC1：PA4/PA5 → CH1/CH2。上电默认按总目标电流应用通道调度：
     //   - I_total < 2 A：仅 CH1 有输出，CH2=0；
     //   - I_total ≥ 2 A：CH1/CH2 近似均分。
-    let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
+    let mut dac = {
+        let mut dac = Dac::new_blocking(p.DAC1, p.PA4, p.PA5);
+
+        // Disable the output buffer (unbuffered mode) for both channels.
+        dac.ch1().set_mode(DacMode::NormalExternalUnbuffered);
+        dac.ch1().enable();
+        dac.ch2().set_mode(DacMode::NormalExternalUnbuffered);
+        dac.ch2().enable();
+
+        info!("DAC mode: external unbuffered (buffer disabled)");
+        dac
+    };
     let init_total_i_ma = DEFAULT_TARGET_I_LOCAL_MA;
     let (init_ch1_ma, init_ch2_ma) = if init_total_i_ma < I_SHARE_THRESHOLD_MA {
         (init_total_i_ma, 0)
@@ -364,10 +523,10 @@ async fn main(_spawner: Spawner) -> ! {
         let rem = init_total_i_ma - 2 * half;
         (half + rem, half)
     };
-    let init_dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * init_ch1_ma / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
-    let init_dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * init_ch2_ma / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
+    let init_raw_ch1_100uv = init_ch1_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+    let init_raw_ch2_100uv = init_ch2_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+    let init_dac_code_ch1 = raw_100uv_to_dac_code_vref(init_raw_ch1_100uv, vref_mv);
+    let init_dac_code_ch2 = raw_100uv_to_dac_code_vref(init_raw_ch2_100uv, vref_mv);
     dac.ch1().set(DacValue::Bit12Right(init_dac_code_ch1));
     dac.ch2().set(DacValue::Bit12Right(init_dac_code_ch2));
 
@@ -418,6 +577,9 @@ async fn main(_spawner: Spawner) -> ! {
     let mut remote_active: bool = false;
     let mut remote_good_streak: u8 = 0;
     let mut remote_bad_streak: u8 = 0;
+
+    // Calibration-only UI/RAW smoothing (see CAL_SMOOTH_WINDOW_FRAMES).
+    let mut cal_smoother: CalSmoother<CAL_SMOOTH_WINDOW_FRAMES> = CalSmoother::new();
 
     loop {
         info!("main loop top");
@@ -500,11 +662,43 @@ async fn main(_spawner: Spawner) -> ! {
 
         // --- 采样所有相关 ADC 通道（阻塞读取） ---
         // v4.2：电压单端采样在 ADC1，电流单端采样在 ADC2。
+        let cal_kind = CalKind::from(CAL_MODE_KIND.load(Ordering::Relaxed));
+
         let v_rmt_sns_code = adc1.blocking_read(&mut v_rmt_sns);
         let v_nr_sns_code = adc1.blocking_read(&mut v_nr_sns);
 
         let cur1_sns_code = adc2.blocking_read(&mut cur1_sns);
         let cur2_sns_code = adc2.blocking_read(&mut cur2_sns);
+
+        // Calibration-only oversampling to reduce 1–10 kHz ripple influence on capture/display.
+        // Keep instantaneous samples above for fault detection and edge conditions.
+        let (v_rmt_sns_code_cal, v_nr_sns_code_cal, cur1_sns_code_cal, cur2_sns_code_cal) =
+            match cal_kind {
+                CalKind::Voltage => (
+                    adc_avg_from_first!(
+                        adc1,
+                        &mut v_rmt_sns,
+                        v_rmt_sns_code,
+                        CAL_OVERSAMPLE_SAMPLES
+                    ),
+                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    cur1_sns_code,
+                    cur2_sns_code,
+                ),
+                CalKind::CurrentCh1 => (
+                    v_rmt_sns_code,
+                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    adc_avg_from_first!(adc2, &mut cur1_sns, cur1_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    cur2_sns_code,
+                ),
+                CalKind::CurrentCh2 => (
+                    v_rmt_sns_code,
+                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                    cur1_sns_code,
+                    adc_avg_from_first!(adc2, &mut cur2_sns, cur2_sns_code, CAL_OVERSAMPLE_SAMPLES),
+                ),
+                CalKind::Off => (v_rmt_sns_code, v_nr_sns_code, cur1_sns_code, cur2_sns_code),
+            };
 
         let sns_5v_code = adc1.blocking_read(&mut sns_5v);
         let ts1_code = adc1.blocking_read(&mut ts1);
@@ -519,6 +713,11 @@ async fn main(_spawner: Spawner) -> ! {
 
         let cur1_sns_mv = adc_to_mv(cur1_sns_code);
         let cur2_sns_mv = adc_to_mv(cur2_sns_code);
+
+        let v_rmt_sns_mv_cal = adc_to_mv(v_rmt_sns_code_cal);
+        let v_nr_sns_mv_cal = adc_to_mv(v_nr_sns_code_cal);
+        let cur1_sns_mv_cal = adc_to_mv(cur1_sns_code_cal);
+        let cur2_sns_mv_cal = adc_to_mv(cur2_sns_code_cal);
 
         let v_5v_sns_mv = adc_to_mv(sns_5v_code);
         let ts1_mv = adc_to_mv(ts1_code);
@@ -536,10 +735,49 @@ async fn main(_spawner: Spawner) -> ! {
             ts2_code
         );
 
-        // 负载端电压（近端 / 远端），由差分放大器缩放关系反推：
+        // --- Raw (ADC pin voltage) in 100 µV units ---
+        let raw_v_nr_100uv = mv_to_raw_100uv(v_nr_sns_mv);
+        let raw_v_rmt_100uv = mv_to_raw_100uv(v_rmt_sns_mv);
+        let raw_cur1_100uv = mv_to_raw_100uv(cur1_sns_mv);
+        let raw_cur2_100uv = mv_to_raw_100uv(cur2_sns_mv);
+
+        let raw_v_nr_100uv_cal = mv_to_raw_100uv(v_nr_sns_mv_cal);
+        let raw_v_rmt_100uv_cal = mv_to_raw_100uv(v_rmt_sns_mv_cal);
+        let raw_cur1_100uv_cal = mv_to_raw_100uv(cur1_sns_mv_cal);
+        let raw_cur2_100uv_cal = mv_to_raw_100uv(cur2_sns_mv_cal);
+
+        // --- Ideal physical (fallback) ---
+        // Voltage ideal scaling:
         //   V_SNS = (10/124) * V_load  →  V_load = (124/10) * V_SNS
-        let v_local_mv = (v_nr_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
-        let v_remote_mv = (v_rmt_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        let v_local_mv_uncal = (v_nr_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        let v_remote_mv_uncal = (v_rmt_sns_mv * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+        // Current ideal scaling:
+        //   I[mA] ≈ 2 * V_CUR[mV]
+        let i_ch1_ma_uncal = (2 * cur1_sns_mv) as i32;
+        let i_ch2_ma_uncal = (2 * cur2_sns_mv) as i32;
+
+        // Snapshot active calibration curves.
+        let curves = {
+            let state = CAL_STATE.lock().await;
+            state.snapshot()
+        };
+
+        // --- Active-calibrated physical values ---
+        let v_local_mv = if curves[CurveKind::VLocal.index()].is_empty() {
+            v_local_mv_uncal
+        } else {
+            piecewise_linear(curves[CurveKind::VLocal.index()].as_slice(), raw_v_nr_100uv)
+                .unwrap_or(v_local_mv_uncal)
+        };
+        let v_remote_mv = if curves[CurveKind::VRemote.index()].is_empty() {
+            v_remote_mv_uncal
+        } else {
+            piecewise_linear(
+                curves[CurveKind::VRemote.index()].as_slice(),
+                raw_v_rmt_100uv,
+            )
+            .unwrap_or(v_remote_mv_uncal)
+        };
 
         // 远端电压软判定：仅在电压处于合理范围且 ADC 原码未接近饱和时认为“看起来正常”。
         let remote_abs_mv = if v_remote_mv < 0 {
@@ -590,8 +828,24 @@ async fn main(_spawner: Spawner) -> ! {
         //   - i_ch1_ma 使用 CUR1_SNS，对应功率通道 1；
         //   - i_ch2_ma 使用 CUR2_SNS，对应功率通道 2；
         //   - i_total_ma = i_ch1_ma + i_ch2_ma，用于功率估算与闭环误差计算。
-        let i_ch1_ma = (2 * cur1_sns_mv) as i32;
-        let i_ch2_ma = (2 * cur2_sns_mv) as i32;
+        let i_ch1_ma = if curves[CurveKind::CurrentCh1.index()].is_empty() {
+            i_ch1_ma_uncal
+        } else {
+            piecewise_linear(
+                curves[CurveKind::CurrentCh1.index()].as_slice(),
+                raw_cur1_100uv,
+            )
+            .unwrap_or(i_ch1_ma_uncal)
+        };
+        let i_ch2_ma = if curves[CurveKind::CurrentCh2.index()].is_empty() {
+            i_ch2_ma_uncal
+        } else {
+            piecewise_linear(
+                curves[CurveKind::CurrentCh2.index()].as_slice(),
+                raw_cur2_100uv,
+            )
+            .unwrap_or(i_ch2_ma_uncal)
+        };
         let i_total_ma = i_ch1_ma.saturating_add(i_ch2_ma);
 
         let calc_p_mw =
@@ -642,7 +896,7 @@ async fn main(_spawner: Spawner) -> ! {
         let effective_enable = enable_requested && cal_ready;
         let effective_enable_with_fault = effective_enable && !has_fault;
 
-        // 目标总电流（两通道合计，单位 mA）。标定点：0.5 A → CC_0P5A_DAC_CODE_CHx。
+        // 目标总电流（两通道合计，单位 mA）。
         let mut target_i_total_ma = if effective_enable_with_fault {
             TARGET_I_LOCAL_MA.load(Ordering::Relaxed)
         } else {
@@ -676,18 +930,73 @@ async fn main(_spawner: Spawner) -> ! {
         // - I_total ≥ I_SHARE_THRESHOLD_MA：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
         let (target_ch1_ma, target_ch2_ma) = if !effective_enable_with_fault {
             (0, 0)
-        } else if target_i_total_ma < I_SHARE_THRESHOLD_MA {
-            (target_i_total_ma, 0)
         } else {
-            let half = target_i_total_ma / 2;
-            let rem = target_i_total_ma - 2 * half;
-            (half + rem, half)
+            match cal_kind {
+                CalKind::CurrentCh1 => (target_i_total_ma, 0),
+                CalKind::CurrentCh2 => (0, target_i_total_ma),
+                _ => {
+                    if target_i_total_ma < I_SHARE_THRESHOLD_MA {
+                        (target_i_total_ma, 0)
+                    } else {
+                        let half = target_i_total_ma / 2;
+                        let rem = target_i_total_ma - 2 * half;
+                        (half + rem, half)
+                    }
+                }
+            }
         };
 
-        let dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * target_ch1_ma / DAC_CAL_REF_I_MA)
-            .clamp(0, ADC_FULL_SCALE as i32) as u16;
-        let dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * target_ch2_ma / DAC_CAL_REF_I_MA)
-            .clamp(0, ADC_FULL_SCALE as i32) as u16;
+        // Inverse mapping: physical target → raw 100 µV target.
+        let ideal_raw_ch1_des_100uv =
+            target_ch1_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+        let ideal_raw_ch2_des_100uv =
+            target_ch2_ma.saturating_mul(5).clamp(0, i16::MAX as i32) as i16;
+
+        let raw_ch1_des_100uv = if cal_kind == CalKind::CurrentCh2 {
+            0
+        } else if curves[CurveKind::CurrentCh1.index()].is_empty() {
+            ideal_raw_ch1_des_100uv
+        } else {
+            inverse_piecewise(
+                curves[CurveKind::CurrentCh1.index()].as_slice(),
+                target_ch1_ma,
+            )
+            .unwrap_or(ideal_raw_ch1_des_100uv)
+        };
+        let raw_ch2_des_100uv = if cal_kind == CalKind::CurrentCh1 {
+            0
+        } else if curves[CurveKind::CurrentCh2.index()].is_empty() {
+            ideal_raw_ch2_des_100uv
+        } else {
+            inverse_piecewise(
+                curves[CurveKind::CurrentCh2.index()].as_slice(),
+                target_ch2_ma,
+            )
+            .unwrap_or(ideal_raw_ch2_des_100uv)
+        };
+
+        // Raw 100 µV target → DAC code.
+        //
+        // Prefer user calibration (raw_100uv ↔ raw_dac_code captured during current calibration).
+        // Fallback to reference-voltage scaling when DAC samples are not present (e.g. factory defaults).
+        let dac_code_ch1 = if curves[CurveKind::CurrentCh1.index()].is_empty() {
+            raw_100uv_to_dac_code_vref(raw_ch1_des_100uv, vref_mv)
+        } else {
+            raw_100uv_to_dac_code_calibrated(
+                curves[CurveKind::CurrentCh1.index()].as_slice(),
+                raw_ch1_des_100uv,
+            )
+            .unwrap_or_else(|_| raw_100uv_to_dac_code_vref(raw_ch1_des_100uv, vref_mv))
+        };
+        let dac_code_ch2 = if curves[CurveKind::CurrentCh2.index()].is_empty() {
+            raw_100uv_to_dac_code_vref(raw_ch2_des_100uv, vref_mv)
+        } else {
+            raw_100uv_to_dac_code_calibrated(
+                curves[CurveKind::CurrentCh2.index()].as_slice(),
+                raw_ch2_des_100uv,
+            )
+            .unwrap_or_else(|_| raw_100uv_to_dac_code_vref(raw_ch2_des_100uv, vref_mv))
+        };
         dac.ch1().set(DacValue::Bit12Right(dac_code_ch1));
         dac.ch2().set(DacValue::Bit12Right(dac_code_ch2));
 
@@ -699,6 +1008,82 @@ async fn main(_spawner: Spawner) -> ! {
 
         // 目标恒流（远端设定，单位 mA），用于 loop_error 与 UI 显示。
         let loop_error = target_i_total_ma - i_total_ma;
+
+        // Calibration-only smoothing for UI + capture: smooth the RAW fields that the
+        // web UI captures, then derive a smoothed view of the displayed physical values.
+        //
+        // IMPORTANT: Protection/fault detection above uses the instantaneous values
+        // (`v_local_mv`, `i_ch1_ma`, ...) and MUST remain unaffected by smoothing.
+        let (raw_v_nr_100uv_sm, raw_v_rmt_100uv_sm, raw_cur1_100uv_sm, raw_cur2_100uv_sm) =
+            cal_smoother.update(
+                cal_kind,
+                raw_v_nr_100uv_cal,
+                raw_v_rmt_100uv_cal,
+                raw_cur1_100uv_cal,
+                raw_cur2_100uv_cal,
+            );
+
+        let (status_v_local_mv, status_v_remote_mv, status_i_ch1_ma, status_i_ch2_ma) = if cal_kind
+            == CalKind::Off
+        {
+            (v_local_mv, v_remote_mv, i_ch1_ma, i_ch2_ma)
+        } else {
+            let v_nr_sns_mv_sm = raw_100uv_to_mv(raw_v_nr_100uv_sm);
+            let v_rmt_sns_mv_sm = raw_100uv_to_mv(raw_v_rmt_100uv_sm);
+            let cur1_sns_mv_sm = raw_100uv_to_mv(raw_cur1_100uv_sm);
+            let cur2_sns_mv_sm = raw_100uv_to_mv(raw_cur2_100uv_sm);
+
+            let v_local_mv_uncal_sm = (v_nr_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+            let v_remote_mv_uncal_sm = (v_rmt_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+
+            let i_ch1_ma_uncal_sm = (2 * cur1_sns_mv_sm) as i32;
+            let i_ch2_ma_uncal_sm = (2 * cur2_sns_mv_sm) as i32;
+
+            let v_local_sm = if curves[CurveKind::VLocal.index()].is_empty() {
+                v_local_mv_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::VLocal.index()].as_slice(),
+                    raw_v_nr_100uv_sm,
+                )
+                .unwrap_or(v_local_mv_uncal_sm)
+            };
+            let v_remote_sm = if curves[CurveKind::VRemote.index()].is_empty() {
+                v_remote_mv_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::VRemote.index()].as_slice(),
+                    raw_v_rmt_100uv_sm,
+                )
+                .unwrap_or(v_remote_mv_uncal_sm)
+            };
+
+            let i_ch1_sm = if curves[CurveKind::CurrentCh1.index()].is_empty() {
+                i_ch1_ma_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::CurrentCh1.index()].as_slice(),
+                    raw_cur1_100uv_sm,
+                )
+                .unwrap_or(i_ch1_ma_uncal_sm)
+            };
+            let i_ch2_sm = if curves[CurveKind::CurrentCh2.index()].is_empty() {
+                i_ch2_ma_uncal_sm
+            } else {
+                piecewise_linear(
+                    curves[CurveKind::CurrentCh2.index()].as_slice(),
+                    raw_cur2_100uv_sm,
+                )
+                .unwrap_or(i_ch2_ma_uncal_sm)
+            };
+
+            (v_local_sm, v_remote_sm, i_ch1_sm, i_ch2_sm)
+        };
+
+        let status_i_total_ma = status_i_ch1_ma.saturating_add(status_i_ch2_ma);
+        let status_calc_p_mw = ((status_i_total_ma as i64 * status_v_local_mv as i64) / 1_000)
+            .clamp(0, u32::MAX as i64) as u32;
+        let status_loop_error = target_i_total_ma - status_i_total_ma;
 
         info!(
             "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_ch1={}mA i_ch2={}mA i_total={}mA target_total={}mA ch1_target={}mA ch2_target={}mA dac1={} dac2={} loop_err={}",
@@ -727,6 +1112,33 @@ async fn main(_spawner: Spawner) -> ! {
         if effective_enable_with_fault {
             state_flags |= STATE_FLAG_ENABLED;
         }
+
+        // Optional Raw telemetry fields during calibration.
+        let (status_cal_kind, raw_v_nr_opt, raw_v_rmt_opt, raw_cur_opt, raw_dac_opt) =
+            match cal_kind {
+                CalKind::Voltage => (
+                    Some(u8::from(cal_kind)),
+                    Some(raw_v_nr_100uv_sm),
+                    Some(raw_v_rmt_100uv_sm),
+                    None,
+                    None,
+                ),
+                CalKind::CurrentCh1 => (
+                    Some(u8::from(cal_kind)),
+                    None,
+                    None,
+                    Some(raw_cur1_100uv_sm),
+                    Some(dac_code_ch1),
+                ),
+                CalKind::CurrentCh2 => (
+                    Some(u8::from(cal_kind)),
+                    None,
+                    None,
+                    Some(raw_cur2_100uv_sm),
+                    Some(dac_code_ch2),
+                ),
+                CalKind::Off => (None, None, None, None, None),
+            };
         let status = FastStatus {
             uptime_ms,
             mode: 1, // 简单视为 CC 模式
@@ -735,17 +1147,22 @@ async fn main(_spawner: Spawner) -> ! {
             // target_value 表示两通道合计目标电流（mA）。
             target_value: target_i_total_ma,
             // i_local_ma / i_remote_ma 对应通道 1 / 通道 2 实测电流。
-            i_local_ma: i_ch1_ma,
-            i_remote_ma: i_ch2_ma,
-            v_local_mv,
-            v_remote_mv,
-            calc_p_mw,
+            i_local_ma: status_i_ch1_ma,
+            i_remote_ma: status_i_ch2_ma,
+            v_local_mv: status_v_local_mv,
+            v_remote_mv: status_v_remote_mv,
+            calc_p_mw: status_calc_p_mw,
             dac_headroom_mv,
-            loop_error,
+            loop_error: status_loop_error,
             sink_core_temp_mc,
             sink_exhaust_temp_mc,
             mcu_temp_mc,
             fault_flags,
+            cal_kind: status_cal_kind,
+            raw_v_nr_100uv: raw_v_nr_opt,
+            raw_v_rmt_100uv: raw_v_rmt_opt,
+            raw_cur_100uv: raw_cur_opt,
+            raw_dac_code: raw_dac_opt,
         };
 
         if ENABLE_FAST_STATUS_TX {
@@ -788,10 +1205,8 @@ async fn apply_soft_reset_safing(
     // SOFT_RESET：清零总目标电流，等待数字板重新下发 SetPoint。
     let reset_target_total = 0;
     TARGET_I_LOCAL_MA.store(reset_target_total, Ordering::Relaxed);
-    let reset_dac_code_ch1 = ((CC_0P5A_DAC_CODE_CH1 as i32) * reset_target_total / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
-    let reset_dac_code_ch2 = ((CC_0P5A_DAC_CODE_CH2 as i32) * reset_target_total / DAC_CAL_REF_I_MA)
-        .clamp(0, ADC_FULL_SCALE as i32) as u16;
+    let reset_dac_code_ch1 = 0u16;
+    let reset_dac_code_ch2 = 0u16;
     dac.ch1().set(DacValue::Bit12Right(reset_dac_code_ch1));
     dac.ch2().set(DacValue::Bit12Right(reset_dac_code_ch2));
 
@@ -1098,21 +1513,26 @@ async fn uart_setpoint_rx_task(
                                                         }
                                                         Err(ProtocolError::UnsupportedMessage(
                                                             _,
-                                                        )) => {
-                                                            match decode_cal_write_frame(&frame) {
-                                                                Ok((_hdr, cal)) => {
-                                                                    let prev = CAL_READY.swap(
-                                                                        true,
-                                                                        Ordering::Relaxed,
-                                                                    );
+                                                        )) => match decode_cal_mode_frame(&frame) {
+                                                            Ok((hdr, mode)) => {
+                                                                if hdr.flags & FLAG_IS_ACK != 0 {
                                                                     info!(
-                                                                        "CalWrite received: index={} cal_ready={} (prev={})",
-                                                                        cal.index,
-                                                                        CAL_READY.load(
-                                                                            Ordering::Relaxed
-                                                                        ),
-                                                                        prev,
+                                                                        "CalMode ACK received (ignored): seq={} kind={:?}",
+                                                                        hdr.seq, mode.kind
                                                                     );
+                                                                } else {
+                                                                    let prev_raw = CAL_MODE_KIND
+                                                                        .swap(
+                                                                            u8::from(mode.kind),
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                    info!(
+                                                                        "CalMode received: kind={:?} (prev_raw={}) seq={}",
+                                                                        mode.kind,
+                                                                        prev_raw,
+                                                                        hdr.seq
+                                                                    );
+
                                                                     LAST_RX_GOOD_MS.store(
                                                                         timestamp_ms() as u32,
                                                                         Ordering::Relaxed,
@@ -1121,19 +1541,157 @@ async fn uart_setpoint_rx_task(
                                                                         true,
                                                                         Ordering::Relaxed,
                                                                     );
-                                                                }
-                                                                Err(err) => {
-                                                                    warn!(
-                                                                        "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
-                                                                        err,
-                                                                        frame.len(),
-                                                                        &frame
-                                                                            [..frame.len().min(8)],
-                                                                    );
-                                                                    decoder.reset();
+
+                                                                    let ack_len =
+                                                                        match encode_ack_only_frame(
+                                                                            hdr.seq,
+                                                                            MSG_CAL_MODE,
+                                                                            false,
+                                                                            &mut ack_raw,
+                                                                        ) {
+                                                                            Ok(len) => len,
+                                                                            Err(err) => {
+                                                                                warn!(
+                                                                                    "CalMode ack encode error: {:?}",
+                                                                                    err
+                                                                                );
+                                                                                continue;
+                                                                            }
+                                                                        };
+                                                                    let slip_len = match slip_encode(
+                                                                        &ack_raw[..ack_len],
+                                                                        &mut ack_slip,
+                                                                    ) {
+                                                                        Ok(len) => len,
+                                                                        Err(err) => {
+                                                                            warn!(
+                                                                                "CalMode ack slip encode error: {:?}",
+                                                                                err
+                                                                            );
+                                                                            continue;
+                                                                        }
+                                                                    };
+
+                                                                    let mut tx =
+                                                                        uart_tx.lock().await;
+                                                                    if let Err(err) = tx
+                                                                        .write(
+                                                                            &ack_slip[..slip_len],
+                                                                        )
+                                                                        .await
+                                                                    {
+                                                                        warn!(
+                                                                            "CalMode ack write error: {:?}",
+                                                                            err
+                                                                        );
+                                                                    } else {
+                                                                        info!(
+                                                                            "CalMode ACK sent: seq={} len={}B",
+                                                                            hdr.seq, slip_len
+                                                                        );
+                                                                    }
                                                                 }
                                                             }
-                                                        }
+                                                            Err(
+                                                                ProtocolError::UnsupportedMessage(
+                                                                    _,
+                                                                ),
+                                                            ) => {
+                                                                match decode_cal_write_frame(&frame)
+                                                                {
+                                                                    Ok((_hdr, cal)) => {
+                                                                        let payload = cal.payload;
+                                                                        let fmt_version =
+                                                                            payload[0];
+                                                                        let hw_rev = payload[1];
+                                                                        let kind_raw = payload[2];
+                                                                        let chunk_index =
+                                                                            payload[3];
+                                                                        let total_chunks =
+                                                                            payload[4];
+                                                                        let total_points =
+                                                                            payload[5];
+
+                                                                        info!(
+                                                                            "CalWrite chunk received: kind_raw={} chunk={}/{} total_points={} fmt_version={} hw_rev={} outer_index={}",
+                                                                            kind_raw,
+                                                                            chunk_index,
+                                                                            total_chunks,
+                                                                            total_points,
+                                                                            fmt_version,
+                                                                            hw_rev,
+                                                                            cal.index
+                                                                        );
+
+                                                                        let mut state =
+                                                                            CAL_STATE.lock().await;
+                                                                        match state
+                                                                            .ingest_cal_write(
+                                                                                cal.index,
+                                                                                &payload, cal.crc,
+                                                                            ) {
+                                                                            Ok(Some(done_kind)) => {
+                                                                                info!(
+                                                                                    "CalWrite curve completed: kind={:?}",
+                                                                                    done_kind
+                                                                                );
+                                                                            }
+                                                                            Ok(None) => {}
+                                                                            Err(err) => {
+                                                                                warn!(
+                                                                                    "CalWrite rejected for kind_raw={} chunk_index={}: {:?}",
+                                                                                    kind_raw,
+                                                                                    chunk_index,
+                                                                                    err
+                                                                                );
+                                                                            }
+                                                                        }
+
+                                                                        let all_valid =
+                                                                            state.all_valid();
+                                                                        let prev = CAL_READY.swap(
+                                                                            all_valid,
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                        if all_valid != prev {
+                                                                            info!(
+                                                                                "CAL_READY updated: {} (prev={})",
+                                                                                all_valid, prev
+                                                                            );
+                                                                        }
+
+                                                                        LAST_RX_GOOD_MS.store(
+                                                                            timestamp_ms() as u32,
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                        LINK_EVER_GOOD.store(
+                                                                            true,
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                    }
+                                                                    Err(err) => {
+                                                                        warn!(
+                                                                            "CalWrite decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                                            err,
+                                                                            frame.len(),
+                                                                            &frame[..frame
+                                                                                .len()
+                                                                                .min(8)],
+                                                                        );
+                                                                        decoder.reset();
+                                                                    }
+                                                                }
+                                                            }
+                                                            Err(err) => {
+                                                                warn!(
+                                                                    "CalMode decode error {:?} (len={}, head={=[u8]:#04x})",
+                                                                    err,
+                                                                    frame.len(),
+                                                                    &frame[..frame.len().min(8)],
+                                                                );
+                                                                decoder.reset();
+                                                            }
+                                                        },
                                                         Err(err) => {
                                                             warn!(
                                                                 "LimitProfile decode error {:?} (len={}, head={=[u8]:#04x})",

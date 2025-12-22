@@ -20,6 +20,7 @@ fn main() {
         sink_exhaust_temp_mc: 39_000,
         mcu_temp_mc: 36_000,
         fault_flags: 0,
+        ..FastStatus::default()
     };
     let mut raw = [0u8; 256];
     let len = encode_fast_status_frame(0x42, &status, &mut raw).unwrap();

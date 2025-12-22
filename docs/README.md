@@ -28,6 +28,7 @@
   - ESP32-S3 启动流程：`dev-notes/software.md`
   - 硬件设计约定与易混点：`dev-notes/hardware-quirks.md`
   - MCU Agent 服务设计：`dev-notes/mcu-agentd.md`
+  - 用户手动校准功能：`dev-notes/user-calibration.md`
 
 - 外部数据手册（Other Datasheets，MinerU 转换）
   - ESP32‑S3：`other-datasheets/esp32-s3.md`

@@ -1,6 +1,10 @@
 #![allow(dead_code)]
 
-use core::{fmt::Write as _, str::FromStr, sync::atomic::Ordering};
+use core::{
+    fmt::Write as _,
+    str::FromStr,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 use alloc::{format, string::String};
 use defmt::*;
@@ -20,18 +24,24 @@ use heapless::{String as HString, Vec};
 use static_cell::StaticCell;
 
 use loadlynx_protocol::{
-    FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, FastStatus,
-    LimitProfile, PROTOCOL_VERSION, SoftResetReason,
+    CalKind, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP,
+    FastStatus, LimitProfile, PROTOCOL_VERSION, SoftResetReason,
 };
 
 use crate::mdns::MdnsConfig;
 use crate::{
-    ANALOG_FW_VERSION_RAW, ENCODER_STEP_MA, ENCODER_VALUE, FAST_STATUS_OK_COUNT, FW_VERSION,
-    HELLO_SEEN, LAST_GOOD_FRAME_MS, LIMIT_PROFILE_DEFAULT, LINK_UP, STATE_FLAG_REMOTE_ACTIVE,
-    TARGET_I_MAX_MA, TARGET_I_MIN_MA, TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME,
-    WIFI_NETMASK, WIFI_PSK, WIFI_SSID, WIFI_STATIC_IP, mdns, now_ms32, timestamp_ms,
-    ui::AnalogState,
+    ANALOG_FW_VERSION_RAW, CalUartCommand, CalibrationMutex, ENCODER_STEP_MA, ENCODER_VALUE,
+    EepromMutex, FAST_STATUS_OK_COUNT, FW_VERSION, HELLO_SEEN, LAST_GOOD_FRAME_MS,
+    LIMIT_PROFILE_DEFAULT, LINK_UP, STATE_FLAG_REMOTE_ACTIVE, TARGET_I_MAX_MA, TARGET_I_MIN_MA,
+    TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME, WIFI_NETMASK, WIFI_PSK, WIFI_SSID,
+    WIFI_STATIC_IP, enqueue_cal_uart, mdns, now_ms32, timestamp_ms, ui::AnalogState,
 };
+
+use loadlynx_calibration_format::{self as calfmt, CalPoint, CurveKind, ProfileSource};
+
+/// Allow only one active status SSE stream at a time to prevent exhausting the
+/// small HTTP worker pool.
+static STATUS_SSE_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Shared Wi‑Fi/IPv4 state for future HTTP APIs.
 #[derive(Clone, Copy, Debug)]
@@ -214,6 +224,8 @@ pub fn spawn_wifi_and_http(
     wifi_peripheral: WIFI<'static>,
     wifi_state: &'static WifiStateMutex,
     telemetry: &'static TelemetryMutex,
+    calibration: &'static CalibrationMutex,
+    eeprom: &'static EepromMutex,
 ) {
     // Initialize the shared radio controller once. If the radio init fails, log
     // and gracefully skip Wi‑Fi/HTTP so the rest of the system can run.
@@ -264,7 +276,14 @@ pub fn spawn_wifi_and_http(
     info!("spawning HTTP workers (count={})", HTTP_WORKER_COUNT);
     for idx in 0..HTTP_WORKER_COUNT {
         spawner
-            .spawn(http_worker(stack, wifi_state, telemetry, idx))
+            .spawn(http_worker(
+                stack,
+                wifi_state,
+                telemetry,
+                calibration,
+                eeprom,
+                idx,
+            ))
             .expect("http_worker spawn");
     }
 
@@ -426,6 +445,8 @@ async fn http_worker(
     stack: Stack<'static>,
     state: &'static WifiStateMutex,
     telemetry: &'static TelemetryMutex,
+    calibration: &'static CalibrationMutex,
+    eeprom: &'static EepromMutex,
     worker_id: usize,
 ) {
     let mut rx_buf = [0u8; 1024];
@@ -442,20 +463,25 @@ async fn http_worker(
 
         match socket.accept(HTTP_PORT).await {
             Ok(()) => {
-                if let Err(err) = handle_http_connection(&mut socket, state, telemetry).await {
+                if let Err(err) =
+                    handle_http_connection(&mut socket, state, telemetry, calibration, eeprom).await
+                {
                     warn!(
                         "HTTP worker {} connection handling error: {:?}",
                         worker_id, err
                     );
                 }
+                // Close the connection gracefully (FIN) instead of aborting it
+                // with a TCP RST. Browsers may treat RST as a network error even
+                // after receiving a complete HTTP response.
+                socket.close();
+                let _ = socket.flush().await;
             }
             Err(err) => {
                 warn!("HTTP worker {} accept error: {:?}", worker_id, err);
                 Timer::after(Duration::from_millis(200)).await;
             }
         }
-
-        socket.abort();
     }
 }
 
@@ -463,7 +489,16 @@ async fn handle_http_connection(
     socket: &mut TcpSocket<'_>,
     wifi_state: &'static WifiStateMutex,
     telemetry: &'static TelemetryMutex,
+    calibration: &'static CalibrationMutex,
+    eeprom: &'static EepromMutex,
 ) -> Result<(), embassy_net::tcp::Error> {
+    // The firmware HTTP parser is intentionally simple. Keep a bounded request
+    // body buffer, but avoid requiring "headers + body" to fit at the same time
+    // by discarding headers after parsing them.
+    //
+    // Keep this small because it becomes part of the async task's state for
+    // each HTTP worker. Calibration requests use a compact points encoding so
+    // 1 KiB is sufficient for the maximum 24-point payload.
     const MAX_REQUEST_SIZE: usize = 1024;
 
     let mut buf = [0u8; MAX_REQUEST_SIZE];
@@ -495,14 +530,15 @@ async fn handle_http_connection(
     // Parse the request line and headers. To avoid borrowing conflicts with
     // subsequent reads, copy the small method/path/version tokens into owned
     // Strings and only keep indices for the header/body split points.
-    let mut method_s = String::new();
-    let mut path_s = String::new();
-    let mut version_s = String::from("HTTP/1.1");
-    let mut header_end: usize = 0;
-    let (mut content_length, mut has_content_length) = (0usize, false);
-    let mut accept_event_stream = false;
-
-    {
+    let (
+        method_s,
+        path_s,
+        version_s,
+        header_end,
+        content_length,
+        has_content_length,
+        accept_event_stream,
+    ) = {
         // Try to parse as UTF‑8; fall back to an error on failure.
         let req_str = match core::str::from_utf8(&buf[..total]) {
             Ok(s) => s,
@@ -520,16 +556,20 @@ async fn handle_http_connection(
             }
         };
 
+        let mut content_length = 0usize;
+        let mut has_content_length = false;
+        let mut accept_event_stream = false;
+
         let mut lines = req_str.lines();
         let request_line = lines.next().unwrap_or("");
 
         let mut parts = request_line.split_whitespace();
-        method_s = String::from(parts.next().unwrap_or(""));
-        path_s = String::from(parts.next().unwrap_or(""));
-        version_s = String::from(parts.next().unwrap_or("HTTP/1.1"));
+        let method_s = String::from(parts.next().unwrap_or(""));
+        let path_s = String::from(parts.next().unwrap_or(""));
+        let version_s = String::from(parts.next().unwrap_or("HTTP/1.1"));
 
         // Locate the end of headers and the beginning of the (optional) body.
-        header_end = match req_str.find("\r\n\r\n") {
+        let header_end = match req_str.find("\r\n\r\n") {
             Some(idx) => idx + 4,
             None => {
                 let mut body = String::new();
@@ -554,7 +594,7 @@ async fn handle_http_connection(
             let lower = line.to_ascii_lowercase();
             if let Some(rest) = lower.strip_prefix("content-length:") {
                 if let Ok(len) = rest.trim().parse::<usize>() {
-                    content_length = len.min(MAX_REQUEST_SIZE);
+                    content_length = len;
                     has_content_length = true;
                 }
             } else if let Some(rest) = lower.strip_prefix("accept:") {
@@ -563,7 +603,17 @@ async fn handle_http_connection(
                 }
             }
         }
-    }
+
+        (
+            method_s,
+            path_s,
+            version_s,
+            header_end,
+            content_length,
+            has_content_length,
+            accept_event_stream,
+        )
+    };
 
     let method = method_s.as_str();
     let path = path_s.as_str();
@@ -599,15 +649,40 @@ async fn handle_http_connection(
             return Ok(());
         }
 
-        while total < header_end + content_length && total < MAX_REQUEST_SIZE {
-            let n = socket.read(&mut buf[total..]).await?;
+        if content_length > MAX_REQUEST_SIZE {
+            let mut body = String::new();
+            write_error_body(
+                &mut body,
+                "INVALID_REQUEST",
+                "request body too large",
+                false,
+                None,
+            );
+            write_http_response(socket, "HTTP/1.1", "413 Payload Too Large", &body).await?;
+            return Ok(());
+        }
+
+        // If we already read some body bytes alongside the header, slide them down
+        // to the start of the buffer so we only need space for the body (not
+        // header+body).
+        let mut body_bytes = total.saturating_sub(header_end);
+        if body_bytes > 0 {
+            buf.copy_within(header_end..total, 0);
+        }
+        if body_bytes > content_length {
+            body_bytes = content_length;
+        }
+        total = body_bytes;
+
+        while total < content_length {
+            let n = socket.read(&mut buf[total..content_length]).await?;
             if n == 0 {
                 break;
             }
             total += n;
         }
 
-        if total < header_end + content_length {
+        if total < content_length {
             let mut body = String::new();
             write_error_body(
                 &mut body,
@@ -620,8 +695,7 @@ async fn handle_http_connection(
             return Ok(());
         }
 
-        let raw_body = &buf[header_end..header_end + content_length];
-        body_str = core::str::from_utf8(raw_body).unwrap_or("");
+        body_str = core::str::from_utf8(&buf[..content_length]).unwrap_or("");
     }
 
     let mut body = String::new();
@@ -675,6 +749,78 @@ async fn handle_http_connection(
                 Err(err) => {
                     write_http_response(socket, version, err, &body).await?;
                 }
+            }
+        }
+        ("GET", "/api/v1/calibration/profile") => {
+            match render_calibration_profile_json(&mut body, calibration).await {
+                Ok(()) => write_http_response(socket, version, "200 OK", &body).await?,
+                Err(err) => write_http_response(socket, version, err, &body).await?,
+            }
+        }
+        ("POST", "/api/v1/calibration/apply") => {
+            match handle_calibration_apply(body_str, &mut body, calibration).await {
+                Ok(kind) => {
+                    // Immediate UART downlink (multi-chunk CalWrite) is queued onto the UART TX task.
+                    if let Err(code) = enqueue_cal_uart(CalUartCommand::SendCurve(kind)) {
+                        write_error_body(&mut body, "UNAVAILABLE", code, true, None);
+                        write_http_response(socket, version, "503 Service Unavailable", &body)
+                            .await?;
+                    } else {
+                        write_http_response(socket, version, "200 OK", &body).await?;
+                    }
+                }
+                Err(err) => write_http_response(socket, version, err, &body).await?,
+            }
+        }
+        ("POST", "/api/v1/calibration/commit") => {
+            match handle_calibration_commit(body_str, &mut body, calibration, eeprom).await {
+                Ok(kind) => {
+                    if let Err(code) = enqueue_cal_uart(CalUartCommand::SendCurve(kind)) {
+                        write_error_body(&mut body, "UNAVAILABLE", code, true, None);
+                        write_http_response(socket, version, "503 Service Unavailable", &body)
+                            .await?;
+                    } else {
+                        write_http_response(socket, version, "200 OK", &body).await?;
+                    }
+                }
+                Err(err) => write_http_response(socket, version, err, &body).await?,
+            }
+        }
+        ("POST", "/api/v1/calibration/reset") => {
+            match handle_calibration_reset(body_str, &mut body, calibration, eeprom).await {
+                Ok(Some(kind)) => {
+                    if let Err(code) = enqueue_cal_uart(CalUartCommand::SendCurve(kind)) {
+                        write_error_body(&mut body, "UNAVAILABLE", code, true, None);
+                        write_http_response(socket, version, "503 Service Unavailable", &body)
+                            .await?;
+                    } else {
+                        write_http_response(socket, version, "200 OK", &body).await?;
+                    }
+                }
+                Ok(None) => {
+                    if let Err(code) = enqueue_cal_uart(CalUartCommand::SendAllCurves) {
+                        write_error_body(&mut body, "UNAVAILABLE", code, true, None);
+                        write_http_response(socket, version, "503 Service Unavailable", &body)
+                            .await?;
+                    } else {
+                        write_http_response(socket, version, "200 OK", &body).await?;
+                    }
+                }
+                Err(err) => write_http_response(socket, version, err, &body).await?,
+            }
+        }
+        ("POST", "/api/v1/calibration/mode") => {
+            match handle_calibration_mode(body_str, &mut body, calibration).await {
+                Ok(kind) => {
+                    if let Err(code) = enqueue_cal_uart(CalUartCommand::SetMode(kind)) {
+                        write_error_body(&mut body, "UNAVAILABLE", code, true, None);
+                        write_http_response(socket, version, "503 Service Unavailable", &body)
+                            .await?;
+                    } else {
+                        write_http_response(socket, version, "200 OK", &body).await?;
+                    }
+                }
+                Err(err) => write_http_response(socket, version, err, &body).await?,
             }
         }
         ("GET", "/api/v1/cc") => match render_cc_view_json(&mut body, telemetry).await {
@@ -758,6 +904,20 @@ fn write_error_body(
     buf.push_str("}}");
 }
 
+async fn socket_write_all(
+    socket: &mut TcpSocket<'_>,
+    mut buf: &[u8],
+) -> Result<(), embassy_net::tcp::Error> {
+    while !buf.is_empty() {
+        let written = socket.write(buf).await?;
+        if written == 0 {
+            return Err(embassy_net::tcp::Error::ConnectionReset);
+        }
+        buf = &buf[written..];
+    }
+    Ok(())
+}
+
 async fn write_http_response(
     socket: &mut TcpSocket<'_>,
     version: &str,
@@ -791,8 +951,8 @@ async fn write_http_response(
         CORS_ALLOW_PRIVATE_NETWORK,
         body.as_bytes().len()
     );
-    socket.write(head.as_bytes()).await?;
-    socket.write(body.as_bytes()).await?;
+    socket_write_all(socket, head.as_bytes()).await?;
+    socket_write_all(socket, body.as_bytes()).await?;
     Ok(())
 }
 
@@ -822,7 +982,7 @@ async fn write_sse_response_head(
         CORS_ALLOW_PRIVATE_NETWORK,
     );
 
-    socket.write(head.as_bytes()).await.map(|_| ())
+    socket_write_all(socket, head.as_bytes()).await
 }
 
 /// Render the JSON body for `GET /api/v1/identity`.
@@ -1073,6 +1233,30 @@ async fn handle_status_sse(
     // smoothness over 400 ms polling.
     const SSE_INTERVAL_MS: u64 = 200;
 
+    if STATUS_SSE_ACTIVE
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        let mut body = String::new();
+        write_error_body(
+            &mut body,
+            "UNAVAILABLE",
+            "status SSE stream already active",
+            true,
+            None,
+        );
+        write_http_response(socket, "HTTP/1.1", "503 Service Unavailable", &body).await?;
+        return Ok(());
+    }
+
+    struct ClearSseActive;
+    impl Drop for ClearSseActive {
+        fn drop(&mut self) {
+            STATUS_SSE_ACTIVE.store(false, Ordering::Release);
+        }
+    }
+    let _guard = ClearSseActive;
+
     write_sse_response_head(socket).await?;
 
     let mut json_body = String::new();
@@ -1086,7 +1270,7 @@ async fn handle_status_sse(
                 frame.push_str("data: ");
                 frame.push_str(&json_body);
                 frame.push_str("\r\n\r\n");
-                socket.write(frame.as_bytes()).await?;
+                socket_write_all(socket, frame.as_bytes()).await?;
                 socket.flush().await?;
             }
             Err(err_status) => {
@@ -1095,7 +1279,7 @@ async fn handle_status_sse(
                 frame.push_str("data: \"");
                 write_json_string_escaped(&mut frame, err_status);
                 frame.push_str("\"\r\n\r\n");
-                socket.write(frame.as_bytes()).await?;
+                socket_write_all(socket, frame.as_bytes()).await?;
                 socket.flush().await?;
                 return Ok(());
             }
@@ -1131,6 +1315,22 @@ fn write_fast_status_json(buf: &mut String, status: &FastStatus) {
     );
     let _ = core::write!(buf, ",\"mcu_temp_mc\":{}", status.mcu_temp_mc);
     let _ = core::write!(buf, ",\"fault_flags\":{}", status.fault_flags);
+
+    if let Some(v) = status.cal_kind {
+        let _ = core::write!(buf, ",\"cal_kind\":{}", v);
+    }
+    if let Some(v) = status.raw_v_nr_100uv {
+        let _ = core::write!(buf, ",\"raw_v_nr_100uv\":{}", v);
+    }
+    if let Some(v) = status.raw_v_rmt_100uv {
+        let _ = core::write!(buf, ",\"raw_v_rmt_100uv\":{}", v);
+    }
+    if let Some(v) = status.raw_cur_100uv {
+        let _ = core::write!(buf, ",\"raw_cur_100uv\":{}", v);
+    }
+    if let Some(v) = status.raw_dac_code {
+        let _ = core::write!(buf, ",\"raw_dac_code\":{}", v);
+    }
     buf.push('}');
 }
 
@@ -1474,4 +1674,830 @@ fn handle_soft_reset_http(body_in: &str, body_out: &mut String) -> Result<(), &'
     body_out.push_str("\"}");
 
     Ok(())
+}
+
+fn ensure_calibration_api_available(body_out: &mut String) -> Result<(), &'static str> {
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    if !link_up {
+        write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted => {
+            write_error_body(
+                body_out,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            Err("409 Conflict")
+        }
+        AnalogState::Offline => {
+            write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
+            Err("503 Service Unavailable")
+        }
+        AnalogState::CalMissing | AnalogState::Ready => Ok(()),
+    }
+}
+
+async fn render_calibration_profile_json(
+    body_out: &mut String,
+    calibration: &'static CalibrationMutex,
+) -> Result<(), &'static str> {
+    let guard = calibration.lock().await;
+    let profile = &guard.profile;
+
+    body_out.clear();
+    body_out.push('{');
+
+    body_out.push_str("\"active\":{");
+    body_out.push_str("\"source\":\"");
+    match profile.source {
+        ProfileSource::FactoryDefault => body_out.push_str("factory-default"),
+        ProfileSource::UserCalibrated => body_out.push_str("user-calibrated"),
+    }
+    body_out.push_str("\",\"fmt_version\":");
+    let _ = core::write!(body_out, "{}", profile.fmt_version);
+    body_out.push_str(",\"hw_rev\":");
+    let _ = core::write!(body_out, "{}", profile.hw_rev);
+    body_out.push_str("},");
+
+    // current_ch1_points
+    body_out.push_str("\"current_ch1_points\":[");
+    for (idx, p) in profile.current_ch1.iter().enumerate() {
+        if idx != 0 {
+            body_out.push(',');
+        }
+        body_out.push('{');
+        let _ = core::write!(
+            body_out,
+            "\"raw_100uv\":{},\"raw_dac_code\":{},\"meas_ma\":{}",
+            p.raw_100uv,
+            p.raw_dac_code,
+            p.meas_physical
+        );
+        body_out.push('}');
+    }
+    body_out.push_str("],");
+
+    // current_ch2_points
+    body_out.push_str("\"current_ch2_points\":[");
+    for (idx, p) in profile.current_ch2.iter().enumerate() {
+        if idx != 0 {
+            body_out.push(',');
+        }
+        body_out.push('{');
+        let _ = core::write!(
+            body_out,
+            "\"raw_100uv\":{},\"raw_dac_code\":{},\"meas_ma\":{}",
+            p.raw_100uv,
+            p.raw_dac_code,
+            p.meas_physical
+        );
+        body_out.push('}');
+    }
+    body_out.push_str("],");
+
+    // v_local_points
+    body_out.push_str("\"v_local_points\":[");
+    for (idx, p) in profile.v_local.iter().enumerate() {
+        if idx != 0 {
+            body_out.push(',');
+        }
+        body_out.push('{');
+        let _ = core::write!(
+            body_out,
+            "\"raw_100uv\":{},\"meas_mv\":{}",
+            p.raw_100uv,
+            p.meas_physical
+        );
+        body_out.push('}');
+    }
+    body_out.push_str("],");
+
+    // v_remote_points
+    body_out.push_str("\"v_remote_points\":[");
+    for (idx, p) in profile.v_remote.iter().enumerate() {
+        if idx != 0 {
+            body_out.push(',');
+        }
+        body_out.push('{');
+        let _ = core::write!(
+            body_out,
+            "\"raw_100uv\":{},\"meas_mv\":{}",
+            p.raw_100uv,
+            p.meas_physical
+        );
+        body_out.push('}');
+    }
+    body_out.push_str("]}");
+
+    Ok(())
+}
+
+fn parse_string_field<'a>(body: &'a str, key: &str) -> Result<&'a str, &'static str> {
+    let needle = match key {
+        "kind" => "\"kind\"",
+        "points" => "\"points\"",
+        _ => return Err("unsupported field"),
+    };
+    let idx = body.find(needle).ok_or("missing field kind")?;
+    let colon = body[idx..].find(':').ok_or("malformed kind field")?;
+    let mut s = body[idx + colon + 1..].trim_start();
+    if !s.starts_with('"') {
+        return Err("kind must be a string");
+    }
+    s = &s[1..];
+    let end = s.find('"').ok_or("kind must be a string")?;
+    Ok(&s[..end])
+}
+
+fn parse_i32_field(body: &str, key: &str) -> Result<i32, &'static str> {
+    let needle = match key {
+        "raw_100uv" => "\"raw_100uv\"",
+        "raw_dac_code" => "\"raw_dac_code\"",
+        "meas_ma" => "\"meas_ma\"",
+        "meas_mv" => "\"meas_mv\"",
+        _ => return Err("unsupported field"),
+    };
+    let idx = body.find(needle).ok_or("missing point field")?;
+    let colon = body[idx..].find(':').ok_or("malformed point field")?;
+    let mut s = body[idx + colon + 1..].trim_start();
+    let mut end = 0usize;
+    for ch in s.chars() {
+        if ch == '-' || ch.is_ascii_digit() {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return Err("point field must be an integer");
+    }
+    s = &s[..end];
+    s.parse::<i32>()
+        .map_err(|_| "point field must be an integer")
+}
+
+fn parse_curve_kind(kind: &str) -> Result<CurveKind, &'static str> {
+    match kind {
+        "current_ch1" => Ok(CurveKind::CurrentCh1),
+        "current_ch2" => Ok(CurveKind::CurrentCh2),
+        "v_local" => Ok(CurveKind::VLocal),
+        "v_remote" => Ok(CurveKind::VRemote),
+        _ => Err("kind must be one of \"current_ch1\", \"current_ch2\", \"v_local\", \"v_remote\""),
+    }
+}
+
+fn parse_reset_kind(kind: &str) -> Result<Option<CurveKind>, &'static str> {
+    if kind == "all" {
+        return Ok(None);
+    }
+    parse_curve_kind(kind).map(Some)
+}
+
+fn parse_cal_mode_kind(kind: &str) -> Result<CalKind, &'static str> {
+    match kind {
+        "off" => Ok(CalKind::Off),
+        "voltage" => Ok(CalKind::Voltage),
+        "current_ch1" => Ok(CalKind::CurrentCh1),
+        "current_ch2" => Ok(CalKind::CurrentCh2),
+        _ => Err("kind must be one of \"off\", \"voltage\", \"current_ch1\", \"current_ch2\""),
+    }
+}
+
+fn parse_points_array(body: &str) -> Result<&str, &'static str> {
+    let idx = body.find("\"points\"").ok_or("missing field points")?;
+    let colon = body[idx..].find(':').ok_or("malformed points field")?;
+    let s = body[idx + colon + 1..].trim_start();
+    if !s.starts_with('[') {
+        return Err("points must be an array");
+    }
+
+    // Extract the full array contents while accounting for nested arrays
+    // (compact point encoding: [[a,b,c],[d,e,f],...]).
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.checked_sub(1).ok_or("points must be an array")?;
+                if depth == 0 {
+                    // Return inside the outermost brackets.
+                    return Ok(&s[1..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Err("points must be an array")
+}
+
+fn representative_i16(values: &mut [i16]) -> i16 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    // Mode (unique winner) if we have repeated samples; otherwise median.
+    let mut max_count = 0usize;
+    let mut winner: Option<i16> = None;
+    let mut winner_tied = false;
+    for i in 0..values.len() {
+        let v = values[i];
+        let mut count = 0usize;
+        for u in values.iter().copied() {
+            if u == v {
+                count += 1;
+            }
+        }
+        if count > max_count {
+            max_count = count;
+            winner = Some(v);
+            winner_tied = false;
+        } else if count == max_count && Some(v) != winner {
+            winner_tied = true;
+        }
+    }
+    if max_count > 1 && !winner_tied {
+        return winner.unwrap_or(0);
+    }
+
+    // Insertion sort for median.
+    for i in 1..values.len() {
+        let key = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > key {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = key;
+    }
+    values[(values.len() - 1) / 2]
+}
+
+fn representative_u16(values: &mut [u16]) -> u16 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    let mut max_count = 0usize;
+    let mut winner: Option<u16> = None;
+    let mut winner_tied = false;
+    for i in 0..values.len() {
+        let v = values[i];
+        let mut count = 0usize;
+        for u in values.iter().copied() {
+            if u == v {
+                count += 1;
+            }
+        }
+        if count > max_count {
+            max_count = count;
+            winner = Some(v);
+            winner_tied = false;
+        } else if count == max_count && Some(v) != winner {
+            winner_tied = true;
+        }
+    }
+    if max_count > 1 && !winner_tied {
+        return winner.unwrap_or(0);
+    }
+
+    for i in 1..values.len() {
+        let key = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > key {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = key;
+    }
+    values[(values.len() - 1) / 2]
+}
+
+fn representative_i32(values: &mut [i32]) -> i32 {
+    if values.is_empty() {
+        return 0;
+    }
+
+    let mut max_count = 0usize;
+    let mut winner: Option<i32> = None;
+    let mut winner_tied = false;
+    for i in 0..values.len() {
+        let v = values[i];
+        let mut count = 0usize;
+        for u in values.iter().copied() {
+            if u == v {
+                count += 1;
+            }
+        }
+        if count > max_count {
+            max_count = count;
+            winner = Some(v);
+            winner_tied = false;
+        } else if count == max_count && Some(v) != winner {
+            winner_tied = true;
+        }
+    }
+    if max_count > 1 && !winner_tied {
+        return winner.unwrap_or(0);
+    }
+
+    for i in 1..values.len() {
+        let key = values[i];
+        let mut j = i;
+        while j > 0 && values[j - 1] > key {
+            values[j] = values[j - 1];
+            j -= 1;
+        }
+        values[j] = key;
+    }
+    values[(values.len() - 1) / 2]
+}
+
+fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 24>, &'static str> {
+    let arr = parse_points_array(body)?;
+    let mut out: Vec<CalPoint, 24> = Vec::new();
+
+    let mut rest = arr.trim_start();
+    if rest.starts_with('{') {
+        return Err(match kind {
+            CurveKind::CurrentCh1 | CurveKind::CurrentCh2 => {
+                "points must be encoded as [[raw_100uv, raw_dac_code, meas_ma], ...]"
+            }
+            CurveKind::VLocal | CurveKind::VRemote => {
+                "points must be encoded as [[raw_100uv, meas_mv], ...]"
+            }
+        });
+    }
+
+    if rest.starts_with('[') {
+        // Compact tuple encoding:
+        // - voltage: [[raw_100uv, meas_mv], ...]
+        // - current: [[raw_100uv, raw_dac_code, meas_ma], ...]
+        while let Some(start) = rest.find('[') {
+            rest = &rest[start + 1..];
+            let end = rest.find(']').ok_or("malformed points array")?;
+            let tuple = rest[..end].trim();
+            rest = &rest[end + 1..];
+
+            if tuple.is_empty() {
+                continue;
+            }
+
+            let mut values = [0i32; 3];
+            let mut n = 0usize;
+            let mut s = tuple;
+            loop {
+                s = s.trim_start();
+                if s.is_empty() {
+                    break;
+                }
+                if n >= values.len() {
+                    return Err("point tuple is too long");
+                }
+
+                let mut end_digits = 0usize;
+                for ch in s.chars() {
+                    if ch == '-' || ch.is_ascii_digit() {
+                        end_digits += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                if end_digits == 0 {
+                    return Err("point tuple must contain integers");
+                }
+
+                let value = s[..end_digits]
+                    .parse::<i32>()
+                    .map_err(|_| "point tuple must contain integers")?;
+                values[n] = value;
+                n += 1;
+
+                s = s[end_digits..].trim_start();
+                if s.is_empty() {
+                    break;
+                }
+                if let Some(next) = s.strip_prefix(',') {
+                    s = next;
+                    continue;
+                }
+                return Err("malformed point tuple");
+            }
+
+            let raw_100uv_i32 = values[0];
+            if raw_100uv_i32 < i16::MIN as i32 || raw_100uv_i32 > i16::MAX as i32 {
+                return Err("raw_100uv out of range for i16");
+            }
+            let raw_100uv = raw_100uv_i32 as i16;
+
+            let (raw_dac_code, meas_physical) = match kind {
+                CurveKind::CurrentCh1 | CurveKind::CurrentCh2 => {
+                    if n != 3 {
+                        return Err(
+                            "current point tuple must be [raw_100uv, raw_dac_code, meas_ma]",
+                        );
+                    }
+                    let dac_i32 = values[1];
+                    if dac_i32 < 0 || dac_i32 > u16::MAX as i32 {
+                        return Err("raw_dac_code out of range for u16");
+                    }
+                    (dac_i32 as u16, values[2])
+                }
+                CurveKind::VLocal | CurveKind::VRemote => {
+                    if n != 2 {
+                        return Err("voltage point tuple must be [raw_100uv, meas_mv]");
+                    }
+                    (0u16, values[1])
+                }
+            };
+
+            if out
+                .push(CalPoint {
+                    raw_100uv,
+                    raw_dac_code,
+                    meas_physical,
+                })
+                .is_err()
+            {
+                return Err("too many points (max 24)");
+            }
+        }
+    } else if !rest.is_empty() {
+        return Err(match kind {
+            CurveKind::CurrentCh1 | CurveKind::CurrentCh2 => {
+                "points must be encoded as [[raw_100uv, raw_dac_code, meas_ma], ...]"
+            }
+            CurveKind::VLocal | CurveKind::VRemote => {
+                "points must be encoded as [[raw_100uv, meas_mv], ...]"
+            }
+        });
+    }
+
+    if out.is_empty() {
+        return Err("points must contain 1..24 items");
+    }
+
+    // Cleanup policy (web UI mirrors this):
+    // 1) Allow repeated samples for the same measured value; collapse by meas
+    //    using mode/median on raw + dac (mode requires unique winner).
+    // 2) Collapse duplicate raw points using mode/median on meas (+ dac).
+    // 3) Enforce strictly increasing meas by dropping non-monotonic points
+    //    after sorting by raw.
+
+    // Sort by meas_physical to group duplicates.
+    {
+        let len = out.len();
+        let slice = out.as_mut_slice();
+        for i in 1..len {
+            let key = slice[i];
+            let mut j = i;
+            while j > 0 && slice[j - 1].meas_physical > key.meas_physical {
+                slice[j] = slice[j - 1];
+                j -= 1;
+            }
+            slice[j] = key;
+        }
+    }
+
+    let mut by_meas: Vec<CalPoint, 24> = Vec::new();
+    let mut idx = 0usize;
+    while idx < out.len() {
+        let meas = out[idx].meas_physical;
+        let mut raws = [0i16; 24];
+        let mut dacs = [0u16; 24];
+        let mut n = 0usize;
+        while idx < out.len() && out[idx].meas_physical == meas {
+            raws[n] = out[idx].raw_100uv;
+            dacs[n] = out[idx].raw_dac_code;
+            n += 1;
+            idx += 1;
+        }
+        let raw_rep = representative_i16(&mut raws[..n]);
+        let dac_rep = representative_u16(&mut dacs[..n]);
+        let _ = by_meas.push(CalPoint {
+            raw_100uv: raw_rep,
+            raw_dac_code: dac_rep,
+            meas_physical: meas,
+        });
+    }
+
+    // Sort by raw_100uv to group duplicates.
+    {
+        let len = by_meas.len();
+        let slice = by_meas.as_mut_slice();
+        for i in 1..len {
+            let key = slice[i];
+            let mut j = i;
+            while j > 0 && slice[j - 1].raw_100uv > key.raw_100uv {
+                slice[j] = slice[j - 1];
+                j -= 1;
+            }
+            slice[j] = key;
+        }
+    }
+
+    let mut by_raw: Vec<CalPoint, 24> = Vec::new();
+    let mut r = 0usize;
+    while r < by_meas.len() {
+        let raw = by_meas[r].raw_100uv;
+        let mut meass = [0i32; 24];
+        let mut dacs = [0u16; 24];
+        let mut n = 0usize;
+        while r < by_meas.len() && by_meas[r].raw_100uv == raw {
+            meass[n] = by_meas[r].meas_physical;
+            dacs[n] = by_meas[r].raw_dac_code;
+            n += 1;
+            r += 1;
+        }
+        let meas_rep = representative_i32(&mut meass[..n]);
+        let dac_rep = representative_u16(&mut dacs[..n]);
+        let _ = by_raw.push(CalPoint {
+            raw_100uv: raw,
+            raw_dac_code: dac_rep,
+            meas_physical: meas_rep,
+        });
+    }
+
+    // Enforce strictly increasing meas by dropping non-monotonic points.
+    let mut cleaned: Vec<CalPoint, 24> = Vec::new();
+    for p in by_raw.into_iter() {
+        if let Some(last) = cleaned.last() {
+            if p.meas_physical <= last.meas_physical {
+                continue;
+            }
+        }
+        let _ = cleaned.push(p);
+    }
+
+    if cleaned.is_empty() {
+        return Err("points must contain 1..24 items");
+    }
+    Ok(cleaned)
+}
+
+async fn handle_calibration_apply(
+    body_in: &str,
+    body_out: &mut String,
+    calibration: &'static CalibrationMutex,
+) -> Result<CurveKind, &'static str> {
+    ensure_calibration_api_available(body_out)?;
+
+    let kind_s = match parse_string_field(body_in, "kind") {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+    let kind = parse_curve_kind(kind_s).map_err(|msg| {
+        write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+        "400 Bad Request"
+    })?;
+
+    let points = match parse_points_for_kind(kind, body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    {
+        let mut guard = calibration.lock().await;
+        *guard.profile.points_for_mut(kind) = points;
+        // Apply is RAM-only (no EEPROM write), but the active profile is now user-supplied.
+        guard.profile.source = ProfileSource::UserCalibrated;
+        guard.profile.fmt_version = calfmt::CAL_FMT_VERSION_LATEST;
+    }
+
+    body_out.clear();
+    body_out.push_str(r#"{"ok":true}"#);
+    Ok(kind)
+}
+
+async fn handle_calibration_commit(
+    body_in: &str,
+    body_out: &mut String,
+    calibration: &'static CalibrationMutex,
+    eeprom: &'static EepromMutex,
+) -> Result<CurveKind, &'static str> {
+    ensure_calibration_api_available(body_out)?;
+
+    let kind_s = match parse_string_field(body_in, "kind") {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+    let kind = match parse_curve_kind(kind_s) {
+        Ok(k) => k,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    let points = match parse_points_for_kind(kind, body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    let (prev, blob) = {
+        let mut guard = calibration.lock().await;
+        let prev = guard.profile.clone();
+        *guard.profile.points_for_mut(kind) = points;
+        guard.profile.source = ProfileSource::UserCalibrated;
+        guard.profile.fmt_version = calfmt::CAL_FMT_VERSION_LATEST;
+        let blob = calfmt::serialize_profile(&guard.profile);
+        (prev, blob)
+    };
+
+    {
+        let mut ep = eeprom.lock().await;
+        if let Err(_err) = ep.write_profile_blob(&blob).await {
+            let mut guard = calibration.lock().await;
+            guard.profile = prev;
+            write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
+            return Err("503 Service Unavailable");
+        }
+    }
+
+    body_out.clear();
+    body_out.push_str(r#"{"ok":true}"#);
+    Ok(kind)
+}
+
+fn profile_equals_factory(profile: &calfmt::ActiveProfile) -> bool {
+    let factory = calfmt::ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV);
+    profile.fmt_version == factory.fmt_version
+        && profile.hw_rev == factory.hw_rev
+        && profile.current_ch1 == factory.current_ch1
+        && profile.current_ch2 == factory.current_ch2
+        && profile.v_local == factory.v_local
+        && profile.v_remote == factory.v_remote
+}
+
+async fn handle_calibration_reset(
+    body_in: &str,
+    body_out: &mut String,
+    calibration: &'static CalibrationMutex,
+    eeprom: &'static EepromMutex,
+) -> Result<Option<CurveKind>, &'static str> {
+    ensure_calibration_api_available(body_out)?;
+
+    let idx = body_in.find("\"kind\"").ok_or_else(|| {
+        write_error_body(
+            body_out,
+            "INVALID_REQUEST",
+            "missing field kind",
+            false,
+            None,
+        );
+        "400 Bad Request"
+    })?;
+    let colon = body_in[idx..].find(':').ok_or_else(|| {
+        write_error_body(
+            body_out,
+            "INVALID_REQUEST",
+            "malformed kind field",
+            false,
+            None,
+        );
+        "400 Bad Request"
+    })?;
+    let mut s = body_in[idx + colon + 1..].trim_start();
+    if !s.starts_with('"') {
+        write_error_body(
+            body_out,
+            "INVALID_REQUEST",
+            "kind must be a string",
+            false,
+            None,
+        );
+        return Err("400 Bad Request");
+    }
+    s = &s[1..];
+    let end = s.find('"').ok_or_else(|| {
+        write_error_body(
+            body_out,
+            "INVALID_REQUEST",
+            "kind must be a string",
+            false,
+            None,
+        );
+        "400 Bad Request"
+    })?;
+    let kind_s = &s[..end];
+
+    let reset_kind = match parse_reset_kind(kind_s) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    // Apply reset to RAM first, then persist (either clear EEPROM or write updated blob).
+    let (factory, should_clear) = {
+        let factory = calfmt::ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV);
+        let should_clear = reset_kind.is_none();
+        (factory, should_clear)
+    };
+
+    if should_clear {
+        {
+            let mut guard = calibration.lock().await;
+            guard.profile = factory.clone();
+            guard.profile.source = ProfileSource::FactoryDefault;
+        }
+        {
+            let mut ep = eeprom.lock().await;
+            if let Err(_err) = ep.clear_profile_blob().await {
+                write_error_body(body_out, "UNAVAILABLE", "EEPROM clear failed", true, None);
+                return Err("503 Service Unavailable");
+            }
+        }
+        body_out.clear();
+        body_out.push_str(r#"{"ok":true}"#);
+        return Ok(None);
+    }
+
+    let kind = reset_kind.unwrap();
+    let blob_or_clear = {
+        let mut guard = calibration.lock().await;
+        let factory_curve = match kind {
+            CurveKind::CurrentCh1 => factory.current_ch1.clone(),
+            CurveKind::CurrentCh2 => factory.current_ch2.clone(),
+            CurveKind::VLocal => factory.v_local.clone(),
+            CurveKind::VRemote => factory.v_remote.clone(),
+        };
+        *guard.profile.points_for_mut(kind) = factory_curve;
+
+        if profile_equals_factory(&guard.profile) {
+            guard.profile = factory.clone();
+            guard.profile.source = ProfileSource::FactoryDefault;
+            None
+        } else {
+            guard.profile.source = ProfileSource::UserCalibrated;
+            Some(calfmt::serialize_profile(&guard.profile))
+        }
+    };
+
+    {
+        let mut ep = eeprom.lock().await;
+        let res = match blob_or_clear {
+            None => ep.clear_profile_blob().await,
+            Some(ref blob) => ep.write_profile_blob(blob).await,
+        };
+        if res.is_err() {
+            write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
+            return Err("503 Service Unavailable");
+        }
+    }
+
+    body_out.clear();
+    body_out.push_str(r#"{"ok":true}"#);
+    Ok(Some(kind))
+}
+
+async fn handle_calibration_mode(
+    body_in: &str,
+    body_out: &mut String,
+    calibration: &'static CalibrationMutex,
+) -> Result<CalKind, &'static str> {
+    ensure_calibration_api_available(body_out)?;
+    let kind_s = match parse_string_field(body_in, "kind") {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+    let kind = match parse_cal_mode_kind(kind_s) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    {
+        let mut guard = calibration.lock().await;
+        guard.cal_mode = kind;
+    }
+
+    body_out.clear();
+    body_out.push_str(r#"{"ok":true}"#);
+    Ok(kind)
 }

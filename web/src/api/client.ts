@@ -1,10 +1,25 @@
+import { CALIBRATION_MAX_POINTS } from "../calibration/validation.ts";
 import type {
+  CalibrationApplyRequest,
+  CalibrationCommitRequest,
+  CalibrationModeRequest,
+  CalibrationPointCurrentWireCompact,
+  CalibrationPointVoltageWireCompact,
+  CalibrationProfile,
+  CalibrationProfileWire,
+  CalibrationResetRequest,
+  CalibrationWriteRequestWire,
   CcControlView,
   CcUpdateRequest,
   FastStatusJson,
   FastStatusView,
   Identity,
 } from "./types.ts";
+
+const TAB_ID =
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `tab-${Math.random().toString(16).slice(2)}`;
 
 // Mock backend selection is based solely on the device URL scheme. The
 // ENABLE_MOCK flag remains exported for other modules but no longer gates the
@@ -197,9 +212,60 @@ interface MockDeviceState {
   identity: Identity;
   status: FastStatusView;
   cc: CcControlView;
+  calibrationMode: CalibrationModeRequest["kind"];
+  calibration: MockCalibrationState;
+}
+
+interface MockCalibrationState {
+  factory: CalibrationProfileWire;
+  ram: CalibrationProfileWire;
+  eeprom: CalibrationProfileWire | null;
+}
+
+function createInitialCalibrationProfileWire(): CalibrationProfileWire {
+  // Match firmware expectations: raw_100uv is i16, points are 1..7, and meas is
+  // strictly increasing (after raw-sorted normalization).
+  const active = {
+    source: "factory-default" as const,
+    fmt_version: 3,
+    hw_rev: 1,
+  };
+
+  const v_local_points = [
+    { raw_100uv: 0, meas_mv: 0 },
+    { raw_100uv: 30_000, meas_mv: 12_000 },
+  ];
+  const v_remote_points = [
+    { raw_100uv: 0, meas_mv: 0 },
+    { raw_100uv: 30_000, meas_mv: 12_000 },
+  ];
+
+  const current_ch1_points = [
+    { raw_100uv: 0, raw_dac_code: 0, meas_ma: 0 },
+    { raw_100uv: 25_000, raw_dac_code: 4095, meas_ma: 5_000 },
+  ];
+  const current_ch2_points = [
+    { raw_100uv: 0, raw_dac_code: 0, meas_ma: 0 },
+    { raw_100uv: 25_000, raw_dac_code: 4095, meas_ma: 5_000 },
+  ];
+
+  return {
+    active,
+    current_ch1_points,
+    current_ch2_points,
+    v_local_points,
+    v_remote_points,
+  };
 }
 
 const mockDevices = new Map<string, MockDeviceState>();
+
+function clampI16(value: number): number {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+  return Math.max(-32768, Math.min(32767, value));
+}
 
 function createInitialStatus(): FastStatusView {
   const raw: FastStatusJson = {
@@ -290,8 +356,20 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
   const identity = createInitialIdentity(baseUrl, index);
   const status = createInitialStatus();
   const cc = createInitialCc();
+  const factoryProfile = createInitialCalibrationProfileWire();
+  const calibration: MockCalibrationState = {
+    factory: structuredClone(factoryProfile),
+    ram: structuredClone(factoryProfile),
+    eeprom: null,
+  };
 
-  const state: MockDeviceState = { identity, status, cc };
+  const state: MockDeviceState = {
+    identity,
+    status,
+    cc,
+    calibrationMode: "off",
+    calibration,
+  };
   mockDevices.set(baseUrl, state);
   return state;
 }
@@ -306,6 +384,52 @@ async function mockGetStatus(baseUrl: string): Promise<FastStatusView> {
   const next = { ...state.status, raw: { ...state.status.raw } };
   // Simple uptime tick to show the value changing between refreshes.
   next.raw.uptime_ms += 1_000;
+
+  // Injection of raw values based on calibration mode
+  switch (state.calibrationMode) {
+    case "voltage":
+      // Inject dummy raw voltage values
+      // In a real device these would fluctuate; here we can just mirror the parsed values * 10 or similar
+      next.raw.cal_kind = 1; // dummy enum value for voltage
+      // Keep within firmware range (i16) so captured candidates can be applied.
+      // Treat raw_*_100uv as a scaled-down ADC-domain representation (~V/4).
+      next.raw.raw_v_nr_100uv = clampI16(Math.round(next.raw.v_local_mv * 2.5));
+      next.raw.raw_v_rmt_100uv = clampI16(
+        Math.round(next.raw.v_remote_mv * 2.5),
+      );
+      break;
+    case "current_ch1":
+      next.raw.cal_kind = 2; // dummy
+      // Keep within firmware range (i16). Model a small shunt voltage at ADC.
+      next.raw.raw_cur_100uv = clampI16(Math.round(next.raw.i_local_ma / 2));
+      next.raw.raw_dac_code = Math.floor(
+        (next.raw.target_value /
+          (state.cc.limit_profile.max_i_ma > 0
+            ? state.cc.limit_profile.max_i_ma
+            : 1)) *
+          4095,
+      );
+      break;
+    case "current_ch2":
+      next.raw.cal_kind = 3; // dummy
+      next.raw.raw_cur_100uv = clampI16(Math.round(next.raw.i_remote_ma / 2));
+      next.raw.raw_dac_code = Math.floor(
+        (next.raw.target_value /
+          (state.cc.limit_profile.max_i_ma > 0
+            ? state.cc.limit_profile.max_i_ma
+            : 1)) *
+          4095,
+      );
+      break;
+    default:
+      delete next.raw.cal_kind;
+      delete next.raw.raw_v_nr_100uv;
+      delete next.raw.raw_v_rmt_100uv;
+      delete next.raw.raw_cur_100uv;
+      delete next.raw.raw_dac_code;
+      break;
+  }
+
   state.status = next;
   return structuredClone(next);
 }
@@ -386,9 +510,15 @@ async function mockSoftReset(
   baseUrl: string,
   reason: string,
 ): Promise<{ accepted: boolean; reason: string }> {
-  // Ensure the device exists in the mock registry so identity/status remain
-  // consistent, but we do not currently simulate side effects.
-  getOrCreateMockDevice(baseUrl);
+  const state = getOrCreateMockDevice(baseUrl);
+  // Simulate a reboot: calibration apply is RAM-only, commit persists.
+  state.calibrationMode = "off";
+  if (state.calibration.eeprom) {
+    state.calibration.ram = structuredClone(state.calibration.eeprom);
+    state.calibration.ram.active.source = "user-calibrated";
+  } else {
+    state.calibration.ram = structuredClone(state.calibration.factory);
+  }
   return {
     accepted: true,
     reason,
@@ -458,7 +588,7 @@ export function subscribeStatusStream(
   }
 
   const url = new URL("/api/v1/status", baseUrl);
-  const source = new EventSource(url.toString());
+  let closed = false;
 
   const isFastStatusView = (val: unknown): val is FastStatusView => {
     return (
@@ -470,9 +600,25 @@ export function subscribeStatusStream(
     );
   };
 
-  const handleStatus = (event: MessageEvent) => {
+  const emitMessage = (view: FastStatusView) => {
+    if (closed) {
+      return;
+    }
+    onMessage(view);
+  };
+
+  const emitError = (error: Event | Error) => {
+    if (closed) {
+      return;
+    }
+    if (onError) {
+      onError(error);
+    }
+  };
+
+  const parseAndEmit = (payload: string) => {
     try {
-      const parsed = JSON.parse(event.data) as
+      const parsed = JSON.parse(payload) as
         | FastStatusView
         | {
             status: FastStatusJson;
@@ -492,31 +638,147 @@ export function subscribeStatusStream(
             fault_flags_decoded: parsed.fault_flags_decoded ?? [],
           };
 
-      onMessage(view);
+      emitMessage(view);
     } catch (error) {
-      if (onError) {
-        onError(
-          error instanceof Error ? error : new Error("invalid SSE payload"),
-        );
-      }
+      emitError(
+        error instanceof Error ? error : new Error("invalid SSE payload"),
+      );
     }
+  };
+
+  const handleStatus = (event: MessageEvent) => {
+    parseAndEmit(event.data);
   };
 
   const handleError = (event: Event) => {
-    if (onError) {
-      onError(event);
+    emitError(event);
+  };
+
+  // Prevent multiple browser tabs from opening parallel SSE connections to the
+  // device. The embedded HTTP server has a small worker pool; one SSE stream is
+  // enough and can be fan-out broadcast to other tabs.
+  const canShareAcrossTabs =
+    typeof BroadcastChannel !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    "locks" in navigator;
+
+  if (!canShareAcrossTabs) {
+    const source = new EventSource(url.toString());
+    source.addEventListener("status", handleStatus as EventListener);
+    source.addEventListener("message", handleStatus as EventListener);
+    source.addEventListener("error", handleError);
+
+    return () => {
+      closed = true;
+      source.removeEventListener("status", handleStatus as EventListener);
+      source.removeEventListener("message", handleStatus as EventListener);
+      source.removeEventListener("error", handleError);
+      source.close();
+    };
+  }
+
+  const lockName = `llx-status-sse:${new URL(baseUrl).origin}`;
+  const channel = new BroadcastChannel(lockName);
+
+  let releaseLeader: (() => void) | null = null;
+
+  type BroadcastEnvelope =
+    | { t: "status"; d: string; from: string }
+    | { t: "bye"; from: string };
+
+  void navigator.locks
+    .request(lockName, { mode: "exclusive" }, async () => {
+      if (closed) {
+        return;
+      }
+
+      let resolveRelease: (() => void) | null = null;
+      const waitRelease = new Promise<void>((resolve) => {
+        resolveRelease = resolve;
+      });
+      releaseLeader = () => {
+        resolveRelease?.();
+      };
+
+      const leaderSource = new EventSource(url.toString());
+
+      const broadcastStatus = (event: MessageEvent) => {
+        const msg: BroadcastEnvelope = {
+          t: "status",
+          d: event.data,
+          from: TAB_ID,
+        };
+        try {
+          channel.postMessage(msg);
+        } catch {
+          // Best-effort fan-out; the channel may already be closed during cleanup.
+        }
+        parseAndEmit(event.data);
+      };
+      const broadcastError = (event: Event) => {
+        handleError(event);
+      };
+
+      leaderSource.addEventListener("status", broadcastStatus as EventListener);
+      leaderSource.addEventListener(
+        "message",
+        broadcastStatus as EventListener,
+      );
+      leaderSource.addEventListener("error", broadcastError);
+
+      try {
+        await waitRelease;
+      } finally {
+        leaderSource.removeEventListener(
+          "status",
+          broadcastStatus as EventListener,
+        );
+        leaderSource.removeEventListener(
+          "message",
+          broadcastStatus as EventListener,
+        );
+        leaderSource.removeEventListener("error", broadcastError);
+        leaderSource.close();
+
+        try {
+          channel.postMessage({
+            t: "bye",
+            from: TAB_ID,
+          } satisfies BroadcastEnvelope);
+        } catch {
+          // ignore
+        }
+        releaseLeader = null;
+      }
+    })
+    .catch((error) => {
+      emitError(
+        error instanceof Error ? error : new Error("status lock error"),
+      );
+    });
+
+  const onChannelMessage = (event: MessageEvent) => {
+    if (closed) {
+      return;
+    }
+    const payload = event.data as Partial<BroadcastEnvelope> | null;
+    if (!payload || typeof payload !== "object" || payload.from === TAB_ID) {
+      return;
+    }
+    if (payload.t === "status" && typeof payload.d === "string") {
+      parseAndEmit(payload.d);
+      return;
     }
   };
 
-  source.addEventListener("status", handleStatus as EventListener);
-  source.addEventListener("message", handleStatus as EventListener);
-  source.addEventListener("error", handleError);
+  channel.addEventListener("message", onChannelMessage);
 
   return () => {
-    source.removeEventListener("status", handleStatus as EventListener);
-    source.removeEventListener("message", handleStatus as EventListener);
-    source.removeEventListener("error", handleError);
-    source.close();
+    closed = true;
+    releaseLeader?.();
+    releaseLeader = null;
+    channel.removeEventListener("message", onChannelMessage);
+    channel.close();
   };
 }
 
@@ -573,4 +835,416 @@ export async function postSoftReset(
       },
     },
   );
+}
+
+// Calibration API
+
+function mapCalibrationProfileWireToUi(
+  profile: CalibrationProfileWire,
+): CalibrationProfile {
+  return {
+    active: profile.active,
+    v_local_points: profile.v_local_points.map((point) => ({
+      raw: point.raw_100uv,
+      mv: point.meas_mv,
+    })),
+    v_remote_points: profile.v_remote_points.map((point) => ({
+      raw: point.raw_100uv,
+      mv: point.meas_mv,
+    })),
+    current_ch1_points: profile.current_ch1_points.map((point) => ({
+      raw: point.raw_100uv,
+      ua: point.meas_ma * 1000,
+      dac_code: point.raw_dac_code,
+    })),
+    current_ch2_points: profile.current_ch2_points.map((point) => ({
+      raw: point.raw_100uv,
+      ua: point.meas_ma * 1000,
+      dac_code: point.raw_dac_code,
+    })),
+  };
+}
+
+function mapCalibrationWriteRequestToWire(
+  payload: CalibrationApplyRequest,
+): CalibrationWriteRequestWire {
+  switch (payload.kind) {
+    case "v_local":
+    case "v_remote":
+      return {
+        kind: payload.kind,
+        points: payload.points.map(
+          (point): CalibrationPointVoltageWireCompact => [point.raw, point.mv],
+        ),
+      };
+    case "current_ch1":
+    case "current_ch2":
+      return {
+        kind: payload.kind,
+        points: payload.points.map(
+          (point): CalibrationPointCurrentWireCompact => [
+            point.raw,
+            point.dac_code,
+            Math.floor((point.ua + 500) / 1000),
+          ],
+        ),
+      };
+  }
+}
+
+export async function getCalibrationProfile(
+  baseUrl: string,
+): Promise<CalibrationProfile> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockGetCalibrationProfile(baseUrl);
+  }
+  const payload = await httpJsonQueued<CalibrationProfileWire>(
+    baseUrl,
+    "/api/v1/calibration/profile",
+  );
+  return mapCalibrationProfileWireToUi(payload);
+}
+
+export async function postCalibrationApply(
+  baseUrl: string,
+  payload: CalibrationApplyRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationApply(baseUrl, payload);
+  }
+  const body = JSON.stringify(mapCalibrationWriteRequestToWire(payload));
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/apply", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
+}
+
+export async function postCalibrationCommit(
+  baseUrl: string,
+  payload: CalibrationCommitRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationCommit(baseUrl, payload);
+  }
+  const body = JSON.stringify(mapCalibrationWriteRequestToWire(payload));
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/commit", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
+}
+
+export async function postCalibrationReset(
+  baseUrl: string,
+  payload: CalibrationResetRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationReset(baseUrl, payload);
+  }
+  const body = JSON.stringify(payload);
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/reset", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
+}
+
+export async function postCalibrationMode(
+  baseUrl: string,
+  payload: CalibrationModeRequest,
+): Promise<void> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockPostCalibrationMode(baseUrl, payload);
+  }
+  const body = JSON.stringify(payload);
+  return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/mode", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
+}
+
+// Mock Implementation Extensions (Calibration)
+
+function mockCalValidationError(message: string): never {
+  throw new HttpApiError({
+    status: 400,
+    code: "INVALID_REQUEST",
+    message,
+    retryable: false,
+    details: null,
+  });
+}
+
+function mockNormalizeWirePointsByRaw100uv<T extends { raw_100uv: number }>(
+  kind: string,
+  points: T[],
+  measKey: string,
+  getMeas: (point: T) => number,
+): T[] {
+  for (const point of points) {
+    const raw = point.raw_100uv;
+    if (!Number.isFinite(raw) || !Number.isInteger(raw)) {
+      mockCalValidationError("raw_100uv must be an integer");
+    }
+    if (raw < -32768 || raw > 32767) {
+      mockCalValidationError("raw_100uv out of range for i16");
+    }
+
+    const meas = getMeas(point);
+    if (!Number.isFinite(meas) || !Number.isInteger(meas)) {
+      mockCalValidationError(`${measKey} must be an integer`);
+    }
+  }
+
+  // Allow repeated captures at the same measured value (keep the most recent).
+  const measDeduped: T[] = [];
+  for (const point of points) {
+    const meas = getMeas(point);
+    const idx = measDeduped.findIndex((p) => getMeas(p) === meas);
+    if (idx < 0) measDeduped.push(point);
+    else measDeduped[idx] = point;
+  }
+
+  // Small N (<=24): stable insertion sort by raw_100uv, then drop duplicates.
+  const sorted = measDeduped.slice();
+  for (let i = 1; i < sorted.length; i++) {
+    let j = i;
+    while (j > 0 && sorted[j - 1].raw_100uv > sorted[j].raw_100uv) {
+      const tmp = sorted[j - 1];
+      sorted[j - 1] = sorted[j];
+      sorted[j] = tmp;
+      j -= 1;
+    }
+  }
+
+  // Dedup by raw_100uv (keep last occurrence).
+  const deduped: T[] = [];
+  for (const point of sorted) {
+    const last = deduped[deduped.length - 1];
+    if (last && last.raw_100uv === point.raw_100uv) {
+      deduped[deduped.length - 1] = point;
+    } else {
+      deduped.push(point);
+    }
+  }
+
+  for (let i = 1; i < deduped.length; i++) {
+    if (getMeas(deduped[i]) <= getMeas(deduped[i - 1])) {
+      mockCalValidationError(`meas must be strictly increasing for ${kind}`);
+    }
+  }
+
+  if (deduped.length === 0) {
+    mockCalValidationError(
+      `points must contain 1..${CALIBRATION_MAX_POINTS} items`,
+    );
+  }
+  if (deduped.length > CALIBRATION_MAX_POINTS) {
+    mockCalValidationError(`too many points (max ${CALIBRATION_MAX_POINTS})`);
+  }
+
+  return deduped;
+}
+
+function mockNormalizeVoltageWirePoints(
+  kind: "v_local" | "v_remote",
+  points: CalibrationPointVoltageWireCompact[],
+): CalibrationProfileWire["v_local_points"] {
+  const normalized = points.map((point) => ({
+    raw_100uv: point[0],
+    meas_mv: point[1],
+  }));
+  return mockNormalizeWirePointsByRaw100uv(
+    kind,
+    normalized,
+    "meas_mv",
+    (p) => p.meas_mv,
+  );
+}
+
+function mockNormalizeCurrentWirePoints(
+  kind: "current_ch1" | "current_ch2",
+  points: CalibrationPointCurrentWireCompact[],
+): CalibrationProfileWire["current_ch1_points"] {
+  const normalized = points.map((point) => ({
+    raw_100uv: point[0],
+    raw_dac_code: point[1],
+    meas_ma: point[2],
+  }));
+
+  for (const point of normalized) {
+    const dac = point.raw_dac_code;
+    if (!Number.isFinite(dac) || !Number.isInteger(dac)) {
+      mockCalValidationError("raw_dac_code must be an integer");
+    }
+    if (dac < 0 || dac > 65535) {
+      mockCalValidationError("raw_dac_code out of range for u16");
+    }
+  }
+
+  return mockNormalizeWirePointsByRaw100uv(
+    kind,
+    normalized,
+    "meas_ma",
+    (p) => p.meas_ma,
+  );
+}
+
+function mockProfileWireEqualsFactory(
+  profile: CalibrationProfileWire,
+  factory: CalibrationProfileWire,
+): boolean {
+  if (
+    profile.active.fmt_version !== factory.active.fmt_version ||
+    profile.active.hw_rev !== factory.active.hw_rev
+  ) {
+    return false;
+  }
+  const eqVoltage = (
+    a: { raw_100uv: number; meas_mv: number }[],
+    b: { raw_100uv: number; meas_mv: number }[],
+  ) => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i].raw_100uv !== b[i].raw_100uv || a[i].meas_mv !== b[i].meas_mv) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  const eqCurrent = (
+    a: { raw_100uv: number; raw_dac_code: number; meas_ma: number }[],
+    b: { raw_100uv: number; raw_dac_code: number; meas_ma: number }[],
+  ) => {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (
+        a[i].raw_100uv !== b[i].raw_100uv ||
+        a[i].raw_dac_code !== b[i].raw_dac_code ||
+        a[i].meas_ma !== b[i].meas_ma
+      ) {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  return (
+    eqCurrent(profile.current_ch1_points, factory.current_ch1_points) &&
+    eqCurrent(profile.current_ch2_points, factory.current_ch2_points) &&
+    eqVoltage(profile.v_local_points, factory.v_local_points) &&
+    eqVoltage(profile.v_remote_points, factory.v_remote_points)
+  );
+}
+
+async function mockGetCalibrationProfile(
+  baseUrl: string,
+): Promise<CalibrationProfile> {
+  const state = getOrCreateMockDevice(baseUrl);
+  return mapCalibrationProfileWireToUi(structuredClone(state.calibration.ram));
+}
+
+async function mockPostCalibrationApply(
+  baseUrl: string,
+  payload: CalibrationApplyRequest,
+): Promise<void> {
+  const state = getOrCreateMockDevice(baseUrl);
+  const wire = mapCalibrationWriteRequestToWire(payload);
+  const ram = state.calibration.ram;
+  ram.active.source = "user-calibrated";
+
+  switch (wire.kind) {
+    case "v_local":
+      ram.v_local_points = mockNormalizeVoltageWirePoints(
+        wire.kind,
+        wire.points,
+      );
+      break;
+    case "v_remote":
+      ram.v_remote_points = mockNormalizeVoltageWirePoints(
+        wire.kind,
+        wire.points,
+      );
+      break;
+    case "current_ch1":
+      ram.current_ch1_points = mockNormalizeCurrentWirePoints(
+        wire.kind,
+        wire.points,
+      );
+      break;
+    case "current_ch2":
+      ram.current_ch2_points = mockNormalizeCurrentWirePoints(
+        wire.kind,
+        wire.points,
+      );
+      break;
+  }
+}
+
+async function mockPostCalibrationCommit(
+  baseUrl: string,
+  payload: CalibrationCommitRequest,
+): Promise<void> {
+  const state = getOrCreateMockDevice(baseUrl);
+  await mockPostCalibrationApply(baseUrl, payload);
+  state.calibration.eeprom = structuredClone(state.calibration.ram);
+}
+
+async function mockPostCalibrationReset(
+  baseUrl: string,
+  payload: CalibrationResetRequest,
+): Promise<void> {
+  const state = getOrCreateMockDevice(baseUrl);
+  const { kind } = payload;
+
+  if (kind === "all") {
+    state.calibration.ram = structuredClone(state.calibration.factory);
+    state.calibration.eeprom = null;
+    return;
+  }
+
+  const factory = state.calibration.factory;
+  const ram = state.calibration.ram;
+
+  switch (kind) {
+    case "v_local":
+      ram.v_local_points = structuredClone(factory.v_local_points);
+      break;
+    case "v_remote":
+      ram.v_remote_points = structuredClone(factory.v_remote_points);
+      break;
+    case "current_ch1":
+      ram.current_ch1_points = structuredClone(factory.current_ch1_points);
+      break;
+    case "current_ch2":
+      ram.current_ch2_points = structuredClone(factory.current_ch2_points);
+      break;
+  }
+
+  if (mockProfileWireEqualsFactory(ram, factory)) {
+    state.calibration.ram = structuredClone(factory);
+    state.calibration.eeprom = null;
+  } else {
+    ram.active.source = "user-calibrated";
+    state.calibration.eeprom = structuredClone(ram);
+  }
+}
+
+async function mockPostCalibrationMode(
+  baseUrl: string,
+  payload: CalibrationModeRequest,
+): Promise<void> {
+  const state = getOrCreateMockDevice(baseUrl);
+  state.calibrationMode = payload.kind;
 }
