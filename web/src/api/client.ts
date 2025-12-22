@@ -885,7 +885,7 @@ function mapCalibrationWriteRequestToWire(
           (point): CalibrationPointCurrentWireCompact => [
             point.raw,
             point.dac_code,
-            Math.round(point.ua / 1000),
+            Math.floor((point.ua + 500) / 1000),
           ],
         ),
       };

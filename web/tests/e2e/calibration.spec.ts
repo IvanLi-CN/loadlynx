@@ -32,10 +32,18 @@ test.describe("Calibration UI", () => {
     const draftVoltageTable = page.locator("table", { hasText: "Value (mV)" });
     await expect(draftVoltageTable).toContainText("No draft points.");
 
-    // Capture a voltage point at 12V.
-    await page.getByLabel("Measured Voltage (V)").fill("12.00");
+    // Capture voltage points (1µV input precision, stored as integer mV).
+    const measuredVoltage = page.getByLabel("Measured Voltage (V)");
+    await expect(measuredVoltage).toHaveAttribute("step", "0.000001");
+
+    await measuredVoltage.fill("12.00");
     await page.getByRole("button", { name: "Capture" }).click();
     await expect(draftVoltageTable).toContainText("12000");
+
+    // 12.000500 V = 12000.5 mV -> rounds half-up to 12001 mV.
+    await measuredVoltage.fill("12.000500");
+    await page.getByRole("button", { name: "Capture" }).click();
+    await expect(draftVoltageTable).toContainText("12001");
 
     // Switch to current tab (CH1).
     await page.getByRole("tab", { name: "电流通道1" }).click();

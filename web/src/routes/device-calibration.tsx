@@ -1,12 +1,14 @@
 import type { QueryObserverResult } from "@tanstack/react-query";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
+import Decimal from "decimal.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   getCalibrationProfile,
   getStatus,
   type HttpApiError,
   isHttpApiError,
+  isMockBaseUrl,
   postCalibrationApply,
   postCalibrationCommit,
   postCalibrationMode,
@@ -22,7 +24,7 @@ import type {
   CalibrationProfile,
   FastStatusView,
 } from "../api/types.ts";
-import { piecewiseLinear } from "../calibration/piecewise.ts";
+import { piecewiseLinearDecimal } from "../calibration/piecewise.ts";
 import {
   calibrationProfilesPointsEqual,
   type ValidationIssue,
@@ -123,6 +125,7 @@ function getCalibrationCurrentOptionsStorageKey(
 }
 
 type CurrentInputUnit = "A" | "mA";
+type VoltageInputUnit = "V";
 
 function parseNonNegativeDecimalToScaledInt(
   input: string,
@@ -130,32 +133,29 @@ function parseNonNegativeDecimalToScaledInt(
 ): number | null {
   const trimmed = input.trim();
   if (trimmed === "") return null;
-  const match = /^(\d+)(?:\.(\d*))?$/.exec(trimmed);
-  if (!match) return null;
-  const intPart = Number.parseInt(match[1], 10);
-  if (!Number.isFinite(intPart) || intPart < 0) return null;
+  if (!/^\d+(?:\.\d*)?$/.test(trimmed)) return null;
 
-  const fracRaw = match[2] ?? "";
-  const scale = 10 ** decimals;
+  try {
+    const value = new Decimal(trimmed);
+    if (!value.isFinite() || value.isNeg()) return null;
 
-  const padded = (fracRaw + "0".repeat(decimals + 1)).slice(0, decimals + 1);
-  const fracMainRaw = padded.slice(0, decimals);
-  const roundDigit = padded[decimals] ?? "0";
+    const scale = new Decimal(10).pow(decimals);
+    const scaled = value.mul(scale).toDecimalPlaces(0, Decimal.ROUND_HALF_UP);
+    if (!scaled.isFinite() || !scaled.isInteger()) return null;
+    if (scaled.gt(Number.MAX_SAFE_INTEGER)) return null;
 
-  let fracPart = fracMainRaw === "" ? 0 : Number.parseInt(fracMainRaw, 10) || 0;
-  if (Number.parseInt(roundDigit, 10) >= 5) {
-    fracPart += 1;
+    return scaled.toNumber();
+  } catch {
+    return null;
   }
-
-  let value = intPart * scale + fracPart;
-  if (fracPart >= scale) {
-    value = (intPart + 1) * scale;
-  }
-  return value;
 }
 
 function currentUnitDecimals(unit: CurrentInputUnit): number {
   return unit === "A" ? 6 : 3;
+}
+
+function voltageUnitDecimals(_unit: VoltageInputUnit): number {
+  return 6;
 }
 
 function parseCurrentInputToUa(
@@ -164,6 +164,34 @@ function parseCurrentInputToUa(
 ): number | null {
   const decimals = currentUnitDecimals(unit);
   return parseNonNegativeDecimalToScaledInt(input, decimals);
+}
+
+function parseVoltageInputToMv(input: string, unit: VoltageInputUnit): number | null {
+  const decimals = voltageUnitDecimals(unit);
+  const uv = parseNonNegativeDecimalToScaledInt(input, decimals);
+  if (uv == null) return null;
+  // Round µV -> mV (half-up), without passing through floats.
+  return Math.floor((uv + 500) / 1000);
+}
+
+function formatIntAsFixedDecimal(
+  numerator: number,
+  denominator: number,
+  decimals: number,
+): string {
+  return new Decimal(numerator).div(denominator).toFixed(decimals);
+}
+
+function formatMvAsV(mv: number, decimals = 3): string {
+  return formatIntAsFixedDecimal(mv, 1000, decimals);
+}
+
+function formatMaAsA(ma: number, decimals = 4): string {
+  return formatIntAsFixedDecimal(ma, 1000, decimals);
+}
+
+function formatUaAsA(ua: number | Decimal, decimals = 6): string {
+  return new Decimal(ua).div(1_000_000).toFixed(decimals);
 }
 
 function formatUaToUnit(ua: number, unit: CurrentInputUnit): string {
@@ -604,6 +632,10 @@ function DeviceCalibrationPage({
   const statusPauseDepthRef = useRef(0);
   const withStatusStreamPaused = useCallback<WithStatusStreamPaused>(
     async (op) => {
+      if (isMockBaseUrl(baseUrl)) {
+        return await op();
+      }
+
       statusPauseDepthRef.current += 1;
       if (statusPauseDepthRef.current === 1) {
         setStatusStreamPaused(true);
@@ -1323,12 +1355,28 @@ function DeviceCalibrationPage({
       const kind: CalibrationModeRequest["kind"] =
         activeTab === "voltage" ? "voltage" : activeTab;
 
+      let snapshotAfterCalKind: number | null = null;
       const attempt = (async (): Promise<void> => {
         await withStatusStreamPaused(async () => {
           await retryDeviceCall(
             () => postCalibrationMode(baseUrl, { kind }),
             { attempts: 4, firstDelayMs: 120, maxDelayMs: 600 },
           );
+
+          // Fast path: fetch once while SSE is paused. This avoids races where
+          // callers proceed before the status stream picks up the new cal_kind
+          // (notably for the mock backend in tests).
+          try {
+            const snapshot = await retryDeviceCall(() => getStatus(baseUrl), {
+              attempts: 2,
+              firstDelayMs: 80,
+              maxDelayMs: 300,
+            });
+            snapshotAfterCalKind = snapshot.raw.cal_kind ?? null;
+            setStatus(snapshot);
+          } catch (err) {
+            console.error(err);
+          }
         });
       })();
 
@@ -1348,6 +1396,10 @@ function DeviceCalibrationPage({
         if (modeSyncInFlightRef.current === attempt) {
           modeSyncInFlightRef.current = null;
         }
+      }
+
+      if (snapshotAfterCalKind === expectedCalKind) {
+        return true;
       }
 
       try {
@@ -1743,6 +1795,7 @@ function VoltageCalibration({
 }) {
   const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
   const [inputV, setInputV] = useState("12.00");
+  const inputVUnit: VoltageInputUnit = "V";
   const [confirmKind, setConfirmKind] = useState<
     "reset_draft" | "reset_device_voltage" | null
   >(null);
@@ -1800,8 +1853,8 @@ function VoltageCalibration({
       return;
     }
 
-    const measuredMv = Math.round(Number.parseFloat(inputV) * 1000);
-    if (!Number.isFinite(measuredMv) || measuredMv <= 0) {
+    const measuredMv = parseVoltageInputToMv(inputV, inputVUnit);
+    if (measuredMv == null || measuredMv <= 0) {
       onAlert("Cannot Capture Voltage Point", "Invalid voltage input.");
       return;
     }
@@ -1870,7 +1923,7 @@ function VoltageCalibration({
 
     if (existingIndex != null) {
       onInfoToast(
-        `Duplicate voltage sample replaced (${(measuredMv / 1000).toFixed(3)} V).`,
+        `Duplicate voltage sample replaced (${formatMvAsV(measuredMv)} V).`,
       );
     }
   };
@@ -1904,14 +1957,14 @@ function VoltageCalibration({
     y: point.mv,
   }));
 
-  const previewLocalV =
+  const previewLocalMv =
     status?.raw.raw_v_nr_100uv != null && previewLocalDataset.length >= 1
-      ? piecewiseLinear(previewLocalDataset, status.raw.raw_v_nr_100uv) / 1000
+      ? piecewiseLinearDecimal(previewLocalDataset, status.raw.raw_v_nr_100uv)
       : null;
 
-  const previewRemoteV =
+  const previewRemoteMv =
     status?.raw.raw_v_rmt_100uv != null && previewRemoteDataset.length >= 1
-      ? piecewiseLinear(previewRemoteDataset, status.raw.raw_v_rmt_100uv) / 1000
+      ? piecewiseLinearDecimal(previewRemoteDataset, status.raw.raw_v_rmt_100uv)
       : null;
 
   const readMutation = useMutation({
@@ -2234,7 +2287,7 @@ function VoltageCalibration({
                 </div>
                 <input
                   type="number"
-                  step="0.01"
+                  step="0.000001"
                   className="input input-bordered"
                   value={inputV}
                   onChange={(event) => setInputV(event.target.value)}
@@ -2270,7 +2323,7 @@ function VoltageCalibration({
               <div className="stat">
                 <div className="stat-title">Local Voltage (Active)</div>
                 <div className="stat-value text-lg">
-                  {((status?.raw.v_local_mv ?? 0) / 1000).toFixed(3)} V
+                  {formatMvAsV(status?.raw.v_local_mv ?? 0)} V
                 </div>
                 <div className="stat-desc">
                   Raw: {status?.raw.raw_v_nr_100uv ?? "--"}
@@ -2279,9 +2332,9 @@ function VoltageCalibration({
               <div className="stat">
                 <div className="stat-title">Local Preview</div>
                 <div className="stat-value text-lg text-primary">
-                  {previewLocalV == null
+                  {previewLocalMv == null
                     ? "--"
-                    : `${previewLocalV.toFixed(3)} V`}
+                    : `${previewLocalMv.div(1000).toFixed(3)} V`}
                 </div>
                 <div className="stat-desc">Uses applied preview</div>
               </div>
@@ -2291,7 +2344,7 @@ function VoltageCalibration({
               <div className="stat">
                 <div className="stat-title">Remote Voltage (Active)</div>
                 <div className="stat-value text-lg">
-                  {((status?.raw.v_remote_mv ?? 0) / 1000).toFixed(3)} V
+                  {formatMvAsV(status?.raw.v_remote_mv ?? 0)} V
                 </div>
                 <div className="stat-desc">
                   Raw: {status?.raw.raw_v_rmt_100uv ?? "--"}
@@ -2300,9 +2353,9 @@ function VoltageCalibration({
               <div className="stat">
                 <div className="stat-title">Remote Preview</div>
                 <div className="stat-value text-lg text-primary">
-                  {previewRemoteV == null
+                  {previewRemoteMv == null
                     ? "--"
-                    : `${previewRemoteV.toFixed(3)} V`}
+                    : `${previewRemoteMv.div(1000).toFixed(3)} V`}
                 </div>
                 <div className="stat-desc">Uses applied preview</div>
               </div>
@@ -2899,7 +2952,7 @@ function CurrentCalibration({
     curve === "current_ch1" ? status?.raw.i_local_ma : status?.raw.i_remote_ma;
   const previewUa =
     status?.raw.raw_cur_100uv != null && previewPoints.length >= 1
-      ? piecewiseLinear(
+      ? piecewiseLinearDecimal(
           previewPoints.map((point) => ({ x: point.raw, y: point.ua })),
           status.raw.raw_cur_100uv,
         )
@@ -3387,7 +3440,7 @@ function CurrentCalibration({
               <div className="stat">
                 <div className="stat-title">Active Current</div>
                 <div className="stat-value text-lg">
-                  {(((activeMa ?? 0) / 1000) as number).toFixed(4)} A
+                  {formatMaAsA(activeMa ?? 0)} A
                 </div>
                 <div className="stat-desc">
                   Raw: {status?.raw.raw_cur_100uv ?? "--"}
@@ -3404,7 +3457,7 @@ function CurrentCalibration({
                 <div className="stat-value text-lg text-primary">
                   {previewUa == null
                     ? "--"
-                    : `${(previewUa / 1_000_000).toFixed(6)} A`}
+                    : `${formatUaAsA(previewUa)} A`}
                 </div>
                 <div className="stat-desc">Uses applied preview</div>
               </div>
