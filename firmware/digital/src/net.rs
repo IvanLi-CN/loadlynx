@@ -481,6 +481,13 @@ async fn handle_http_connection(
     calibration: &'static CalibrationMutex,
     eeprom: &'static EepromMutex,
 ) -> Result<(), embassy_net::tcp::Error> {
+    // The firmware HTTP parser is intentionally simple. Keep a bounded request
+    // body buffer, but avoid requiring "headers + body" to fit at the same time
+    // by discarding headers after parsing them.
+    //
+    // Keep this small because it becomes part of the async task's state for
+    // each HTTP worker. Calibration requests use a compact points encoding so
+    // 1 KiB is sufficient for the maximum 24-point payload.
     const MAX_REQUEST_SIZE: usize = 1024;
 
     let mut buf = [0u8; MAX_REQUEST_SIZE];
@@ -576,7 +583,7 @@ async fn handle_http_connection(
             let lower = line.to_ascii_lowercase();
             if let Some(rest) = lower.strip_prefix("content-length:") {
                 if let Ok(len) = rest.trim().parse::<usize>() {
-                    content_length = len.min(MAX_REQUEST_SIZE);
+                    content_length = len;
                     has_content_length = true;
                 }
             } else if let Some(rest) = lower.strip_prefix("accept:") {
@@ -631,15 +638,40 @@ async fn handle_http_connection(
             return Ok(());
         }
 
-        while total < header_end + content_length && total < MAX_REQUEST_SIZE {
-            let n = socket.read(&mut buf[total..]).await?;
+        if content_length > MAX_REQUEST_SIZE {
+            let mut body = String::new();
+            write_error_body(
+                &mut body,
+                "INVALID_REQUEST",
+                "request body too large",
+                false,
+                None,
+            );
+            write_http_response(socket, "HTTP/1.1", "413 Payload Too Large", &body).await?;
+            return Ok(());
+        }
+
+        // If we already read some body bytes alongside the header, slide them down
+        // to the start of the buffer so we only need space for the body (not
+        // header+body).
+        let mut body_bytes = total.saturating_sub(header_end);
+        if body_bytes > 0 {
+            buf.copy_within(header_end..total, 0);
+        }
+        if body_bytes > content_length {
+            body_bytes = content_length;
+        }
+        total = body_bytes;
+
+        while total < content_length {
+            let n = socket.read(&mut buf[total..content_length]).await?;
             if n == 0 {
                 break;
             }
             total += n;
         }
 
-        if total < header_end + content_length {
+        if total < content_length {
             let mut body = String::new();
             write_error_body(
                 &mut body,
@@ -652,8 +684,7 @@ async fn handle_http_connection(
             return Ok(());
         }
 
-        let raw_body = &buf[header_end..header_end + content_length];
-        body_str = core::str::from_utf8(raw_body).unwrap_or("");
+        body_str = core::str::from_utf8(&buf[..content_length]).unwrap_or("");
     }
 
     let mut body = String::new();
@@ -1806,13 +1837,30 @@ fn parse_cal_mode_kind(kind: &str) -> Result<CalKind, &'static str> {
 fn parse_points_array(body: &str) -> Result<&str, &'static str> {
     let idx = body.find("\"points\"").ok_or("missing field points")?;
     let colon = body[idx..].find(':').ok_or("malformed points field")?;
-    let mut s = body[idx + colon + 1..].trim_start();
+    let s = body[idx + colon + 1..].trim_start();
     if !s.starts_with('[') {
         return Err("points must be an array");
     }
-    s = &s[1..];
-    let end = s.find(']').ok_or("points must be an array")?;
-    Ok(&s[..end])
+
+    // Extract the full array contents while accounting for nested arrays
+    // (compact point encoding: [[a,b,c],[d,e,f],...]).
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'[' => depth += 1,
+            b']' => {
+                depth = depth.checked_sub(1).ok_or("points must be an array")?;
+                if depth == 0 {
+                    // Return inside the outermost brackets.
+                    return Ok(&s[1..i]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    Err("points must be an array")
 }
 
 fn representative_i16(values: &mut [i16]) -> i16 {
@@ -1941,50 +1989,120 @@ fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 24
     let arr = parse_points_array(body)?;
     let mut out: Vec<CalPoint, 24> = Vec::new();
 
-    let mut rest = arr;
-    while let Some(start) = rest.find('{') {
-        rest = &rest[start + 1..];
-        let end = rest.find('}').ok_or("malformed points array")?;
-        let obj = &rest[..end];
-        rest = &rest[end + 1..];
-
-        if obj.trim().is_empty() {
-            continue;
-        }
-
-        let raw_100uv_i32 = parse_i32_field(obj, "raw_100uv")?;
-        if raw_100uv_i32 < i16::MIN as i32 || raw_100uv_i32 > i16::MAX as i32 {
-            return Err("raw_100uv out of range for i16");
-        }
-        let raw_100uv = raw_100uv_i32 as i16;
-
-        let (raw_dac_code, meas_physical) = match kind {
+    let mut rest = arr.trim_start();
+    if rest.starts_with('{') {
+        return Err(match kind {
             CurveKind::CurrentCh1 | CurveKind::CurrentCh2 => {
-                // Decision: raw_dac_code is required for current points.
-                let dac_i32 = parse_i32_field(obj, "raw_dac_code")
-                    .map_err(|_| "missing field raw_dac_code for current point")?;
-                if dac_i32 < 0 || dac_i32 > u16::MAX as i32 {
-                    return Err("raw_dac_code out of range for u16");
-                }
-                let meas_ma = parse_i32_field(obj, "meas_ma")?;
-                (dac_i32 as u16, meas_ma)
+                "points must be encoded as [[raw_100uv, raw_dac_code, meas_ma], ...]"
             }
             CurveKind::VLocal | CurveKind::VRemote => {
-                let meas_mv = parse_i32_field(obj, "meas_mv")?;
-                (0u16, meas_mv)
+                "points must be encoded as [[raw_100uv, meas_mv], ...]"
             }
-        };
+        });
+    }
 
-        if out
-            .push(CalPoint {
-                raw_100uv,
-                raw_dac_code,
-                meas_physical,
-            })
-            .is_err()
-        {
-            return Err("too many points (max 24)");
+    if rest.starts_with('[') {
+        // Compact tuple encoding:
+        // - voltage: [[raw_100uv, meas_mv], ...]
+        // - current: [[raw_100uv, raw_dac_code, meas_ma], ...]
+        while let Some(start) = rest.find('[') {
+            rest = &rest[start + 1..];
+            let end = rest.find(']').ok_or("malformed points array")?;
+            let tuple = rest[..end].trim();
+            rest = &rest[end + 1..];
+
+            if tuple.is_empty() {
+                continue;
+            }
+
+            let mut values = [0i32; 3];
+            let mut n = 0usize;
+            let mut s = tuple;
+            loop {
+                s = s.trim_start();
+                if s.is_empty() {
+                    break;
+                }
+                if n >= values.len() {
+                    return Err("point tuple is too long");
+                }
+
+                let mut end_digits = 0usize;
+                for ch in s.chars() {
+                    if ch == '-' || ch.is_ascii_digit() {
+                        end_digits += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+                if end_digits == 0 {
+                    return Err("point tuple must contain integers");
+                }
+
+                let value = s[..end_digits]
+                    .parse::<i32>()
+                    .map_err(|_| "point tuple must contain integers")?;
+                values[n] = value;
+                n += 1;
+
+                s = s[end_digits..].trim_start();
+                if s.is_empty() {
+                    break;
+                }
+                if let Some(next) = s.strip_prefix(',') {
+                    s = next;
+                    continue;
+                }
+                return Err("malformed point tuple");
+            }
+
+            let raw_100uv_i32 = values[0];
+            if raw_100uv_i32 < i16::MIN as i32 || raw_100uv_i32 > i16::MAX as i32 {
+                return Err("raw_100uv out of range for i16");
+            }
+            let raw_100uv = raw_100uv_i32 as i16;
+
+            let (raw_dac_code, meas_physical) = match kind {
+                CurveKind::CurrentCh1 | CurveKind::CurrentCh2 => {
+                    if n != 3 {
+                        return Err(
+                            "current point tuple must be [raw_100uv, raw_dac_code, meas_ma]",
+                        );
+                    }
+                    let dac_i32 = values[1];
+                    if dac_i32 < 0 || dac_i32 > u16::MAX as i32 {
+                        return Err("raw_dac_code out of range for u16");
+                    }
+                    (dac_i32 as u16, values[2])
+                }
+                CurveKind::VLocal | CurveKind::VRemote => {
+                    if n != 2 {
+                        return Err("voltage point tuple must be [raw_100uv, meas_mv]");
+                    }
+                    (0u16, values[1])
+                }
+            };
+
+            if out
+                .push(CalPoint {
+                    raw_100uv,
+                    raw_dac_code,
+                    meas_physical,
+                })
+                .is_err()
+            {
+                return Err("too many points (max 24)");
+            }
         }
+    } else if !rest.is_empty() {
+        return Err(match kind {
+            CurveKind::CurrentCh1 | CurveKind::CurrentCh2 => {
+                "points must be encoded as [[raw_100uv, raw_dac_code, meas_ma], ...]"
+            }
+            CurveKind::VLocal | CurveKind::VRemote => {
+                "points must be encoded as [[raw_100uv, meas_mv], ...]"
+            }
+        });
     }
 
     if out.is_empty() {
