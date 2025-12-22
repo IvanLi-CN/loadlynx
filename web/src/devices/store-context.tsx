@@ -18,7 +18,9 @@ export function DeviceStoreProvider(props: {
 export function useDeviceStore(): DeviceStore {
   const store = useContext(DeviceStoreContext);
   if (!store) {
-    throw new Error("DeviceStoreProvider is missing");
+    throw new Error(
+      "DeviceStoreProvider is missing. This component/page cannot run in the current environment. Wrap it with <DeviceStoreProvider store={...}> (MemoryDeviceStore for Storybook/tests, LocalStorageDeviceStore(window.localStorage) for the app).",
+    );
   }
   return store;
 }
