@@ -3,6 +3,8 @@ import type {
   CalibrationApplyRequest,
   CalibrationCommitRequest,
   CalibrationModeRequest,
+  CalibrationPointCurrentWireCompact,
+  CalibrationPointVoltageWireCompact,
   CalibrationProfile,
   CalibrationProfileWire,
   CalibrationResetRequest,
@@ -13,6 +15,11 @@ import type {
   FastStatusView,
   Identity,
 } from "./types.ts";
+
+const TAB_ID =
+  typeof crypto !== "undefined" && "randomUUID" in crypto
+    ? crypto.randomUUID()
+    : `tab-${Math.random().toString(16).slice(2)}`;
 
 // Mock backend selection is based solely on the device URL scheme. The
 // ENABLE_MOCK flag remains exported for other modules but no longer gates the
@@ -581,7 +588,6 @@ export function subscribeStatusStream(
   }
 
   const url = new URL("/api/v1/status", baseUrl);
-  const source = new EventSource(url.toString());
 
   const isFastStatusView = (val: unknown): val is FastStatusView => {
     return (
@@ -593,9 +599,9 @@ export function subscribeStatusStream(
     );
   };
 
-  const handleStatus = (event: MessageEvent) => {
+  const parseAndEmit = (payload: string) => {
     try {
-      const parsed = JSON.parse(event.data) as
+      const parsed = JSON.parse(payload) as
         | FastStatusView
         | {
             status: FastStatusJson;
@@ -625,21 +631,156 @@ export function subscribeStatusStream(
     }
   };
 
+  const handleStatus = (event: MessageEvent) => {
+    parseAndEmit(event.data);
+  };
+
   const handleError = (event: Event) => {
     if (onError) {
       onError(event);
     }
   };
 
-  source.addEventListener("status", handleStatus as EventListener);
-  source.addEventListener("message", handleStatus as EventListener);
-  source.addEventListener("error", handleError);
+  // Prevent multiple browser tabs from opening parallel SSE connections to the
+  // device. The embedded HTTP server has a small worker pool; one SSE stream is
+  // enough and can be fan-out broadcast to other tabs.
+  const canShareAcrossTabs =
+    typeof BroadcastChannel !== "undefined" &&
+    typeof navigator !== "undefined" &&
+    "locks" in navigator;
+
+  if (!canShareAcrossTabs) {
+    const source = new EventSource(url.toString());
+    source.addEventListener("status", handleStatus as EventListener);
+    source.addEventListener("message", handleStatus as EventListener);
+    source.addEventListener("error", handleError);
+
+    return () => {
+      source.removeEventListener("status", handleStatus as EventListener);
+      source.removeEventListener("message", handleStatus as EventListener);
+      source.removeEventListener("error", handleError);
+      source.close();
+    };
+  }
+
+  const lockName = `llx-status-sse:${baseUrl}`;
+  const channel = new BroadcastChannel(lockName);
+
+  let closed = false;
+  let leaderAttemptInFlight = false;
+  let source: EventSource | null = null;
+  let releaseLeader: (() => void) | null = null;
+  let leaderStatusHandler: ((event: MessageEvent) => void) | null = null;
+  let leaderErrorHandler: ((event: Event) => void) | null = null;
+
+  type BroadcastEnvelope =
+    | { t: "status"; d: string; from: string }
+    | { t: "bye"; from: string };
+
+  const startLeaderIfAvailable = () => {
+    if (closed || leaderAttemptInFlight || releaseLeader) {
+      return;
+    }
+    leaderAttemptInFlight = true;
+
+    void navigator.locks.request(
+      lockName,
+      { mode: "exclusive", ifAvailable: true },
+      async (lock) => {
+        leaderAttemptInFlight = false;
+        if (!lock || closed) {
+          return;
+        }
+
+        let resolveRelease: (() => void) | null = null;
+        const waitRelease = new Promise<void>((resolve) => {
+          resolveRelease = resolve;
+        });
+        releaseLeader = () => {
+          resolveRelease?.();
+        };
+
+        source = new EventSource(url.toString());
+
+        const broadcastStatus = (event: MessageEvent) => {
+          const msg: BroadcastEnvelope = {
+            t: "status",
+            d: event.data,
+            from: TAB_ID,
+          };
+          channel.postMessage(msg);
+          parseAndEmit(event.data);
+        };
+        const broadcastError = (event: Event) => {
+          handleError(event);
+        };
+
+        leaderStatusHandler = broadcastStatus;
+        leaderErrorHandler = broadcastError;
+
+        source.addEventListener("status", broadcastStatus as EventListener);
+        source.addEventListener("message", broadcastStatus as EventListener);
+        source.addEventListener("error", broadcastError);
+
+        await waitRelease;
+
+        source.removeEventListener("status", broadcastStatus as EventListener);
+        source.removeEventListener("message", broadcastStatus as EventListener);
+        source.removeEventListener("error", broadcastError);
+        source.close();
+        source = null;
+
+        leaderStatusHandler = null;
+        leaderErrorHandler = null;
+
+        channel.postMessage({
+          t: "bye",
+          from: TAB_ID,
+        } satisfies BroadcastEnvelope);
+        releaseLeader = null;
+      },
+    );
+  };
+
+  const onChannelMessage = (event: MessageEvent) => {
+    const payload = event.data as Partial<BroadcastEnvelope> | null;
+    if (!payload || typeof payload !== "object" || payload.from === TAB_ID) {
+      return;
+    }
+    if (payload.t === "status" && typeof payload.d === "string") {
+      parseAndEmit(payload.d);
+      return;
+    }
+    if (payload.t === "bye") {
+      startLeaderIfAvailable();
+    }
+  };
+
+  channel.addEventListener("message", onChannelMessage);
+  startLeaderIfAvailable();
 
   return () => {
-    source.removeEventListener("status", handleStatus as EventListener);
-    source.removeEventListener("message", handleStatus as EventListener);
-    source.removeEventListener("error", handleError);
-    source.close();
+    closed = true;
+    releaseLeader?.();
+    if (source) {
+      if (leaderStatusHandler) {
+        source.removeEventListener(
+          "status",
+          leaderStatusHandler as EventListener,
+        );
+        source.removeEventListener(
+          "message",
+          leaderStatusHandler as EventListener,
+        );
+      }
+      if (leaderErrorHandler) {
+        source.removeEventListener("error", leaderErrorHandler);
+      }
+      source.close();
+      source = null;
+    }
+    channel.removeEventListener("message", onChannelMessage);
+    channel.close();
   };
 }
 
@@ -734,20 +875,21 @@ function mapCalibrationWriteRequestToWire(
     case "v_remote":
       return {
         kind: payload.kind,
-        points: payload.points.map((point) => ({
-          raw_100uv: point.raw,
-          meas_mv: point.mv,
-        })),
+        points: payload.points.map(
+          (point): CalibrationPointVoltageWireCompact => [point.raw, point.mv],
+        ),
       };
     case "current_ch1":
     case "current_ch2":
       return {
         kind: payload.kind,
-        points: payload.points.map((point) => ({
-          raw_100uv: point.raw,
-          raw_dac_code: point.dac_code,
-          meas_ma: Math.round(point.ua / 1000),
-        })),
+        points: payload.points.map(
+          (point): CalibrationPointCurrentWireCompact => [
+            point.raw,
+            point.dac_code,
+            Math.round(point.ua / 1000),
+          ],
+        ),
       };
   }
 }
@@ -918,11 +1060,15 @@ function mockNormalizeWirePointsByRaw100uv<T extends { raw_100uv: number }>(
 
 function mockNormalizeVoltageWirePoints(
   kind: "v_local" | "v_remote",
-  points: CalibrationProfileWire["v_local_points"],
+  points: CalibrationPointVoltageWireCompact[],
 ): CalibrationProfileWire["v_local_points"] {
+  const normalized = points.map((point) => ({
+    raw_100uv: point[0],
+    meas_mv: point[1],
+  }));
   return mockNormalizeWirePointsByRaw100uv(
     kind,
-    points,
+    normalized,
     "meas_mv",
     (p) => p.meas_mv,
   );
@@ -930,9 +1076,15 @@ function mockNormalizeVoltageWirePoints(
 
 function mockNormalizeCurrentWirePoints(
   kind: "current_ch1" | "current_ch2",
-  points: CalibrationProfileWire["current_ch1_points"],
+  points: CalibrationPointCurrentWireCompact[],
 ): CalibrationProfileWire["current_ch1_points"] {
-  for (const point of points) {
+  const normalized = points.map((point) => ({
+    raw_100uv: point[0],
+    raw_dac_code: point[1],
+    meas_ma: point[2],
+  }));
+
+  for (const point of normalized) {
     const dac = point.raw_dac_code;
     if (!Number.isFinite(dac) || !Number.isInteger(dac)) {
       mockCalValidationError("raw_dac_code must be an integer");
@@ -944,7 +1096,7 @@ function mockNormalizeCurrentWirePoints(
 
   return mockNormalizeWirePointsByRaw100uv(
     kind,
-    points,
+    normalized,
     "meas_ma",
     (p) => p.meas_ma,
   );

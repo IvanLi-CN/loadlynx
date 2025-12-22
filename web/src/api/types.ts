@@ -129,6 +129,18 @@ export interface CalibrationPointCurrentWire {
   meas_ma: number;
 }
 
+// Compact request encoding (reduces payload size for embedded HTTP parsers).
+export type CalibrationPointVoltageWireCompact = [
+  raw_100uv: number,
+  meas_mv: number,
+];
+
+export type CalibrationPointCurrentWireCompact = [
+  raw_100uv: number,
+  raw_dac_code: number,
+  meas_ma: number,
+];
+
 export interface CalibrationProfileWire {
   active: CalibrationActiveProfile;
   current_ch1_points: CalibrationPointCurrentWire[];
@@ -138,10 +150,22 @@ export interface CalibrationProfileWire {
 }
 
 export type CalibrationWriteRequestWire =
-  | { kind: "v_local"; points: CalibrationPointVoltageWire[] }
-  | { kind: "v_remote"; points: CalibrationPointVoltageWire[] }
-  | { kind: "current_ch1"; points: CalibrationPointCurrentWire[] }
-  | { kind: "current_ch2"; points: CalibrationPointCurrentWire[] };
+  | {
+      kind: "v_local";
+      points: CalibrationPointVoltageWireCompact[];
+    }
+  | {
+      kind: "v_remote";
+      points: CalibrationPointVoltageWireCompact[];
+    }
+  | {
+      kind: "current_ch1";
+      points: CalibrationPointCurrentWireCompact[];
+    }
+  | {
+      kind: "current_ch2";
+      points: CalibrationPointCurrentWireCompact[];
+    };
 
 export interface FastStatusView {
   raw: FastStatusJson;
