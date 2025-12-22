@@ -5,10 +5,18 @@ type AppVersion = {
   builtAt: string;
 };
 
+function isStorybookRuntime(): boolean {
+  return globalThis.__LOADLYNX_STORYBOOK__ === true;
+}
+
 export function App() {
   const [versionInfo, setVersionInfo] = useState<AppVersion | null>(null);
+  const storybookRuntime = isStorybookRuntime();
 
   useEffect(() => {
+    if (storybookRuntime) {
+      return;
+    }
     void fetch("/version.json")
       .then(async (response) => {
         if (!response.ok) {
@@ -24,7 +32,7 @@ export function App() {
       .catch(() => {
         // Best-effort only; version is not critical at this stage.
       });
-  }, []);
+  }, [storybookRuntime]);
 
   return (
     <main
@@ -87,7 +95,11 @@ export function App() {
           <dd style={{ margin: 0 }}>LoadLynx Web Console</dd>
           <dt style={{ color: "#9ca3af" }}>Build</dt>
           <dd style={{ margin: 0 }}>
-            {versionInfo ? versionInfo.version : "dev (version.json pending)"}
+            {storybookRuntime
+              ? "storybook"
+              : versionInfo
+                ? versionInfo.version
+                : "dev (version.json pending)"}
           </dd>
           {versionInfo ? (
             <>
