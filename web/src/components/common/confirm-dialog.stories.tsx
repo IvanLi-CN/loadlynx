@@ -1,7 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, fn, userEvent, waitFor, within } from "@storybook/test";
+import { waitFor, within } from "@testing-library/dom";
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { ConfirmDialog, type ConfirmDialogProps } from "./confirm-dialog.tsx";
+
+let cancelCalls = 0;
+let confirmCalls = 0;
 
 function ConfirmDialogHarness(args: ConfirmDialogProps) {
   const [open, setOpen] = useState(false);
@@ -44,8 +48,12 @@ const meta = {
     confirmLabel: "Confirm",
     destructive: false,
     confirmDisabled: false,
-    onConfirm: () => {},
-    onCancel: () => {},
+    onConfirm: () => {
+      confirmCalls += 1;
+    },
+    onCancel: () => {
+      cancelCalls += 1;
+    },
   },
 } satisfies Meta<typeof ConfirmDialog>;
 
@@ -53,39 +61,57 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const CancelCloses: Story = {
-  args: {
-    onConfirm: fn(),
-    onCancel: fn(),
-  },
-  play: async ({ canvasElement, args }) => {
+  play: async ({ canvasElement }) => {
+    cancelCalls = 0;
+    confirmCalls = 0;
     const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
-    expect(canvas.getByRole("dialog")).toBeTruthy();
+    canvas.getByRole("dialog");
 
     await userEvent.click(canvas.getByRole("button", { name: "Cancel" }));
-    expect(args.onCancel).toHaveBeenCalledTimes(1);
+    if (cancelCalls !== 1) {
+      throw new Error(
+        `Expected onCancel to be called exactly once, got ${cancelCalls}`,
+      );
+    }
+    if (confirmCalls !== 0) {
+      throw new Error(
+        `Expected onConfirm to be called 0 times, got ${confirmCalls}`,
+      );
+    }
     await waitFor(() => {
-      expect(canvas.queryByRole("dialog")).toBeNull();
+      if (canvas.queryByRole("dialog")) {
+        throw new Error("Expected dialog to close after clicking Cancel");
+      }
     });
   },
 };
 
 export const ConfirmCallsHandler: Story = {
-  args: {
-    onConfirm: fn(),
-    onCancel: fn(),
-  },
-  play: async ({ canvasElement, args }) => {
+  play: async ({ canvasElement }) => {
+    cancelCalls = 0;
+    confirmCalls = 0;
     const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
-    expect(canvas.getByRole("dialog")).toBeTruthy();
+    canvas.getByRole("dialog");
 
     await userEvent.click(canvas.getByRole("button", { name: "Confirm" }));
-    expect(args.onConfirm).toHaveBeenCalledTimes(1);
+    if (confirmCalls !== 1) {
+      throw new Error(
+        `Expected onConfirm to be called exactly once, got ${confirmCalls}`,
+      );
+    }
+    if (cancelCalls !== 0) {
+      throw new Error(
+        `Expected onCancel to be called 0 times, got ${cancelCalls}`,
+      );
+    }
     await waitFor(() => {
-      expect(canvas.queryByRole("dialog")).toBeNull();
+      if (canvas.queryByRole("dialog")) {
+        throw new Error("Expected dialog to close after clicking Confirm");
+      }
     });
   },
 };
@@ -93,17 +119,23 @@ export const ConfirmCallsHandler: Story = {
 export const ConfirmDisabled: Story = {
   args: {
     confirmDisabled: true,
-    onConfirm: fn(),
-    onCancel: fn(),
   },
-  play: async ({ canvasElement, args }) => {
+  play: async ({ canvasElement }) => {
+    cancelCalls = 0;
+    confirmCalls = 0;
     const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     const confirmButton = canvas.getByRole("button", { name: "Confirm" });
-    expect((confirmButton as HTMLButtonElement).disabled).toBe(true);
+    if (!(confirmButton as HTMLButtonElement).disabled) {
+      throw new Error("Expected Confirm button to be disabled");
+    }
 
-    expect(args.onConfirm).toHaveBeenCalledTimes(0);
-    expect(canvas.getByRole("dialog")).toBeTruthy();
+    if (confirmCalls !== 0) {
+      throw new Error(
+        `Expected onConfirm to be called 0 times, got ${confirmCalls}`,
+      );
+    }
+    canvas.getByRole("dialog");
   },
 };

@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, userEvent, within } from "@storybook/test";
+import { within } from "@testing-library/dom";
+import userEvent from "@testing-library/user-event";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function CalibrationRouteStory() {
@@ -25,6 +26,8 @@ export const Default: Story = {
     await userEvent.click(currentCh1Tab);
 
     await canvas.findByText("电流单位");
-    await expect(currentCh1Tab).toHaveClass("tab-active");
+    if (!(currentCh1Tab as HTMLElement).classList.contains("tab-active")) {
+      throw new Error('Expected "电流通道1" tab to be active after click');
+    }
   },
 };

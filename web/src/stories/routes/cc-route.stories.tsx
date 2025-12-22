@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, userEvent, within } from "@storybook/test";
+import { within } from "@testing-library/dom";
+import userEvent from "@testing-library/user-event";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function CcRouteStory() {
@@ -26,8 +27,12 @@ export const Default: Story = {
       name: /Enable output/i,
     });
 
-    await expect(enableToggle).not.toBeChecked();
+    if ((enableToggle as HTMLInputElement).checked) {
+      throw new Error("Expected Enable output to start unchecked");
+    }
     await userEvent.click(enableToggle);
-    await expect(enableToggle).toBeChecked();
+    if (!(enableToggle as HTMLInputElement).checked) {
+      throw new Error("Expected Enable output to be checked after click");
+    }
   },
 };

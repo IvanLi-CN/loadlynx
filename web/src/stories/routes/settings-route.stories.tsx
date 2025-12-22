@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { expect, userEvent, waitFor, within } from "@storybook/test";
+import { waitFor, within } from "@testing-library/dom";
+import userEvent from "@testing-library/user-event";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function SettingsRouteStory() {
@@ -21,20 +22,22 @@ export const SoftResetDialog: Story = {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
-      expect(canvas.getByRole("button", { name: "Soft Reset" })).toBeTruthy();
+      canvas.getByRole("button", { name: "Soft Reset" });
     });
 
     await userEvent.click(canvas.getByRole("button", { name: "Soft Reset" }));
 
     await waitFor(() => {
-      expect(canvas.getByRole("dialog")).toBeTruthy();
+      canvas.getByRole("dialog");
     });
 
     const dialog = within(canvas.getByRole("dialog"));
     await userEvent.click(dialog.getByRole("button", { name: "Cancel" }));
 
     await waitFor(() => {
-      expect(canvas.queryByRole("dialog")).toBeNull();
+      if (canvas.queryByRole("dialog")) {
+        throw new Error("Expected dialog to close after clicking Cancel");
+      }
     });
   },
 };
