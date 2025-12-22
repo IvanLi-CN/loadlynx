@@ -157,3 +157,23 @@ export interface DeviceApi {
 - CI 运行策略：是否对所有 stories 全视口执行，或只对“标记的关键 stories”做多视口（用于控制时长）。
 - 是否需要在 CI 添加静态检查：禁止 `web/src/**` 中直接使用 `localStorage` / `fetch`（要求使用 `services` 注入层）。
 
+## 11. Storybook 覆盖清单（2025-12-22）
+
+目标：确保 `web/src/**` 下**对外导出的 React 组件 / route 组件**都能在 Storybook 中被“直接或间接”渲染与验证（尽量避免重复 stories），且 Storybook 环境不触发真实网络/子网扫描等副作用。
+
+> 说明：表格中的 “Covered by” 使用的是 Storybook `title`；路径为对应 `*.stories.tsx` 文件位置。
+
+| Exported component | Source | Covered by (Storybook title) | Story file | Coverage note |
+| --- | --- | --- | --- | --- |
+| `App` (legacy scaffold) | `web/src/app.tsx` | `Legacy/App (scaffold)` | `web/src/stories/legacy/app.stories.tsx` | 显式 story；Storybook runtime 会跳过 `/version.json` fetch。 |
+| `AppLayout` (root layout) | `web/src/routes/app-layout.tsx` | `Routes/*` (any) | `web/src/stories/routes/*.stories.tsx` | 由 `createAppRouter()` 作为 root component 使用；任一路由 story 都会渲染它。 |
+| `DevicesRoute` | `web/src/routes/devices.tsx` | `Routes/Devices` | `web/src/stories/routes/devices-route.stories.tsx` | 通过路由渲染（同样也覆盖了 index route `/`）。 |
+| `DeviceCcRoute` | `web/src/routes/device-cc.tsx` | `Routes/CC` | `web/src/stories/routes/cc-route.stories.tsx` | 通过路由渲染（`/mock-001/cc`）。 |
+| `DeviceStatusRoute` | `web/src/routes/device-status.tsx` | `Routes/Status` | `web/src/stories/routes/status-route.stories.tsx` | 通过路由渲染（`/mock-001/status`）。 |
+| `DeviceSettingsRoute` | `web/src/routes/device-settings.tsx` | `Routes/Settings` | `web/src/stories/routes/settings-route.stories.tsx` | 通过路由渲染（`/mock-001/settings`）。 |
+| `DeviceCalibrationRoute` | `web/src/routes/device-calibration.tsx` | `Routes/Calibration` | `web/src/stories/routes/calibration-route.stories.tsx` | 通过路由渲染（`/mock-001/calibration`）。 |
+| `DevicesPanel` | `web/src/devices/devices-panel.tsx` | `Devices/Panel (No side effects)` | `web/src/devices/devices-panel.stories.tsx` | 显式 story（`MemoryDeviceStore` + `QueryClient`），零副作用。 |
+| `DeviceStoreProvider` | `web/src/devices/store-context.tsx` | `Devices/Panel (No side effects)` / `Routes/*` | `web/src/devices/devices-panel.stories.tsx` / `web/src/stories/routes/*.stories.tsx` | Provider-only 组件：作为 stories harness 的 wrapper 被覆盖；无需单独 story。 |
+| `ConfirmDialog` | `web/src/components/common/confirm-dialog.tsx` | `Common/ConfirmDialog` | `web/src/components/common/confirm-dialog.stories.tsx` | 显式 story（包含交互测试）。 |
+| `AlertDialog` | `web/src/components/common/alert-dialog.tsx` | `Common/AlertDialog` | `web/src/components/common/alert-dialog.stories.tsx` | 显式 story（包含交互测试）。 |
+| `RouteStoryHarness` (storybook-only helper) | `web/src/stories/router/route-story-harness.tsx` | `Routes/*` (indirect) | `web/src/stories/routes/*.stories.tsx` | 仅供 stories 使用的辅助组件；不作为产品组件覆盖目标，但在 routes stories 中被渲染。 |
