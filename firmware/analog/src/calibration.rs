@@ -412,6 +412,12 @@ pub struct CalibrationState {
     pending: [PendingCurve; 4],
 }
 
+impl Default for CalibrationState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl CalibrationState {
     pub const fn new() -> Self {
         Self {
@@ -482,15 +488,13 @@ impl CalibrationState {
             pending.total_chunks = total_chunks;
             pending.total_points = total_points;
             pending.active = true;
-        } else {
-            if pending.fmt_version != fmt_version
-                || pending.hw_rev != hw_rev
-                || pending.total_chunks != total_chunks
-                || pending.total_points != total_points
-            {
-                pending.reset();
-                return Err(CalError::InconsistentHeader);
-            }
+        } else if pending.fmt_version != fmt_version
+            || pending.hw_rev != hw_rev
+            || pending.total_chunks != total_chunks
+            || pending.total_points != total_points
+        {
+            pending.reset();
+            return Err(CalError::InconsistentHeader);
         }
 
         // Unpack up to 3 points from this chunk.
