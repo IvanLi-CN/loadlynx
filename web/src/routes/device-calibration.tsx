@@ -166,7 +166,10 @@ function parseCurrentInputToUa(
   return parseNonNegativeDecimalToScaledInt(input, decimals);
 }
 
-function parseVoltageInputToMv(input: string, unit: VoltageInputUnit): number | null {
+function parseVoltageInputToMv(
+  input: string,
+  unit: VoltageInputUnit,
+): number | null {
   const decimals = voltageUnitDecimals(unit);
   const uv = parseNonNegativeDecimalToScaledInt(input, decimals);
   if (uv == null) return null;
@@ -651,7 +654,7 @@ function DeviceCalibrationPage({
         }
       }
     },
-    [],
+    [baseUrl],
   );
 
   const rejectStatusWaiters = useCallback((error: Error) => {
@@ -1358,10 +1361,11 @@ function DeviceCalibrationPage({
       let snapshotAfterCalKind: number | null = null;
       const attempt = (async (): Promise<void> => {
         await withStatusStreamPaused(async () => {
-          await retryDeviceCall(
-            () => postCalibrationMode(baseUrl, { kind }),
-            { attempts: 4, firstDelayMs: 120, maxDelayMs: 600 },
-          );
+          await retryDeviceCall(() => postCalibrationMode(baseUrl, { kind }), {
+            attempts: 4,
+            firstDelayMs: 120,
+            maxDelayMs: 600,
+          });
 
           // Fast path: fetch once while SSE is paused. This avoids races where
           // callers proceed before the status stream picks up the new cal_kind
@@ -3455,9 +3459,7 @@ function CurrentCalibration({
               <div className="stat">
                 <div className="stat-title">Preview Current</div>
                 <div className="stat-value text-lg text-primary">
-                  {previewUa == null
-                    ? "--"
-                    : `${formatUaAsA(previewUa)} A`}
+                  {previewUa == null ? "--" : `${formatUaAsA(previewUa)} A`}
                 </div>
                 <div className="stat-desc">Uses applied preview</div>
               </div>
