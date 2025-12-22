@@ -54,7 +54,7 @@ export const CloseCloses: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     expect(canvas.getByRole("dialog")).toBeTruthy();
 
-    await userEvent.click(canvas.getByRole("button", { name: "Close" }));
+    await userEvent.click(canvas.getByText("Close"));
     expect(args.onClose).toHaveBeenCalledTimes(1);
     await waitFor(() => {
       expect(canvas.queryByRole("dialog")).toBeNull();
