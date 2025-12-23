@@ -1,8 +1,10 @@
 import type { QueryClient } from "@tanstack/react-query";
 import {
+  createBrowserHistory,
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  type RouterHistory,
 } from "@tanstack/react-router";
 import { AppLayout } from "./routes/app-layout.tsx";
 import { DeviceCalibrationRoute } from "./routes/device-calibration.tsx";
@@ -69,10 +71,14 @@ const routeTree = rootRoute.addChildren([
   deviceCalibrationRoute,
 ]);
 
-export function createAppRouter(queryClient: QueryClient) {
+export function createAppRouter(
+  queryClient: QueryClient,
+  history?: RouterHistory,
+) {
   return createRouter({
     routeTree,
     context: { queryClient },
+    history: history ?? createBrowserHistory(),
   });
 }
 

@@ -2,6 +2,10 @@ import { useMutation } from "@tanstack/react-query";
 import type { Identity } from "../api/types.ts";
 import { buildSubnetPlanFromSeedIp } from "./scan-subnet.ts";
 
+function isStorybookRuntime(): boolean {
+  return globalThis.__LOADLYNX_STORYBOOK__ === true;
+}
+
 export interface DiscoveredDevice {
   ip: string;
   hostname: string | null;
@@ -102,6 +106,12 @@ export async function scanSubnet(
   options: ScanOptions,
   onProgress?: (progress: ScanProgress) => void,
 ): Promise<DiscoveredDevice[]> {
+  if (isStorybookRuntime()) {
+    throw new Error(
+      "[LoadLynx] LAN subnet scanning is disabled in Storybook. This action would initiate real network traffic; use mock:// devices instead.",
+    );
+  }
+
   const { seedIp, maxConcurrency = 24, perHostTimeoutMs = 400 } = options;
 
   const plan = buildSubnetPlanFromSeedIp(seedIp);
@@ -189,6 +199,11 @@ export function useSubnetScanMutation() {
     { options: ScanOptions; onProgress?: (p: ScanProgress) => void }
   >({
     mutationFn: async (args) => {
+      if (isStorybookRuntime()) {
+        throw new Error(
+          "[LoadLynx] LAN subnet scanning is disabled in Storybook. This action would initiate real network traffic; use mock:// devices instead.",
+        );
+      }
       return scanSubnet(args.options, args.onProgress);
     },
   });

@@ -1,9 +1,10 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
 import { getIdentity, isHttpApiError, postSoftReset } from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
+import { ConfirmDialog } from "../components/common/confirm-dialog.tsx";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
 export function DeviceSettingsRoute() {
@@ -20,6 +21,7 @@ export function DeviceSettingsRoute() {
   );
 
   const baseUrl = device?.baseUrl;
+  const [confirmSoftResetOpen, setConfirmSoftResetOpen] = useState(false);
 
   const identityQuery = useQuery<Identity, HttpApiError>({
     queryKey: ["device", deviceId, "identity"],
@@ -99,18 +101,26 @@ export function DeviceSettingsRoute() {
     if (!baseUrl) {
       return;
     }
-    const confirmed = window.confirm(
-      "确定要进行 Soft Reset 吗？当前输出会被重置。",
-    );
-    if (!confirmed) {
-      return;
-    }
-    softResetMutation.reset();
-    softResetMutation.mutate();
+    setConfirmSoftResetOpen(true);
   };
 
   return (
     <div className="flex flex-col gap-6 max-w-5xl font-mono tabular-nums">
+      <ConfirmDialog
+        open={confirmSoftResetOpen}
+        title="Soft Reset"
+        body="确定要进行 Soft Reset 吗？当前输出会被重置。"
+        details={["Writes device: Yes.", "May interrupt ongoing output."]}
+        confirmLabel="Soft Reset"
+        destructive
+        confirmDisabled={softResetMutation.isPending}
+        onCancel={() => setConfirmSoftResetOpen(false)}
+        onConfirm={() => {
+          setConfirmSoftResetOpen(false);
+          softResetMutation.reset();
+          softResetMutation.mutate();
+        }}
+      />
       <header>
         <h2 className="text-lg font-bold">Device Settings</h2>
         <p className="mt-1 text-sm text-base-content/70">

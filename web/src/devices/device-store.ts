@@ -6,66 +6,79 @@ export interface StoredDevice {
 
 const STORAGE_KEY = "loadlynx.devices";
 
-function getDefaultDevices(): StoredDevice[] {
-  return [];
+export interface DeviceStore {
+  getDevices(): StoredDevice[];
+  setDevices(devices: StoredDevice[]): void;
 }
 
-function isBrowser(): boolean {
-  return (
-    typeof window !== "undefined" && typeof window.localStorage !== "undefined"
-  );
-}
-
-export function loadDevices(): StoredDevice[] {
-  if (!isBrowser()) {
-    return getDefaultDevices();
+function sanitizeDevices(input: unknown): StoredDevice[] {
+  if (!Array.isArray(input)) {
+    return [];
   }
 
-  try {
-    const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) {
-      return getDefaultDevices();
+  const devices: StoredDevice[] = [];
+  for (const item of input) {
+    if (
+      item &&
+      typeof item === "object" &&
+      typeof (item as StoredDevice).id === "string" &&
+      typeof (item as StoredDevice).name === "string" &&
+      typeof (item as StoredDevice).baseUrl === "string"
+    ) {
+      devices.push({
+        id: (item as StoredDevice).id,
+        name: (item as StoredDevice).name,
+        baseUrl: (item as StoredDevice).baseUrl,
+      });
     }
-    const parsed = JSON.parse(raw) as unknown;
-    if (!Array.isArray(parsed)) {
-      return getDefaultDevices();
-    }
+  }
 
-    const devices: StoredDevice[] = [];
-    for (const item of parsed) {
-      if (
-        item &&
-        typeof item === "object" &&
-        typeof (item as StoredDevice).id === "string" &&
-        typeof (item as StoredDevice).name === "string" &&
-        typeof (item as StoredDevice).baseUrl === "string"
-      ) {
-        devices.push({
-          id: (item as StoredDevice).id,
-          name: (item as StoredDevice).name,
-          baseUrl: (item as StoredDevice).baseUrl,
-        });
+  return devices;
+}
+
+export class LocalStorageDeviceStore implements DeviceStore {
+  readonly #storage: Storage;
+  readonly #key: string;
+
+  constructor(storage: Storage, key: string = STORAGE_KEY) {
+    this.#storage = storage;
+    this.#key = key;
+  }
+
+  getDevices(): StoredDevice[] {
+    try {
+      const raw = this.#storage.getItem(this.#key);
+      if (!raw) {
+        return [];
       }
+      const parsed = JSON.parse(raw) as unknown;
+      return sanitizeDevices(parsed);
+    } catch {
+      return [];
     }
+  }
 
-    if (devices.length > 0) {
-      return devices;
+  setDevices(devices: StoredDevice[]): void {
+    try {
+      this.#storage.setItem(this.#key, JSON.stringify(devices));
+    } catch {
+      // Best-effort only; UI can still function from in-memory state.
     }
-
-    return getDefaultDevices();
-  } catch {
-    // If parsing fails, fall back to a safe default.
-    return getDefaultDevices();
   }
 }
 
-export function saveDevices(devices: StoredDevice[]): void {
-  if (!isBrowser()) {
-    return;
+export class MemoryDeviceStore implements DeviceStore {
+  #devices: StoredDevice[];
+
+  constructor(initialDevices: StoredDevice[] = []) {
+    this.#devices = [...initialDevices];
   }
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(devices));
-  } catch {
-    // Best-effort only; UI can still function from in-memory state.
+
+  getDevices(): StoredDevice[] {
+    return [...this.#devices];
+  }
+
+  setDevices(devices: StoredDevice[]): void {
+    this.#devices = [...devices];
   }
 }

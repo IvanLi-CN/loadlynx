@@ -35,7 +35,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v1
         with:
-          bun-version: '1.1.34'
+          bun-version: '1.3.5'
 
       - name: Compute web version
         working-directory: web
@@ -64,6 +64,10 @@ jobs:
       - name: Build
         working-directory: web
         run: bun run build
+
+      - name: Storybook tests
+        working-directory: web
+        run: bun run test:storybook:ci
 
       - name: E2E tests
         working-directory: web
