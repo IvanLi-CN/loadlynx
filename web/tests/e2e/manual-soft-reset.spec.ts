@@ -41,14 +41,14 @@ test.describe("Manual Soft Reset (HIL)", () => {
       page.getByRole("heading", { name: "Device Settings" }),
     ).toBeVisible();
 
-    // Confirm dialog handler for Soft Reset.
-    page.on("dialog", async (dialog) => {
-      await dialog.accept();
-    });
-
     const resetBtn = page.getByRole("button", { name: "Soft Reset" });
     await expect(resetBtn).toBeVisible();
     await resetBtn.click();
+
+    // ConfirmDialog (app-level modal), then expect a success alert mentioning soft reset was requested.
+    const confirmDialog = page.getByRole("dialog");
+    await expect(confirmDialog).toBeVisible();
+    await confirmDialog.getByRole("button", { name: "Soft Reset" }).click();
 
     // Expect a success alert mentioning soft reset was requested.
     const successAlert = page.locator(".alert-success");

@@ -58,12 +58,13 @@ test.describe("Device Pages", () => {
     const resetBtn = page.locator("button:text('Soft Reset')");
     await expect(resetBtn).toBeVisible();
 
-    // Handle confirmation dialog and expect a success alert in the UI.
-    page.on("dialog", async (dialog) => {
-      expect(dialog.message()).toContain("Soft Reset");
-      await dialog.accept();
-    });
     await resetBtn.click();
+
+    // ConfirmDialog (app-level modal), then expect a success alert in the UI.
+    const confirmDialog = page.getByRole("dialog");
+    await expect(confirmDialog).toBeVisible();
+    await expect(confirmDialog).toContainText(/Soft Reset/i);
+    await confirmDialog.getByRole("button", { name: "Soft Reset" }).click();
 
     const successAlert = page.locator(".alert-success");
     await expect(successAlert).toBeVisible();
