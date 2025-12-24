@@ -1,0 +1,58 @@
+name: Digital Check
+
+on:
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'firmware/digital/**'
+      - '.gitmodules'
+      - 'ft6336u-async'
+      - '.github/workflows/**'
+
+jobs:
+  digital-check:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (stable, rustfmt)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            firmware/digital/target
+          key: ${{ runner.os }}-digital-cargo-${{ hashFiles('firmware/digital/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-digital-cargo-
+
+      - name: Check code formatting (digital)
+        working-directory: firmware/digital
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: cargo fmt --all -- --check
+
+      - name: Install ESP Rust toolchain (espup, xtensa-esp32s3)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cargo install espup --locked
+          espup install --targets esp32s3
+
+      - name: Build digital firmware (no hardware)
+        env:
+          DIGITAL_WIFI_SSID: codex_dummy
+          DIGITAL_WIFI_PSK: codex_dummy
+        run: |
+          . "$HOME/export-esp.sh"
+          make d-build
