@@ -1,11 +1,12 @@
 use embassy_futures::yield_now;
-use esp_hal::Async;
-use esp_hal::i2c::master::I2c;
+use embedded_hal_async::i2c::I2c as EhI2c;
 use heapless::Vec;
 
 use loadlynx_calibration_format::{
     EEPROM_I2C_ADDR_7BIT, EEPROM_PAGE_SIZE_BYTES, EEPROM_PROFILE_BASE_ADDR, EEPROM_PROFILE_LEN,
 };
+
+use crate::i2c0::I2c0Bus;
 
 #[derive(Debug, Clone, Copy, defmt::Format)]
 pub enum EepromError {
@@ -14,34 +15,83 @@ pub enum EepromError {
     InvalidLength,
 }
 
-/// Minimal M24C64 (64 Kbit) EEPROM driver over esp-hal async I2C.
+/// Minimal M24C64 (64 Kbit) EEPROM driver over embedded-hal-async I2C.
 ///
 /// - 7-bit address: 0x50 (A0/A1/A2 strapped to GND).
 /// - 16-bit word address.
 /// - Page-write: we never write across `EEPROM_PAGE_SIZE_BYTES` boundaries.
+#[derive(Clone, Copy)]
 pub struct M24c64 {
-    i2c: I2c<'static, Async>,
     addr_7bit: u8,
 }
 
 impl M24c64 {
-    pub fn new(i2c: I2c<'static, Async>) -> Self {
+    pub const fn new(addr_7bit: u8) -> Self {
+        Self { addr_7bit }
+    }
+
+    pub async fn read<I2C: EhI2c>(
+        &self,
+        i2c: &mut I2C,
+        addr: u16,
+        out: &mut [u8],
+    ) -> Result<(), EepromError> {
+        let a = addr.to_be_bytes();
+        i2c.write_read(self.addr_7bit, &a, out)
+            .await
+            .map_err(|_| EepromError::I2c)
+    }
+
+    pub async fn write_chunk<I2C: EhI2c>(
+        &self,
+        i2c: &mut I2C,
+        addr: u16,
+        data: &[u8],
+    ) -> Result<(), EepromError> {
+        let mem_addr = addr.to_be_bytes();
+        let mut buf: Vec<u8, { 2 + EEPROM_PAGE_SIZE_BYTES }> = Vec::new();
+        let _ = buf.extend_from_slice(&mem_addr);
+        let _ = buf.extend_from_slice(data);
+        i2c.write(self.addr_7bit, &buf)
+            .await
+            .map_err(|_| EepromError::I2c)
+    }
+
+    pub async fn probe_ready<I2C: EhI2c>(
+        &self,
+        i2c: &mut I2C,
+        probe_addr: u16,
+        dummy: &mut [u8; 1],
+    ) -> Result<(), EepromError> {
+        let probe = probe_addr.to_be_bytes();
+        i2c.write_read(self.addr_7bit, &probe, dummy)
+            .await
+            .map_err(|_| EepromError::I2c)
+    }
+}
+
+/// EEPROM instance wired onto the shared I2C0 bus.
+///
+/// This wrapper intentionally locks the bus only for a single short transaction
+/// at a time (page write, read, ready-probe), so other devices (e.g. touch) can
+/// share I2C0 without starvation.
+pub struct SharedM24c64 {
+    bus: &'static I2c0Bus,
+    dev: M24c64,
+}
+
+impl SharedM24c64 {
+    pub fn new(bus: &'static I2c0Bus) -> Self {
         Self {
-            i2c,
-            addr_7bit: EEPROM_I2C_ADDR_7BIT,
+            bus,
+            dev: M24c64::new(EEPROM_I2C_ADDR_7BIT),
         }
     }
 
-    pub fn into_inner(self) -> I2c<'static, Async> {
-        self.i2c
-    }
-
     pub async fn read(&mut self, addr: u16, out: &mut [u8]) -> Result<(), EepromError> {
-        let a = addr.to_be_bytes();
-        self.i2c
-            .write_read_async(self.addr_7bit, &a, out)
-            .await
-            .map_err(|_| EepromError::I2c)
+        let dev = self.dev;
+        let mut guard = self.bus.lock().await;
+        dev.read(&mut *guard, addr, out).await
     }
 
     pub async fn write(&mut self, addr: u16, data: &[u8]) -> Result<(), EepromError> {
@@ -59,15 +109,12 @@ impl M24c64 {
             // device supports 32-byte page writes.
             let chunk_len = (data.len() - offset).min(page_rem).min(16);
 
-            let mem_addr = (cur_addr as u16).to_be_bytes();
-            let mut buf: Vec<u8, { 2 + EEPROM_PAGE_SIZE_BYTES }> = Vec::new();
-            let _ = buf.extend_from_slice(&mem_addr);
-            let _ = buf.extend_from_slice(&data[offset..offset + chunk_len]);
-
-            self.i2c
-                .write_async(self.addr_7bit, &buf)
-                .await
-                .map_err(|_| EepromError::I2c)?;
+            let chunk = &data[offset..offset + chunk_len];
+            let dev = self.dev;
+            {
+                let mut guard = self.bus.lock().await;
+                dev.write_chunk(&mut *guard, cur_addr as u16, chunk).await?;
+            }
 
             // Wait for internal write cycle completion via polling.
             self.wait_ready(cur_addr as u16).await?;
@@ -103,13 +150,14 @@ impl M24c64 {
         const POLL_TIMEOUT_MS: u32 = 20;
         let start = crate::now_ms32();
         let mut dummy = [0u8; 1];
-        let probe = probe_addr.to_be_bytes();
         loop {
-            match self
-                .i2c
-                .write_read_async(self.addr_7bit, &probe, &mut dummy)
-                .await
-            {
+            let dev = self.dev;
+            let res = {
+                let mut guard = self.bus.lock().await;
+                dev.probe_ready(&mut *guard, probe_addr, &mut dummy).await
+            };
+
+            match res {
                 Ok(()) => return Ok(()),
                 Err(_) => {
                     if crate::now_ms32().wrapping_sub(start) >= POLL_TIMEOUT_MS {
