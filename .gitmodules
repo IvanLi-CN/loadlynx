@@ -1,0 +1,4 @@
+[submodule "ft6336u-async"]
+	path = ft6336u-async
+	url = https://github.com/IvanLi-CN/ft6336u-async
+	branch = main
