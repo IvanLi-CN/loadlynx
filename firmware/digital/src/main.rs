@@ -198,8 +198,6 @@ static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
 pub(crate) static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
 
 pub type I2c0Bus = i2c0::I2c0Bus;
-static I2C0_BUS: StaticCell<I2c0Bus> = StaticCell::new();
-
 pub type EepromMutex = Mutex<CriticalSectionRawMutex, eeprom::SharedM24c64>;
 static EEPROM: StaticCell<EepromMutex> = StaticCell::new();
 
@@ -1674,7 +1672,7 @@ async fn main(spawner: Spawner) {
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9)
     .into_async();
-    let i2c0_bus = I2C0_BUS.init(Mutex::new(i2c0));
+    let i2c0_bus = i2c0::init(i2c0);
     let eeprom = EEPROM.init(Mutex::new(eeprom::SharedM24c64::new(i2c0_bus)));
 
     // Load calibration profile from EEPROM; if invalid, fall back to firmware defaults.
