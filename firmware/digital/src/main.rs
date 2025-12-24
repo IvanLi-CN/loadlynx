@@ -42,7 +42,6 @@ use esp_hal::{
     time::Rate,
 };
 
-#[cfg(not(feature = "mock_setpoint"))]
 use esp_hal::gpio::{Input, InputConfig, Pull};
 
 #[cfg(not(feature = "mock_setpoint"))]
@@ -73,6 +72,8 @@ mod ui;
 use ui::{AnalogState, UiSnapshot};
 
 mod eeprom;
+mod i2c0;
+mod touch;
 
 // Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
 #[cfg(feature = "net_http")]
@@ -196,7 +197,8 @@ pub type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
 pub(crate) static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
 
-pub type EepromMutex = Mutex<CriticalSectionRawMutex, eeprom::M24c64>;
+pub type I2c0Bus = i2c0::I2c0Bus;
+pub type EepromMutex = Mutex<CriticalSectionRawMutex, eeprom::SharedM24c64>;
 static EEPROM: StaticCell<EepromMutex> = StaticCell::new();
 
 use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
@@ -589,6 +591,7 @@ pub struct TelemetryModel {
     /// Last raw FastStatus frame observed from the analog side. This is used
     /// by the optional HTTP API to expose a structured status view.
     pub last_status: Option<FastStatus>,
+    last_touch_marker_seq: u32,
 }
 
 impl TelemetryModel {
@@ -598,6 +601,7 @@ impl TelemetryModel {
             last_uptime_ms: None,
             last_rendered: None,
             last_status: None,
+            last_touch_marker_seq: 0,
         }
     }
 
@@ -674,6 +678,12 @@ impl TelemetryModel {
         let current = &self.snapshot;
         let mut mask = ui::UiChangeMask::default();
 
+        let touch_seq = touch::touch_marker_seq();
+        if touch_seq != self.last_touch_marker_seq {
+            mask.touch_marker = true;
+            self.last_touch_marker_seq = touch_seq;
+        }
+
         if let Some(prev) = prev_snapshot {
             if prev.main_voltage_text != current.main_voltage_text
                 || prev.main_current_text != current.main_current_text
@@ -714,6 +724,7 @@ impl TelemetryModel {
             mask.telemetry_lines = true;
             mask.bars = true;
             mask.wifi_status = true;
+            mask.touch_marker = true;
         }
 
         // 记录当前快照用于下一次 diff；只在这里 clone 一次，避免在栈上持有多份大对象。
@@ -1105,7 +1116,7 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                         DISPLAY_WIDTH,
                         DISPLAY_HEIGHT,
                     );
-                    if frame_idx == 1 {
+                    if frame_idx == 1 || mask.touch_marker {
                         // 首帧：完整绘制静态布局 + 动态内容。
                         ui::render(&mut frame, &snapshot);
                     } else {
@@ -1114,6 +1125,7 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
                     }
                     // 在左上角叠加 FPS 信息，使用上一统计窗口得到的整数 FPS。
                     ui::render_fps_overlay(&mut frame, last_fps);
+                    ui::render_touch_marker(&mut frame, touch::load_touch_marker());
                 }
 
                 if frame_idx <= FRAME_SAMPLE_FRAMES {
@@ -1670,7 +1682,8 @@ async fn main(spawner: Spawner) {
     .with_sda(peripherals.GPIO8)
     .with_scl(peripherals.GPIO9)
     .into_async();
-    let eeprom = EEPROM.init(Mutex::new(eeprom::M24c64::new(i2c0)));
+    let i2c0_bus = i2c0::init(i2c0);
+    let eeprom = EEPROM.init(Mutex::new(eeprom::SharedM24c64::new(i2c0_bus)));
 
     // Load calibration profile from EEPROM; if invalid, fall back to firmware defaults.
     let initial_profile = {
@@ -1813,6 +1826,10 @@ async fn main(spawner: Spawner) {
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
     let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
 
+    let touch_input_cfg = InputConfig::default().with_pull(Pull::Up);
+    let ctp_int = Input::new(peripherals.GPIO7, touch_input_cfg);
+    let ctp_rst = Output::new(peripherals.GPIO5, Level::High, OutputConfig::default());
+
     #[cfg(not(feature = "mock_setpoint"))]
     let (encoder_button, encoder_unit, encoder_counter) = {
         let encoder_cfg = InputConfig::default().with_pull(Pull::Up);
@@ -1953,6 +1970,10 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(display_task(resources, telemetry))
         .expect("display_task spawn");
+    info!("spawning touch task");
+    spawner
+        .spawn(touch::touch_task(ctp_int, ctp_rst))
+        .expect("touch_task spawn");
     info!("spawning fan task");
     spawner
         .spawn(fan_task(telemetry, fan_channel))
@@ -2030,9 +2051,22 @@ async fn stats_task() {
             let sp_ack = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
             let sp_retx = SETPOINT_RETX_TOTAL.load(Ordering::Relaxed);
             let sp_timeout = SETPOINT_TIMEOUT_TOTAL.load(Ordering::Relaxed);
+            let touch_int = touch::TOUCH_INT_COUNT.load(Ordering::Relaxed);
+            let touch_i2c = touch::TOUCH_I2C_READ_COUNT.load(Ordering::Relaxed);
+            let touch_parse_fail = touch::TOUCH_PARSE_FAIL_COUNT.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}",
-                ok, de, df, ut, sp_tx, sp_ack, sp_retx, sp_timeout
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}",
+                ok,
+                de,
+                df,
+                ut,
+                sp_tx,
+                sp_ack,
+                sp_retx,
+                sp_timeout,
+                touch_int,
+                touch_i2c,
+                touch_parse_fail
             );
 
             // Link health: derive LINK_UP from the age of the last successfully

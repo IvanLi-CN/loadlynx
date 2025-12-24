@@ -7,6 +7,7 @@ use embedded_graphics::pixelcolor::{
 use heapless::String;
 use lcd_async::raw_framebuf::RawFrameBuf;
 
+use crate::touch::TouchMarker;
 use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
 use self::fonts::{SEVEN_SEG_FONT, SMALL_FONT};
@@ -62,6 +63,7 @@ pub struct UiChangeMask {
     pub telemetry_lines: bool,
     pub bars: bool,
     pub wifi_status: bool,
+    pub touch_marker: bool,
 }
 
 impl UiChangeMask {
@@ -71,7 +73,8 @@ impl UiChangeMask {
             || self.current_pair
             || self.telemetry_lines
             || self.bars
-            || self.wifi_status)
+            || self.wifi_status
+            || self.touch_marker)
     }
 }
 
@@ -265,6 +268,32 @@ pub fn render_fps_overlay(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, fps: u32) 
     canvas.fill_rect(Rect::new(0, 0, 80, 16), rgb(0x101829));
     // 叠加白色小字体文本。
     draw_small_text(&mut canvas, text.as_str(), 4, 4, rgb(0xFFFFFF), 0);
+}
+
+pub fn render_touch_marker(
+    frame: &mut RawFrameBuf<Rgb565, &mut [u8]>,
+    marker: Option<TouchMarker>,
+) {
+    let Some(marker) = marker else {
+        return;
+    };
+
+    let bytes = frame.as_mut_bytes();
+    let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+
+    let color = match marker.event {
+        0 => rgb(0x00ff00), // down
+        1 => rgb(0xff4040), // up
+        2 => rgb(0xffd000), // contact/move
+        _ => rgb(0xffffff),
+    };
+
+    let x = marker.x;
+    let y = marker.y;
+    let r = 7i32;
+    canvas.draw_line(x - r, y, x + r, y, color);
+    canvas.draw_line(x, y - r, x, y + r, color);
+    canvas.fill_rect(Rect::new(x - 1, y - 1, x + 2, y + 2), rgb(0xffffff));
 }
 
 /// 在右上角叠加显示简要 Wi‑Fi 状态。
