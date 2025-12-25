@@ -7,6 +7,7 @@ import {
   type RouterHistory,
 } from "@tanstack/react-router";
 import { ConsoleLayout } from "./layouts/console-layout.tsx";
+import { DeviceLayout } from "./layouts/device-layout.tsx";
 import { RootLayout } from "./layouts/root-layout.tsx";
 import { DeviceCalibrationRoute } from "./routes/device-calibration.tsx";
 import { DeviceCcRoute } from "./routes/device-cc.tsx";
@@ -41,41 +42,47 @@ const devicesRoute = createRoute({
   component: DevicesRoute,
 });
 
-// Baseline pattern: /:deviceId/:functionPath*
-// For now we materialize a few concrete children under it.
-const deviceCcRoute = createRoute({
+const deviceRoute = createRoute({
   getParentRoute: () => consoleRoute,
-  path: "$deviceId/cc",
+  path: "$deviceId",
+  component: DeviceLayout,
+});
+
+const deviceCcRoute = createRoute({
+  getParentRoute: () => deviceRoute,
+  path: "cc",
   component: DeviceCcRoute,
 });
 
 const deviceStatusRoute = createRoute({
-  getParentRoute: () => consoleRoute,
-  path: "$deviceId/status",
+  getParentRoute: () => deviceRoute,
+  path: "status",
   component: DeviceStatusRoute,
 });
 
 const deviceSettingsRoute = createRoute({
-  getParentRoute: () => consoleRoute,
-  path: "$deviceId/settings",
-
+  getParentRoute: () => deviceRoute,
+  path: "settings",
   component: DeviceSettingsRoute,
 });
 
 const deviceCalibrationRoute = createRoute({
-  getParentRoute: () => consoleRoute,
-  path: "$deviceId/calibration",
+  getParentRoute: () => deviceRoute,
+  path: "calibration",
   component: DeviceCalibrationRoute,
 });
+
+const deviceRouteTree = deviceRoute.addChildren([
+  deviceCcRoute,
+  deviceStatusRoute,
+  deviceSettingsRoute,
+  deviceCalibrationRoute,
+]);
 
 const consoleRouteTree = consoleRoute.addChildren([
   indexRoute,
   devicesRoute,
-  deviceCcRoute,
-  deviceStatusRoute,
-
-  deviceSettingsRoute,
-  deviceCalibrationRoute,
+  deviceRouteTree,
 ]);
 
 const routeTree = rootRoute.addChildren([consoleRouteTree]);
