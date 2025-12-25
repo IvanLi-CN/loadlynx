@@ -2,6 +2,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { ENABLE_MOCK_DEVTOOLS, isHttpApiError } from "../api/client.ts";
+import { PageContainer } from "../components/layout/page-container.tsx";
 import type { StoredDevice } from "../devices/device-store.ts";
 import {
   type DiscoveredDevice,
@@ -63,7 +64,7 @@ export function DevicesRoute() {
   const isScanning = scanMutation.isPending;
 
   return (
-    <div className="max-w-5xl mx-auto space-y-6">
+    <PageContainer className="space-y-6">
       <header>
         <h2 className="text-2xl font-bold">Devices</h2>
         <p className="mt-1 text-sm text-base-content/70">
@@ -424,7 +425,7 @@ export function DevicesRoute() {
           )}
         </div>
       </div>
-    </div>
+    </PageContainer>
   );
 }
 
