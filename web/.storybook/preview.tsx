@@ -44,7 +44,7 @@ const withDarkTheme: Decorator = (Story) => {
   );
 
   return (
-    <div className="min-h-screen bg-base-100 p-6 text-base-content antialiased">
+    <div className="min-h-screen bg-base-100 p-0 md:p-6 text-base-content antialiased">
       <BreakpointRulerOverlay />
       <Story />
     </div>

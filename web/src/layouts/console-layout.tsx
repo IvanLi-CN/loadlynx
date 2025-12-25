@@ -299,7 +299,7 @@ export function ConsoleLayout() {
 
   return (
     <>
-      <header className="navbar bg-base-200 border-b border-base-300 px-6 py-2">
+      <header className="navbar bg-base-200 border-b border-base-300 px-3 sm:px-4 md:px-6 py-2">
         <div className="navbar-start">
           <button
             type="button"
@@ -406,7 +406,7 @@ export function ConsoleLayout() {
           </aside>
         )}
 
-        <main className="flex-1 p-6 overflow-y-auto bg-base-100">
+        <main className="flex-1 p-3 sm:p-4 md:p-6 overflow-y-auto bg-base-100">
           <Outlet />
         </main>
       </div>
