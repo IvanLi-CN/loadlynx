@@ -11,6 +11,8 @@ test.describe("Calibration UI", () => {
 
     await page.goto(`/${deviceId}/calibration`);
 
+    await expect(page.locator("aside")).toHaveCount(0);
+
     // Voltage tab is default.
     await expect(page.getByRole("heading", { level: 2 })).toHaveText(
       "Calibration",
