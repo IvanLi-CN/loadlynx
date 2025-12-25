@@ -44,7 +44,7 @@ const withDarkTheme: Decorator = (Story) => {
   );
 
   return (
-    <div className="min-h-screen bg-base-100 p-0 md:p-6 text-base-content antialiased">
+    <div className="min-h-screen bg-base-100 p-0 text-base-content antialiased">
       <BreakpointRulerOverlay />
       <Story />
     </div>
@@ -54,6 +54,7 @@ const withDarkTheme: Decorator = (Story) => {
 const preview: Preview = {
   decorators: [withDarkTheme],
   parameters: {
+    layout: "fullscreen",
     viewport: {
       options: {
         ...LOADLYNX_VIEWPORTS,
