@@ -8,14 +8,13 @@ import { useDevicesQuery } from "../devices/hooks.ts";
 
 export function ConsoleLayout() {
   const layoutMode = useRouterState({
-    select: (state) => {
-      let mode: unknown;
+    select: (state): "tool" | undefined => {
       for (const match of state.matches) {
         const staticData = (match as { staticData?: unknown }).staticData;
         const layout = (staticData as { layout?: unknown } | undefined)?.layout;
-        if (layout != null) mode = layout;
+        if (layout === "tool") return "tool";
       }
-      return mode;
+      return undefined;
     },
   });
   const isToolLayout = layoutMode === "tool";
