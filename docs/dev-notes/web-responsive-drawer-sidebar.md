@@ -58,10 +58,11 @@
    - 进入 **Small**：inline sidebar 关闭（不渲染），drawer 默认为关闭态。
    - 进入 **Medium/Large**：drawer 强制关闭；Medium 的 rail/expanded 状态保留为 UI 状态（可选持久化）。
 
-### Tool layout 决策（本次由实现方拍板）
+### Tool layout 决策（校准页仍复用 DeviceLayout）
 
 为兼顾沉浸与可导航性，约定：
 
+- Tool layout 代表页（例如 `/$deviceId/calibration`）仍属于设备域页面，**必须复用 `DeviceLayout`**（设备查找/错误处理/上下文统一），仅在 `ConsoleLayout` 层切换导航形态。
 - Tool layout 下 **不显示 inline sidebar/rail（Large/Medium 也隐藏）**，保持内容全宽。
 - 但所有宽度下都允许通过 **header 汉堡按钮**打开 drawer 进行导航与切换设备（drawer 默认为关闭，不影响沉浸）。
 
@@ -166,4 +167,3 @@ Storybook 需要成为断点验证标尺：
 - Storybook：新增/更新 stories + play assertions（断点形态与交互）。
 - 手工：桌面/分屏/手机三种尺寸下导航与设备切换路径回归。
 - E2E（可选）：覆盖 drawer 打开/关闭与 device switch 跳转逻辑。
-

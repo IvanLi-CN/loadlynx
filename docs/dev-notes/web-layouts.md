@@ -39,9 +39,10 @@
      - 不存在/未加载的统一占位；
      - 设备子导航（CC/Status/Settings/Calibration）；
      - 向子页面提供 `device/baseUrl/identity` 等上下文（避免每页重复查询/判空）。
-4. **CalibrationLayout（校准工具模式）**
-   - 专门包住 calibration 子树；用于更精确地管理 calibration mode 的进入/退出副作用。
-   - 对应“工具模式”：内容区 **全宽**，并向 App Shell 请求 **隐藏侧栏**（见下文的布局变体）。
+   - 约束：包括 calibration 在内的所有 `/$deviceId/*` 子页面都应优先通过 `DeviceLayout` 上下文获取 `device/baseUrl`，避免重复的 “再查一次 devices 列表/再判空”。
+4. **Calibration（设备子页面，工具模式变体）**
+   - calibration 仍属于 `/$deviceId/*` 的设备子页面，**必须复用 `DeviceLayout`**（设备查找/错误处理/上下文统一由 DeviceLayout 提供）。
+   - 作为“工具模式（tool layout）”的代表页面：内容区 **全宽**，并向 App Shell 请求 **隐藏常驻侧栏/rail**（但保留抽屉入口，见下文的布局变体与响应式侧栏设计）。
 
 ## 路由结构（保持 URL 不变）
 
@@ -52,16 +53,16 @@
     - `/devices`：Devices 页面
     - `/$deviceId`：`DeviceLayout`
       - `cc | status | settings`：各子页面内容
-      - `calibration`：`CalibrationLayout`（工具模式变体：隐藏侧栏 + 全宽内容）
+      - `calibration`：设备子页面（工具模式变体：隐藏常驻侧栏/rail + 全宽内容）
 
 说明：TanStack Router 会按匹配优先级排序路由，pathless layout 不参与 URL 匹配，仅作为渲染结构的父级。
 
 ## 布局变体（工具模式 / 全宽）
 
-为避免把 calibration 变成“另一个 App”，本方案仍复用 `ConsoleLayout` 的顶栏，但允许它基于路由元信息切换布局变体：
+为避免把 calibration 变成“另一个 App”，本方案仍复用 `ConsoleLayout` 的顶栏，并且 calibration **仍在 `DeviceLayout` 之下**；同时允许 `ConsoleLayout` 基于路由元信息切换布局变体：
 
 - **默认变体（shell）**：顶栏 + 侧栏 + 内容区（内容区内再用 `PageContainer` 做 `max-w-5xl` 收敛）
-- **工具变体（tool）**：顶栏 + 内容区（隐藏侧栏），内容区 **不限制宽度**（用于 Calibration 这类长表格/多列操作）
+- **工具变体（tool）**：顶栏 + 内容区（隐藏常驻侧栏/rail），内容区 **不限制宽度**（用于 Calibration 这类长表格/多列操作）；响应式抽屉入口见 `docs/dev-notes/web-responsive-drawer-sidebar.md`。
 
 另见：`docs/dev-notes/web-responsive-drawer-sidebar.md`（响应式 drawer / icon rail / 大屏固定侧栏的交互与断点规范）。
 
