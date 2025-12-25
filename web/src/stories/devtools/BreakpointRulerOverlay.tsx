@@ -21,6 +21,14 @@ export function BreakpointRulerOverlay() {
   }, []);
 
   const mode = useMemo(() => computeMode(width), [width]);
+  const mdPosPct = useMemo(
+    () => Math.min(100, (BREAKPOINT_MD / width) * 100),
+    [width],
+  );
+  const lgPosPct = useMemo(
+    () => Math.min(100, (BREAKPOINT_LG / width) * 100),
+    [width],
+  );
 
   return (
     <div className="pointer-events-none fixed inset-0 z-[10000]">
@@ -31,6 +39,18 @@ export function BreakpointRulerOverlay() {
         <div className="mt-1 flex gap-2 font-mono text-xs text-base-content/70">
           <span>md: {BREAKPOINT_MD}</span>
           <span>lg: {BREAKPOINT_LG}</span>
+        </div>
+        <div className="relative mt-2 h-2 w-60 rounded bg-base-content/10">
+          <div
+            aria-hidden="true"
+            className="absolute inset-y-0 w-px bg-info/80"
+            style={{ left: `${mdPosPct}%` }}
+          />
+          <div
+            aria-hidden="true"
+            className="absolute inset-y-0 w-px bg-warning/80"
+            style={{ left: `${lgPosPct}%` }}
+          />
         </div>
       </div>
 
