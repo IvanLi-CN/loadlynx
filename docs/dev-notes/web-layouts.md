@@ -63,6 +63,8 @@
 - **默认变体（shell）**：顶栏 + 侧栏 + 内容区（内容区内再用 `PageContainer` 做 `max-w-5xl` 收敛）
 - **工具变体（tool）**：顶栏 + 内容区（隐藏侧栏），内容区 **不限制宽度**（用于 Calibration 这类长表格/多列操作）
 
+另见：`docs/dev-notes/web-responsive-drawer-sidebar.md`（响应式 drawer / icon rail / 大屏固定侧栏的交互与断点规范）。
+
 实现建议（实现阶段落地）：
 
 - 在 `calibration` route 上设置 `staticData`（例如 `{ layout: "tool" }`）
