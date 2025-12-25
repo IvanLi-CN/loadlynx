@@ -11,7 +11,7 @@ const RETRY_DELAY_MS = 500;
 
 export function DeviceStatusRoute() {
   const { deviceId } = useParams({
-    from: "/$deviceId/status",
+    strict: false,
   }) as {
     deviceId: string;
   };

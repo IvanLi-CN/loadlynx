@@ -34,7 +34,7 @@ const jitterRetryDelay = () => 200 + Math.random() * 300;
 
 export function DeviceCcRoute() {
   const { deviceId } = useParams({
-    from: "/$deviceId/cc",
+    strict: false,
   }) as {
     deviceId: string;
   };

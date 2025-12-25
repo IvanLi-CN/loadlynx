@@ -580,7 +580,7 @@ function expectedCalKindForTab(tab: CalibrationTab): number {
 
 export function DeviceCalibrationRoute() {
   const { deviceId } = useParams({
-    from: "/$deviceId/calibration",
+    strict: false,
   }) as {
     deviceId: string;
   };

@@ -9,7 +9,7 @@ import { useDevicesQuery } from "../devices/hooks.ts";
 
 export function DeviceSettingsRoute() {
   const { deviceId } = useParams({
-    from: "/$deviceId/settings",
+    strict: false,
   }) as {
     deviceId: string;
   };
