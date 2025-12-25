@@ -128,6 +128,7 @@ export function ConsoleLayout() {
 
   const SidebarNav = ({ variant }: { variant: "drawer" | "sidebar" }) => {
     const isDrawer = variant === "drawer";
+    const isSidebarRail = !isDrawer && !isMediumSidebarExpanded;
 
     const labelVisibilityClass = isDrawer
       ? ""
@@ -148,7 +149,7 @@ export function ConsoleLayout() {
         : "md:px-2 md:py-2 lg:px-3 lg:py-2";
 
     const linkClassName = [
-      "rounded-box flex items-center gap-3",
+      "w-full rounded-box flex items-center gap-3",
       itemLayoutClass,
       itemPaddingClass,
     ].join(" ");
@@ -166,7 +167,12 @@ export function ConsoleLayout() {
       <ul
         className={isDrawer ? "menu p-4 w-full gap-1" : "menu p-3 w-full gap-1"}
       >
-        <li className="menu-title uppercase tracking-wider opacity-70 text-xs">
+        <li
+          className={[
+            "menu-title uppercase tracking-wider opacity-70 text-xs",
+            isSidebarRail ? "md:hidden lg:block" : "",
+          ].join(" ")}
+        >
           Navigation
         </li>
 
