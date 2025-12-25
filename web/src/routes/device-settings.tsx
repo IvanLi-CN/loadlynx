@@ -1,26 +1,14 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
 import { getIdentity, isHttpApiError, postSoftReset } from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
 import { ConfirmDialog } from "../components/common/confirm-dialog.tsx";
-import { useDevicesQuery } from "../devices/hooks.ts";
+import { PageContainer } from "../components/layout/page-container.tsx";
+import { useDeviceContext } from "../layouts/device-layout.tsx";
 
 export function DeviceSettingsRoute() {
-  const { deviceId } = useParams({
-    from: "/$deviceId/settings",
-  }) as {
-    deviceId: string;
-  };
-
-  const devicesQuery = useDevicesQuery();
-  const device = useMemo(
-    () => devicesQuery.data?.find((entry) => entry.id === deviceId),
-    [devicesQuery.data, deviceId],
-  );
-
-  const baseUrl = device?.baseUrl;
+  const { deviceId, baseUrl } = useDeviceContext();
   const [confirmSoftResetOpen, setConfirmSoftResetOpen] = useState(false);
 
   const identityQuery = useQuery<Identity, HttpApiError>({
@@ -73,28 +61,6 @@ export function DeviceSettingsRoute() {
     return { summary, hint } as const;
   })();
 
-  if (devicesQuery.isLoading) {
-    return <p className="text-sm text-base-content/60">Loading devices...</p>;
-  }
-
-  if (!device) {
-    return (
-      <div className="flex flex-col gap-4 max-w-xl">
-        <h2 className="text-xl font-bold">Device not found</h2>
-        <p className="text-sm text-base-content/70">
-          The requested device ID{" "}
-          <code className="font-mono bg-base-200 px-1 rounded">{deviceId}</code>{" "}
-          does not exist in the local registry.
-        </p>
-        <div>
-          <Link to="/devices" className="btn btn-sm btn-outline">
-            Back to devices
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
   const identity = identityQuery.data;
 
   const handleSoftReset = () => {
@@ -105,7 +71,7 @@ export function DeviceSettingsRoute() {
   };
 
   return (
-    <div className="flex flex-col gap-6 max-w-5xl font-mono tabular-nums">
+    <PageContainer className="flex flex-col gap-6 font-mono tabular-nums">
       <ConfirmDialog
         open={confirmSoftResetOpen}
         title="Soft Reset"
@@ -285,6 +251,6 @@ export function DeviceSettingsRoute() {
           </div>
         </div>
       </div>
-    </div>
+    </PageContainer>
   );
 }

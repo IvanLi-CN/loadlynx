@@ -1,0 +1,190 @@
+import {
+  Link,
+  Outlet,
+  useParams,
+  useRouterState,
+} from "@tanstack/react-router";
+import { useDevicesQuery } from "../devices/hooks.ts";
+
+export function ConsoleLayout() {
+  const layoutMode = useRouterState({
+    select: (state): "tool" | undefined => {
+      for (const match of state.matches) {
+        const staticData = (match as { staticData?: unknown }).staticData;
+        const layout = (staticData as { layout?: unknown } | undefined)?.layout;
+        if (layout === "tool") return "tool";
+      }
+      return undefined;
+    },
+  });
+  const isToolLayout = layoutMode === "tool";
+  const { deviceId } = useParams({ strict: false }) as {
+    deviceId?: string;
+  };
+
+  const { data: devices } = useDevicesQuery();
+  const currentDevice =
+    deviceId && devices
+      ? devices.find((device) => device.id === deviceId)
+      : undefined;
+
+  return (
+    <>
+      <header className="navbar bg-base-200 border-b border-base-300 px-6 py-2">
+        <div className="navbar-start">
+          <div className="flex flex-col items-start">
+            <h1 className="text-xl font-semibold px-2">LoadLynx Web Console</h1>
+            <span className="text-xs text-base-content/70 px-2">
+              Network device manager & CC control
+            </span>
+          </div>
+        </div>
+
+        <div className="navbar-end flex gap-4">
+          <label className="form-control w-full max-w-[250px]">
+            <div className="label pt-0 pb-1">
+              <span className="label-text-alt text-base-content/70">
+                Current device
+              </span>
+            </div>
+            <div className="join">
+              <select
+                disabled
+                className="select select-bordered select-sm w-full join-item text-xs"
+              >
+                <option>
+                  {currentDevice
+                    ? `${currentDevice.name} (${currentDevice.id})`
+                    : "No device selected (device selector)"}
+                </option>
+              </select>
+              <button
+                type="button"
+                className="btn btn-sm join-item btn-square"
+                disabled
+              >
+                ▼
+              </button>
+            </div>
+          </label>
+
+          <div className="flex items-end pb-1">
+            <Link
+              to="/devices"
+              activeProps={{ className: "btn-active" }}
+              className="btn btn-sm btn-outline rounded-full"
+            >
+              Add device
+            </Link>
+          </div>
+        </div>
+      </header>
+
+      <div className="flex flex-1 overflow-hidden">
+        {isToolLayout ? null : (
+          <aside className="w-64 bg-base-200/50 border-r border-base-300 overflow-y-auto">
+            <ul className="menu p-4 w-full gap-1">
+              <li className="menu-title uppercase tracking-wider opacity-70 text-xs">
+                Navigation
+              </li>
+              <li>
+                <Link
+                  to="/devices"
+                  activeProps={{ className: "active" }}
+                  className="rounded-box"
+                >
+                  Devices
+                </Link>
+              </li>
+
+              {deviceId ? (
+                <>
+                  <li>
+                    <Link
+                      to="/$deviceId/cc"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      CC Control
+                    </Link>
+                  </li>
+                  <li>
+                    <Link
+                      to="/$deviceId/status"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      Status
+                    </Link>
+                  </li>
+                  <li>
+                    <Link
+                      to="/$deviceId/settings"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      Settings
+                    </Link>
+                  </li>
+                  <li>
+                    <Link
+                      to="/$deviceId/calibration"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      Calibration
+                    </Link>
+                  </li>
+                </>
+              ) : (
+                <>
+                  <li>
+                    <button
+                      type="button"
+                      disabled
+                      className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                    >
+                      CC Control
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      disabled
+                      className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                    >
+                      Status
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      disabled
+                      className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                    >
+                      Settings
+                    </button>
+                  </li>
+                </>
+              )}
+
+              <li className="menu-title mt-6 uppercase tracking-wider opacity-70 text-xs">
+                Other functions
+              </li>
+            </ul>
+          </aside>
+        )}
+
+        <main className="flex-1 p-6 overflow-y-auto bg-base-100">
+          <Outlet />
+        </main>
+      </div>
+    </>
+  );
+}
+
+export default ConsoleLayout;

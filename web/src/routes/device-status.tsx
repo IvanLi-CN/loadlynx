@@ -1,20 +1,16 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
 import { getIdentity, getStatus, isHttpApiError } from "../api/client.ts";
 import type { FastStatusView, Identity } from "../api/types.ts";
-import { useDevicesQuery } from "../devices/hooks.ts";
+import { PageContainer } from "../components/layout/page-container.tsx";
+import { useDeviceContext } from "../layouts/device-layout.tsx";
 
 const FAST_STATUS_REFETCH_MS = 1000;
 const RETRY_DELAY_MS = 500;
 
 export function DeviceStatusRoute() {
-  const { deviceId } = useParams({
-    from: "/$deviceId/status",
-  }) as {
-    deviceId: string;
-  };
+  const { deviceId, device, baseUrl } = useDeviceContext();
 
   const [isPageVisible, setIsPageVisible] = useState(() =>
     typeof document === "undefined"
@@ -36,14 +32,6 @@ export function DeviceStatusRoute() {
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
-
-  const devicesQuery = useDevicesQuery();
-  const device = useMemo(
-    () => devicesQuery.data?.find((entry) => entry.id === deviceId),
-    [devicesQuery.data, deviceId],
-  );
-
-  const baseUrl = device?.baseUrl;
 
   const identityQuery = useQuery<Identity, HttpApiError>({
     queryKey: ["device", deviceId, "identity"],
@@ -108,29 +96,6 @@ export function DeviceStatusRoute() {
     (firstHttpError.code === "LINK_DOWN" ||
       firstHttpError.code === "UNAVAILABLE");
 
-  if (devicesQuery.isLoading) {
-    return <p className="text-sm text-base-content/60">Loading devices...</p>;
-  }
-
-  if (!device) {
-    return (
-      <div className="flex flex-col gap-4 max-w-xl">
-        <h2 className="text-xl font-bold">Device not found</h2>
-        <p className="text-sm text-base-content/70">
-          The requested device ID{" "}
-          <code className="font-mono bg-base-200 px-1 rounded">{deviceId}</code>{" "}
-          does not exist in the local registry. Please return to the device list
-          and add or select a device.
-        </p>
-        <div>
-          <Link to="/devices" className="btn btn-sm btn-outline">
-            Back to devices
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
   const identity = identityQuery.data;
   const status = statusQuery.data;
 
@@ -159,7 +124,7 @@ export function DeviceStatusRoute() {
     status?.raw.mcu_temp_mc != null ? status.raw.mcu_temp_mc / 1000 : null;
 
   return (
-    <div className="flex flex-col gap-6 max-w-5xl font-mono tabular-nums">
+    <PageContainer className="flex flex-col gap-6 font-mono tabular-nums">
       {/* Top Header */}
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -373,6 +338,6 @@ export function DeviceStatusRoute() {
           </pre>
         </div>
       </div>
-    </div>
+    </PageContainer>
   );
 }
