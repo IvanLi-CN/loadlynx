@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
 import {
   getCc,
@@ -16,7 +15,7 @@ import type {
   FastStatusView,
   Identity,
 } from "../api/types.ts";
-import { useDevicesQuery } from "../devices/hooks.ts";
+import { PageContainer } from "../components/layout/page-container.tsx";
 import {
   isSevenSegPixel,
   sevenSegFontCharCount,
@@ -24,6 +23,7 @@ import {
   sevenSegFontHeight,
   sevenSegFontWidth,
 } from "../fonts/sevenSegFont.ts";
+import { useDeviceContext } from "../layouts/device-layout.tsx";
 
 const MONO_FONT_FAMILY =
   'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
@@ -33,11 +33,7 @@ const RETRY_DELAY_MS = 500;
 const jitterRetryDelay = () => 200 + Math.random() * 300;
 
 export function DeviceCcRoute() {
-  const { deviceId } = useParams({
-    strict: false,
-  }) as {
-    deviceId: string;
-  };
+  const { deviceId, device, baseUrl } = useDeviceContext();
 
   const [isPageVisible, setIsPageVisible] = useState(() =>
     typeof document === "undefined"
@@ -59,14 +55,6 @@ export function DeviceCcRoute() {
       document.removeEventListener("visibilitychange", handleVisibility);
     };
   }, []);
-
-  const devicesQuery = useDevicesQuery();
-  const device = useMemo(
-    () => devicesQuery.data?.find((entry) => entry.id === deviceId),
-    [devicesQuery.data, deviceId],
-  );
-
-  const baseUrl = device?.baseUrl;
 
   const [streamStatus, setStreamStatus] = useState<FastStatusView | null>(null);
 
@@ -227,29 +215,6 @@ export function DeviceCcRoute() {
     (firstHttpError.code === "LINK_DOWN" ||
       firstHttpError.code === "UNAVAILABLE");
 
-  if (devicesQuery.isLoading) {
-    return <p className="text-sm text-base-content/60">Loading devices...</p>;
-  }
-
-  if (!device) {
-    return (
-      <div className="flex flex-col gap-4 max-w-xl">
-        <h2 className="text-xl font-bold">Device not found</h2>
-        <p className="text-sm text-base-content/70">
-          The requested device ID{" "}
-          <code className="font-mono bg-base-200 px-1 rounded">{deviceId}</code>{" "}
-          does not exist in the local registry. Please return to the device list
-          and add or select a device.
-        </p>
-        <div>
-          <Link to="/devices" className="btn btn-sm btn-outline">
-            Back to devices
-          </Link>
-        </div>
-      </div>
-    );
-  }
-
   const identity = identityQuery.data;
   const status = streamStatus ?? statusQuery.data;
   const cc = ccQuery.data;
@@ -310,7 +275,7 @@ export function DeviceCcRoute() {
   };
 
   return (
-    <div className="flex flex-col gap-6 max-w-5xl font-mono tabular-nums">
+    <PageContainer className="flex flex-col gap-6 font-mono tabular-nums">
       {/* Top context: device + mode strip + link status */}
       <header className="flex flex-wrap items-start justify-between gap-4">
         <div>
@@ -598,7 +563,7 @@ export function DeviceCcRoute() {
           </div>
         </div>
       </section>
-    </div>
+    </PageContainer>
   );
 }
 
