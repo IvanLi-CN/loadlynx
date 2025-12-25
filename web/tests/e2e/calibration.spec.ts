@@ -147,6 +147,14 @@ test.describe("Calibration UI", () => {
     await expect(draftCurrentTableMA).not.toContainText("900.000");
     await expect(draftCurrentTableMA).toContainText("No draft points.");
 
+    // Navigating away from calibration should restore the default console layout.
+    await page.goto(`/${deviceId}/cc`);
+    const sidebar = page.locator("aside");
+    await expect(sidebar).toHaveCount(1);
+    await expect(
+      sidebar.getByRole("link", { name: "Status", exact: true }),
+    ).toBeVisible();
+
     await page.goto("/");
   });
 });
