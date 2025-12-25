@@ -370,7 +370,12 @@ export function ConsoleLayout() {
               "lg:w-64",
             ].join(" ")}
           >
-            <div className="p-2 flex items-center justify-end md:flex lg:hidden">
+            <div
+              className={[
+                "p-2 w-full flex items-center md:flex lg:hidden",
+                isMediumSidebarExpanded ? "justify-end" : "justify-center",
+              ].join(" ")}
+            >
               <button
                 type="button"
                 className="btn btn-ghost btn-sm btn-square"
