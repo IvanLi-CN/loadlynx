@@ -33,6 +33,7 @@ import {
 } from "../calibration/validation.ts";
 import { AlertDialog } from "../components/common/alert-dialog.tsx";
 import { ConfirmDialog } from "../components/common/confirm-dialog.tsx";
+import { PageContainer } from "../components/layout/page-container.tsx";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
 type RefetchProfile = () => Promise<
@@ -593,15 +594,18 @@ export function DeviceCalibrationRoute() {
 
   if (devicesQuery.isLoading) {
     return (
-      <div className="max-w-5xl mx-auto p-8 text-center text-base-content/60">
+      <PageContainer
+        variant="full"
+        className="p-8 text-center text-base-content/60"
+      >
         Loading device...
-      </div>
+      </PageContainer>
     );
   }
 
   if (!device) {
     return (
-      <div className="max-w-5xl mx-auto space-y-4">
+      <PageContainer variant="full" className="space-y-4">
         <h2 className="text-2xl font-bold">Calibration</h2>
         <div role="alert" className="alert alert-error text-sm py-2">
           <span>
@@ -612,7 +616,7 @@ export function DeviceCalibrationRoute() {
         <Link to="/devices" className="btn btn-sm btn-outline">
           Back to devices
         </Link>
-      </div>
+      </PageContainer>
     );
   }
 
@@ -627,6 +631,14 @@ function DeviceCalibrationPage({
   baseUrl: string;
 }) {
   const [activeTab, setActiveTab] = useState<CalibrationTab>("voltage");
+
+  useEffect(() => {
+    return () => {
+      postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
+        // Best-effort; do not block navigation or show UI errors here.
+      });
+    };
+  }, [baseUrl]);
 
   // Live status stream (includes optional RAW fields in calibration mode).
   const [status, setStatus] = useState<FastStatusView | null>(null);
@@ -1466,7 +1478,7 @@ function DeviceCalibrationPage({
   }, [activeTab]);
 
   return (
-    <div className="flex flex-col gap-6 max-w-5xl mx-auto">
+    <PageContainer variant="full" className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold">Calibration</h2>
         <div className="badge badge-neutral gap-2">
@@ -1748,7 +1760,7 @@ function DeviceCalibrationPage({
           })}
         </div>
       )}
-    </div>
+    </PageContainer>
   );
 }
 
