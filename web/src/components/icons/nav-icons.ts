@@ -28,4 +28,3 @@ export const NAV_ICONS = {
   expand: NAV_ICON_EXPAND,
   collapse: NAV_ICON_COLLAPSE,
 } as const satisfies Record<string, IconifyIcon>;
-
