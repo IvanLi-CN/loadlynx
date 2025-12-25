@@ -4,15 +4,21 @@ import {
   useParams,
   useRouterState,
 } from "@tanstack/react-router";
-import { useEffect, useRef } from "react";
-import { postCalibrationMode } from "../api/client.ts";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
 export function ConsoleLayout() {
-  const pathname = useRouterState({
-    select: (state) => state.location.pathname,
+  const layoutMode = useRouterState({
+    select: (state) => {
+      let mode: unknown;
+      for (const match of state.matches) {
+        const staticData = (match as { staticData?: unknown }).staticData;
+        const layout = (staticData as { layout?: unknown } | undefined)?.layout;
+        if (layout != null) mode = layout;
+      }
+      return mode;
+    },
   });
-  const isCalibrationPage = /\/calibration$/.test(pathname);
+  const isToolLayout = layoutMode === "tool";
   const { deviceId } = useParams({ strict: false }) as {
     deviceId?: string;
   };
@@ -22,31 +28,6 @@ export function ConsoleLayout() {
     deviceId && devices
       ? devices.find((device) => device.id === deviceId)
       : undefined;
-
-  const lastDeviceBaseUrlRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (currentDevice?.baseUrl) {
-      lastDeviceBaseUrlRef.current = currentDevice.baseUrl;
-    }
-  }, [currentDevice?.baseUrl]);
-
-  // Enforce calibration mode based on the current page:
-  // - /calibration manages its own mode (voltage/current tabs)
-  // - all other pages should keep mode off
-  //
-  // This makes page entry resilient even if the previous page failed to clean up
-  // (e.g., refresh, navigation glitches, tab close).
-  useEffect(() => {
-    void pathname;
-    if (isCalibrationPage) return;
-
-    const baseUrl = currentDevice?.baseUrl ?? lastDeviceBaseUrlRef.current;
-    if (!baseUrl) return;
-
-    postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
-      // Best-effort; do not block navigation or show UI errors here.
-    });
-  }, [currentDevice?.baseUrl, isCalibrationPage, pathname]);
 
   return (
     <>
@@ -101,101 +82,103 @@ export function ConsoleLayout() {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        <aside className="w-64 bg-base-200/50 border-r border-base-300 overflow-y-auto">
-          <ul className="menu p-4 w-full gap-1">
-            <li className="menu-title uppercase tracking-wider opacity-70 text-xs">
-              Navigation
-            </li>
-            <li>
-              <Link
-                to="/devices"
-                activeProps={{ className: "active" }}
-                className="rounded-box"
-              >
-                Devices
-              </Link>
-            </li>
+        {isToolLayout ? null : (
+          <aside className="w-64 bg-base-200/50 border-r border-base-300 overflow-y-auto">
+            <ul className="menu p-4 w-full gap-1">
+              <li className="menu-title uppercase tracking-wider opacity-70 text-xs">
+                Navigation
+              </li>
+              <li>
+                <Link
+                  to="/devices"
+                  activeProps={{ className: "active" }}
+                  className="rounded-box"
+                >
+                  Devices
+                </Link>
+              </li>
 
-            {deviceId ? (
-              <>
-                <li>
-                  <Link
-                    to="/$deviceId/cc"
-                    params={{ deviceId }}
-                    activeProps={{ className: "active" }}
-                    className="rounded-box"
-                  >
-                    CC Control
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    to="/$deviceId/status"
-                    params={{ deviceId }}
-                    activeProps={{ className: "active" }}
-                    className="rounded-box"
-                  >
-                    Status
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    to="/$deviceId/settings"
-                    params={{ deviceId }}
-                    activeProps={{ className: "active" }}
-                    className="rounded-box"
-                  >
-                    Settings
-                  </Link>
-                </li>
-                <li>
-                  <Link
-                    to="/$deviceId/calibration"
-                    params={{ deviceId }}
-                    activeProps={{ className: "active" }}
-                    className="rounded-box"
-                  >
-                    Calibration
-                  </Link>
-                </li>
-              </>
-            ) : (
-              <>
-                <li>
-                  <button
-                    type="button"
-                    disabled
-                    className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
-                  >
-                    CC Control
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    disabled
-                    className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
-                  >
-                    Status
-                  </button>
-                </li>
-                <li>
-                  <button
-                    type="button"
-                    disabled
-                    className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
-                  >
-                    Settings
-                  </button>
-                </li>
-              </>
-            )}
+              {deviceId ? (
+                <>
+                  <li>
+                    <Link
+                      to="/$deviceId/cc"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      CC Control
+                    </Link>
+                  </li>
+                  <li>
+                    <Link
+                      to="/$deviceId/status"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      Status
+                    </Link>
+                  </li>
+                  <li>
+                    <Link
+                      to="/$deviceId/settings"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      Settings
+                    </Link>
+                  </li>
+                  <li>
+                    <Link
+                      to="/$deviceId/calibration"
+                      params={{ deviceId }}
+                      activeProps={{ className: "active" }}
+                      className="rounded-box"
+                    >
+                      Calibration
+                    </Link>
+                  </li>
+                </>
+              ) : (
+                <>
+                  <li>
+                    <button
+                      type="button"
+                      disabled
+                      className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                    >
+                      CC Control
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      disabled
+                      className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                    >
+                      Status
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      type="button"
+                      disabled
+                      className="disabled:bg-transparent disabled:text-base-content/30 cursor-not-allowed"
+                    >
+                      Settings
+                    </button>
+                  </li>
+                </>
+              )}
 
-            <li className="menu-title mt-6 uppercase tracking-wider opacity-70 text-xs">
-              Other functions
-            </li>
-          </ul>
-        </aside>
+              <li className="menu-title mt-6 uppercase tracking-wider opacity-70 text-xs">
+                Other functions
+              </li>
+            </ul>
+          </aside>
+        )}
 
         <main className="flex-1 p-6 overflow-y-auto bg-base-100">
           <Outlet />
