@@ -1,6 +1,5 @@
 import type { QueryObserverResult } from "@tanstack/react-query";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { Link, useParams } from "@tanstack/react-router";
 import Decimal from "decimal.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -34,7 +33,7 @@ import {
 import { AlertDialog } from "../components/common/alert-dialog.tsx";
 import { ConfirmDialog } from "../components/common/confirm-dialog.tsx";
 import { PageContainer } from "../components/layout/page-container.tsx";
-import { useDevicesQuery } from "../devices/hooks.ts";
+import { useDeviceContext } from "../layouts/device-layout.tsx";
 
 type RefetchProfile = () => Promise<
   QueryObserverResult<CalibrationProfile, HttpApiError>
@@ -580,47 +579,8 @@ function expectedCalKindForTab(tab: CalibrationTab): number {
 }
 
 export function DeviceCalibrationRoute() {
-  const { deviceId } = useParams({
-    strict: false,
-  }) as {
-    deviceId: string;
-  };
-
-  const devicesQuery = useDevicesQuery();
-  const device = useMemo(
-    () => devicesQuery.data?.find((entry) => entry.id === deviceId),
-    [devicesQuery.data, deviceId],
-  );
-
-  if (devicesQuery.isLoading) {
-    return (
-      <PageContainer
-        variant="full"
-        className="p-8 text-center text-base-content/60"
-      >
-        Loading device...
-      </PageContainer>
-    );
-  }
-
-  if (!device) {
-    return (
-      <PageContainer variant="full" className="space-y-4">
-        <h2 className="text-2xl font-bold">Calibration</h2>
-        <div role="alert" className="alert alert-error text-sm py-2">
-          <span>
-            Device not found. Please add the device first in{" "}
-            <code className="code">Devices</code>.
-          </span>
-        </div>
-        <Link to="/devices" className="btn btn-sm btn-outline">
-          Back to devices
-        </Link>
-      </PageContainer>
-    );
-  }
-
-  return <DeviceCalibrationPage deviceId={deviceId} baseUrl={device.baseUrl} />;
+  const { deviceId, baseUrl } = useDeviceContext();
+  return <DeviceCalibrationPage deviceId={deviceId} baseUrl={baseUrl} />;
 }
 
 function DeviceCalibrationPage({
