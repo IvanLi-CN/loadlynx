@@ -32,9 +32,9 @@ use crate::mdns::MdnsConfig;
 use crate::{
     ANALOG_FW_VERSION_RAW, CalUartCommand, CalibrationMutex, ENCODER_STEP_MA, ENCODER_VALUE,
     EepromMutex, FAST_STATUS_OK_COUNT, FW_VERSION, HELLO_SEEN, LAST_GOOD_FRAME_MS,
-    LIMIT_PROFILE_DEFAULT, LINK_UP, STATE_FLAG_REMOTE_ACTIVE, TARGET_I_MAX_MA, TARGET_I_MIN_MA,
-    TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME, WIFI_NETMASK, WIFI_PSK, WIFI_SSID,
-    WIFI_STATIC_IP, enqueue_cal_uart, mdns, now_ms32, timestamp_ms, ui::AnalogState,
+    LIMIT_PROFILE_DEFAULT, LINK_UP, LOAD_SWITCH_ENABLED, STATE_FLAG_REMOTE_ACTIVE, TARGET_I_MAX_MA,
+    TARGET_I_MIN_MA, TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME, WIFI_NETMASK, WIFI_PSK,
+    WIFI_SSID, WIFI_STATIC_IP, enqueue_cal_uart, mdns, now_ms32, timestamp_ms, ui::AnalogState,
 };
 
 use loadlynx_calibration_format::{self as calfmt, CalPoint, CurveKind, ProfileSource};
@@ -1095,7 +1095,7 @@ async fn render_identity_json(
     buf.push_str("\"cc_supported\":true,");
     buf.push_str("\"cv_supported\":false,");
     buf.push_str("\"cp_supported\":false,");
-    buf.push_str("\"api_version\":\"1.0.0\"}");
+    buf.push_str("\"api_version\":\"2.0.0\"}");
 
     buf.push('}');
     Ok(())
@@ -1387,22 +1387,24 @@ async fn render_cc_view_json(
         status.v_local_mv
     };
 
-    // Digital-side desired target based on the shared encoder value. This
-    // matches the path used by the existing SetPoint TX task and keeps the
-    // HTTP view consistent with the local UI knob and remote updates.
-    let desired_target = {
+    // Digital-side CC setpoint derived from the shared encoder value.
+    let setpoint_i_ma = {
         let steps = ENCODER_VALUE.load(Ordering::SeqCst);
         let raw = steps.saturating_mul(ENCODER_STEP_MA);
         raw.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA)
     };
+    let load_enabled = LOAD_SWITCH_ENABLED.load(Ordering::SeqCst) && setpoint_i_ma != 0;
+    let effective_i_ma = if load_enabled { setpoint_i_ma } else { 0 };
 
     buf.clear();
     buf.push('{');
-    // enable + target
+    // enable (load switch) + setpoint + effective
     buf.push_str("\"enable\":");
-    buf.push_str(if status.enable { "true" } else { "false" });
+    buf.push_str(if load_enabled { "true" } else { "false" });
     buf.push_str(",\"target_i_ma\":");
-    let _ = core::write!(buf, "{}", desired_target);
+    let _ = core::write!(buf, "{}", setpoint_i_ma);
+    buf.push_str(",\"effective_i_ma\":");
+    let _ = core::write!(buf, "{}", effective_i_ma);
 
     // limit_profile
     buf.push_str(",\"limit_profile\":{");
@@ -1501,12 +1503,15 @@ async fn handle_cc_update(
         return Err("422 Unprocessable Entity");
     }
 
-    // Map `enable=false` onto a zero-current target; we currently keep the
-    // analog-side SetEnable handshake as a separate concern.
-    let effective_target = if parsed.enable { parsed.target_i_ma } else { 0 };
-
-    let steps = effective_target / ENCODER_STEP_MA;
+    // Update digital-side CC model (setpoint + load switch), applying rule A:
+    // if setpoint becomes 0, force load_enabled=false (even if request asked for true).
+    let max_steps = TARGET_I_MAX_MA / ENCODER_STEP_MA;
+    let steps = (parsed.target_i_ma / ENCODER_STEP_MA).clamp(0, max_steps);
     ENCODER_VALUE.store(steps, Ordering::SeqCst);
+    let setpoint_i_ma =
+        (steps.saturating_mul(ENCODER_STEP_MA)).clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
+    let load_enabled = parsed.enable && setpoint_i_ma != 0;
+    LOAD_SWITCH_ENABLED.store(load_enabled, Ordering::SeqCst);
 
     // Reuse the GET /cc view to report the updated state back to the caller.
     render_cc_view_json(body_out, telemetry).await
