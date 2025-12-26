@@ -24,15 +24,15 @@ export const Default: Story = {
     await canvas.findByText(/1\.50\s*A\s*·\s*1500\s*mA/);
 
     const enableToggle = await canvas.findByRole("checkbox", {
-      name: /Enable output/i,
+      name: /Load switch/i,
     });
 
     if ((enableToggle as HTMLInputElement).checked) {
-      throw new Error("Expected Enable output to start unchecked");
+      throw new Error("Expected Load switch to start unchecked");
     }
     await userEvent.click(enableToggle);
     if (!(enableToggle as HTMLInputElement).checked) {
-      throw new Error("Expected Enable output to be checked after click");
+      throw new Error("Expected Load switch to be checked after click");
     }
   },
 };
