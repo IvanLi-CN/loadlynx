@@ -99,7 +99,7 @@ static RADIO_CONTROLLER: StaticCell<RadioController<'static>> = StaticCell::new(
 // Allow a modest number of simultaneous TCP sockets (HTTP fetches + SSE).
 // Value chosen to cover a typical browser's 4–6 parallel GETs without being
 // wasteful on RAM.
-static NET_RESOURCES: StaticCell<StackResources<6>> = StaticCell::new();
+static NET_RESOURCES: StaticCell<StackResources<10>> = StaticCell::new();
 
 fn derive_device_names(mac: [u8; 6]) -> DeviceNames {
     let short_id = mdns::short_id_from_mac(mac);
@@ -259,7 +259,7 @@ pub fn spawn_wifi_and_http(
     let rng = Rng::new();
     let seed = (rng.random() as u64) << 32 | rng.random() as u64;
 
-    let resources = NET_RESOURCES.init(StackResources::<6>::new());
+    let resources = NET_RESOURCES.init(StackResources::<10>::new());
     let (stack, runner) = embassy_net::new(wifi_device, net_cfg, resources, seed);
 
     info!("spawning Wi-Fi connection task");
@@ -437,7 +437,10 @@ async fn wifi_task(
 
 // Keep at least one worker in accept() even if another is occupied by SSE, avoiding
 // browser-side ECONNREFUSED while reusing the same HTTP port and stack.
-const HTTP_WORKER_COUNT: usize = 2;
+//
+// Browsers often issue 4+ parallel HTTP requests on page load (identity, status,
+// cc, calibration mode, etc.). Keep enough workers to absorb that burst.
+const HTTP_WORKER_COUNT: usize = 4;
 const HTTP_PORT: u16 = 80;
 
 #[embassy_executor::task(pool_size = HTTP_WORKER_COUNT)]
@@ -537,6 +540,7 @@ async fn handle_http_connection(
         header_end,
         content_length,
         has_content_length,
+        origin_s,
         accept_event_stream,
     ) = {
         // Try to parse as UTF‑8; fall back to an error on failure.
@@ -551,13 +555,14 @@ async fn handle_http_connection(
                     false,
                     None,
                 );
-                write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+                write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body, None).await?;
                 return Ok(());
             }
         };
 
         let mut content_length = 0usize;
         let mut has_content_length = false;
+        let mut origin_s: Option<String> = None;
         let mut accept_event_stream = false;
 
         let mut lines = req_str.lines();
@@ -580,7 +585,7 @@ async fn handle_http_connection(
                     false,
                     None,
                 );
-                write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+                write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body, None).await?;
                 return Ok(());
             }
         };
@@ -597,6 +602,13 @@ async fn handle_http_connection(
                     content_length = len;
                     has_content_length = true;
                 }
+            } else if lower.starts_with("origin:") {
+                // Echo Origin when present. This improves compatibility with
+                // browser preflight checks (including Private Network Access).
+                let rest = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+                if !rest.is_empty() {
+                    origin_s = Some(String::from(rest));
+                }
             } else if let Some(rest) = lower.strip_prefix("accept:") {
                 if rest.contains("text/event-stream") {
                     accept_event_stream = true;
@@ -611,6 +623,7 @@ async fn handle_http_connection(
             header_end,
             content_length,
             has_content_length,
+            origin_s,
             accept_event_stream,
         )
     };
@@ -618,6 +631,7 @@ async fn handle_http_connection(
     let method = method_s.as_str();
     let path = path_s.as_str();
     let version = version_s.as_str();
+    let cors_origin = origin_s.as_deref();
 
     // Only HTTP/1.1 is supported.
     if version != "HTTP/1.1" {
@@ -629,7 +643,7 @@ async fn handle_http_connection(
             false,
             None,
         );
-        write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+        write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body, cors_origin).await?;
         return Ok(());
     }
 
@@ -645,7 +659,7 @@ async fn handle_http_connection(
                 false,
                 None,
             );
-            write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+            write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body, cors_origin).await?;
             return Ok(());
         }
 
@@ -658,7 +672,14 @@ async fn handle_http_connection(
                 false,
                 None,
             );
-            write_http_response(socket, "HTTP/1.1", "413 Payload Too Large", &body).await?;
+            write_http_response(
+                socket,
+                "HTTP/1.1",
+                "413 Payload Too Large",
+                &body,
+                cors_origin,
+            )
+            .await?;
             return Ok(());
         }
 
@@ -691,7 +712,7 @@ async fn handle_http_connection(
                 false,
                 None,
             );
-            write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body).await?;
+            write_http_response(socket, "HTTP/1.1", "400 Bad Request", &body, cors_origin).await?;
             return Ok(());
         }
 
@@ -707,7 +728,7 @@ async fn handle_http_connection(
             // Empty body is fine; write_http_response already emits the
             // CORS headers we need. Use 200 to satisfy strict preflight
             // checks that expect an \"OK\" status.
-            write_http_response(socket, version, "200 OK", "").await?;
+            write_http_response(socket, version, "200 OK", "", cors_origin).await?;
             return Ok(());
         }
 
@@ -718,43 +739,45 @@ async fn handle_http_connection(
             false,
             None,
         );
-        write_http_response(socket, version, "400 Bad Request", &body).await?;
+        write_http_response(socket, version, "400 Bad Request", &body, cors_origin).await?;
         return Ok(());
     }
 
     match (method, path) {
         ("GET", "/api/v1/ping") | ("GET", "/health") => {
             body.push_str(r#"{"ok":true}"#);
-            write_http_response(socket, version, "200 OK", &body).await?;
+            write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
         }
         ("GET", "/api/v1/identity") => {
             match render_identity_json(&mut body, wifi_state).await {
                 Ok(()) => {
-                    write_http_response(socket, version, "200 OK", &body).await?;
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
                 Err(err) => {
                     // render_identity_json already encoded the appropriate ErrorResponse.
-                    write_http_response(socket, version, err, &body).await?;
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
                 }
             }
         }
         ("GET", "/api/v1/status") => {
             if accept_event_stream {
-                return handle_status_sse(socket, telemetry).await;
+                return handle_status_sse(socket, telemetry, cors_origin).await;
             }
             match render_status_json(&mut body, telemetry).await {
                 Ok(()) => {
-                    write_http_response(socket, version, "200 OK", &body).await?;
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
                 Err(err) => {
-                    write_http_response(socket, version, err, &body).await?;
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
                 }
             }
         }
         ("GET", "/api/v1/calibration/profile") => {
             match render_calibration_profile_json(&mut body, calibration).await {
-                Ok(()) => write_http_response(socket, version, "200 OK", &body).await?,
-                Err(err) => write_http_response(socket, version, err, &body).await?,
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?
+                }
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
         ("POST", "/api/v1/calibration/apply") => {
@@ -763,13 +786,19 @@ async fn handle_http_connection(
                     // Immediate UART downlink (multi-chunk CalWrite) is queued onto the UART TX task.
                     if let Err(code) = enqueue_cal_uart(CalUartCommand::SendCurve(kind)) {
                         write_error_body(&mut body, "UNAVAILABLE", code, true, None);
-                        write_http_response(socket, version, "503 Service Unavailable", &body)
-                            .await?;
+                        write_http_response(
+                            socket,
+                            version,
+                            "503 Service Unavailable",
+                            &body,
+                            cors_origin,
+                        )
+                        .await?;
                     } else {
-                        write_http_response(socket, version, "200 OK", &body).await?;
+                        write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                     }
                 }
-                Err(err) => write_http_response(socket, version, err, &body).await?,
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
         ("POST", "/api/v1/calibration/commit") => {
@@ -777,13 +806,19 @@ async fn handle_http_connection(
                 Ok(kind) => {
                     if let Err(code) = enqueue_cal_uart(CalUartCommand::SendCurve(kind)) {
                         write_error_body(&mut body, "UNAVAILABLE", code, true, None);
-                        write_http_response(socket, version, "503 Service Unavailable", &body)
-                            .await?;
+                        write_http_response(
+                            socket,
+                            version,
+                            "503 Service Unavailable",
+                            &body,
+                            cors_origin,
+                        )
+                        .await?;
                     } else {
-                        write_http_response(socket, version, "200 OK", &body).await?;
+                        write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                     }
                 }
-                Err(err) => write_http_response(socket, version, err, &body).await?,
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
         ("POST", "/api/v1/calibration/reset") => {
@@ -791,22 +826,34 @@ async fn handle_http_connection(
                 Ok(Some(kind)) => {
                     if let Err(code) = enqueue_cal_uart(CalUartCommand::SendCurve(kind)) {
                         write_error_body(&mut body, "UNAVAILABLE", code, true, None);
-                        write_http_response(socket, version, "503 Service Unavailable", &body)
-                            .await?;
+                        write_http_response(
+                            socket,
+                            version,
+                            "503 Service Unavailable",
+                            &body,
+                            cors_origin,
+                        )
+                        .await?;
                     } else {
-                        write_http_response(socket, version, "200 OK", &body).await?;
+                        write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                     }
                 }
                 Ok(None) => {
                     if let Err(code) = enqueue_cal_uart(CalUartCommand::SendAllCurves) {
                         write_error_body(&mut body, "UNAVAILABLE", code, true, None);
-                        write_http_response(socket, version, "503 Service Unavailable", &body)
-                            .await?;
+                        write_http_response(
+                            socket,
+                            version,
+                            "503 Service Unavailable",
+                            &body,
+                            cors_origin,
+                        )
+                        .await?;
                     } else {
-                        write_http_response(socket, version, "200 OK", &body).await?;
+                        write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                     }
                 }
-                Err(err) => write_http_response(socket, version, err, &body).await?,
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
         ("POST", "/api/v1/calibration/mode") => {
@@ -814,44 +861,50 @@ async fn handle_http_connection(
                 Ok(kind) => {
                     if let Err(code) = enqueue_cal_uart(CalUartCommand::SetMode(kind)) {
                         write_error_body(&mut body, "UNAVAILABLE", code, true, None);
-                        write_http_response(socket, version, "503 Service Unavailable", &body)
-                            .await?;
+                        write_http_response(
+                            socket,
+                            version,
+                            "503 Service Unavailable",
+                            &body,
+                            cors_origin,
+                        )
+                        .await?;
                     } else {
-                        write_http_response(socket, version, "200 OK", &body).await?;
+                        write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                     }
                 }
-                Err(err) => write_http_response(socket, version, err, &body).await?,
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
         ("GET", "/api/v1/cc") => match render_cc_view_json(&mut body, telemetry).await {
             Ok(()) => {
-                write_http_response(socket, version, "200 OK", &body).await?;
+                write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
             }
             Err(err) => {
-                write_http_response(socket, version, err, &body).await?;
+                write_http_response(socket, version, err, &body, cors_origin).await?;
             }
         },
         ("PUT", "/api/v1/cc") | ("POST", "/api/v1/cc") => {
             match handle_cc_update(body_str, &mut body, telemetry).await {
                 Ok(()) => {
-                    write_http_response(socket, version, "200 OK", &body).await?;
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
                 Err(err) => {
-                    write_http_response(socket, version, err, &body).await?;
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
                 }
             }
         }
         ("POST", "/api/v1/soft-reset") => match handle_soft_reset_http(body_str, &mut body) {
             Ok(()) => {
-                write_http_response(socket, version, "200 OK", &body).await?;
+                write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
             }
             Err(status) => {
-                write_http_response(socket, version, status, &body).await?;
+                write_http_response(socket, version, status, &body, cors_origin).await?;
             }
         },
         ("GET", _) => {
             write_error_body(&mut body, "UNSUPPORTED_OPERATION", "not found", false, None);
-            write_http_response(socket, version, "404 Not Found", &body).await?;
+            write_http_response(socket, version, "404 Not Found", &body, cors_origin).await?;
         }
         _ => {
             write_error_body(
@@ -861,7 +914,7 @@ async fn handle_http_connection(
                 false,
                 None,
             );
-            write_http_response(socket, version, "400 Bad Request", &body).await?;
+            write_http_response(socket, version, "400 Bad Request", &body, cors_origin).await?;
         }
     }
 
@@ -923,13 +976,20 @@ async fn write_http_response(
     version: &str,
     status_line: &str,
     body: &str,
+    cors_origin: Option<&str>,
 ) -> Result<(), embassy_net::tcp::Error> {
     // Minimal CORS support to allow the LoadLynx web console (running on a
     // separate origin during development) to access the HTTP API.
-    const CORS_ALLOW_ORIGIN: &str = "*";
     const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
     const CORS_ALLOW_HEADERS: &str = "Content-Type";
     const CORS_ALLOW_PRIVATE_NETWORK: &str = "true";
+
+    let allow_origin = cors_origin.unwrap_or("*");
+    let vary_origin = if cors_origin.is_some() {
+        "Vary: Origin\r\n"
+    } else {
+        ""
+    };
 
     let mut head = String::new();
     let _ = core::write!(
@@ -937,6 +997,7 @@ async fn write_http_response(
         "{} {}\r\n\
          Content-Type: application/json; charset=utf-8\r\n\
          Access-Control-Allow-Origin: {}\r\n\
+         {}\
          Access-Control-Allow-Methods: {}\r\n\
          Access-Control-Allow-Headers: {}\r\n\
          Access-Control-Allow-Private-Network: {}\r\n\
@@ -945,7 +1006,8 @@ async fn write_http_response(
          \r\n",
         version,
         status_line,
-        CORS_ALLOW_ORIGIN,
+        allow_origin,
+        vary_origin,
         CORS_ALLOW_METHODS,
         CORS_ALLOW_HEADERS,
         CORS_ALLOW_PRIVATE_NETWORK,
@@ -958,11 +1020,18 @@ async fn write_http_response(
 
 async fn write_sse_response_head(
     socket: &mut TcpSocket<'_>,
+    cors_origin: Option<&str>,
 ) -> Result<(), embassy_net::tcp::Error> {
-    const CORS_ALLOW_ORIGIN: &str = "*";
     const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
     const CORS_ALLOW_HEADERS: &str = "Content-Type";
     const CORS_ALLOW_PRIVATE_NETWORK: &str = "true";
+
+    let allow_origin = cors_origin.unwrap_or("*");
+    let vary_origin = if cors_origin.is_some() {
+        "Vary: Origin\r\n"
+    } else {
+        ""
+    };
 
     let mut head = String::new();
     let _ = core::write!(
@@ -971,12 +1040,14 @@ async fn write_sse_response_head(
          Content-Type: text/event-stream\r\n\
          Cache-Control: no-cache\r\n\
          Access-Control-Allow-Origin: {}\r\n\
+         {}\
          Access-Control-Allow-Methods: {}\r\n\
          Access-Control-Allow-Headers: {}\r\n\
          Access-Control-Allow-Private-Network: {}\r\n\
          Connection: keep-alive\r\n\
          \r\n",
-        CORS_ALLOW_ORIGIN,
+        allow_origin,
+        vary_origin,
         CORS_ALLOW_METHODS,
         CORS_ALLOW_HEADERS,
         CORS_ALLOW_PRIVATE_NETWORK,
@@ -1228,6 +1299,7 @@ async fn render_status_json_inner(
 async fn handle_status_sse(
     socket: &mut TcpSocket<'_>,
     telemetry: &'static TelemetryMutex,
+    cors_origin: Option<&str>,
 ) -> Result<(), embassy_net::tcp::Error> {
     // Conservative rate to keep CPU/stack usage low while still improving
     // smoothness over 400 ms polling.
@@ -1245,7 +1317,14 @@ async fn handle_status_sse(
             true,
             None,
         );
-        write_http_response(socket, "HTTP/1.1", "503 Service Unavailable", &body).await?;
+        write_http_response(
+            socket,
+            "HTTP/1.1",
+            "503 Service Unavailable",
+            &body,
+            cors_origin,
+        )
+        .await?;
         return Ok(());
     }
 
@@ -1257,7 +1336,7 @@ async fn handle_status_sse(
     }
     let _guard = ClearSseActive;
 
-    write_sse_response_head(socket).await?;
+    write_sse_response_head(socket, cors_origin).await?;
 
     let mut json_body = String::new();
     let mut frame = String::new();
