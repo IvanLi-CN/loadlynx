@@ -24,3 +24,6 @@ logs/agentd/
 
 # Local environment configuration (contains secrets, never commit)
 .env
+
+# Local backup snapshots (e.g. editor/submodule backups)
+*.local-backup-*
