@@ -896,7 +896,7 @@ async fn handle_http_connection(
                 write_http_response(socket, version, err, &body, cors_origin).await?;
             }
         },
-        ("PUT", "/api/v1/presets") => {
+        ("PUT", "/api/v1/presets") | ("POST", "/api/v1/presets") => {
             match handle_presets_update(body_str, &mut body, control, eeprom).await {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
@@ -926,7 +926,7 @@ async fn handle_http_connection(
                 }
             }
         }
-        ("PUT", "/api/v1/control") => {
+        ("PUT", "/api/v1/control") | ("POST", "/api/v1/control") => {
             match handle_control_update(body_str, &mut body, control, telemetry).await {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
