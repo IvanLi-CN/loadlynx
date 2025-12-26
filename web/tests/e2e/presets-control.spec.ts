@@ -18,6 +18,20 @@ async function openFirstDeviceControl(page: Page) {
   await expect(page.url()).toContain("/cc");
 }
 
+async function setOutputEnabled(page: Page, enabled: boolean) {
+  const outputToggle = page.getByRole("checkbox", { name: "Output enabled" });
+  await expect(outputToggle).toBeEnabled();
+
+  const wasChecked = await outputToggle.isChecked();
+  if (wasChecked !== enabled) {
+    await outputToggle.click();
+  }
+
+  await expect(page.getByTestId("control-output-enabled")).toContainText(
+    enabled ? "true" : "false",
+  );
+}
+
 test.describe("Presets + Unified Control (mock://)", () => {
   test.beforeEach(async ({ page }) => {
     await openFirstDeviceControl(page);
@@ -28,11 +42,7 @@ test.describe("Presets + Unified Control (mock://)", () => {
   });
 
   test("apply preset forces output_enabled=false", async ({ page }) => {
-    const outputToggle = page.getByRole("checkbox", { name: "Output enabled" });
-    await outputToggle.check();
-    await expect(page.getByTestId("control-output-enabled")).toContainText(
-      "true",
-    );
+    await setOutputEnabled(page, true);
 
     await page.getByRole("button", { name: "#2" }).click();
     await page
@@ -46,17 +56,8 @@ test.describe("Presets + Unified Control (mock://)", () => {
   });
 
   test("toggling output changes output_enabled", async ({ page }) => {
-    const outputToggle = page.getByRole("checkbox", { name: "Output enabled" });
-
-    await outputToggle.uncheck();
-    await expect(page.getByTestId("control-output-enabled")).toContainText(
-      "false",
-    );
-
-    await outputToggle.check();
-    await expect(page.getByTestId("control-output-enabled")).toContainText(
-      "true",
-    );
+    await setOutputEnabled(page, false);
+    await setOutputEnabled(page, true);
   });
 
   test("switching a preset CC<->CV and applying reflects in ControlView", async ({
