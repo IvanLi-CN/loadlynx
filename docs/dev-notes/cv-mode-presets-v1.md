@@ -210,9 +210,9 @@ I_limit_ma    = min(max_i_ma_total, I_by_power_ma, system_i_max_ma)
 
 ## 10. 跨模块接口边界（概要）
 
-### 10.1 UART：原子下发 Active Control（推荐）
+### 10.1 UART：原子下发 Active Control（冻结）
 
-现有 `MSG_SET_MODE (0x21)` 仅预留常量；v1 推荐引入“原子控制帧”（消息名/ID 为实现阶段决定）以满足：
+v1 冻结将 `MSG_SET_MODE (0x21)` 定义为“原子 Active Control”控制帧，以满足：
 
 - 一次下发：`preset_id + output_enabled + mode + target + limits`
 - 带 ACK_REQ/ACK，便于可靠传输与“关→开”边沿语义
@@ -254,7 +254,13 @@ Web/HTTP 必须覆盖：
 - 模式与目标值（CC: I、CV: V）
 - 关键状态展示：`uv_latched` 与当前受限原因（建议）
 
-接口设计可选择“统一 control 端点”或 “/cc + /cv” 分端点；v1 只冻结行为语义，不强制 URL 形式。
+v1 冻结使用统一端点与固定路径（详见 `docs/interfaces/network-http-api.md`）：
+
+- `GET /api/v1/presets` → `{ "presets": Preset[] }`（必须恰好 5 条）
+- `PUT /api/v1/presets` → 更新单个 Preset（请求体必须包含完整 Preset payload + `preset_id`），返回更新后的 Preset
+- `POST /api/v1/presets/apply` → `{ "preset_id": number }`，应用并 **强制输出关闭**，返回 `ControlView`
+- `GET /api/v1/control` → `ControlView`
+- `PUT /api/v1/control` → `{ "output_enabled": boolean }`（`uv_latched` 仅能通过 “关→开” 边沿清除）
 
 ---
 
@@ -299,4 +305,3 @@ v1 建议将 Preset blob 放在后续地址段（不重叠），例如：
 ### 12.3 可观测性
 
 - FastStatus/HTTP 能反映 mode、目标、`uv_latched`、受限原因（建议项）。
-
