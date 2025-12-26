@@ -311,6 +311,7 @@ function createInitialCc(): CcControlView {
   return {
     enable: false,
     target_i_ma: 1_500,
+    effective_i_ma: 0,
     limit_profile: {
       max_i_ma: 5_000,
       max_p_mw: 60_000,
@@ -352,7 +353,7 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
       cc_supported: true,
       cv_supported: false,
       cp_supported: false,
-      api_version: "1.0.0-mock",
+      api_version: "2.0.0-mock",
     },
   };
 }
@@ -456,10 +457,16 @@ async function mockUpdateCc(
 ): Promise<CcControlView> {
   const state = getOrCreateMockDevice(baseUrl);
 
+  // Rule A: when target is 0, force enable=false.
+  const nextTargetIMa = payload.target_i_ma;
+  const nextEnable = nextTargetIMa === 0 ? false : payload.enable;
+  const nextEffectiveIMa = nextEnable ? nextTargetIMa : 0;
+
   const nextCc: CcControlView = {
     ...state.cc,
-    enable: payload.enable,
-    target_i_ma: payload.target_i_ma,
+    enable: nextEnable,
+    target_i_ma: nextTargetIMa,
+    effective_i_ma: nextEffectiveIMa,
     limit_profile: {
       ...state.cc.limit_profile,
       max_i_ma: payload.max_i_ma ?? state.cc.limit_profile.max_i_ma,
@@ -480,10 +487,10 @@ async function mockUpdateCc(
   };
 
   // Very simple output model: if enabled, we assume actual current tracks
-  // target at ~95%, otherwise 0. Power is derived from voltage and current.
-  if (nextCc.enable) {
+  // effective at ~95%, otherwise 0. Power is derived from voltage and current.
+  if (nextCc.effective_i_ma > 0) {
     const clampedTarget = Math.min(
-      nextCc.target_i_ma,
+      nextCc.effective_i_ma,
       nextCc.limit_profile.max_i_ma,
     );
     nextCc.i_total_ma = Math.round(clampedTarget * 0.95);
@@ -503,7 +510,7 @@ async function mockUpdateCc(
     raw: {
       ...state.status.raw,
       enable: nextCc.enable,
-      target_value: nextCc.target_i_ma,
+      target_value: nextCc.effective_i_ma,
       i_local_ma: Math.round(nextCc.i_total_ma * 0.9),
       i_remote_ma: nextCc.i_total_ma - Math.round(nextCc.i_total_ma * 0.9),
       v_local_mv: nextCc.v_main_mv,
