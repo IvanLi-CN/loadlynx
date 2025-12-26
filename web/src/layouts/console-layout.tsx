@@ -33,17 +33,6 @@ function isDeviceTab(value: string): value is DeviceTab {
 export function ConsoleLayout() {
   const navigate = useNavigate();
 
-  const layoutMode = useRouterState({
-    select: (state): "tool" | undefined => {
-      for (const match of state.matches) {
-        const staticData = (match as { staticData?: unknown }).staticData;
-        const layout = (staticData as { layout?: unknown } | undefined)?.layout;
-        if (layout === "tool") return "tool";
-      }
-      return undefined;
-    },
-  });
-  const isToolLayout = layoutMode === "tool";
   const { deviceId } = useParams({ strict: false }) as {
     deviceId?: string;
   };
@@ -303,10 +292,7 @@ export function ConsoleLayout() {
         <div className="navbar-start">
           <button
             type="button"
-            className={[
-              "btn btn-ghost btn-square",
-              isToolLayout ? "" : "md:hidden",
-            ].join(" ")}
+            className="btn btn-ghost btn-square md:hidden"
             aria-label="Open navigation drawer"
             onClick={() => setIsDrawerOpen(true)}
           >
@@ -362,49 +348,37 @@ export function ConsoleLayout() {
       </header>
 
       <div className="flex flex-1 overflow-hidden">
-        {isToolLayout ? null : (
-          <aside
+        <aside
+          className={[
+            "hidden md:flex flex-col bg-base-200/50 border-r border-base-300 overflow-y-auto",
+            isMediumSidebarExpanded ? "md:w-64" : "md:w-20",
+            "lg:w-64",
+          ].join(" ")}
+        >
+          <div
             className={[
-              "hidden md:flex flex-col bg-base-200/50 border-r border-base-300 overflow-y-auto",
-              isMediumSidebarExpanded ? "md:w-64" : "md:w-20",
-              "lg:w-64",
+              "px-3 py-2 w-full flex items-center lg:hidden",
+              isMediumSidebarExpanded ? "justify-end" : "justify-center",
             ].join(" ")}
           >
-            <div
-              className={[
-                "p-2 w-full flex items-center md:flex lg:hidden",
-                isMediumSidebarExpanded ? "justify-end" : "justify-center",
-              ].join(" ")}
+            <button
+              type="button"
+              className="btn btn-ghost btn-sm btn-square"
+              aria-label={
+                isMediumSidebarExpanded ? "Collapse sidebar" : "Expand sidebar"
+              }
+              title={isMediumSidebarExpanded ? "Collapse sidebar" : "Expand sidebar"}
+              onClick={() => setIsMediumSidebarExpanded((value) => !value)}
             >
-              <button
-                type="button"
-                className="btn btn-ghost btn-sm btn-square"
-                aria-label={
-                  isMediumSidebarExpanded
-                    ? "Collapse sidebar"
-                    : "Expand sidebar"
-                }
-                title={
-                  isMediumSidebarExpanded
-                    ? "Collapse sidebar"
-                    : "Expand sidebar"
-                }
-                onClick={() => setIsMediumSidebarExpanded((value) => !value)}
-              >
-                <AppIcon
-                  icon={
-                    isMediumSidebarExpanded
-                      ? NAV_ICON_COLLAPSE
-                      : NAV_ICON_EXPAND
-                  }
-                  size={18}
-                />
-              </button>
-            </div>
+              <AppIcon
+                icon={isMediumSidebarExpanded ? NAV_ICON_COLLAPSE : NAV_ICON_EXPAND}
+                size={20}
+              />
+            </button>
+          </div>
 
-            <SidebarNav variant="sidebar" />
-          </aside>
-        )}
+          <SidebarNav variant="sidebar" />
+        </aside>
 
         <main className="flex-1 p-3 sm:p-4 md:p-6 overflow-y-auto bg-base-100">
           <Outlet />

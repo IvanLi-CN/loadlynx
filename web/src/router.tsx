@@ -70,7 +70,6 @@ const deviceCalibrationRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "calibration",
   component: DeviceCalibrationRoute,
-  staticData: { layout: "tool" },
 });
 
 const deviceRouteTree = deviceRoute.addChildren([
