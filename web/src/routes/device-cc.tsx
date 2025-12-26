@@ -101,8 +101,9 @@ export function DeviceCcRoute() {
     if (!cc) {
       return;
     }
-    setDraftEnable(cc.enable);
     setDraftTargetIMa(cc.target_i_ma);
+    // Rule A: target==0 always forces enable=false (even if the backend is stale).
+    setDraftEnable(cc.target_i_ma === 0 ? false : cc.enable);
     setDraftMaxPMw(cc.limit_profile.max_p_mw);
   }, [ccQuery.data]);
 
@@ -266,7 +267,7 @@ export function DeviceCcRoute() {
     }
 
     const payload: CcUpdateRequest = {
-      enable: draftEnable,
+      enable: draftTargetIMa === 0 ? false : draftEnable,
       target_i_ma: draftTargetIMa,
       max_p_mw: draftMaxPMw,
     };
@@ -417,7 +418,7 @@ export function DeviceCcRoute() {
             <div className="flex flex-col gap-6">
               <div className="form-control">
                 <label className="label" htmlFor="input-target-current">
-                  <span className="label-text">Target current</span>
+                  <span className="label-text">Setpoint current</span>
                   <span className="label-text-alt font-mono">
                     {(draftTargetIMa / 1_000).toFixed(2)} A · {draftTargetIMa}{" "}
                     mA
@@ -431,7 +432,12 @@ export function DeviceCcRoute() {
                   step={50}
                   value={draftTargetIMa}
                   onChange={(event) => {
-                    setDraftTargetIMa(Number.parseInt(event.target.value, 10));
+                    const nextTarget = Number.parseInt(event.target.value, 10);
+                    setDraftTargetIMa(nextTarget);
+                    // Rule A: target==0 always forces enable=false.
+                    if (nextTarget === 0) {
+                      setDraftEnable(false);
+                    }
                   }}
                   className="range range-primary range-sm"
                 />
@@ -475,15 +481,17 @@ export function DeviceCcRoute() {
                     className="toggle toggle-primary"
                     checked={draftEnable}
                     onChange={(event) => {
-                      setDraftEnable(event.target.checked);
+                      // Avoid enabling while target==0 (Rule A).
+                      const wantsEnable = event.target.checked;
+                      setDraftEnable(wantsEnable && draftTargetIMa !== 0);
                     }}
                   />
                   <div className="flex flex-col">
                     <span className="label-text font-semibold">
-                      Enable output
+                      Load switch
                     </span>
                     <span className="label-text-alt text-base-content/60">
-                      zero setpoint if disabled
+                      When off, output target is 0 mA; setpoint is preserved.
                     </span>
                   </div>
                 </label>
@@ -491,7 +499,7 @@ export function DeviceCcRoute() {
 
               <div className="text-xs text-base-content/60 space-y-1 bg-base-200/50 p-3 rounded-lg">
                 <div>
-                  Status:{" "}
+                  Load:{" "}
                   <span
                     className={
                       cc?.enable
@@ -499,13 +507,19 @@ export function DeviceCcRoute() {
                         : "text-base-content font-bold"
                     }
                   >
-                    {cc?.enable ? "enabled" : "disabled"}
+                    {cc?.enable ? "on" : "off"}
                   </span>
                 </div>
                 <div>
-                  Target:{" "}
+                  Setpoint:{" "}
                   <span className="font-mono">
                     {(cc?.target_i_ma ?? 0) / 1_000} A
+                  </span>
+                </div>
+                <div>
+                  Effective:{" "}
+                  <span className="font-mono">
+                    {(cc?.effective_i_ma ?? 0) / 1_000} A
                   </span>
                 </div>
                 <div>
