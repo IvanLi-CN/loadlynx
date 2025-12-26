@@ -290,6 +290,8 @@ static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+/// Digital-side CC load switch (default OFF on boot).
+pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -470,6 +472,9 @@ async fn mock_setpoint_task() {
             last_t = t_ms;
             let steps = target_ma / ENCODER_STEP_MA;
             ENCODER_VALUE.store(steps, Ordering::SeqCst);
+            if steps == 0 {
+                LOAD_SWITCH_ENABLED.store(false, Ordering::SeqCst);
+            }
             info!(
                 "mock setpoint script: step={} t={} ms target={} mA (steps={})",
                 idx, t_ms, target_ma, steps
@@ -540,6 +545,11 @@ async fn encoder_task(
                             new_steps * ENCODER_STEP_MA
                         );
                     }
+
+                    // Rule A: if setpoint hits 0, force load switch OFF.
+                    if new_steps == 0 && old_steps != 0 {
+                        LOAD_SWITCH_ENABLED.store(false, Ordering::SeqCst);
+                    }
                 } else if (new_steps == 0 && logical_step < 0)
                     || (new_steps == ENCODER_MAX_STEPS && logical_step > 0)
                 {
@@ -559,8 +569,19 @@ async fn encoder_task(
                 last_button = pressed;
                 debounce = 0;
                 if pressed {
-                    ENCODER_VALUE.store(0, Ordering::SeqCst);
-                    info!("encoder button pressed: value reset to 0");
+                    let steps = ENCODER_VALUE.load(Ordering::SeqCst);
+                    let setpoint_ma = clamp_target_ma(steps.saturating_mul(ENCODER_STEP_MA));
+                    if setpoint_ma == 0 {
+                        info!("encoder button pressed: setpoint is 0 mA (no-op)");
+                    } else {
+                        let prev = LOAD_SWITCH_ENABLED.fetch_xor(true, Ordering::SeqCst);
+                        info!(
+                            "encoder button pressed: load switch {} -> {} (setpoint={} mA)",
+                            if prev { "ON" } else { "OFF" },
+                            if !prev { "ON" } else { "OFF" },
+                            setpoint_ma
+                        );
+                    }
                 }
             }
         } else {
@@ -2303,8 +2324,15 @@ async fn setpoint_tx_task(
         }
 
         let now = now_ms32();
-        let desired_target =
-            clamp_target_ma(ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA);
+        let setpoint_ma = clamp_target_ma(ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA);
+        if setpoint_ma == 0 {
+            LOAD_SWITCH_ENABLED.store(false, Ordering::SeqCst);
+        }
+        let desired_target = if LOAD_SWITCH_ENABLED.load(Ordering::SeqCst) {
+            setpoint_ma
+        } else {
+            0
+        };
         let observed_target = LAST_TARGET_VALUE_FROM_STATUS.load(Ordering::Relaxed);
 
         if observed_target == desired_target {

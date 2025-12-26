@@ -191,8 +191,11 @@ export interface CcProtectionConfig {
 }
 
 export interface CcControlView {
-  enable: boolean;
-  target_i_ma: number;
+  // NOTE: For capabilities.api_version >= 2.0.0, enable/target_i_ma model
+  // the "load switch + setpoint" semantics (see docs/interfaces/network-http-api.md).
+  enable: boolean; // load switch: when false, output is effectively 0 mA
+  target_i_ma: number; // setpoint (mA), editable even when enable=false
+  effective_i_ma: number; // effective output target (mA): enable ? target_i_ma : 0
   limit_profile: CcLimitProfile;
   protection: CcProtectionConfig;
   // Derived / live values; simplified from the full docs.

@@ -245,16 +245,21 @@
 
 - 统一控制模型（内部）：
   - 在数字板固件中引入一个集中管理的控制状态，例如：
-    - `enable`（布尔）；
-    - `target_i_ma`（恒流模式目标电流）；
+    - `enable`（布尔，负载开关 / load switch，默认 `false`）；
+    - `target_i_ma`（设置值 / setpoint，mA，UI 展示值；`enable=false` 时也允许为非 0）；
+    - `effective_i_ma`（生效值 / effective，mA，实际下发 SetPoint.target_i_ma，`enable ? target : 0`）；
     - `limit_profile`（当前软限值）；
     - 控制来源标记（local/remote，用于未来行为差异化）。
-  - 现有旋钮 UI 与遥测逻辑改为与该模型交互，SetPoint/SetEnable/LimitProfile 的下行发送统一从此状态生成。
+  - 该语义为破坏性变更，需通过 `identity.capabilities.api_version="2.0.0"` 标识，便于客户端按版本适配。
+  - 强制安全规则（A）：当 `target_i_ma == 0` 时必须强制 `enable=false`，避免从 0 调到非零时意外上负载。
+  - 现有旋钮 UI 与遥测逻辑改为与该模型交互；SetPoint 的下行发送从该状态生成（`effective_i_ma`）。
+    - 本次“负载开关”不使用 `SetEnable` 实现（硬件驱动/供电开关语义独立）。
 - 建议 API 端点：
   - `GET /api/v1/cc`
     - 返回当前控制视图：
       - `enable`；
       - `target_i_ma`；
+      - `effective_i_ma`；
       - 当前 `limit_profile`（max_i_ma, max_p_mw, ovp_mv, temp_trip_mc, thermal_derate_pct）；
       - 与当前 `FastStatus` 的关键测量值摘要（`i_total_ma`、`v_main_mv`、`p_main_mw`）。
   - `PUT /api/v1/cc`
@@ -274,7 +279,8 @@
     - 行为：
       - 对输入字段进行范围检查（基于当前硬件能力与安全余量）；
       - 更新内部控制状态；
-      - 按需发送 SetEnable/SetPoint/LimitProfile 帧；
+      - 应用 A 规则：`target_i_ma==0` 强制 `enable=false`；
+      - 按需发送 SetPoint/LimitProfile 帧（SetPoint 使用 `effective_i_ma`）；
       - 返回更新后的完整 CC 状态。
 - 错误处理：
   - `400 Bad Request`：参数缺失或超出安全范围。
