@@ -2,18 +2,30 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
 import {
+  __debugSetUvLatched,
+  applyPreset,
+  ENABLE_MOCK_DEVTOOLS,
   getCc,
+  getControl,
   getIdentity,
+  getPresets,
   getStatus,
   isHttpApiError,
+  isMockBaseUrl,
   subscribeStatusStream,
   updateCc,
+  updateControl,
+  updatePreset,
 } from "../api/client.ts";
 import type {
   CcControlView,
   CcUpdateRequest,
+  ControlView,
   FastStatusView,
   Identity,
+  LoadMode,
+  Preset,
+  PresetId,
 } from "../api/types.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import {
@@ -90,11 +102,45 @@ export function DeviceCcRoute() {
     retryDelay: RETRY_DELAY_MS,
   });
 
+  const controlQuery = useQuery<ControlView, HttpApiError>({
+    queryKey: ["device", deviceId, "control"],
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getControl(baseUrl);
+    },
+    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+    retryDelay: RETRY_DELAY_MS,
+  });
+
+  const presetsQuery = useQuery<Preset[], HttpApiError>({
+    queryKey: ["device", deviceId, "presets"],
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getPresets(baseUrl);
+    },
+    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+    retryDelay: RETRY_DELAY_MS,
+  });
+
   const queryClient = useQueryClient();
 
   const [draftEnable, setDraftEnable] = useState(false);
   const [draftTargetIMa, setDraftTargetIMa] = useState(0);
   const [draftMaxPMw, setDraftMaxPMw] = useState(0);
+
+  const [selectedPresetId, setSelectedPresetId] = useState<PresetId>(1);
+  const selectedPresetInitializedRef = useRef(false);
+
+  const [draftPresetMode, setDraftPresetMode] = useState<LoadMode>("cc");
+  const [draftPresetTargetIMa, setDraftPresetTargetIMa] = useState(0);
+  const [draftPresetTargetVMv, setDraftPresetTargetVMv] = useState(0);
+  const [draftPresetMinVMv, setDraftPresetMinVMv] = useState(0);
+  const [draftPresetMaxIMaTotal, setDraftPresetMaxIMaTotal] = useState(0);
+  const [draftPresetMaxPMw, setDraftPresetMaxPMw] = useState(0);
 
   useEffect(() => {
     const cc = ccQuery.data;
@@ -106,6 +152,32 @@ export function DeviceCcRoute() {
     setDraftEnable(cc.target_i_ma === 0 ? false : cc.enable);
     setDraftMaxPMw(cc.limit_profile.max_p_mw);
   }, [ccQuery.data]);
+
+  useEffect(() => {
+    const control = controlQuery.data;
+    if (!control || selectedPresetInitializedRef.current) {
+      return;
+    }
+    selectedPresetInitializedRef.current = true;
+    setSelectedPresetId(control.active_preset_id);
+  }, [controlQuery.data]);
+
+  useEffect(() => {
+    const presets = presetsQuery.data;
+    if (!presets) {
+      return;
+    }
+    const preset = presets.find((p) => p.preset_id === selectedPresetId);
+    if (!preset) {
+      return;
+    }
+    setDraftPresetMode(preset.mode);
+    setDraftPresetTargetIMa(preset.target_i_ma);
+    setDraftPresetTargetVMv(preset.target_v_mv);
+    setDraftPresetMinVMv(preset.min_v_mv);
+    setDraftPresetMaxIMaTotal(preset.max_i_ma_total);
+    setDraftPresetMaxPMw(preset.max_p_mw);
+  }, [presetsQuery.data, selectedPresetId]);
 
   const updateCcMutation = useMutation({
     mutationFn: async (payload: CcUpdateRequest) => {
@@ -125,6 +197,92 @@ export function DeviceCcRoute() {
     },
   });
 
+  const updatePresetMutation = useMutation({
+    mutationFn: async (payload: Preset) => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return updatePreset(baseUrl, payload);
+    },
+    onSuccess: (nextPreset) => {
+      queryClient.setQueryData<Preset[]>(
+        ["device", deviceId, "presets"],
+        (prev) => {
+          const prevList = prev ?? [];
+          const next = prevList.slice();
+          const idx = next.findIndex(
+            (preset) => preset.preset_id === nextPreset.preset_id,
+          );
+          if (idx >= 0) {
+            next[idx] = nextPreset;
+          } else {
+            next.push(nextPreset);
+            next.sort((a, b) => a.preset_id - b.preset_id);
+          }
+          return next;
+        },
+      );
+      queryClient.invalidateQueries({
+        queryKey: ["device", deviceId, "control"],
+      });
+      queryClient.invalidateQueries({
+        queryKey: ["device", deviceId, "status"],
+      });
+    },
+  });
+
+  const applyPresetMutation = useMutation({
+    mutationFn: async (presetId: PresetId) => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return applyPreset(baseUrl, presetId);
+    },
+    onSuccess: (nextControl) => {
+      queryClient.setQueryData<ControlView>(
+        ["device", deviceId, "control"],
+        nextControl,
+      );
+      setSelectedPresetId(nextControl.active_preset_id);
+      queryClient.invalidateQueries({
+        queryKey: ["device", deviceId, "status"],
+      });
+    },
+  });
+
+  const updateControlMutation = useMutation({
+    mutationFn: async (payload: { output_enabled: boolean }) => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return updateControl(baseUrl, payload);
+    },
+    onSuccess: (nextControl) => {
+      queryClient.setQueryData<ControlView>(
+        ["device", deviceId, "control"],
+        nextControl,
+      );
+      queryClient.invalidateQueries({
+        queryKey: ["device", deviceId, "status"],
+      });
+    },
+  });
+
+  const debugUvMutation = useMutation({
+    mutationFn: async (uv_latched: boolean) => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return __debugSetUvLatched(baseUrl, uv_latched);
+    },
+    onSuccess: (nextControl) => {
+      queryClient.setQueryData<ControlView>(
+        ["device", deviceId, "control"],
+        nextControl,
+      );
+    },
+  });
+
   const statusQuery = useQuery<FastStatusView, HttpApiError>({
     queryKey: ["device", deviceId, "status"],
     queryFn: () => {
@@ -138,7 +296,12 @@ export function DeviceCcRoute() {
     enabled:
       Boolean(baseUrl) &&
       identityQuery.isSuccess &&
-      !updateCcMutation.isPending &&
+      !(
+        updateCcMutation.isPending ||
+        updatePresetMutation.isPending ||
+        applyPresetMutation.isPending ||
+        updateControlMutation.isPending
+      ) &&
       streamStatus === null,
     refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
     refetchIntervalInBackground: false,
@@ -179,6 +342,8 @@ export function DeviceCcRoute() {
       identityQuery.error,
       statusQuery.error,
       ccQuery.error,
+      controlQuery.error,
+      presetsQuery.error,
     ];
     for (const err of errors) {
       if (isHttpApiError(err)) {
@@ -219,6 +384,10 @@ export function DeviceCcRoute() {
   const identity = identityQuery.data;
   const status = streamStatus ?? statusQuery.data;
   const cc = ccQuery.data;
+  const control = controlQuery.data;
+  const presets = presetsQuery.data ?? null;
+
+  const activeLoadModeBadge = control?.preset.mode === "cv" ? "CV" : "CC";
 
   const statusLocalMa = status?.raw.i_local_ma ?? null;
   const statusRemoteMa = status?.raw.i_remote_ma ?? null;
@@ -275,6 +444,24 @@ export function DeviceCcRoute() {
     updateCcMutation.mutate(payload);
   };
 
+  const handleSavePreset = () => {
+    const payload: Preset = {
+      preset_id: selectedPresetId,
+      mode: draftPresetMode,
+      target_i_ma: draftPresetTargetIMa,
+      target_v_mv: draftPresetTargetVMv,
+      min_v_mv: draftPresetMinVMv,
+      max_i_ma_total: draftPresetMaxIMaTotal,
+      max_p_mw: draftPresetMaxPMw,
+    };
+
+    updatePresetMutation.mutate(payload);
+  };
+
+  const handleApplyPreset = () => {
+    applyPresetMutation.mutate(selectedPresetId);
+  };
+
   return (
     <PageContainer className="flex flex-col gap-6 font-mono tabular-nums">
       {/* Top context: device + mode strip + link status */}
@@ -309,7 +496,7 @@ export function DeviceCcRoute() {
             </span>
             <div className="flex gap-1">
               {["CC", "CV", "CP", "CR"].map((mode) => {
-                const isActive = mode === "CC";
+                const isActive = mode === activeLoadModeBadge;
                 return (
                   <span
                     key={mode}
@@ -390,6 +577,324 @@ export function DeviceCcRoute() {
           </div>
         </section>
       ) : null}
+
+      <section
+        aria-label="Presets and control"
+        className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start"
+      >
+        <div className="card bg-base-100 shadow-sm border border-base-200 lg:col-span-2">
+          <div className="card-body p-6 space-y-4">
+            <div className="flex flex-wrap items-start justify-between gap-4">
+              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 h-auto min-h-0">
+                Presets
+              </h3>
+              <div className="text-xs text-base-content/60 space-y-1 text-right">
+                <div data-testid="control-active-preset">
+                  Active preset:{" "}
+                  <span className="font-mono">
+                    {control?.active_preset_id ?? "—"}
+                  </span>
+                </div>
+                <div data-testid="control-active-mode">
+                  Active mode:{" "}
+                  <span className="font-mono">
+                    {control?.preset.mode ?? "—"}
+                  </span>
+                </div>
+                <div data-testid="control-output-enabled">
+                  Output enabled:{" "}
+                  <span className="font-mono">
+                    {control?.output_enabled ? "true" : "false"}
+                  </span>
+                </div>
+                <div data-testid="control-uv-latched">
+                  UV latched:{" "}
+                  <span className="font-mono">
+                    {control?.uv_latched ? "true" : "false"}
+                  </span>
+                </div>
+                <div className="text-[10px]">
+                  Hint: Toggle output off → on to clear UV latch.
+                </div>
+              </div>
+            </div>
+
+            <div className="flex flex-wrap gap-2 items-center">
+              <label className="label cursor-pointer justify-start gap-3 p-0">
+                <input
+                  type="checkbox"
+                  className="toggle toggle-primary"
+                  checked={control?.output_enabled ?? false}
+                  disabled={
+                    !control ||
+                    updateControlMutation.isPending ||
+                    applyPresetMutation.isPending
+                  }
+                  onChange={(event) => {
+                    updateControlMutation.mutate({
+                      output_enabled: event.target.checked,
+                    });
+                  }}
+                />
+                <div className="flex flex-col">
+                  <span className="label-text font-semibold">
+                    Output enabled
+                  </span>
+                  <span className="label-text-alt text-base-content/60">
+                    Preset apply forces this off.
+                  </span>
+                </div>
+              </label>
+
+              {ENABLE_MOCK_DEVTOOLS && baseUrl && isMockBaseUrl(baseUrl) ? (
+                <button
+                  type="button"
+                  className="btn btn-xs"
+                  disabled={!control || debugUvMutation.isPending}
+                  onClick={() => {
+                    debugUvMutation.mutate(!(control?.uv_latched ?? false));
+                  }}
+                >
+                  Toggle UV latch (mock)
+                </button>
+              ) : null}
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="table table-zebra table-sm">
+                <thead>
+                  <tr>
+                    <th>Preset</th>
+                    <th>Mode</th>
+                    <th>Target</th>
+                    <th>Limits</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {presetsQuery.isLoading ? (
+                    <tr>
+                      <td colSpan={4} className="text-xs text-base-content/60">
+                        Loading presets…
+                      </td>
+                    </tr>
+                  ) : (presets ?? []).length === 0 ? (
+                    <tr>
+                      <td colSpan={4} className="text-xs text-base-content/60">
+                        No presets yet.
+                      </td>
+                    </tr>
+                  ) : (
+                    (presets ?? []).map((preset) => (
+                      <tr
+                        key={preset.preset_id}
+                        data-testid="preset-row"
+                        className={
+                          preset.preset_id === selectedPresetId
+                            ? "bg-base-200/60"
+                            : undefined
+                        }
+                      >
+                        <td className="whitespace-nowrap">
+                          <button
+                            type="button"
+                            className={[
+                              "btn btn-xs",
+                              preset.preset_id === selectedPresetId
+                                ? "btn-primary"
+                                : "btn-ghost",
+                            ].join(" ")}
+                            onClick={() =>
+                              setSelectedPresetId(preset.preset_id)
+                            }
+                          >
+                            #{preset.preset_id}
+                          </button>
+                          {preset.preset_id === control?.active_preset_id ? (
+                            <span className="ml-2 badge badge-xs badge-outline">
+                              active
+                            </span>
+                          ) : null}
+                        </td>
+                        <td className="font-mono text-xs">{preset.mode}</td>
+                        <td className="font-mono text-xs">
+                          {preset.mode === "cc"
+                            ? `${preset.target_i_ma} mA`
+                            : `${preset.target_v_mv} mV`}
+                        </td>
+                        <td className="font-mono text-xs">
+                          min_v={preset.min_v_mv} · max_i=
+                          {preset.max_i_ma_total} · max_p={preset.max_p_mw}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+
+        <div className="card bg-base-100 shadow-sm border border-base-200">
+          <div className="card-body p-6 space-y-4">
+            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 h-auto min-h-0">
+              Preset editor
+            </h3>
+
+            <div className="form-control">
+              <label className="label" htmlFor="preset-mode">
+                <span className="label-text">Mode</span>
+              </label>
+              <select
+                id="preset-mode"
+                className="select select-bordered select-sm"
+                value={draftPresetMode}
+                onChange={(event) =>
+                  setDraftPresetMode(event.target.value as LoadMode)
+                }
+              >
+                <option value="cc">cc</option>
+                <option value="cv">cv</option>
+              </select>
+            </div>
+
+            {draftPresetMode === "cc" ? (
+              <div className="form-control">
+                <label className="label" htmlFor="preset-target-i">
+                  <span className="label-text">Target current (mA)</span>
+                </label>
+                <input
+                  id="preset-target-i"
+                  type="number"
+                  className="input input-bordered input-sm"
+                  value={draftPresetTargetIMa}
+                  onChange={(event) =>
+                    setDraftPresetTargetIMa(
+                      Number.parseInt(event.target.value || "0", 10),
+                    )
+                  }
+                />
+              </div>
+            ) : (
+              <div className="form-control">
+                <label className="label" htmlFor="preset-target-v">
+                  <span className="label-text">Target voltage (mV)</span>
+                </label>
+                <input
+                  id="preset-target-v"
+                  type="number"
+                  className="input input-bordered input-sm"
+                  value={draftPresetTargetVMv}
+                  onChange={(event) =>
+                    setDraftPresetTargetVMv(
+                      Number.parseInt(event.target.value || "0", 10),
+                    )
+                  }
+                />
+              </div>
+            )}
+
+            <div className="form-control">
+              <label className="label" htmlFor="preset-min-v">
+                <span className="label-text">Min voltage (mV)</span>
+              </label>
+              <input
+                id="preset-min-v"
+                type="number"
+                className="input input-bordered input-sm"
+                value={draftPresetMinVMv}
+                onChange={(event) =>
+                  setDraftPresetMinVMv(
+                    Number.parseInt(event.target.value || "0", 10),
+                  )
+                }
+              />
+            </div>
+
+            <div className="form-control">
+              <label className="label" htmlFor="preset-max-i">
+                <span className="label-text">Max current total (mA)</span>
+              </label>
+              <input
+                id="preset-max-i"
+                type="number"
+                className="input input-bordered input-sm"
+                value={draftPresetMaxIMaTotal}
+                onChange={(event) =>
+                  setDraftPresetMaxIMaTotal(
+                    Number.parseInt(event.target.value || "0", 10),
+                  )
+                }
+              />
+            </div>
+
+            <div className="form-control">
+              <label className="label" htmlFor="preset-max-p">
+                <span className="label-text">Max power (mW)</span>
+              </label>
+              <input
+                id="preset-max-p"
+                type="number"
+                className="input input-bordered input-sm"
+                value={draftPresetMaxPMw}
+                onChange={(event) =>
+                  setDraftPresetMaxPMw(
+                    Number.parseInt(event.target.value || "0", 10),
+                  )
+                }
+              />
+            </div>
+
+            <div className="flex flex-col gap-2 pt-2">
+              <button
+                type="button"
+                className="btn btn-sm"
+                disabled={!baseUrl || updatePresetMutation.isPending}
+                onClick={handleSavePreset}
+              >
+                {updatePresetMutation.isPending ? (
+                  <span className="loading loading-spinner loading-xs" />
+                ) : null}
+                Save preset
+              </button>
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                disabled={!baseUrl || applyPresetMutation.isPending}
+                onClick={handleApplyPreset}
+              >
+                {applyPresetMutation.isPending ? (
+                  <span className="loading loading-spinner loading-xs" />
+                ) : null}
+                Apply preset (forces output off)
+              </button>
+            </div>
+
+            {updatePresetMutation.isError && updatePresetMutation.error ? (
+              <div className="alert alert-error text-xs p-2">
+                <span>
+                  {isHttpApiError(updatePresetMutation.error)
+                    ? `${updatePresetMutation.error.code ?? "HTTP_ERROR"} — ${updatePresetMutation.error.message}`
+                    : updatePresetMutation.error instanceof Error
+                      ? updatePresetMutation.error.message
+                      : "Unknown error"}
+                </span>
+              </div>
+            ) : null}
+
+            {applyPresetMutation.isError && applyPresetMutation.error ? (
+              <div className="alert alert-error text-xs p-2">
+                <span>
+                  {isHttpApiError(applyPresetMutation.error)
+                    ? `${applyPresetMutation.error.code ?? "HTTP_ERROR"} — ${applyPresetMutation.error.message}`
+                    : applyPresetMutation.error instanceof Error
+                      ? applyPresetMutation.error.message
+                      : "Unknown error"}
+                </span>
+              </div>
+            ) : null}
+          </div>
+        </div>
+      </section>
 
       <section aria-label="Main display" className="flex justify-center">
         <MainDisplayCanvas
