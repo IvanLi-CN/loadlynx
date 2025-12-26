@@ -99,7 +99,7 @@ interface DeviceCapabilities {
   cc_supported: boolean;
   cv_supported: boolean;
   cp_supported: boolean;
-  api_version: string; // HTTP API 版本，如 "1.0.0"
+  api_version: string; // HTTP API 语义版本，如 "2.0.0"
 }
 ```
 
@@ -137,8 +137,11 @@ interface CcProtectionConfig {
 }
 
 interface CcControlView {
-  enable: boolean;          // 当前输出启用状态（映射 SetEnable）
-  target_i_ma: number;      // 当前 CC 模式目标电流（mA）
+  // 注意：从 capabilities.api_version="2.0.0" 起，enable/target_i_ma 的语义为
+  // “负载开关 + 设置值”模型，不再表示模拟板的 SetEnable 状态。
+  enable: boolean;          // 负载开关（load switch）：true=应用设置值，false=生效值为 0
+  target_i_ma: number;      // 设置值（setpoint，mA），UI 展示值；enable=false 时也允许为非 0
+  effective_i_ma: number;   // 生效值（effective，mA），实际下发 SetPoint.target_i_ma
   limit_profile: CcLimitProfile;
   protection: CcProtectionConfig;
 
@@ -158,7 +161,7 @@ interface FastStatusJson {
   uptime_ms: number;
   mode: number;             // 当前工作模式（数值，具体枚举在协议 crate 中定义）
   state_flags: number;      // 状态位掩码（uint32）
-  enable: boolean;
+  enable: boolean;          // 来自模拟板 FastStatus；与 /api/v1/cc 中的 enable（负载开关）不是同一概念
   target_value: number;     // 目标总电流（mA）
   i_local_ma: number;
   i_remote_ma: number;
@@ -220,7 +223,7 @@ interface FastStatusView {
     "cc_supported": true,
     "cv_supported": false,
     "cp_supported": false,
-    "api_version": "1.0.0"
+    "api_version": "2.0.0"
   }
 }
 ```
@@ -337,8 +340,9 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 ```jsonc
 {
-  "enable": true,
+  "enable": false,
   "target_i_ma": 1500,
+  "effective_i_ma": 0,
   "limit_profile": {
     "max_i_ma": 5000,
     "max_p_mw": 60000,
@@ -363,7 +367,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 ### 3.4 `PUT /api/v1/cc`
 
-更新 CC 控制参数（启停、目标电流及软限值配置）。
+更新 CC 控制参数（负载开关、设置值及软限值配置）。
 
 - 请求：
 
@@ -384,6 +388,8 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 字段策略：
 
 - `enable` 与 `target_i_ma` 为必填；
+- `enable` 表示“负载开关”，`target_i_ma` 表示“设置值”；二者语义从 `api_version="2.0.0"` 起生效；
+- **强制规则（A）**：当 `target_i_ma == 0` 时，服务端必须将 `enable` 纠正为 `false`（即使请求传入 `true`）；
 - 软限值与保护模式字段为可选，若省略则保持当前固件中已有配置；
 - 固件需对范围进行安全检查，例如：
   - `0 <= target_i_ma <= max_i_ma`；
@@ -392,7 +398,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   - `0 < ovp_mv <= 安全上限电压`。
 
 - 响应（200）：
-  - 返回更新后的完整 `CcControlView`（同 `GET /api/v1/cc`）。
+  - 返回更新后的完整 `CcControlView`（同 `GET /api/v1/cc`，包含 `effective_i_ma`）。
 
 - 典型错误：
   - `400 INVALID_REQUEST`：JSON 无法解析或类型错误；
@@ -456,10 +462,21 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 - API 版本号：
   - URL 路径中固定使用 `/api/v1`；
-  - 细粒度版本信息由 `identity.capabilities.api_version` 提供（如 `"1.0.0"`）。
+  - 细粒度版本信息由 `identity.capabilities.api_version` 提供（如 `"2.0.0"`）。
 - 向后兼容策略：
   - 新增字段应保证前端在忽略该字段时仍能正常工作；
   - 新增端点不得改变现有端点语义；
   - 删除或重大变更现有端点/字段时，需通过升级 `api_version` 并在前端做兼容处理。
 
-前端应以“宽松读取、严格发送”为原则：读取时容忍多余字段，发送时遵循本文档定义的字段与枚举，避免给固件引入不必要的不确定性。***
+### 5.1 `api_version` 变更记录（与 `/api/v1/cc` 相关）
+
+- `1.x`（历史语义）
+  - `enable=false` 等价于“将目标设为 0”（会覆盖用户设置值）；
+  - `target_i_ma` 表示当前目标（更接近“生效值”）。
+- `2.0.0`（本文档语义）
+  - `enable` 表示“负载开关”（load switch），关闭时不清空设置值；
+  - `target_i_ma` 表示“设置值”（setpoint）；
+  - 新增 `effective_i_ma` 表示“生效值”（effective）；
+  - `target_i_ma==0` 时强制 `enable=false`（A 规则）。
+
+前端应以“宽松读取、严格发送”为原则：读取时容忍多余字段，发送时遵循本文档定义的字段与枚举，避免给固件引入不必要的不确定性。
