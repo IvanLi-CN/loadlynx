@@ -25,16 +25,17 @@ use static_cell::StaticCell;
 
 use loadlynx_protocol::{
     CalKind, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP,
-    FastStatus, LimitProfile, PROTOCOL_VERSION, SoftResetReason,
+    FastStatus, LimitProfile, LoadMode, PROTOCOL_VERSION, STATE_FLAG_UV_LATCHED, SoftResetReason,
 };
 
 use crate::mdns::MdnsConfig;
 use crate::{
-    ANALOG_FW_VERSION_RAW, CalUartCommand, CalibrationMutex, ENCODER_STEP_MA, ENCODER_VALUE,
-    EepromMutex, FAST_STATUS_OK_COUNT, FW_VERSION, HELLO_SEEN, LAST_GOOD_FRAME_MS,
+    ANALOG_FW_VERSION_RAW, CalUartCommand, CalibrationMutex, ControlMutex, ENCODER_STEP_MA,
+    ENCODER_VALUE, EepromMutex, FAST_STATUS_OK_COUNT, FW_VERSION, HELLO_SEEN, LAST_GOOD_FRAME_MS,
     LIMIT_PROFILE_DEFAULT, LINK_UP, LOAD_SWITCH_ENABLED, STATE_FLAG_REMOTE_ACTIVE, TARGET_I_MAX_MA,
     TARGET_I_MIN_MA, TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME, WIFI_NETMASK, WIFI_PSK,
-    WIFI_SSID, WIFI_STATIC_IP, enqueue_cal_uart, mdns, now_ms32, timestamp_ms, ui::AnalogState,
+    WIFI_SSID, WIFI_STATIC_IP, bump_control_rev, control, enqueue_cal_uart, mdns, now_ms32,
+    timestamp_ms, ui::AnalogState,
 };
 
 use loadlynx_calibration_format::{self as calfmt, CalPoint, CurveKind, ProfileSource};
@@ -226,6 +227,7 @@ pub fn spawn_wifi_and_http(
     telemetry: &'static TelemetryMutex,
     calibration: &'static CalibrationMutex,
     eeprom: &'static EepromMutex,
+    control: &'static ControlMutex,
 ) {
     // Initialize the shared radio controller once. If the radio init fails, log
     // and gracefully skip Wi‑Fi/HTTP so the rest of the system can run.
@@ -282,6 +284,7 @@ pub fn spawn_wifi_and_http(
                 telemetry,
                 calibration,
                 eeprom,
+                control,
                 idx,
             ))
             .expect("http_worker spawn");
@@ -450,6 +453,7 @@ async fn http_worker(
     telemetry: &'static TelemetryMutex,
     calibration: &'static CalibrationMutex,
     eeprom: &'static EepromMutex,
+    control: &'static ControlMutex,
     worker_id: usize,
 ) {
     let mut rx_buf = [0u8; 1024];
@@ -466,8 +470,15 @@ async fn http_worker(
 
         match socket.accept(HTTP_PORT).await {
             Ok(()) => {
-                if let Err(err) =
-                    handle_http_connection(&mut socket, state, telemetry, calibration, eeprom).await
+                if let Err(err) = handle_http_connection(
+                    &mut socket,
+                    state,
+                    telemetry,
+                    calibration,
+                    eeprom,
+                    control,
+                )
+                .await
                 {
                     warn!(
                         "HTTP worker {} connection handling error: {:?}",
@@ -494,6 +505,7 @@ async fn handle_http_connection(
     telemetry: &'static TelemetryMutex,
     calibration: &'static CalibrationMutex,
     eeprom: &'static EepromMutex,
+    control: &'static ControlMutex,
 ) -> Result<(), embassy_net::tcp::Error> {
     // The firmware HTTP parser is intentionally simple. Keep a bounded request
     // body buffer, but avoid requiring "headers + body" to fit at the same time
@@ -876,6 +888,54 @@ async fn handle_http_connection(
                 Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
+        ("GET", "/api/v1/presets") => match render_presets_json(&mut body, control).await {
+            Ok(()) => {
+                write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+            }
+            Err(err) => {
+                write_http_response(socket, version, err, &body, cors_origin).await?;
+            }
+        },
+        ("PUT", "/api/v1/presets") => {
+            match handle_presets_update(body_str, &mut body, control, eeprom).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
+                }
+            }
+        }
+        ("POST", "/api/v1/presets/apply") => {
+            match handle_presets_apply(body_str, &mut body, control, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
+                }
+            }
+        }
+        ("GET", "/api/v1/control") => {
+            match render_control_view_json(&mut body, control, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
+                }
+            }
+        }
+        ("PUT", "/api/v1/control") => {
+            match handle_control_update(body_str, &mut body, control, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
+                }
+            }
+        }
         ("GET", "/api/v1/cc") => match render_cc_view_json(&mut body, telemetry).await {
             Ok(()) => {
                 write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
@@ -1164,8 +1224,10 @@ async fn render_identity_json(
     // capabilities
     buf.push_str("\"capabilities\":{");
     buf.push_str("\"cc_supported\":true,");
-    buf.push_str("\"cv_supported\":false,");
+    buf.push_str("\"cv_supported\":true,");
     buf.push_str("\"cp_supported\":false,");
+    buf.push_str("\"presets_supported\":true,");
+    buf.push_str("\"preset_count\":5,");
     buf.push_str("\"api_version\":\"2.0.0\"}");
 
     buf.push('}');
@@ -1411,6 +1473,330 @@ fn write_fast_status_json(buf: &mut String, status: &FastStatus) {
         let _ = core::write!(buf, ",\"raw_dac_code\":{}", v);
     }
     buf.push('}');
+}
+
+// ---- Presets / Control (v1 frozen) -----------------------------------------
+
+fn mode_to_json_str(mode: LoadMode) -> &'static str {
+    match mode {
+        LoadMode::Cc => "cc",
+        LoadMode::Cv => "cv",
+        LoadMode::Reserved(_) => "cc",
+    }
+}
+
+fn write_preset_json(buf: &mut String, preset: &control::Preset) {
+    buf.push('{');
+    let _ = core::write!(buf, "\"preset_id\":{}", preset.preset_id);
+    buf.push_str(",\"mode\":\"");
+    write_json_string_escaped(buf, mode_to_json_str(preset.mode));
+    buf.push_str("\"");
+    let _ = core::write!(buf, ",\"target_i_ma\":{}", preset.target_i_ma);
+    let _ = core::write!(buf, ",\"target_v_mv\":{}", preset.target_v_mv);
+    let _ = core::write!(buf, ",\"min_v_mv\":{}", preset.min_v_mv);
+    let _ = core::write!(buf, ",\"max_i_ma_total\":{}", preset.max_i_ma_total);
+    let _ = core::write!(buf, ",\"max_p_mw\":{}", preset.max_p_mw);
+    buf.push('}');
+}
+
+async fn render_presets_json(
+    buf: &mut String,
+    control: &'static ControlMutex,
+) -> Result<(), &'static str> {
+    let presets = {
+        let guard = control.lock().await;
+        guard.presets
+    };
+
+    buf.clear();
+    buf.push('{');
+    buf.push_str("\"presets\":[");
+    for (idx, p) in presets.iter().enumerate() {
+        if idx != 0 {
+            buf.push(',');
+        }
+        write_preset_json(buf, p);
+    }
+    buf.push_str("]}");
+    Ok(())
+}
+
+async fn render_control_view_json(
+    buf: &mut String,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let (active_preset_id, output_enabled, preset) = {
+        let guard = control.lock().await;
+        (
+            guard.active_preset_id,
+            guard.output_enabled,
+            guard.active_preset(),
+        )
+    };
+
+    let uv_latched = {
+        let guard = telemetry.lock().await;
+        guard
+            .last_status
+            .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
+            .unwrap_or(false)
+    };
+
+    buf.clear();
+    buf.push('{');
+    let _ = core::write!(buf, "\"active_preset_id\":{}", active_preset_id);
+    buf.push_str(",\"output_enabled\":");
+    buf.push_str(if output_enabled { "true" } else { "false" });
+    buf.push_str(",\"uv_latched\":");
+    buf.push_str(if uv_latched { "true" } else { "false" });
+    buf.push_str(",\"preset\":");
+    write_preset_json(buf, &preset);
+    buf.push('}');
+    Ok(())
+}
+
+fn parse_json_bool(body: &str, key: &str) -> Result<bool, &'static str> {
+    let idx = body.find(key).ok_or("missing field")?;
+    let colon = body[idx..].find(':').ok_or("missing ':'")?;
+    let value_str = body[idx + colon + 1..].trim_start();
+    if value_str.starts_with("true") {
+        Ok(true)
+    } else if value_str.starts_with("false") {
+        Ok(false)
+    } else {
+        Err("expected boolean")
+    }
+}
+
+fn parse_json_i64(body: &str, key: &str) -> Result<i64, &'static str> {
+    let idx = body.find(key).ok_or("missing field")?;
+    let colon = body[idx..].find(':').ok_or("missing ':'")?;
+    let mut value_str = body[idx + colon + 1..].trim_start();
+    let mut end = 0usize;
+    for ch in value_str.chars() {
+        if ch == '-' || ch.is_ascii_digit() {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    value_str = &value_str[..end];
+    value_str.parse::<i64>().map_err(|_| "expected integer")
+}
+
+fn parse_json_str<'a>(body: &'a str, key: &str) -> Result<&'a str, &'static str> {
+    let idx = body.find(key).ok_or("missing field")?;
+    let colon = body[idx..].find(':').ok_or("missing ':'")?;
+    let rest = body[idx + colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return Err("expected string");
+    }
+    let rest = &rest[1..];
+    let end = rest.find('"').ok_or("unterminated string")?;
+    Ok(&rest[..end])
+}
+
+fn parse_preset_json(body: &str) -> Result<control::Preset, &'static str> {
+    let preset_id = parse_json_i64(body, "\"preset_id\"")?;
+    if preset_id < 1 || preset_id > 5 {
+        return Err("preset_id out of range (1..=5)");
+    }
+    let mode_s = parse_json_str(body, "\"mode\"")?;
+    let mode = match mode_s {
+        "cc" => LoadMode::Cc,
+        "cv" => LoadMode::Cv,
+        _ => return Err("unsupported mode (expected \"cc\" or \"cv\")"),
+    };
+
+    let target_i_ma = parse_json_i64(body, "\"target_i_ma\"")?;
+    let target_v_mv = parse_json_i64(body, "\"target_v_mv\"")?;
+    let min_v_mv = parse_json_i64(body, "\"min_v_mv\"")?;
+    let max_i_ma_total = parse_json_i64(body, "\"max_i_ma_total\"")?;
+    let max_p_mw = parse_json_i64(body, "\"max_p_mw\"")?;
+
+    Ok(control::Preset {
+        preset_id: preset_id as u8,
+        mode,
+        target_i_ma: target_i_ma as i32,
+        target_v_mv: target_v_mv as i32,
+        min_v_mv: min_v_mv as i32,
+        max_i_ma_total: max_i_ma_total as i32,
+        max_p_mw: max_p_mw.max(0) as u32,
+    })
+}
+
+async fn handle_presets_update(
+    body_in: &str,
+    body_out: &mut String,
+    control: &'static ControlMutex,
+    eeprom: &'static EepromMutex,
+) -> Result<(), &'static str> {
+    let mut preset = match parse_preset_json(body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+    preset = preset.clamp();
+
+    let mut updated = preset;
+
+    {
+        let mut guard = control.lock().await;
+        let idx = (preset.preset_id - 1) as usize;
+        if idx >= control::PRESET_COUNT {
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "preset_id out of range",
+                false,
+                None,
+            );
+            return Err("422 Unprocessable Entity");
+        }
+
+        let old_presets = guard.presets;
+        let old_output = guard.output_enabled;
+
+        let prev_mode = guard.presets[idx].mode;
+        guard.presets[idx] = preset;
+
+        // ApplyPreset and any mode change MUST force output OFF (if this affects the active preset).
+        if guard.active_preset_id == preset.preset_id && prev_mode != preset.mode {
+            guard.output_enabled = false;
+        }
+
+        // Persist presets blob to EEPROM.
+        let blob = control::encode_presets_blob(&guard.presets);
+        let write_ok = {
+            let mut ep = eeprom.lock().await;
+            ep.write_presets_blob(&blob).await.is_ok()
+        };
+
+        if !write_ok {
+            // Roll back in-RAM state on persistence failure.
+            guard.presets = old_presets;
+            guard.output_enabled = old_output;
+            write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
+            return Err("503 Service Unavailable");
+        }
+
+        updated = guard.presets[idx];
+        bump_control_rev();
+    }
+
+    body_out.clear();
+    write_preset_json(body_out, &updated);
+    Ok(())
+}
+
+struct PresetsApplyRequest {
+    preset_id: u8,
+}
+
+fn parse_presets_apply_json(body: &str) -> Result<PresetsApplyRequest, &'static str> {
+    let preset_id = parse_json_i64(body, "\"preset_id\"")?;
+    if preset_id < 1 || preset_id > 5 {
+        return Err("preset_id out of range (1..=5)");
+    }
+    Ok(PresetsApplyRequest {
+        preset_id: preset_id as u8,
+    })
+}
+
+async fn handle_presets_apply(
+    body_in: &str,
+    body_out: &mut String,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let parsed = match parse_presets_apply_json(body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    {
+        let mut guard = control.lock().await;
+        guard.active_preset_id = parsed.preset_id;
+        // ApplyPreset MUST force output OFF.
+        guard.output_enabled = false;
+        bump_control_rev();
+    }
+
+    render_control_view_json(body_out, control, telemetry).await
+}
+
+struct ControlUpdateRequest {
+    output_enabled: bool,
+}
+
+fn parse_control_update_json(body: &str) -> Result<ControlUpdateRequest, &'static str> {
+    let output_enabled = parse_json_bool(body, "\"output_enabled\"")?;
+    Ok(ControlUpdateRequest { output_enabled })
+}
+
+async fn handle_control_update(
+    body_in: &str,
+    body_out: &mut String,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let parsed = match parse_control_update_json(body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    // Safety: enabling output requires a healthy link + ready analog.
+    if parsed.output_enabled {
+        if !LINK_UP.load(Ordering::Relaxed) {
+            write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
+            return Err("503 Service Unavailable");
+        }
+        let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+        match analog_state {
+            AnalogState::Faulted => {
+                write_error_body(
+                    body_out,
+                    "ANALOG_FAULTED",
+                    "analog board is faulted",
+                    false,
+                    None,
+                );
+                return Err("409 Conflict");
+            }
+            AnalogState::CalMissing => {
+                write_error_body(
+                    body_out,
+                    "ANALOG_NOT_READY",
+                    "analog board calibration missing or not ready",
+                    true,
+                    None,
+                );
+                return Err("409 Conflict");
+            }
+            AnalogState::Offline => {
+                write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
+                return Err("503 Service Unavailable");
+            }
+            AnalogState::Ready => {}
+        }
+    }
+
+    {
+        let mut guard = control.lock().await;
+        guard.output_enabled = parsed.output_enabled;
+        bump_control_rev();
+    }
+
+    render_control_view_json(body_out, control, telemetry).await
 }
 
 /// Render the JSON body for `GET /api/v1/cc`.

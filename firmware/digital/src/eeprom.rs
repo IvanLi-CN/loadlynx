@@ -8,6 +8,11 @@ use loadlynx_calibration_format::{
 
 use crate::i2c0::I2c0Bus;
 
+// Calibration blob is fixed at base=0x0000 len=EEPROM_PROFILE_LEN (v3=1024).
+// Presets are stored in the next non-overlapping region.
+pub const EEPROM_PRESETS_BASE_ADDR: u16 = EEPROM_PROFILE_BASE_ADDR + (EEPROM_PROFILE_LEN as u16);
+pub const EEPROM_PRESETS_LEN: usize = 256;
+
 #[derive(Debug, Clone, Copy, defmt::Format)]
 pub enum EepromError {
     I2c,
@@ -143,6 +148,26 @@ impl SharedM24c64 {
         // to firmware factory defaults on next boot.
         let buf = [0xFFu8; EEPROM_PROFILE_LEN];
         self.write_profile_blob(&buf).await
+    }
+
+    pub async fn write_presets_blob(
+        &mut self,
+        blob: &[u8; EEPROM_PRESETS_LEN],
+    ) -> Result<(), EepromError> {
+        self.write(EEPROM_PRESETS_BASE_ADDR, blob).await
+    }
+
+    pub async fn read_presets_blob(&mut self) -> Result<[u8; EEPROM_PRESETS_LEN], EepromError> {
+        let mut buf = [0u8; EEPROM_PRESETS_LEN];
+        self.read(EEPROM_PRESETS_BASE_ADDR, &mut buf).await?;
+        Ok(buf)
+    }
+
+    pub async fn clear_presets_blob(&mut self) -> Result<(), EepromError> {
+        // Invalidate by filling with 0xFF; CRC will fail and we will fall back
+        // to firmware defaults on next boot.
+        let buf = [0xFFu8; EEPROM_PRESETS_LEN];
+        self.write_presets_blob(&buf).await
     }
 
     async fn wait_ready(&mut self, probe_addr: u16) -> Result<(), EepromError> {

@@ -6,6 +6,7 @@ use embedded_graphics::pixelcolor::{
 };
 use heapless::String;
 use lcd_async::raw_framebuf::RawFrameBuf;
+use loadlynx_protocol::LoadMode;
 
 use crate::touch::TouchMarker;
 use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
@@ -734,6 +735,12 @@ pub struct UiSnapshot {
     pub fault_flags: u32,
     pub analog_state: AnalogState,
     pub wifi_status: WifiUiStatus,
+    // Control overlay (active preset + mode + output + UV latch), driven by the
+    // digital-side preset/control model.
+    pub active_preset_id: u8,
+    pub output_enabled: bool,
+    pub active_mode: LoadMode,
+    pub uv_latched: bool,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -768,6 +775,10 @@ impl UiSnapshot {
             fault_flags: 0,
             analog_state: AnalogState::Ready,
             wifi_status: WifiUiStatus::Disabled,
+            active_preset_id: 1,
+            output_enabled: false,
+            active_mode: LoadMode::Cc,
+            uv_latched: false,
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),
@@ -778,6 +789,23 @@ impl UiSnapshot {
             set_current_text: String::new(),
             status_lines: Default::default(),
         }
+    }
+
+    pub fn set_control_overlay(
+        &mut self,
+        active_preset_id: u8,
+        output_enabled: bool,
+        mode: LoadMode,
+        uv_latched: bool,
+    ) {
+        self.active_preset_id = active_preset_id;
+        self.output_enabled = output_enabled;
+        self.active_mode = match mode {
+            LoadMode::Cc => LoadMode::Cc,
+            LoadMode::Cv => LoadMode::Cv,
+            LoadMode::Reserved(_) => LoadMode::Cc,
+        };
+        self.uv_latched = uv_latched;
     }
 
     /// Recompute all preformatted strings from the current numeric snapshot.
@@ -822,29 +850,48 @@ impl UiSnapshot {
         append_temp_1dp(&mut mcu, self.mcu_temp);
         let _ = mcu.push('C');
 
-        let mut analog = String::<20>::new();
+        let mut ctl = String::<20>::new();
         if self.fault_flags != 0 || self.analog_state == AnalogState::Faulted {
-            let _ = analog.push_str("ANLG FAULT 0x");
-            append_u32_hex(&mut analog, self.fault_flags);
+            let _ = ctl.push_str("ANLG FAULT 0x");
+            append_u32_hex(&mut ctl, self.fault_flags);
         } else {
+            // Example: "P1 CC OUT0 UV0 RDY"
+            let _ = ctl.push('P');
+            append_u32(&mut ctl, self.active_preset_id as u32);
+            let _ = ctl.push(' ');
+            match self.active_mode {
+                LoadMode::Cc => {
+                    let _ = ctl.push_str("CC");
+                }
+                LoadMode::Cv => {
+                    let _ = ctl.push_str("CV");
+                }
+                LoadMode::Reserved(_) => {
+                    let _ = ctl.push_str("CC");
+                }
+            }
+            let _ = ctl.push_str(" OUT");
+            let _ = ctl.push(if self.output_enabled { '1' } else { '0' });
+            let _ = ctl.push_str(" UV");
+            let _ = ctl.push(if self.uv_latched { '1' } else { '0' });
+            let _ = ctl.push(' ');
             match self.analog_state {
                 AnalogState::Offline => {
-                    let _ = analog.push_str("ANLG OFFLINE");
+                    let _ = ctl.push_str("OFF");
                 }
                 AnalogState::CalMissing => {
-                    let _ = analog.push_str("ANLG CAL?");
+                    let _ = ctl.push_str("CAL");
                 }
                 AnalogState::Ready => {
-                    let _ = analog.push_str("ANLG READY");
+                    let _ = ctl.push_str("RDY");
                 }
                 AnalogState::Faulted => {
-                    // Already handled by the fault_flags branch above.
-                    let _ = analog.push_str("ANLG FAULT");
+                    let _ = ctl.push_str("FLT");
                 }
             }
         }
 
-        [run, core, exhaust, mcu, analog]
+        [run, core, exhaust, mcu, ctl]
     }
 
     pub fn status_lines(&self) -> [String<20>; 5] {
