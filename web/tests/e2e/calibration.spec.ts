@@ -11,7 +11,8 @@ test.describe("Calibration UI", () => {
 
     await page.goto(`/${deviceId}/calibration`);
 
-    await expect(page.locator("aside")).toHaveCount(0);
+    // Calibration now uses the default console layout (sidebar visible on desktop).
+    await expect(page.locator("aside")).toHaveCount(1);
 
     // Voltage tab is default.
     await expect(page.getByRole("heading", { level: 2 })).toHaveText(
@@ -147,7 +148,7 @@ test.describe("Calibration UI", () => {
     await expect(draftCurrentTableMA).not.toContainText("900.000");
     await expect(draftCurrentTableMA).toContainText("No draft points.");
 
-    // Navigating away from calibration should restore the default console layout.
+    // Navigating away from calibration should keep the default console layout.
     await page.goto(`/${deviceId}/cc`);
     const sidebar = page.locator("aside");
     await expect(sidebar).toHaveCount(1);
