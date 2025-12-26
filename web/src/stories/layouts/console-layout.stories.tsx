@@ -109,6 +109,7 @@ export const Medium: Story = {
       { timeout: 5000 },
     );
     if (!aside) throw new Error("Expected inline sidebar <aside> to exist");
+    const asideEl = aside;
 
     await waitFor(
       () => {
@@ -121,7 +122,7 @@ export const Medium: Story = {
       { timeout: 5000 },
     );
 
-    const canvas = within(aside);
+    const canvas = within(asideEl);
     const expandButton = canvas.getByRole("button", { name: "Expand sidebar" });
     await userEvent.click(expandButton);
 
@@ -138,8 +139,8 @@ export const Medium: Story = {
 
     await waitFor(
       () => {
-        within(aside).getByRole("button", { name: "Collapse sidebar" });
-        if (within(aside).queryByRole("button", { name: "Expand sidebar" })) {
+        within(asideEl).getByRole("button", { name: "Collapse sidebar" });
+        if (within(asideEl).queryByRole("button", { name: "Expand sidebar" })) {
           throw new Error(
             'Expected toggle aria-label to flip from "Expand sidebar" to "Collapse sidebar"',
           );
@@ -229,7 +230,7 @@ export const Small: Story = {
   },
 };
 
-export const ToolMode: Story = {
+export const CalibrationLarge: Story = {
   globals: {
     viewport: { value: "loadlynxLarge", isRotated: false },
   },
@@ -242,31 +243,28 @@ export const ToolMode: Story = {
 
     await waitFor(
       () => {
-        const asides = canvasElement.querySelectorAll("aside");
-        if (asides.length !== 0) {
-          throw new Error(
-            "Expected sidebar <aside> to be hidden in tool layout",
-          );
-        }
+        getInlineSidebar(canvasElement);
       },
       { timeout: 5000 },
     );
 
-    const hamburger = canvas.getByRole("button", {
-      name: "Open navigation drawer",
-    });
+    const hamburger = canvasElement.querySelector<HTMLElement>(
+      'button[aria-label="Open navigation drawer"]',
+    );
+    if (!hamburger) {
+      throw new Error(
+        'Expected hamburger button [aria-label="Open navigation drawer"] to exist',
+      );
+    }
     await waitFor(
       () => {
-        assertDisplayIsNotNone(
+        assertDisplayIsNone(
           hamburger,
-          "Expected hamburger to be visible at Large in tool layout",
+          "Expected hamburger to be hidden at Large in non-tool layout",
         );
       },
       { timeout: 5000 },
     );
-
-    await userEvent.click(hamburger);
-    await canvas.findByRole("dialog", { name: "Navigation drawer" });
   },
 };
 
