@@ -18,6 +18,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@iconify-icons/mdi-light": "^1.2.5",
+    "@iconify/react": "^6.0.2",
     "@tanstack/react-query": "^5.71.10",
     "@tanstack/react-router": "^1.114.3",
     "decimal.js": "^10.6.0",
