@@ -367,11 +367,15 @@ export function ConsoleLayout() {
               aria-label={
                 isMediumSidebarExpanded ? "Collapse sidebar" : "Expand sidebar"
               }
-              title={isMediumSidebarExpanded ? "Collapse sidebar" : "Expand sidebar"}
+              title={
+                isMediumSidebarExpanded ? "Collapse sidebar" : "Expand sidebar"
+              }
               onClick={() => setIsMediumSidebarExpanded((value) => !value)}
             >
               <AppIcon
-                icon={isMediumSidebarExpanded ? NAV_ICON_COLLAPSE : NAV_ICON_EXPAND}
+                icon={
+                  isMediumSidebarExpanded ? NAV_ICON_COLLAPSE : NAV_ICON_EXPAND
+                }
                 size={20}
               />
             </button>
