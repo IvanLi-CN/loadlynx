@@ -1641,9 +1641,7 @@ async fn handle_presets_update(
     };
     preset = preset.clamp();
 
-    let mut updated = preset;
-
-    {
+    let updated = {
         let mut guard = control.lock().await;
         let idx = (preset.preset_id - 1) as usize;
         if idx >= control::PRESET_COUNT {
@@ -1683,9 +1681,9 @@ async fn handle_presets_update(
             return Err("503 Service Unavailable");
         }
 
-        updated = guard.presets[idx];
         bump_control_rev();
-    }
+        guard.presets[idx]
+    };
 
     body_out.clear();
     write_preset_json(body_out, &updated);

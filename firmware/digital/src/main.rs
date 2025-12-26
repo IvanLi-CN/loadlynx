@@ -70,7 +70,7 @@ const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
 mod control;
-use control::{ControlState, Preset, PresetsBlobError};
+use control::{ControlState, PresetsBlobError};
 
 mod ui;
 use ui::{AnalogState, UiSnapshot};

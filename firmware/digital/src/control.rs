@@ -134,10 +134,6 @@ fn put_i32_le(out: &mut [u8], offset: usize, v: i32) {
     out[offset..offset + 4].copy_from_slice(&v.to_le_bytes());
 }
 
-fn get_u16_le(input: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([input[offset], input[offset + 1]])
-}
-
 fn get_u32_le(input: &[u8], offset: usize) -> u32 {
     u32::from_le_bytes([
         input[offset],
