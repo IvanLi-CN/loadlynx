@@ -13,6 +13,8 @@ export interface DeviceCapabilities {
   cc_supported: boolean;
   cv_supported: boolean;
   cp_supported: boolean;
+  presets_supported?: boolean;
+  preset_count?: number; // 固定为 5（见 docs/interfaces/network-http-api.md）
   api_version: string;
 }
 
@@ -215,4 +217,27 @@ export interface CcUpdateRequest {
   thermal_derate_pct?: number;
   voltage_mode?: CcProtectionMode;
   power_mode?: CcProtectionMode;
+}
+
+// Preset/Control (docs/interfaces/network-http-api.md §2.5)
+
+export type LoadMode = "cc" | "cv";
+
+export type PresetId = 1 | 2 | 3 | 4 | 5;
+
+export interface Preset {
+  preset_id: PresetId; // 1..=5
+  mode: LoadMode;
+  target_i_ma: number; // mA (used when mode="cc")
+  target_v_mv: number; // mV (used when mode="cv")
+  min_v_mv: number; // mV (undervoltage latch threshold)
+  max_i_ma_total: number; // mA
+  max_p_mw: number; // mW
+}
+
+export interface ControlView {
+  active_preset_id: PresetId; // 1..=5
+  output_enabled: boolean;
+  uv_latched: boolean;
+  preset: Preset; // snapshot of active preset
 }
