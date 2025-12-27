@@ -566,22 +566,6 @@ export function DeviceCcRoute() {
                 </div>
               </label>
 
-              <button
-                type="button"
-                className="btn btn-sm btn-primary"
-                disabled={
-                  !control ||
-                  control.output_enabled ||
-                  updateControlMutation.isPending ||
-                  applyPresetMutation.isPending
-                }
-                onClick={() => {
-                  updateControlMutation.mutate({ output_enabled: true });
-                }}
-              >
-                Start load
-              </button>
-
               {ENABLE_MOCK_DEVTOOLS && baseUrl && isMockBaseUrl(baseUrl) ? (
                 <button
                   type="button"
