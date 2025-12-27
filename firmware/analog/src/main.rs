@@ -26,7 +26,7 @@ use loadlynx_protocol::{
     CRC_LEN, CalKind, Error as ProtocolError, FAST_STATUS_MODE_CC, FAST_STATUS_MODE_CV,
     FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, FLAG_IS_ACK,
     FastStatus, FrameHeader, HEADER_LEN, Hello, LoadMode, MSG_CAL_MODE, MSG_SET_MODE,
-    MSG_SET_POINT, SLIP_END, STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD,
+    MSG_SET_POINT, STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD,
     STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE, STATE_FLAG_UV_LATCHED, SlipDecoder,
     SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame,
     decode_limit_profile_frame, decode_set_enable_frame, decode_set_mode_frame,
@@ -51,6 +51,10 @@ bind_interrupts!(struct Irqs {
 
 // 模拟板 FAST_STATUS 发送周期：20 Hz → 1000/20 ms = 50 ms
 const FAST_STATUS_PERIOD_MS: u64 = 1000 / 20;
+// 控制环（DAC 更新）运行周期：提高 CV 环路更新频率以减少低频抖动；
+// FastStatus 仍保持 20 Hz，不影响数字板协议/带宽。
+const CONTROL_PERIOD_MS: u64 = 5; // 200 Hz
+const CONTROL_TICKS_PER_STATUS: u32 = (FAST_STATUS_PERIOD_MS / CONTROL_PERIOD_MS) as u32;
 // 若超过该时间（ms）未收到任何来自数字板的有效控制帧，则认为链路当前异常。
 const LINK_DEAD_TIMEOUT_MS: u32 = 300;
 // 调试开关：如需只验证数字板→模拟板的 SetPoint 路径，可暂时关闭 FAST_STATUS TX。
@@ -134,6 +138,22 @@ const CV_G_ERR_DIV_MV: i32 = 500; // 500 mV error -> 1 uA/mV step (before clampi
 const CV_G_STEP_UP_MAX_UA_PER_MV: i32 = 5;
 const CV_G_STEP_DN_MAX_UA_PER_MV: i32 = 10;
 const CV_G_MAX_UA_PER_MV: i32 = 2_000;
+// CV voltage measurement smoothing for the control law (not used for faults).
+// y += (x - y) / N ; larger N => more smoothing / more phase lag.
+const CV_V_FILT_DIV: i32 = 8;
+
+// Fixed-point representation for conductance G (uA/mV) to avoid quantization-induced dithering:
+// store as Q8: G_fp = G * 256.
+const CV_G_FP_SHIFT: i32 = 8;
+const CV_G_FP_SCALE: i32 = 1 << CV_G_FP_SHIFT;
+const CV_G_MAX_FP: i32 = CV_G_MAX_UA_PER_MV * CV_G_FP_SCALE;
+// Per-control-tick step clamp derived from the legacy per-FAST_STATUS tick clamp.
+const CV_G_STEP_UP_MAX_FP: i32 = (CV_G_STEP_UP_MAX_UA_PER_MV * CV_G_FP_SCALE)
+    * (CONTROL_PERIOD_MS as i32)
+    / (FAST_STATUS_PERIOD_MS as i32);
+const CV_G_STEP_DN_MAX_FP: i32 = (CV_G_STEP_DN_MAX_UA_PER_MV * CV_G_FP_SCALE)
+    * (CONTROL_PERIOD_MS as i32)
+    / (FAST_STATUS_PERIOD_MS as i32);
 
 // 由数字板通过 SetPoint 消息更新的电流设定（mA，视为“两通道合计目标电流”）。
 //
@@ -316,10 +336,6 @@ static LAST_SETPOINT_IGNORED_LOG_MS: AtomicU32 = AtomicU32::new(0);
 
 // Latched protection faults reported via FastStatus and used to gate output.
 static FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
-// UART RX debug dump window (bytes). Set to 0 to avoid swallowing the initial
-// control frames (SoftReset / CalWrite / SetEnable) before the SLIP decoder
-// starts normal processing.
-const RAW_DUMP_BYTES: usize = 0;
 
 static UART_TX_SHARED: StaticCell<Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>> =
     StaticCell::new();
@@ -634,11 +650,21 @@ async fn main(_spawner: Spawner) -> ! {
     // Calibration-only UI/RAW smoothing (see CAL_SMOOTH_WINDOW_FRAMES).
     let mut cal_smoother: CalSmoother<CAL_SMOOTH_WINDOW_FRAMES> = CalSmoother::new();
 
-    // CV loop internal state (conductance, uA/mV).
-    let mut cv_g_uapermv: i32 = 0;
+    // CV loop internal state:
+    // - conductance G (uA/mV) stored as fixed-point Q8 (x256)
+    // - filtered V_main used by the CV control law (not used for protection)
+    let mut cv_g_uapermv_fp: i32 = 0;
+    let mut cv_v_main_filt_mv: i32 = 0;
+    let mut cv_v_filt_init: bool = false;
+
+    // FastStatus cadence divider: control loop runs faster than status TX.
+    let mut status_div: u32 = 0;
 
     loop {
-        info!("main loop top");
+        let is_status_tick = status_div == 0;
+        if is_status_tick {
+            info!("main loop top");
+        }
         if SOFT_RESET_PENDING.swap(false, Ordering::SeqCst) {
             apply_soft_reset_safing(&mut dac, &mut load_en_ctl, &mut load_en_ts).await;
 
@@ -729,31 +755,60 @@ async fn main(_spawner: Spawner) -> ! {
         // Calibration-only oversampling to reduce 1–10 kHz ripple influence on capture/display.
         // Keep instantaneous samples above for fault detection and edge conditions.
         let (v_rmt_sns_code_cal, v_nr_sns_code_cal, cur1_sns_code_cal, cur2_sns_code_cal) =
-            match cal_kind {
-                CalKind::Voltage => (
-                    adc_avg_from_first!(
-                        adc1,
-                        &mut v_rmt_sns,
-                        v_rmt_sns_code,
-                        CAL_OVERSAMPLE_SAMPLES
+            if is_status_tick {
+                match cal_kind {
+                    CalKind::Voltage => (
+                        adc_avg_from_first!(
+                            adc1,
+                            &mut v_rmt_sns,
+                            v_rmt_sns_code,
+                            CAL_OVERSAMPLE_SAMPLES
+                        ),
+                        adc_avg_from_first!(
+                            adc1,
+                            &mut v_nr_sns,
+                            v_nr_sns_code,
+                            CAL_OVERSAMPLE_SAMPLES
+                        ),
+                        cur1_sns_code,
+                        cur2_sns_code,
                     ),
-                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
-                    cur1_sns_code,
-                    cur2_sns_code,
-                ),
-                CalKind::CurrentCh1 => (
-                    v_rmt_sns_code,
-                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
-                    adc_avg_from_first!(adc2, &mut cur1_sns, cur1_sns_code, CAL_OVERSAMPLE_SAMPLES),
-                    cur2_sns_code,
-                ),
-                CalKind::CurrentCh2 => (
-                    v_rmt_sns_code,
-                    adc_avg_from_first!(adc1, &mut v_nr_sns, v_nr_sns_code, CAL_OVERSAMPLE_SAMPLES),
-                    cur1_sns_code,
-                    adc_avg_from_first!(adc2, &mut cur2_sns, cur2_sns_code, CAL_OVERSAMPLE_SAMPLES),
-                ),
-                CalKind::Off => (v_rmt_sns_code, v_nr_sns_code, cur1_sns_code, cur2_sns_code),
+                    CalKind::CurrentCh1 => (
+                        v_rmt_sns_code,
+                        adc_avg_from_first!(
+                            adc1,
+                            &mut v_nr_sns,
+                            v_nr_sns_code,
+                            CAL_OVERSAMPLE_SAMPLES
+                        ),
+                        adc_avg_from_first!(
+                            adc2,
+                            &mut cur1_sns,
+                            cur1_sns_code,
+                            CAL_OVERSAMPLE_SAMPLES
+                        ),
+                        cur2_sns_code,
+                    ),
+                    CalKind::CurrentCh2 => (
+                        v_rmt_sns_code,
+                        adc_avg_from_first!(
+                            adc1,
+                            &mut v_nr_sns,
+                            v_nr_sns_code,
+                            CAL_OVERSAMPLE_SAMPLES
+                        ),
+                        cur1_sns_code,
+                        adc_avg_from_first!(
+                            adc2,
+                            &mut cur2_sns,
+                            cur2_sns_code,
+                            CAL_OVERSAMPLE_SAMPLES
+                        ),
+                    ),
+                    CalKind::Off => (v_rmt_sns_code, v_nr_sns_code, cur1_sns_code, cur2_sns_code),
+                }
+            } else {
+                (v_rmt_sns_code, v_nr_sns_code, cur1_sns_code, cur2_sns_code)
             };
 
         let sns_5v_code = adc1.blocking_read(&mut sns_5v);
@@ -779,17 +834,19 @@ async fn main(_spawner: Spawner) -> ! {
         let ts1_mv = adc_to_mv(ts1_code);
         let ts2_mv = adc_to_mv(ts2_code);
 
-        info!(
-            "raw_adc: vrefint={} v_rmt_sns={} v_nr_sns={} cur1_sns={} cur2_sns={} sns_5v={} ts1={} ts2={}",
-            vrefint_raw,
-            v_rmt_sns_code,
-            v_nr_sns_code,
-            cur1_sns_code,
-            cur2_sns_code,
-            sns_5v_code,
-            ts1_code,
-            ts2_code
-        );
+        if is_status_tick {
+            info!(
+                "raw_adc: vrefint={} v_rmt_sns={} v_nr_sns={} cur1_sns={} cur2_sns={} sns_5v={} ts1={} ts2={}",
+                vrefint_raw,
+                v_rmt_sns_code,
+                v_nr_sns_code,
+                cur1_sns_code,
+                cur2_sns_code,
+                sns_5v_code,
+                ts1_code,
+                ts2_code
+            );
+        }
 
         // --- Raw (ADC pin voltage) in 100 µV units ---
         let raw_v_nr_100uv = mv_to_raw_100uv(v_nr_sns_mv);
@@ -848,25 +905,27 @@ async fn main(_spawner: Spawner) -> ! {
 
         let remote_ok = remote_in_range && not_saturated;
 
-        if remote_ok {
-            remote_good_streak = remote_good_streak.saturating_add(1);
-            remote_bad_streak = 0;
-            if !remote_active && remote_good_streak >= 3 {
-                remote_active = true;
-                info!(
-                    "remote sense became ACTIVE (v_remote_mv={}mV, code={})",
-                    v_remote_mv, v_rmt_sns_code
-                );
-            }
-        } else {
-            remote_bad_streak = remote_bad_streak.saturating_add(1);
-            remote_good_streak = 0;
-            if remote_active && remote_bad_streak >= 2 {
-                remote_active = false;
-                info!(
-                    "remote sense became INACTIVE (v_remote_mv={}mV, code={})",
-                    v_remote_mv, v_rmt_sns_code
-                );
+        if is_status_tick {
+            if remote_ok {
+                remote_good_streak = remote_good_streak.saturating_add(1);
+                remote_bad_streak = 0;
+                if !remote_active && remote_good_streak >= 3 {
+                    remote_active = true;
+                    info!(
+                        "remote sense became ACTIVE (v_remote_mv={}mV, code={})",
+                        v_remote_mv, v_rmt_sns_code
+                    );
+                }
+            } else {
+                remote_bad_streak = remote_bad_streak.saturating_add(1);
+                remote_good_streak = 0;
+                if remote_active && remote_bad_streak >= 2 {
+                    remote_active = false;
+                    info!(
+                        "remote sense became INACTIVE (v_remote_mv={}mV, code={})",
+                        v_remote_mv, v_rmt_sns_code
+                    );
+                }
             }
         }
 
@@ -1013,30 +1072,53 @@ async fn main(_spawner: Spawner) -> ! {
         let desired_i_total_ma: i32 = if active_mode_seen {
             let mut desired_i_total_ma: i32 = match ctrl_snapshot.mode {
                 LoadMode::Cv => {
-                    let err_mv = v_main_mv - ctrl_snapshot.target_v_mv;
+                    // CV outer loop: integrate conductance (G) based on smoothed voltage error.
+                    // This runs at CONTROL_PERIOD_MS, while the legacy tuning constants are
+                    // defined at FAST_STATUS_PERIOD_MS cadence; scale the update accordingly.
                     if !effective_output_enable {
-                        cv_g_uapermv = 0;
-                    } else if err_mv.abs() <= CV_ERR_DEADBAND_MV {
-                        // Within deadband: hold the last conductance to reduce dithering.
+                        cv_g_uapermv_fp = 0;
+                        cv_v_filt_init = false;
+                        cv_v_main_filt_mv = 0;
                     } else {
-                        // Convert voltage error (mV) to a conductance step (uA/mV), then clamp.
-                        let mut step_g = err_mv / CV_G_ERR_DIV_MV;
-                        if step_g == 0 {
-                            step_g = err_mv.signum(); // ensure progress outside deadband
+                        if !cv_v_filt_init {
+                            cv_v_main_filt_mv = v_main_mv;
+                            cv_v_filt_init = true;
+                        } else {
+                            cv_v_main_filt_mv += (v_main_mv - cv_v_main_filt_mv) / CV_V_FILT_DIV;
                         }
-                        step_g =
-                            step_g.clamp(-CV_G_STEP_DN_MAX_UA_PER_MV, CV_G_STEP_UP_MAX_UA_PER_MV);
-                        cv_g_uapermv = (cv_g_uapermv + step_g).clamp(0, CV_G_MAX_UA_PER_MV);
+
+                        let err_mv = cv_v_main_filt_mv - ctrl_snapshot.target_v_mv;
+                        if err_mv.abs() > CV_ERR_DEADBAND_MV {
+                            // Voltage error (mV) -> conductance step (uA/mV), fixed-point Q8.
+                            let denom = (CV_G_ERR_DIV_MV as i64) * (FAST_STATUS_PERIOD_MS as i64);
+                            let mut step_fp = (err_mv as i64)
+                                .saturating_mul(CV_G_FP_SCALE as i64)
+                                .saturating_mul(CONTROL_PERIOD_MS as i64)
+                                / denom;
+                            step_fp = step_fp
+                                .clamp(-(CV_G_STEP_DN_MAX_FP as i64), CV_G_STEP_UP_MAX_FP as i64);
+                            cv_g_uapermv_fp =
+                                (cv_g_uapermv_fp + step_fp as i32).clamp(0, CV_G_MAX_FP);
+                        }
                     }
-                    if v_main_mv <= 0 {
+
+                    let v_cv_mv = if cv_v_filt_init {
+                        cv_v_main_filt_mv
+                    } else {
+                        v_main_mv
+                    };
+                    if v_cv_mv <= 0 {
                         0
                     } else {
-                        let i_ma = (cv_g_uapermv as i64).saturating_mul(v_main_mv as i64) / 1_000;
+                        let i_ma = (cv_g_uapermv_fp as i64).saturating_mul(v_cv_mv as i64)
+                            / ((1_000 * CV_G_FP_SCALE) as i64);
                         i_ma.clamp(TARGET_I_MIN_MA as i64, TARGET_I_MAX_MA as i64) as i32
                     }
                 }
                 _ => {
-                    cv_g_uapermv = 0;
+                    cv_g_uapermv_fp = 0;
+                    cv_v_filt_init = false;
+                    cv_v_main_filt_mv = 0;
                     ctrl_snapshot.target_i_ma
                 }
             };
@@ -1064,13 +1146,20 @@ async fn main(_spawner: Spawner) -> ! {
 
             // Anti-windup: only apply when we're saturating on a limit.
             if ctrl_snapshot.mode == LoadMode::Cv && (current_limited || power_limited) {
-                if v_main_mv <= 0 || desired_i_total_ma <= 0 {
-                    cv_g_uapermv = 0;
+                let v_cv_mv = if cv_v_filt_init {
+                    cv_v_main_filt_mv
                 } else {
-                    // desired_i_total_ma is mA; convert back to uA/mV.
-                    let g_uapermv =
-                        (desired_i_total_ma as i64).saturating_mul(1_000) / (v_main_mv as i64);
-                    cv_g_uapermv = (g_uapermv as i32).clamp(0, CV_G_MAX_UA_PER_MV);
+                    v_main_mv
+                };
+                if v_cv_mv <= 0 || desired_i_total_ma <= 0 {
+                    cv_g_uapermv_fp = 0;
+                } else {
+                    // desired_i_total_ma is mA; convert back to uA/mV (Q8).
+                    let g_fp = (desired_i_total_ma as i64)
+                        .saturating_mul(1_000)
+                        .saturating_mul(CV_G_FP_SCALE as i64)
+                        / (v_cv_mv as i64);
+                    cv_g_uapermv_fp = (g_fp as i32).clamp(0, CV_G_MAX_FP);
                 }
             }
             desired_i_total_ma
@@ -1190,213 +1279,221 @@ async fn main(_spawner: Spawner) -> ! {
         dac.ch1().set(DacValue::Bit12Right(dac_code_ch1));
         dac.ch2().set(DacValue::Bit12Right(dac_code_ch2));
 
-        // DAC 头间裕度：VREF - max(V_DAC1, V_DAC2)（便于检查任一通道是否接近打满）。
-        let dac_v1_mv = (dac_code_ch1 as u32) * vref_mv / ADC_FULL_SCALE;
-        let dac_v2_mv = (dac_code_ch2 as u32) * vref_mv / ADC_FULL_SCALE;
-        let dac_v_max_mv = dac_v1_mv.max(dac_v2_mv);
-        let dac_headroom_mv = (vref_mv.saturating_sub(dac_v_max_mv)) as u16;
+        if is_status_tick {
+            // DAC 头间裕度：VREF - max(V_DAC1, V_DAC2)（便于检查任一通道是否接近打满）。
+            let dac_v1_mv = (dac_code_ch1 as u32) * vref_mv / ADC_FULL_SCALE;
+            let dac_v2_mv = (dac_code_ch2 as u32) * vref_mv / ADC_FULL_SCALE;
+            let dac_v_max_mv = dac_v1_mv.max(dac_v2_mv);
+            let dac_headroom_mv = (vref_mv.saturating_sub(dac_v_max_mv)) as u16;
 
-        // loop_error semantics:
-        // - CC: current error (mA) = I_target_total - I_measured_total
-        // - CV: voltage error (mV) = V_main - V_target
-        let loop_error = if status_mode == FAST_STATUS_MODE_CV {
-            v_main_mv - ctrl_snapshot.target_v_mv
-        } else {
-            target_i_total_ma - i_total_ma
-        };
+            // loop_error semantics:
+            // - CC: current error (mA) = I_target_total - I_measured_total
+            // - CV: voltage error (mV) = V_main - V_target
+            let loop_error = if status_mode == FAST_STATUS_MODE_CV {
+                v_main_mv - ctrl_snapshot.target_v_mv
+            } else {
+                target_i_total_ma - i_total_ma
+            };
 
-        // Calibration-only smoothing for UI + capture: smooth the RAW fields that the
-        // web UI captures, then derive a smoothed view of the displayed physical values.
-        //
-        // IMPORTANT: Protection/fault detection above uses the instantaneous values
-        // (`v_local_mv`, `i_ch1_ma`, ...) and MUST remain unaffected by smoothing.
-        let (raw_v_nr_100uv_sm, raw_v_rmt_100uv_sm, raw_cur1_100uv_sm, raw_cur2_100uv_sm) =
-            cal_smoother.update(
-                cal_kind,
-                raw_v_nr_100uv_cal,
-                raw_v_rmt_100uv_cal,
-                raw_cur1_100uv_cal,
-                raw_cur2_100uv_cal,
+            // Calibration-only smoothing for UI + capture: smooth the RAW fields that the
+            // web UI captures, then derive a smoothed view of the displayed physical values.
+            //
+            // IMPORTANT: Protection/fault detection above uses the instantaneous values
+            // (`v_local_mv`, `i_ch1_ma`, ...) and MUST remain unaffected by smoothing.
+            let (raw_v_nr_100uv_sm, raw_v_rmt_100uv_sm, raw_cur1_100uv_sm, raw_cur2_100uv_sm) =
+                cal_smoother.update(
+                    cal_kind,
+                    raw_v_nr_100uv_cal,
+                    raw_v_rmt_100uv_cal,
+                    raw_cur1_100uv_cal,
+                    raw_cur2_100uv_cal,
+                );
+
+            let (status_v_local_mv, status_v_remote_mv, status_i_ch1_ma, status_i_ch2_ma) =
+                if cal_kind == CalKind::Off {
+                    (v_local_mv, v_remote_mv, i_ch1_ma, i_ch2_ma)
+                } else {
+                    let v_nr_sns_mv_sm = raw_100uv_to_mv(raw_v_nr_100uv_sm);
+                    let v_rmt_sns_mv_sm = raw_100uv_to_mv(raw_v_rmt_100uv_sm);
+                    let cur1_sns_mv_sm = raw_100uv_to_mv(raw_cur1_100uv_sm);
+                    let cur2_sns_mv_sm = raw_100uv_to_mv(raw_cur2_100uv_sm);
+
+                    let v_local_mv_uncal_sm =
+                        (v_nr_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+                    let v_remote_mv_uncal_sm =
+                        (v_rmt_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
+
+                    let i_ch1_ma_uncal_sm = (2 * cur1_sns_mv_sm) as i32;
+                    let i_ch2_ma_uncal_sm = (2 * cur2_sns_mv_sm) as i32;
+
+                    let v_local_sm = if curves[CurveKind::VLocal.index()].is_empty() {
+                        v_local_mv_uncal_sm
+                    } else {
+                        piecewise_linear(
+                            curves[CurveKind::VLocal.index()].as_slice(),
+                            raw_v_nr_100uv_sm,
+                        )
+                        .unwrap_or(v_local_mv_uncal_sm)
+                    };
+                    let v_remote_sm = if curves[CurveKind::VRemote.index()].is_empty() {
+                        v_remote_mv_uncal_sm
+                    } else {
+                        piecewise_linear(
+                            curves[CurveKind::VRemote.index()].as_slice(),
+                            raw_v_rmt_100uv_sm,
+                        )
+                        .unwrap_or(v_remote_mv_uncal_sm)
+                    };
+
+                    let i_ch1_sm = if curves[CurveKind::CurrentCh1.index()].is_empty() {
+                        i_ch1_ma_uncal_sm
+                    } else {
+                        piecewise_linear(
+                            curves[CurveKind::CurrentCh1.index()].as_slice(),
+                            raw_cur1_100uv_sm,
+                        )
+                        .unwrap_or(i_ch1_ma_uncal_sm)
+                    };
+                    let i_ch2_sm = if curves[CurveKind::CurrentCh2.index()].is_empty() {
+                        i_ch2_ma_uncal_sm
+                    } else {
+                        piecewise_linear(
+                            curves[CurveKind::CurrentCh2.index()].as_slice(),
+                            raw_cur2_100uv_sm,
+                        )
+                        .unwrap_or(i_ch2_ma_uncal_sm)
+                    };
+
+                    (v_local_sm, v_remote_sm, i_ch1_sm, i_ch2_sm)
+                };
+
+            let status_i_total_ma = status_i_ch1_ma.saturating_add(status_i_ch2_ma);
+            let status_calc_p_mw = ((status_i_total_ma as i64 * status_v_local_mv as i64) / 1_000)
+                .clamp(0, u32::MAX as i64) as u32;
+            let status_v_main_mv = if remote_active {
+                status_v_local_mv.max(status_v_remote_mv)
+            } else {
+                status_v_local_mv
+            };
+            let status_loop_error = if status_mode == FAST_STATUS_MODE_CV {
+                status_v_main_mv - ctrl_snapshot.target_v_mv
+            } else {
+                target_i_total_ma - status_i_total_ma
+            };
+
+            info!(
+                "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_ch1={}mA i_ch2={}mA i_total={}mA target_total={}mA ch1_target={}mA ch2_target={}mA dac1={} dac2={} loop_err={}",
+                v_local_mv,
+                v_remote_mv,
+                v_5v_mv,
+                i_ch1_ma,
+                i_ch2_ma,
+                i_total_ma,
+                target_i_total_ma,
+                target_ch1_ma,
+                target_ch2_ma,
+                dac_code_ch1,
+                dac_code_ch2,
+                loop_error
             );
 
-        let (status_v_local_mv, status_v_remote_mv, status_i_ch1_ma, status_i_ch2_ma) = if cal_kind
-            == CalKind::Off
-        {
-            (v_local_mv, v_remote_mv, i_ch1_ma, i_ch2_ma)
-        } else {
-            let v_nr_sns_mv_sm = raw_100uv_to_mv(raw_v_nr_100uv_sm);
-            let v_rmt_sns_mv_sm = raw_100uv_to_mv(raw_v_rmt_100uv_sm);
-            let cur1_sns_mv_sm = raw_100uv_to_mv(raw_cur1_100uv_sm);
-            let cur2_sns_mv_sm = raw_100uv_to_mv(raw_cur2_100uv_sm);
+            // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
+            let mut state_flags = 0u32;
+            if remote_active {
+                state_flags |= STATE_FLAG_REMOTE_ACTIVE;
+            }
+            if !link_fault {
+                state_flags |= STATE_FLAG_LINK_GOOD;
+            }
+            if effective_output_enable {
+                state_flags |= STATE_FLAG_ENABLED;
+            }
+            if uv_latched {
+                state_flags |= STATE_FLAG_UV_LATCHED;
+            }
+            if power_limited {
+                state_flags |= STATE_FLAG_POWER_LIMITED;
+            }
+            if current_limited {
+                state_flags |= STATE_FLAG_CURRENT_LIMITED;
+            }
 
-            let v_local_mv_uncal_sm = (v_nr_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
-            let v_remote_mv_uncal_sm = (v_rmt_sns_mv_sm * SENSE_GAIN_NUM / SENSE_GAIN_DEN) as i32;
-
-            let i_ch1_ma_uncal_sm = (2 * cur1_sns_mv_sm) as i32;
-            let i_ch2_ma_uncal_sm = (2 * cur2_sns_mv_sm) as i32;
-
-            let v_local_sm = if curves[CurveKind::VLocal.index()].is_empty() {
-                v_local_mv_uncal_sm
-            } else {
-                piecewise_linear(
-                    curves[CurveKind::VLocal.index()].as_slice(),
-                    raw_v_nr_100uv_sm,
-                )
-                .unwrap_or(v_local_mv_uncal_sm)
+            // Optional Raw telemetry fields during calibration.
+            let (status_cal_kind, raw_v_nr_opt, raw_v_rmt_opt, raw_cur_opt, raw_dac_opt) =
+                match cal_kind {
+                    CalKind::Voltage => (
+                        Some(u8::from(cal_kind)),
+                        Some(raw_v_nr_100uv_sm),
+                        Some(raw_v_rmt_100uv_sm),
+                        None,
+                        None,
+                    ),
+                    CalKind::CurrentCh1 => (
+                        Some(u8::from(cal_kind)),
+                        None,
+                        None,
+                        Some(raw_cur1_100uv_sm),
+                        Some(dac_code_ch1),
+                    ),
+                    CalKind::CurrentCh2 => (
+                        Some(u8::from(cal_kind)),
+                        None,
+                        None,
+                        Some(raw_cur2_100uv_sm),
+                        Some(dac_code_ch2),
+                    ),
+                    CalKind::Off => (None, None, None, None, None),
+                };
+            let status = FastStatus {
+                uptime_ms,
+                mode: status_mode,
+                state_flags,
+                enable: effective_output_enable,
+                // target_value 表示两通道合计目标电流（mA）。
+                target_value: target_i_total_ma,
+                // i_local_ma / i_remote_ma 对应通道 1 / 通道 2 实测电流。
+                i_local_ma: status_i_ch1_ma,
+                i_remote_ma: status_i_ch2_ma,
+                v_local_mv: status_v_local_mv,
+                v_remote_mv: status_v_remote_mv,
+                calc_p_mw: status_calc_p_mw,
+                dac_headroom_mv,
+                loop_error: status_loop_error,
+                sink_core_temp_mc,
+                sink_exhaust_temp_mc,
+                mcu_temp_mc,
+                fault_flags,
+                cal_kind: status_cal_kind,
+                raw_v_nr_100uv: raw_v_nr_opt,
+                raw_v_rmt_100uv: raw_v_rmt_opt,
+                raw_cur_100uv: raw_cur_opt,
+                raw_dac_code: raw_dac_opt,
             };
-            let v_remote_sm = if curves[CurveKind::VRemote.index()].is_empty() {
-                v_remote_mv_uncal_sm
-            } else {
-                piecewise_linear(
-                    curves[CurveKind::VRemote.index()].as_slice(),
-                    raw_v_rmt_100uv_sm,
-                )
-                .unwrap_or(v_remote_mv_uncal_sm)
-            };
 
-            let i_ch1_sm = if curves[CurveKind::CurrentCh1.index()].is_empty() {
-                i_ch1_ma_uncal_sm
-            } else {
-                piecewise_linear(
-                    curves[CurveKind::CurrentCh1.index()].as_slice(),
-                    raw_cur1_100uv_sm,
-                )
-                .unwrap_or(i_ch1_ma_uncal_sm)
-            };
-            let i_ch2_sm = if curves[CurveKind::CurrentCh2.index()].is_empty() {
-                i_ch2_ma_uncal_sm
-            } else {
-                piecewise_linear(
-                    curves[CurveKind::CurrentCh2.index()].as_slice(),
-                    raw_cur2_100uv_sm,
-                )
-                .unwrap_or(i_ch2_ma_uncal_sm)
-            };
-
-            (v_local_sm, v_remote_sm, i_ch1_sm, i_ch2_sm)
-        };
-
-        let status_i_total_ma = status_i_ch1_ma.saturating_add(status_i_ch2_ma);
-        let status_calc_p_mw = ((status_i_total_ma as i64 * status_v_local_mv as i64) / 1_000)
-            .clamp(0, u32::MAX as i64) as u32;
-        let status_v_main_mv = if remote_active {
-            status_v_local_mv.max(status_v_remote_mv)
-        } else {
-            status_v_local_mv
-        };
-        let status_loop_error = if status_mode == FAST_STATUS_MODE_CV {
-            status_v_main_mv - ctrl_snapshot.target_v_mv
-        } else {
-            target_i_total_ma - status_i_total_ma
-        };
-
-        info!(
-            "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_ch1={}mA i_ch2={}mA i_total={}mA target_total={}mA ch1_target={}mA ch2_target={}mA dac1={} dac2={} loop_err={}",
-            v_local_mv,
-            v_remote_mv,
-            v_5v_mv,
-            i_ch1_ma,
-            i_ch2_ma,
-            i_total_ma,
-            target_i_total_ma,
-            target_ch1_ma,
-            target_ch2_ma,
-            dac_code_ch1,
-            dac_code_ch2,
-            loop_error
-        );
-
-        // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
-        let mut state_flags = 0u32;
-        if remote_active {
-            state_flags |= STATE_FLAG_REMOTE_ACTIVE;
-        }
-        if !link_fault {
-            state_flags |= STATE_FLAG_LINK_GOOD;
-        }
-        if effective_output_enable {
-            state_flags |= STATE_FLAG_ENABLED;
-        }
-        if uv_latched {
-            state_flags |= STATE_FLAG_UV_LATCHED;
-        }
-        if power_limited {
-            state_flags |= STATE_FLAG_POWER_LIMITED;
-        }
-        if current_limited {
-            state_flags |= STATE_FLAG_CURRENT_LIMITED;
-        }
-
-        // Optional Raw telemetry fields during calibration.
-        let (status_cal_kind, raw_v_nr_opt, raw_v_rmt_opt, raw_cur_opt, raw_dac_opt) =
-            match cal_kind {
-                CalKind::Voltage => (
-                    Some(u8::from(cal_kind)),
-                    Some(raw_v_nr_100uv_sm),
-                    Some(raw_v_rmt_100uv_sm),
-                    None,
-                    None,
-                ),
-                CalKind::CurrentCh1 => (
-                    Some(u8::from(cal_kind)),
-                    None,
-                    None,
-                    Some(raw_cur1_100uv_sm),
-                    Some(dac_code_ch1),
-                ),
-                CalKind::CurrentCh2 => (
-                    Some(u8::from(cal_kind)),
-                    None,
-                    None,
-                    Some(raw_cur2_100uv_sm),
-                    Some(dac_code_ch2),
-                ),
-                CalKind::Off => (None, None, None, None, None),
-            };
-        let status = FastStatus {
-            uptime_ms,
-            mode: status_mode,
-            state_flags,
-            enable: effective_output_enable,
-            // target_value 表示两通道合计目标电流（mA）。
-            target_value: target_i_total_ma,
-            // i_local_ma / i_remote_ma 对应通道 1 / 通道 2 实测电流。
-            i_local_ma: status_i_ch1_ma,
-            i_remote_ma: status_i_ch2_ma,
-            v_local_mv: status_v_local_mv,
-            v_remote_mv: status_v_remote_mv,
-            calc_p_mw: status_calc_p_mw,
-            dac_headroom_mv,
-            loop_error: status_loop_error,
-            sink_core_temp_mc,
-            sink_exhaust_temp_mc,
-            mcu_temp_mc,
-            fault_flags,
-            cal_kind: status_cal_kind,
-            raw_v_nr_100uv: raw_v_nr_opt,
-            raw_v_rmt_100uv: raw_v_rmt_opt,
-            raw_cur_100uv: raw_cur_opt,
-            raw_dac_code: raw_dac_opt,
-        };
-
-        if ENABLE_FAST_STATUS_TX {
-            let now_ms = timestamp_ms() as u32;
-            let quiet_until = QUIET_UNTIL_MS.load(Ordering::Relaxed);
-            if now_ms >= quiet_until {
-                let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
-                    .expect("encode fast_status frame");
-                let slip_len =
-                    slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
-                let mut tx = uart_tx_shared.lock().await;
-                if let Err(_err) = tx.write(&slip_frame[..slip_len]).await {
-                    warn!("uart tx error; dropping frame");
+            if ENABLE_FAST_STATUS_TX {
+                let now_ms = timestamp_ms() as u32;
+                let quiet_until = QUIET_UNTIL_MS.load(Ordering::Relaxed);
+                if now_ms >= quiet_until {
+                    let frame_len = encode_fast_status_frame(seq, &status, &mut raw_frame)
+                        .expect("encode fast_status frame");
+                    let slip_len =
+                        slip_encode(&raw_frame[..frame_len], &mut slip_frame).expect("slip encode");
+                    let mut tx = uart_tx_shared.lock().await;
+                    if let Err(_err) = tx.write(&slip_frame[..slip_len]).await {
+                        warn!("uart tx error; dropping frame");
+                    }
+                    seq = seq.wrapping_add(1);
                 }
-                seq = seq.wrapping_add(1);
             }
         }
 
-        uptime_ms = uptime_ms.wrapping_add(FAST_STATUS_PERIOD_MS as u32);
-        Timer::after_millis(FAST_STATUS_PERIOD_MS).await;
+        status_div = status_div.wrapping_add(1);
+        if status_div >= CONTROL_TICKS_PER_STATUS {
+            status_div = 0;
+        }
+
+        uptime_ms = uptime_ms.wrapping_add(CONTROL_PERIOD_MS as u32);
+        Timer::after_millis(CONTROL_PERIOD_MS).await;
     }
 }
 
@@ -1589,57 +1686,14 @@ async fn uart_setpoint_rx_task(
         Ordering::Relaxed,
     );
 
-    // Drain any stale bytes in UART FIFO to avoid misaligned first frame, and
-    // resynchronize to the first SLIP_END boundary before starting decode.
-    if let Ok(drained) = uart_rx.read(&mut buf).await
-        && drained > 0
-    {
-        info!("SetPoint RX: drained {} stale bytes before start", drained);
-    }
-
-    // Wait until we see two consecutive SLIP_END to align to frame boundary.
-    let mut end_seen = 0;
-    loop {
-        match uart_rx.read(&mut buf[..1]).await {
-            Ok(1) if buf[0] == SLIP_END => {
-                end_seen += 1;
-                if end_seen >= 2 {
-                    decoder.reset();
-                    info!("SetPoint RX: synced to double SLIP_END boundary");
-                    break;
-                }
-            }
-            Ok(_) => end_seen = 0,
-            Err(_) => break,
-        }
-    }
-
-    // Dump first RAW_DUMP_BYTES of raw UART stream for debugging, without decoding.
-    let mut raw_dump = [0u8; RAW_DUMP_BYTES];
-    let mut raw_len = 0usize;
-    let dump_start = timestamp_ms() as u32;
-    #[allow(clippy::absurd_extreme_comparisons)]
-    while raw_len < RAW_DUMP_BYTES {
-        match uart_rx.read(&mut buf).await {
-            Ok(n) if n > 0 => {
-                let take = core::cmp::min(n, RAW_DUMP_BYTES - raw_len);
-                raw_dump[raw_len..raw_len + take].copy_from_slice(&buf[..take]);
-                raw_len += take;
-            }
-            _ => {}
-        }
-        if (timestamp_ms() as u32).wrapping_sub(dump_start) > 300 {
-            break;
-        }
-    }
-    if raw_len > 0 {
-        info!(
-            "SetPoint RX raw_dump len={} data={=[u8]:#04x}",
-            raw_len,
-            &raw_dump[..raw_len]
-        );
-    }
-    decoder.reset();
+    // NOTE: Do not block on "syncing" to a specific SLIP boundary here.
+    //
+    // The digital side may burst calibration frames immediately on link-up; any
+    // pre-decode sync loop risks dropping the first (and often most important)
+    // CalWrite chunk, leaving CAL_READY false and output disabled.
+    //
+    // The SLIP decoder self-synchronizes on SLIP_END, and we already validate
+    // minimum frame length + CRC, so starting decode immediately is safe.
 
     loop {
         match uart_rx.read(&mut buf).await {
