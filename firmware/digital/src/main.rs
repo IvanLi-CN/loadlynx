@@ -73,7 +73,7 @@ mod control;
 use control::{ControlState, PresetsBlobError};
 
 mod ui;
-use ui::{AnalogState, UiSnapshot};
+use ui::{AdjustStep, AnalogState, ControlHit, UiSnapshot};
 
 mod eeprom;
 mod i2c0;
@@ -151,7 +151,6 @@ const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
 pub(crate) const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 pub(crate) const TARGET_I_MIN_MA: i32 = 0;
 pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
-const ENCODER_MAX_STEPS: i32 = TARGET_I_MAX_MA / ENCODER_STEP_MA;
 // 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
 pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     max_i_ma: TARGET_I_MAX_MA,
@@ -306,6 +305,7 @@ static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+pub(crate) static UI_ADJUST_STEP: AtomicU8 = AtomicU8::new(AdjustStep::Tenths as u8);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
@@ -335,6 +335,11 @@ pub(crate) static ANALOG_FW_VERSION_RAW: AtomicU32 = AtomicU32::new(0);
 #[inline]
 pub fn now_ms32() -> u32 {
     timestamp_ms() as u32
+}
+
+#[inline]
+fn ui_adjust_step() -> AdjustStep {
+    AdjustStep::from_u8(UI_ADJUST_STEP.load(Ordering::Relaxed))
 }
 
 pub fn timestamp_ms() -> u64 {
@@ -544,48 +549,7 @@ async fn encoder_task(
 
                 // Reverse logical direction to match panel orientation (CW increments).
                 let logical_step = -phys_step;
-                let mut prev_steps = ENCODER_VALUE.load(Ordering::SeqCst);
-                let (old_steps, new_steps) = loop {
-                    let candidate = (prev_steps + logical_step as i32).clamp(0, ENCODER_MAX_STEPS);
-                    match ENCODER_VALUE.compare_exchange(
-                        prev_steps,
-                        candidate,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(old) => break (old, candidate),
-                        Err(cur) => prev_steps = cur,
-                    }
-                };
-
-                if new_steps != old_steps {
-                    if logical_step > 0 {
-                        info!(
-                            "encoder cw: value={} ({} mA)",
-                            new_steps,
-                            new_steps * ENCODER_STEP_MA
-                        );
-                    } else {
-                        info!(
-                            "encoder ccw: value={} ({} mA)",
-                            new_steps,
-                            new_steps * ENCODER_STEP_MA
-                        );
-                    }
-
-                    // Rule A: if setpoint hits 0, force load switch OFF.
-                    if new_steps == 0 && old_steps != 0 {
-                        LOAD_SWITCH_ENABLED.store(false, Ordering::SeqCst);
-                    }
-                } else if (new_steps == 0 && logical_step < 0)
-                    || (new_steps == ENCODER_MAX_STEPS && logical_step > 0)
-                {
-                    info!(
-                        "encoder at limit: value={} ({} mA)",
-                        new_steps,
-                        new_steps * ENCODER_STEP_MA
-                    );
-                }
+                apply_encoder_step(logical_step as i32, control).await;
             }
         }
 
@@ -647,6 +611,67 @@ async fn encoder_task(
 
         for _ in 0..ENCODER_POLL_YIELD_LOOPS {
             yield_now().await;
+        }
+    }
+}
+
+async fn apply_encoder_step(delta: i32, control: &'static ControlMutex) {
+    if delta == 0 {
+        return;
+    }
+
+    let step = ui_adjust_step();
+    let mut guard = control.lock().await;
+    let preset_id = guard.active_preset_id;
+    let idx = (preset_id.saturating_sub(1) as usize).min(guard.presets.len().saturating_sub(1));
+    let mut preset = guard.presets[idx];
+
+    match preset.mode {
+        LoadMode::Cv => {
+            let step_mv = match step {
+                AdjustStep::Ones => 1000,
+                AdjustStep::Tenths => 100,
+                AdjustStep::Hundredths => 10,
+            };
+            let before = preset.target_v_mv;
+            let after =
+                (before + delta.saturating_mul(step_mv)).clamp(0, LIMIT_PROFILE_DEFAULT.ovp_mv);
+            if after != before {
+                preset.target_v_mv = after;
+                guard.presets[idx] = preset.clamp();
+                bump_control_rev();
+                info!(
+                    "encoder {}: target_v {} -> {} mV (step={:?}, preset_id={})",
+                    if delta > 0 { "cw" } else { "ccw" },
+                    before,
+                    after,
+                    step,
+                    preset_id
+                );
+            }
+        }
+        LoadMode::Cc | LoadMode::Reserved(_) => {
+            let step_ma = match step {
+                AdjustStep::Ones => 1000,
+                AdjustStep::Tenths => 100,
+                AdjustStep::Hundredths => 10,
+            };
+            let before = preset.target_i_ma;
+            let max_i = preset.max_i_ma_total.max(0);
+            let after = (before + delta.saturating_mul(step_ma)).clamp(0, max_i);
+            if after != before {
+                preset.target_i_ma = after;
+                guard.presets[idx] = preset.clamp();
+                bump_control_rev();
+                info!(
+                    "encoder {}: target_i {} -> {} mA (step={:?}, preset_id={})",
+                    if delta > 0 { "cw" } else { "ccw" },
+                    before,
+                    after,
+                    step,
+                    preset_id
+                );
+            }
         }
     }
 }
@@ -739,12 +764,6 @@ impl TelemetryModel {
     /// This is used by the display task to drive partial, character-aware
     /// updates on top of the existing framebuffer diff logic.
     fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask) {
-        // 将当前编码器位置转换为 CC 模式下的目标总电流（A），用于右侧 “SET I” 文本。
-        let steps = ENCODER_VALUE.load(Ordering::Relaxed);
-        let raw_ma = steps.saturating_mul(ENCODER_STEP_MA);
-        let clamped_ma = clamp_target_ma(raw_ma);
-        self.snapshot.set_current_a = clamped_ma as f32 / 1000.0;
-
         // Keep all display strings in sync with the latest numeric values so
         // the UI layer can render based purely on preformatted text. This is
         // intentionally called from the display task (UI context), not from the
@@ -778,7 +797,9 @@ impl TelemetryModel {
 
             if prev.ch1_current_text != current.ch1_current_text
                 || prev.ch2_current_text != current.ch2_current_text
-                || prev.set_current_text != current.set_current_text
+                || prev.setpoint_text != current.setpoint_text
+                || prev.active_mode != current.active_mode
+                || prev.adjust_step != current.adjust_step
             {
                 mask.current_pair = true;
             }
@@ -1163,6 +1184,7 @@ async fn display_task(
     let mut fps_window_start_ms = last_push_ms;
     let mut fps_window_frames: u32 = 0;
     let mut last_fps: u32 = 0;
+    let mut last_touch_action_seq: u32 = 0;
     loop {
         let now = timestamp_ms() as u32;
         let dt_ms = now.wrapping_sub(last_push_ms);
@@ -1179,12 +1201,65 @@ async fn display_task(
             // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
             fps_window_frames = fps_window_frames.wrapping_add(1);
 
-            let (active_preset_id, output_enabled, mode) = {
+            // UI control taps (MODE / STEP). Process on touch "up" events only.
+            let touch_seq = touch::touch_marker_seq();
+            if touch_seq != last_touch_action_seq {
+                last_touch_action_seq = touch_seq;
+                if let Some(marker) = touch::load_touch_marker() {
+                    // FT6336U event: 1 = lift up.
+                    if marker.event == 1 {
+                        if let Some(hit) = ui::hit_test_control_panel(marker.x, marker.y) {
+                            match hit {
+                                ControlHit::ToggleMode => {
+                                    let mut guard = control.lock().await;
+                                    let preset_id = guard.active_preset_id;
+                                    let idx = (preset_id.saturating_sub(1) as usize)
+                                        .min(guard.presets.len().saturating_sub(1));
+                                    let before = guard.presets[idx].mode;
+                                    let after = match before {
+                                        LoadMode::Cc => LoadMode::Cv,
+                                        LoadMode::Cv => LoadMode::Cc,
+                                        LoadMode::Reserved(_) => LoadMode::Cc,
+                                    };
+                                    guard.presets[idx].mode = after;
+                                    if guard.output_enabled {
+                                        guard.output_enabled = false;
+                                    }
+                                    bump_control_rev();
+                                    info!(
+                                        "touch: mode {:?} -> {:?} (output forced OFF, preset_id={})",
+                                        before, after, preset_id
+                                    );
+                                }
+                                ControlHit::AdjustStep(step) => {
+                                    UI_ADJUST_STEP.store(step as u8, Ordering::Relaxed);
+                                    info!("touch: adjust step -> {:?}", step);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let (active_preset_id, output_enabled, mode, setpoint_value, setpoint_unit, step) = {
                 let guard = control.lock().await;
+                let p = guard.active_preset();
+                let mode = match p.mode {
+                    LoadMode::Cc => LoadMode::Cc,
+                    LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Reserved(_) => LoadMode::Cc,
+                };
+                let (value, unit) = match mode {
+                    LoadMode::Cv => (p.target_v_mv as f32 / 1000.0, 'V'),
+                    _ => (p.target_i_ma as f32 / 1000.0, 'A'),
+                };
                 (
                     guard.active_preset_id,
                     guard.output_enabled,
-                    guard.active_preset().mode,
+                    mode,
+                    value,
+                    unit,
+                    ui_adjust_step(),
                 )
             };
 
@@ -1200,6 +1275,9 @@ async fn display_task(
                     mode,
                     uv_latched,
                 );
+                guard
+                    .snapshot
+                    .set_setpoint_display(setpoint_value, setpoint_unit, step);
                 guard.diff_for_render()
             };
 

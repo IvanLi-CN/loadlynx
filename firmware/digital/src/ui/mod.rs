@@ -55,6 +55,31 @@ pub enum WifiUiStatus {
     Error,
 }
 
+#[repr(u8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, defmt::Format)]
+pub enum AdjustStep {
+    Ones = 0,
+    Tenths = 1,
+    Hundredths = 2,
+}
+
+impl AdjustStep {
+    pub fn from_u8(raw: u8) -> Self {
+        match raw {
+            x if x == AdjustStep::Ones as u8 => AdjustStep::Ones,
+            x if x == AdjustStep::Tenths as u8 => AdjustStep::Tenths,
+            x if x == AdjustStep::Hundredths as u8 => AdjustStep::Hundredths,
+            _ => AdjustStep::Tenths,
+        }
+    }
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ControlHit {
+    ToggleMode,
+    AdjustStep(AdjustStep),
+}
+
 /// Bitmask describing which logical UI regions need to be updated for a frame.
 #[derive(Copy, Clone, Default)]
 pub struct UiChangeMask {
@@ -142,7 +167,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.ch1_current_text.as_str(),
         data.ch2_current_text.as_str(),
     );
-    draw_set_current(&mut canvas, data.set_current_text.as_str());
+    draw_control_panel(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
     render_wifi_status(&mut canvas, data.wifi_status);
@@ -222,7 +247,7 @@ pub fn render_partial(
         let ch1_text = curr.ch1_current_text.as_str();
         let ch2_text = curr.ch2_current_text.as_str();
         draw_current_pair(&mut canvas, curr, ch1_text, ch2_text);
-        draw_set_current(&mut canvas, curr.set_current_text.as_str());
+        draw_control_panel(&mut canvas, curr);
     }
 
     if mask.telemetry_lines {
@@ -358,14 +383,178 @@ fn small_text_width(text: &str, spacing: i32) -> i32 {
     (text.chars().count() as i32) * glyph
 }
 
-fn draw_set_current(canvas: &mut Canvas, text: &str) {
-    // CC 模式设定电流行："SET I" + 右对齐的设定值。
-    let baseline = 156;
-    draw_small_text(canvas, "SET I", 198, baseline, rgb(0x6d7fa4), 0);
+const CONTROL_PANEL_LEFT_X: i32 = 198;
+const CONTROL_PANEL_RIGHT_X: i32 = 314;
+const CONTROL_PANEL_MODE_Y: i32 = 144;
+const CONTROL_PANEL_SETPOINT_Y: i32 = 156;
+const CONTROL_PANEL_STEP_Y: i32 = 168;
 
+struct ControlLayout {
+    mode_button: Rect,
+    step_ones: Rect,
+    step_tenths: Rect,
+    step_hundredths: Rect,
+    step_label_width: i32,
+}
+
+fn control_layout() -> ControlLayout {
+    let font_h = SMALL_FONT.height() as i32;
+    let pad_y = 1;
+    let line_h = font_h + 2 * pad_y;
+
+    let mode_btn_w = 44;
+    let mode_top = CONTROL_PANEL_MODE_Y - pad_y;
+    let mode_button = Rect::new(
+        CONTROL_PANEL_RIGHT_X - mode_btn_w,
+        mode_top,
+        CONTROL_PANEL_RIGHT_X,
+        mode_top + line_h,
+    );
+
+    let step_label_width = small_text_width("STEP", 0);
+    let mut x = CONTROL_PANEL_LEFT_X + step_label_width + 4;
+    let top = CONTROL_PANEL_STEP_Y - pad_y;
+    let bottom = top + line_h;
+
+    let step_pad_x = 2;
+    let step_gap = 2;
+    let mut next_rect = |label: &str| {
+        let w = small_text_width(label, 0) + 2 * step_pad_x;
+        let rect = Rect::new(x, top, x + w, bottom);
+        x = rect.right + step_gap;
+        rect
+    };
+
+    let step_ones = next_rect("1");
+    let step_tenths = next_rect("0.1");
+    let step_hundredths = next_rect("0.01");
+
+    ControlLayout {
+        mode_button,
+        step_ones,
+        step_tenths,
+        step_hundredths,
+        step_label_width,
+    }
+}
+
+fn draw_step_button(canvas: &mut Canvas, rect: Rect, label: &str, selected: bool) {
+    let bg = if selected {
+        rgb(0x4cc9f0)
+    } else {
+        rgb(0x1c2638)
+    };
+    let fg = if selected {
+        rgb(0x080f19)
+    } else {
+        rgb(0xdfe7ff)
+    };
+    canvas.fill_rect(rect, bg);
+    draw_small_text(canvas, label, rect.left + 2, rect.top + 1, fg, 0);
+}
+
+fn draw_control_panel(canvas: &mut Canvas, data: &UiSnapshot) {
+    let layout = control_layout();
+
+    // MODE row: label + small tappable "CC/CV" button on the right.
+    draw_small_text(
+        canvas,
+        "MODE",
+        CONTROL_PANEL_LEFT_X,
+        CONTROL_PANEL_MODE_Y,
+        rgb(0x6d7fa4),
+        0,
+    );
+    let mode_text = match data.active_mode {
+        LoadMode::Cc => "CC",
+        LoadMode::Cv => "CV",
+        LoadMode::Reserved(_) => "CC",
+    };
+    canvas.fill_rect(layout.mode_button, rgb(0x1c2638));
+    draw_small_text(
+        canvas,
+        mode_text,
+        layout.mode_button.left + 2,
+        layout.mode_button.top + 1,
+        rgb(0xdfe7ff),
+        0,
+    );
+
+    // SET row: label depends on active mode, value right-aligned.
+    let set_label = match data.active_mode {
+        LoadMode::Cv => "SET V",
+        _ => "SET I",
+    };
+    draw_small_text(
+        canvas,
+        set_label,
+        CONTROL_PANEL_LEFT_X,
+        CONTROL_PANEL_SETPOINT_Y,
+        rgb(0x6d7fa4),
+        0,
+    );
+
+    let text = data.setpoint_text.as_str();
     let width = small_text_width(text, 0);
-    let value_x = 314 - width;
-    draw_small_text(canvas, text, value_x, baseline, rgb(0xdfe7ff), 0);
+    let value_x = CONTROL_PANEL_RIGHT_X - width;
+    draw_small_text(
+        canvas,
+        text,
+        value_x,
+        CONTROL_PANEL_SETPOINT_Y,
+        rgb(0xdfe7ff),
+        0,
+    );
+
+    // STEP row: "STEP" + three buttons (1 / 0.1 / 0.01).
+    draw_small_text(
+        canvas,
+        "STEP",
+        CONTROL_PANEL_LEFT_X,
+        CONTROL_PANEL_STEP_Y,
+        rgb(0x6d7fa4),
+        0,
+    );
+    let _ = layout.step_label_width; // keep layout in sync with draw/hit-test
+    draw_step_button(
+        canvas,
+        layout.step_ones,
+        "1",
+        data.adjust_step == AdjustStep::Ones,
+    );
+    draw_step_button(
+        canvas,
+        layout.step_tenths,
+        "0.1",
+        data.adjust_step == AdjustStep::Tenths,
+    );
+    draw_step_button(
+        canvas,
+        layout.step_hundredths,
+        "0.01",
+        data.adjust_step == AdjustStep::Hundredths,
+    );
+}
+
+fn rect_contains(rect: Rect, x: i32, y: i32) -> bool {
+    x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+pub fn hit_test_control_panel(x: i32, y: i32) -> Option<ControlHit> {
+    let layout = control_layout();
+    if rect_contains(layout.mode_button, x, y) {
+        return Some(ControlHit::ToggleMode);
+    }
+    if rect_contains(layout.step_ones, x, y) {
+        return Some(ControlHit::AdjustStep(AdjustStep::Ones));
+    }
+    if rect_contains(layout.step_tenths, x, y) {
+        return Some(ControlHit::AdjustStep(AdjustStep::Tenths));
+    }
+    if rect_contains(layout.step_hundredths, x, y) {
+        return Some(ControlHit::AdjustStep(AdjustStep::Hundredths));
+    }
+    None
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -725,7 +914,9 @@ pub struct UiSnapshot {
     pub local_voltage: f32,
     pub ch1_current: f32,
     pub ch2_current: f32,
-    pub set_current_a: f32,
+    pub setpoint_value: f32,
+    pub setpoint_unit: char,
+    pub adjust_step: AdjustStep,
     pub run_time: String<16>,
     pub sink_core_temp: f32,
     pub sink_exhaust_temp: f32,
@@ -749,7 +940,7 @@ pub struct UiSnapshot {
     pub local_voltage_text: String<6>,
     pub ch1_current_text: String<6>,
     pub ch2_current_text: String<6>,
-    pub set_current_text: String<6>,
+    pub setpoint_text: String<6>,
     pub status_lines: [String<20>; 5],
 }
 
@@ -765,7 +956,9 @@ impl UiSnapshot {
             local_voltage: 24.47,
             ch1_current: 4.20,
             ch2_current: 3.50,
-            set_current_a: 12.00,
+            setpoint_value: 12.00,
+            setpoint_unit: 'A',
+            adjust_step: AdjustStep::Tenths,
             run_time,
             sink_core_temp: 42.3,
             sink_exhaust_temp: 38.1,
@@ -786,7 +979,7 @@ impl UiSnapshot {
             local_voltage_text: String::new(),
             ch1_current_text: String::new(),
             ch2_current_text: String::new(),
-            set_current_text: String::new(),
+            setpoint_text: String::new(),
             status_lines: Default::default(),
         }
     }
@@ -808,6 +1001,12 @@ impl UiSnapshot {
         self.uv_latched = uv_latched;
     }
 
+    pub fn set_setpoint_display(&mut self, value: f32, unit: char, step: AdjustStep) {
+        self.setpoint_value = value;
+        self.setpoint_unit = unit;
+        self.adjust_step = step;
+    }
+
     /// Recompute all preformatted strings from the current numeric snapshot.
     pub fn update_strings(&mut self) {
         self.main_voltage_text = format_value(self.main_voltage, 2);
@@ -823,7 +1022,7 @@ impl UiSnapshot {
         self.local_voltage_text = format_pair_value(self.local_voltage, 'V');
         self.ch1_current_text = format_pair_value(self.ch1_current, 'A');
         self.ch2_current_text = format_pair_value(self.ch2_current, 'A');
-        self.set_current_text = format_pair_value(self.set_current_a, 'A');
+        self.setpoint_text = format_pair_value(self.setpoint_value, self.setpoint_unit);
 
         self.status_lines = self.compute_status_lines();
     }
