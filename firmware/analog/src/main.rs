@@ -121,10 +121,19 @@ const I_SHARE_THRESHOLD_MA: i32 = 2_000;
 
 // CV loop tuning (executed at FAST_STATUS_PERIOD_MS cadence).
 //
-// Goal: ramp current up when V_main > V_target, and quickly back off toward 0
-// when V_main <= V_target to avoid continued sinking below the setpoint.
-const CV_RAMP_STEP_MAX_MA: i32 = 1_500;
-const CV_DECAY_STEP_MA: i32 = 3_000;
+// Control model: integrate on conductance `G` so current demand scales with voltage:
+//   I = G * V
+// This behaves better on current-limited sources (avoids "snap to 0 current"
+// when V dips, which would otherwise let the source jump back up).
+//
+// Units:
+// - `G` stored as uA per mV (uA/mV)
+// - `I` computed as: (G * V[mV]) / 1000 -> mA
+const CV_ERR_DEADBAND_MV: i32 = 50;
+const CV_G_ERR_DIV_MV: i32 = 500; // 500 mV error -> 1 uA/mV step (before clamping)
+const CV_G_STEP_UP_MAX_UA_PER_MV: i32 = 5;
+const CV_G_STEP_DN_MAX_UA_PER_MV: i32 = 10;
+const CV_G_MAX_UA_PER_MV: i32 = 2_000;
 
 // 由数字板通过 SetPoint 消息更新的电流设定（mA，视为“两通道合计目标电流”）。
 //
@@ -625,8 +634,8 @@ async fn main(_spawner: Spawner) -> ! {
     // Calibration-only UI/RAW smoothing (see CAL_SMOOTH_WINDOW_FRAMES).
     let mut cal_smoother: CalSmoother<CAL_SMOOTH_WINDOW_FRAMES> = CalSmoother::new();
 
-    // CV loop internal state (total current target, mA).
-    let mut cv_i_total_ma: i32 = 0;
+    // CV loop internal state (conductance, uA/mV).
+    let mut cv_g_uapermv: i32 = 0;
 
     loop {
         info!("main loop top");
@@ -1002,23 +1011,30 @@ async fn main(_spawner: Spawner) -> ! {
         let desired_i_total_ma: i32 = if active_mode_seen {
             let mut desired_i_total_ma: i32 = match ctrl_snapshot.mode {
                 LoadMode::Cv => {
-                    // CV loop: ramp current up when above target voltage, otherwise back off.
-                    let err_mv = v_main_mv.saturating_sub(ctrl_snapshot.target_v_mv);
+                    let err_mv = v_main_mv - ctrl_snapshot.target_v_mv;
                     if !effective_output_enable {
-                        cv_i_total_ma = 0;
-                    } else if err_mv <= 0 {
-                        cv_i_total_ma = (cv_i_total_ma - CV_DECAY_STEP_MA).max(0);
+                        cv_g_uapermv = 0;
+                    } else if err_mv.abs() <= CV_ERR_DEADBAND_MV {
+                        // Within deadband: hold the last conductance to reduce dithering.
                     } else {
-                        // Step proportional to voltage error, capped to avoid aggressive jumps.
-                        let step_ma = (err_mv / 2).clamp(1, CV_RAMP_STEP_MAX_MA);
-                        cv_i_total_ma = cv_i_total_ma
-                            .saturating_add(step_ma)
-                            .clamp(0, TARGET_I_MAX_MA);
+                        // Convert voltage error (mV) to a conductance step (uA/mV), then clamp.
+                        let mut step_g = err_mv / CV_G_ERR_DIV_MV;
+                        if step_g == 0 {
+                            step_g = err_mv.signum(); // ensure progress outside deadband
+                        }
+                        step_g =
+                            step_g.clamp(-CV_G_STEP_DN_MAX_UA_PER_MV, CV_G_STEP_UP_MAX_UA_PER_MV);
+                        cv_g_uapermv = (cv_g_uapermv + step_g).clamp(0, CV_G_MAX_UA_PER_MV);
                     }
-                    cv_i_total_ma
+                    if v_main_mv <= 0 {
+                        0
+                    } else {
+                        let i_ma = (cv_g_uapermv as i64).saturating_mul(v_main_mv as i64) / 1_000;
+                        i_ma.clamp(TARGET_I_MIN_MA as i64, TARGET_I_MAX_MA as i64) as i32
+                    }
                 }
                 _ => {
-                    cv_i_total_ma = 0;
+                    cv_g_uapermv = 0;
                     ctrl_snapshot.target_i_ma
                 }
             };
@@ -1043,6 +1059,18 @@ async fn main(_spawner: Spawner) -> ! {
                 .min(current_limit_ma)
                 .min(power_limit_ma)
                 .clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
+
+            // Anti-windup: only apply when we're saturating on a limit.
+            if ctrl_snapshot.mode == LoadMode::Cv && (current_limited || power_limited) {
+                if v_main_mv <= 0 || desired_i_total_ma <= 0 {
+                    cv_g_uapermv = 0;
+                } else {
+                    // desired_i_total_ma is mA; convert back to uA/mV.
+                    let g_uapermv =
+                        (desired_i_total_ma as i64).saturating_mul(1_000) / (v_main_mv as i64);
+                    cv_g_uapermv = (g_uapermv as i32).clamp(0, CV_G_MAX_UA_PER_MV);
+                }
+            }
             desired_i_total_ma
         } else {
             // Legacy CC-only path: SetEnable + SetPoint with LimitProfile clamp.
