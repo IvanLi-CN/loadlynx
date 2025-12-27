@@ -3094,11 +3094,12 @@ async fn setmode_tx_task(
                         force_send = false;
                         continue;
                     }
-                    AnalogState::CalMissing => {
-                        warn!("SetMode TX gated: analog not ready (calibration missing?)");
-                        force_send = false;
-                        continue;
-                    }
+                    // CalMissing means "not producing enable" (FastStatus.enable==false),
+                    // not "missing calibration". We must still allow output_enabled=true
+                    // to be sent, otherwise HTTP/UI output enable becomes deadlocked.
+                    //
+                    // The analog firmware remains the source of truth for safety gating.
+                    AnalogState::CalMissing => {}
                     AnalogState::Offline => {
                         warn!("SetMode TX gated: analog offline");
                         force_send = false;

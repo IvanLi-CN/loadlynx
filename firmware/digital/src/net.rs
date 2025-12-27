@@ -1770,16 +1770,15 @@ async fn handle_control_update(
                 );
                 return Err("409 Conflict");
             }
-            AnalogState::CalMissing => {
-                write_error_body(
-                    body_out,
-                    "ANALOG_NOT_READY",
-                    "analog board calibration missing or not ready",
-                    true,
-                    None,
-                );
-                return Err("409 Conflict");
-            }
+            // NOTE: AnalogState::CalMissing currently means "not producing enable"
+            // (FastStatus.enable == false). This is NOT a reliable indicator of
+            // missing calibration, and blocking output ON here would create a
+            // deadlock: the UI cannot enable output, and the analog side can
+            // never transition into "Ready".
+            //
+            // True safety gating still happens on the analog side:
+            // CAL_READY / fault flags / uv_latched => effective output=0.
+            AnalogState::CalMissing => {}
             AnalogState::Offline => {
                 write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
                 return Err("503 Service Unavailable");
@@ -1820,16 +1819,8 @@ async fn render_cc_view_json(
             );
             return Err("409 Conflict");
         }
-        AnalogState::CalMissing => {
-            write_error_body(
-                buf,
-                "ANALOG_NOT_READY",
-                "analog board calibration missing or not ready",
-                true,
-                None,
-            );
-            return Err("409 Conflict");
-        }
+        // See handle_control_update(): CalMissing is not a reliable calibration indicator.
+        AnalogState::CalMissing => {}
         AnalogState::Offline => {
             write_error_body(buf, "LINK_DOWN", "analog board is offline", true, None);
             return Err("503 Service Unavailable");
