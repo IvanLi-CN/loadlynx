@@ -972,18 +972,20 @@ async fn main(_spawner: Spawner) -> ! {
         // - Trigger when output_enabled=true and V_main <= min_v.
         // - Clears ONLY on output enable rising edge (handled in SetMode RX path).
         let mut uv_latched = active_mode_seen && ctrl_snapshot.uv_latched;
-        if active_mode_seen && ctrl_snapshot.output_enabled && v_main_mv <= ctrl_snapshot.min_v_mv {
-            if !uv_latched {
-                uv_latched = true;
-                {
-                    let mut ctrl = ACTIVE_CONTROL.lock().await;
-                    ctrl.uv_latched = true;
-                }
-                warn!(
-                    "uv_latched set: preset_id={} v_main={}mV <= min_v={}mV",
-                    ctrl_snapshot.preset_id, v_main_mv, ctrl_snapshot.min_v_mv
-                );
+        if active_mode_seen
+            && ctrl_snapshot.output_enabled
+            && v_main_mv <= ctrl_snapshot.min_v_mv
+            && !uv_latched
+        {
+            uv_latched = true;
+            {
+                let mut ctrl = ACTIVE_CONTROL.lock().await;
+                ctrl.uv_latched = true;
             }
+            warn!(
+                "uv_latched set: preset_id={} v_main={}mV <= min_v={}mV",
+                ctrl_snapshot.preset_id, v_main_mv, ctrl_snapshot.min_v_mv
+            );
         }
 
         // Output gating + safety rule: effective output MUST be 0 when any of these apply:
