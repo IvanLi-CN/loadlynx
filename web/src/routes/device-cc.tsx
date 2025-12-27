@@ -5,7 +5,6 @@ import {
   __debugSetUvLatched,
   applyPreset,
   ENABLE_MOCK_DEVTOOLS,
-  getCc,
   getControl,
   getIdentity,
   getPresets,
@@ -13,13 +12,10 @@ import {
   isHttpApiError,
   isMockBaseUrl,
   subscribeStatusStream,
-  updateCc,
   updateControl,
   updatePreset,
 } from "../api/client.ts";
 import type {
-  CcControlView,
-  CcUpdateRequest,
   ControlView,
   FastStatusView,
   Identity,
@@ -90,18 +86,6 @@ export function DeviceCcRoute() {
     enabled: Boolean(baseUrl),
   });
 
-  const ccQuery = useQuery<CcControlView, HttpApiError>({
-    queryKey: ["device", deviceId, "cc"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getCc(baseUrl);
-    },
-    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
-    retryDelay: RETRY_DELAY_MS,
-  });
-
   const controlQuery = useQuery<ControlView, HttpApiError>({
     queryKey: ["device", deviceId, "control"],
     queryFn: () => {
@@ -128,10 +112,6 @@ export function DeviceCcRoute() {
 
   const queryClient = useQueryClient();
 
-  const [draftEnable, setDraftEnable] = useState(false);
-  const [draftTargetIMa, setDraftTargetIMa] = useState(0);
-  const [draftMaxPMw, setDraftMaxPMw] = useState(0);
-
   const [selectedPresetId, setSelectedPresetId] = useState<PresetId>(1);
   const selectedPresetInitializedRef = useRef(false);
 
@@ -141,17 +121,6 @@ export function DeviceCcRoute() {
   const [draftPresetMinVMv, setDraftPresetMinVMv] = useState(0);
   const [draftPresetMaxIMaTotal, setDraftPresetMaxIMaTotal] = useState(0);
   const [draftPresetMaxPMw, setDraftPresetMaxPMw] = useState(0);
-
-  useEffect(() => {
-    const cc = ccQuery.data;
-    if (!cc) {
-      return;
-    }
-    setDraftTargetIMa(cc.target_i_ma);
-    // Rule A: target==0 always forces enable=false (even if the backend is stale).
-    setDraftEnable(cc.target_i_ma === 0 ? false : cc.enable);
-    setDraftMaxPMw(cc.limit_profile.max_p_mw);
-  }, [ccQuery.data]);
 
   useEffect(() => {
     const control = controlQuery.data;
@@ -178,24 +147,6 @@ export function DeviceCcRoute() {
     setDraftPresetMaxIMaTotal(preset.max_i_ma_total);
     setDraftPresetMaxPMw(preset.max_p_mw);
   }, [presetsQuery.data, selectedPresetId]);
-
-  const updateCcMutation = useMutation({
-    mutationFn: async (payload: CcUpdateRequest) => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return updateCc(baseUrl, payload);
-    },
-    onSuccess: (nextCc) => {
-      queryClient.setQueryData<CcControlView>(
-        ["device", deviceId, "cc"],
-        nextCc,
-      );
-      queryClient.invalidateQueries({
-        queryKey: ["device", deviceId, "status"],
-      });
-    },
-  });
 
   const updatePresetMutation = useMutation({
     mutationFn: async (payload: Preset) => {
@@ -297,7 +248,6 @@ export function DeviceCcRoute() {
       Boolean(baseUrl) &&
       identityQuery.isSuccess &&
       !(
-        updateCcMutation.isPending ||
         updatePresetMutation.isPending ||
         applyPresetMutation.isPending ||
         updateControlMutation.isPending
@@ -341,7 +291,6 @@ export function DeviceCcRoute() {
     const errors: Array<unknown> = [
       identityQuery.error,
       statusQuery.error,
-      ccQuery.error,
       controlQuery.error,
       presetsQuery.error,
     ];
@@ -383,7 +332,6 @@ export function DeviceCcRoute() {
 
   const identity = identityQuery.data;
   const status = streamStatus ?? statusQuery.data;
-  const cc = ccQuery.data;
   const control = controlQuery.data;
   const presets = presetsQuery.data ?? null;
 
@@ -393,33 +341,19 @@ export function DeviceCcRoute() {
   const statusRemoteMa = status?.raw.i_remote_ma ?? null;
 
   const remoteVoltageV =
-    status?.raw.v_remote_mv != null
-      ? status.raw.v_remote_mv / 1_000
-      : cc?.v_main_mv != null
-        ? cc.v_main_mv / 1_000
-        : 0;
+    status?.raw.v_remote_mv != null ? status.raw.v_remote_mv / 1_000 : 0;
   const localVoltageV =
     status?.raw.v_local_mv != null
       ? status.raw.v_local_mv / 1_000
       : remoteVoltageV;
-  const localCurrentA =
-    statusLocalMa != null
-      ? statusLocalMa / 1_000
-      : (cc?.i_total_ma ?? 0) / 1_000 / 2;
+  const localCurrentA = statusLocalMa != null ? statusLocalMa / 1_000 : 0;
   const remoteCurrentA = statusRemoteMa != null ? statusRemoteMa / 1_000 : 0;
   const totalCurrentA =
     statusLocalMa != null && statusRemoteMa != null
       ? (statusLocalMa + statusRemoteMa) / 1_000
-      : (cc?.i_total_ma ?? 0) / 1_000;
+      : 0;
   const totalPowerW =
-    status?.raw.calc_p_mw != null
-      ? status.raw.calc_p_mw / 1_000
-      : (cc?.p_main_mw ?? 0) / 1_000;
-
-  const maxIMa =
-    cc?.limit_profile.max_i_ma != null ? cc.limit_profile.max_i_ma : 5_000;
-  const maxPMw =
-    cc?.limit_profile.max_p_mw != null ? cc.limit_profile.max_p_mw : 60_000;
+    status?.raw.calc_p_mw != null ? status.raw.calc_p_mw / 1_000 : 0;
 
   const uptimeSeconds =
     status?.raw.uptime_ms != null
@@ -429,20 +363,6 @@ export function DeviceCcRoute() {
     status?.raw.sink_core_temp_mc != null
       ? status.raw.sink_core_temp_mc / 1_000
       : undefined;
-
-  const handleApply = () => {
-    if (!cc) {
-      return;
-    }
-
-    const payload: CcUpdateRequest = {
-      enable: draftTargetIMa === 0 ? false : draftEnable,
-      target_i_ma: draftTargetIMa,
-      max_p_mw: draftMaxPMw,
-    };
-
-    updateCcMutation.mutate(payload);
-  };
 
   const handleSavePreset = () => {
     const payload: Preset = {
@@ -641,10 +561,26 @@ export function DeviceCcRoute() {
                     Output enabled
                   </span>
                   <span className="label-text-alt text-base-content/60">
-                    Preset apply forces this off.
+                    Preset apply forces this off; toggle on to start the load.
                   </span>
                 </div>
               </label>
+
+              <button
+                type="button"
+                className="btn btn-sm btn-primary"
+                disabled={
+                  !control ||
+                  control.output_enabled ||
+                  updateControlMutation.isPending ||
+                  applyPresetMutation.isPending
+                }
+                onClick={() => {
+                  updateControlMutation.mutate({ output_enabled: true });
+                }}
+              >
+                Start load
+              </button>
 
               {ENABLE_MOCK_DEVTOOLS && baseUrl && isMockBaseUrl(baseUrl) ? (
                 <button
@@ -659,6 +595,18 @@ export function DeviceCcRoute() {
                 </button>
               ) : null}
             </div>
+
+            {updateControlMutation.isError && updateControlMutation.error ? (
+              <div className="alert alert-error text-xs p-2">
+                <span>
+                  {isHttpApiError(updateControlMutation.error)
+                    ? `${updateControlMutation.error.code ?? "HTTP_ERROR"} — ${updateControlMutation.error.message}`
+                    : updateControlMutation.error instanceof Error
+                      ? updateControlMutation.error.message
+                      : "Unknown error"}
+                </span>
+              </div>
+            ) : null}
 
             <div className="overflow-x-auto">
               <table className="table table-zebra table-sm">
@@ -904,183 +852,10 @@ export function DeviceCcRoute() {
           remoteCurrentA={remoteCurrentA}
           totalCurrentA={totalCurrentA}
           totalPowerW={totalPowerW}
-          ccTargetA={(cc?.target_i_ma ?? 0) / 1_000}
+          setTargetA={(status?.raw.target_value ?? 0) / 1_000}
           uptimeSeconds={uptimeSeconds}
           tempC={tempC}
         />
-      </section>
-
-      <section
-        aria-label="CC control"
-        className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start"
-      >
-        <div className="card bg-base-100 shadow-sm border border-base-200 lg:col-span-2">
-          <div className="card-body p-6">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
-              Setpoint
-            </h3>
-
-            <div className="flex flex-col gap-6">
-              <div className="form-control">
-                <label className="label" htmlFor="input-target-current">
-                  <span className="label-text">Setpoint current</span>
-                  <span className="label-text-alt font-mono">
-                    {(draftTargetIMa / 1_000).toFixed(2)} A · {draftTargetIMa}{" "}
-                    mA
-                  </span>
-                </label>
-                <input
-                  id="input-target-current"
-                  type="range"
-                  min={0}
-                  max={maxIMa}
-                  step={50}
-                  value={draftTargetIMa}
-                  onChange={(event) => {
-                    const nextTarget = Number.parseInt(event.target.value, 10);
-                    setDraftTargetIMa(nextTarget);
-                    // Rule A: target==0 always forces enable=false.
-                    if (nextTarget === 0) {
-                      setDraftEnable(false);
-                    }
-                  }}
-                  className="range range-primary range-sm"
-                />
-              </div>
-
-              <div className="form-control">
-                <label className="label" htmlFor="input-max-power">
-                  <span className="label-text">Max power limit</span>
-                  <span className="label-text-alt font-mono">
-                    {(draftMaxPMw / 1_000).toFixed(1)} W · {draftMaxPMw} mW
-                  </span>
-                </label>
-                <input
-                  id="input-max-power"
-                  type="range"
-                  min={10_000}
-                  max={maxPMw}
-                  step={1_000}
-                  value={draftMaxPMw}
-                  onChange={(event) => {
-                    setDraftMaxPMw(Number.parseInt(event.target.value, 10));
-                  }}
-                  className="range range-sm"
-                />
-              </div>
-            </div>
-          </div>
-        </div>
-
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-6">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
-              Output &amp; limits
-            </h3>
-
-            <div className="flex flex-col gap-4">
-              <div className="form-control">
-                <label className="label cursor-pointer justify-start gap-4">
-                  <input
-                    type="checkbox"
-                    className="toggle toggle-primary"
-                    checked={draftEnable}
-                    onChange={(event) => {
-                      // Avoid enabling while target==0 (Rule A).
-                      const wantsEnable = event.target.checked;
-                      setDraftEnable(wantsEnable && draftTargetIMa !== 0);
-                    }}
-                  />
-                  <div className="flex flex-col">
-                    <span className="label-text font-semibold">
-                      Load switch
-                    </span>
-                    <span className="label-text-alt text-base-content/60">
-                      When off, output target is 0 mA; setpoint is preserved.
-                    </span>
-                  </div>
-                </label>
-              </div>
-
-              <div className="text-xs text-base-content/60 space-y-1 bg-base-200/50 p-3 rounded-lg">
-                <div>
-                  Load:{" "}
-                  <span
-                    className={
-                      cc?.enable
-                        ? "text-success font-bold"
-                        : "text-base-content font-bold"
-                    }
-                  >
-                    {cc?.enable ? "on" : "off"}
-                  </span>
-                </div>
-                <div>
-                  Setpoint:{" "}
-                  <span className="font-mono">
-                    {(cc?.target_i_ma ?? 0) / 1_000} A
-                  </span>
-                </div>
-                <div>
-                  Effective:{" "}
-                  <span className="font-mono">
-                    {(cc?.effective_i_ma ?? 0) / 1_000} A
-                  </span>
-                </div>
-                <div>
-                  Limit:{" "}
-                  <span className="font-mono">
-                    {(cc?.limit_profile.max_p_mw ?? 0) / 1_000} W
-                  </span>
-                </div>
-              </div>
-
-              {updateCcMutation.isError && updateCcMutation.error ? (
-                <div className="alert alert-error text-xs p-2">
-                  <span>
-                    {(() => {
-                      const error = updateCcMutation.error;
-                      if (isHttpApiError(error)) {
-                        const code = error.code ?? "HTTP_ERROR";
-                        if (error.status === 0 && code === "NETWORK_ERROR") {
-                          return `Network error — unable to reach device${
-                            baseUrl ? ` (${baseUrl})` : ""
-                          }. Check network/IP.`;
-                        }
-                        if (
-                          error.status === 404 &&
-                          code === "UNSUPPORTED_OPERATION"
-                        ) {
-                          return "API unsupported by device firmware — please upgrade and retry.";
-                        }
-                        if (error.status >= 400 && error.status < 500 && code) {
-                          return `Device rejected request: ${code} — ${error.message}`;
-                        }
-                        return `HTTP error: ${code} — ${error.message}`;
-                      }
-                      if (error instanceof Error) {
-                        return `Error: ${error.message}`;
-                      }
-                      return "Error: unknown HTTP failure";
-                    })()}
-                  </span>
-                </div>
-              ) : null}
-
-              <button
-                type="button"
-                onClick={handleApply}
-                disabled={updateCcMutation.isPending || !cc}
-                className="btn btn-primary w-full mt-2"
-              >
-                {updateCcMutation.isPending ? (
-                  <span className="loading loading-spinner text-primary-content"></span>
-                ) : null}
-                {updateCcMutation.isPending ? "Applying..." : "Apply changes"}
-              </button>
-            </div>
-          </div>
-        </div>
       </section>
     </PageContainer>
   );
@@ -1093,7 +868,7 @@ interface MainDisplayCanvasProps {
   remoteCurrentA: number;
   totalCurrentA: number;
   totalPowerW: number;
-  ccTargetA: number;
+  setTargetA: number;
   uptimeSeconds: number;
   tempC: number | undefined;
 }
@@ -1105,7 +880,7 @@ function MainDisplayCanvas({
   remoteCurrentA,
   totalCurrentA,
   totalPowerW,
-  ccTargetA,
+  setTargetA,
   uptimeSeconds,
   tempC,
 }: MainDisplayCanvasProps) {
@@ -1405,7 +1180,7 @@ function MainDisplayCanvas({
     const setBaselineY = bar2Top + barHeight + 8;
     ctx.fillText("SET", 198, setBaselineY);
     ctx.fillStyle = rightValue;
-    const ccText = `${ccTargetA.toFixed(1)}A`;
+    const ccText = `${setTargetA.toFixed(1)}A`;
     const ccTextWidth = ctx.measureText(ccText).width;
     ctx.fillText(ccText, barRight - ccTextWidth, setBaselineY);
 
@@ -1444,7 +1219,7 @@ function MainDisplayCanvas({
     remoteCurrentA,
     totalCurrentA,
     totalPowerW,
-    ccTargetA,
+    setTargetA,
     uptimeSeconds,
     tempC,
   ]);

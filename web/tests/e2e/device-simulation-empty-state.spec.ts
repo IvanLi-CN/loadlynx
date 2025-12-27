@@ -26,6 +26,6 @@ test.describe("Simulation device empty state", () => {
     await page.getByRole("link", { name: /Open CC Control/i }).click();
 
     await expect(page).toHaveURL(/\/cc/);
-    await expect(page.locator("#input-target-current")).toBeVisible();
+    await expect(page.getByRole("heading", { name: /Presets/i })).toBeVisible();
   });
 });
