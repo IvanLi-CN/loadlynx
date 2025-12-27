@@ -21,18 +21,19 @@ export const Default: Story = {
     const canvas = within(canvasElement);
 
     await canvas.findByRole("heading", { name: /Device control/i });
-    await canvas.findByText(/1\.50\s*A\s*·\s*1500\s*mA/);
+    await canvas.findByRole("heading", { name: /Presets/i });
+    await canvas.findByText(/1500\s*mA/);
 
-    const enableToggle = await canvas.findByRole("checkbox", {
-      name: /Load switch/i,
+    const outputToggle = await canvas.findByRole("checkbox", {
+      name: /Output enabled/i,
     });
 
-    if ((enableToggle as HTMLInputElement).checked) {
-      throw new Error("Expected Load switch to start unchecked");
+    if ((outputToggle as HTMLInputElement).checked) {
+      throw new Error("Expected Output enabled to start unchecked");
     }
-    await userEvent.click(enableToggle);
-    if (!(enableToggle as HTMLInputElement).checked) {
-      throw new Error("Expected Load switch to be checked after click");
+    await userEvent.click(outputToggle);
+    if (!(outputToggle as HTMLInputElement).checked) {
+      throw new Error("Expected Output enabled to be checked after click");
     }
   },
 };
