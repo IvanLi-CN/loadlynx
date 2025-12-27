@@ -72,7 +72,7 @@
   - 0x11 `FAULT_EVENT`：G431→S3 故障事件帧；当前版本尚未启用此帧，故障状态通过 `FAST_STATUS.fault_flags` 传输，ID 预留。
   - 0x12 `SLOW_HOUSEKEEPING`：慢速供电/诊断帧；尚未实现，仅用于容量规划。
   - 0x20 `SetEnable`：S3→G431，布尔使能；当前固件已实现 v0，用于配合 `CAL_READY` 与 `FAULT_FLAGS` 做出力 gating。
-  - 0x21 `SetMode`：S3→G431，模式切换（CC/CV/CP/CR）；尚未实现，仅在协议常量中预留。
+  - 0x21 `SetMode`：S3→G431，**原子 Active Control（v1 冻结）**：一次下发 `preset_id + output_enabled + mode + target + limits`（见下文 “SetMode（0x21）原子控制帧”）。
   - 0x22 `SetPoint`：S3→G431，恒流设定值（mA，带 ACK）；当前固件已实现 v0 版本，将 `target_i_ma` 视为**两通道合计目标电流**，由 G431 在本地按“<2 A 单通道、≥2 A 双通道近似均分”的策略在 CH1/CH2 间拆分电流，由 `setpoint_tx_task` 实现 ACK 等待与退避重传。
   - 0x23 `SetLimits`/`LIMIT_PROFILE`：S3→G431，功率/电流/温度限值；尚未实现，未来用于热降额与风扇协同。
   - 0x24 `GetStatus`：S3→G431，请求立即返回一帧 FastStatus；协议 crate 中已有类型与编码函数，但固件尚未在运行路径中使用。
@@ -85,6 +85,31 @@
 - 角色
   - ESP32‑S3：主控（UI/日志/标定/桥接），下发控制命令，轮询/订阅遥测。
   - STM32G431：实时控制与保护（独立安全），周期上报遥测/故障，关键故障本地强制失能。
+
+### SetMode（0x21）原子控制帧（v1 冻结）
+
+`SetMode` 是 v1 冻结的“原子 Active Control”消息：数字侧每次更新 active preset / 输出开关 / 模式与目标值时，都用 **同一帧** 完整下发，避免多帧更新导致两侧状态不一致。
+
+- 方向：ESP32‑S3 → STM32G431
+- 消息：`MSG_SET_MODE = 0x21`
+- 可靠性：请求帧必须置位 `FLAG_ACK_REQ`；模拟侧成功解析并（按实现策略）应用后回 `FLAG_IS_ACK`（可选 `FLAG_IS_NACK` 用于解析失败）。
+- `mode` 数值（冻结）：
+  - `1` = CC
+  - `2` = CV
+  - 其他值保留（v1 不使用）
+
+Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
+
+| 字段 | 类型 | 单位 | 语义 |
+| --- | --- | --- | --- |
+| `preset_id` | `u8` | — | 1..=5（active preset 槽位） |
+| `output_enabled` | `bool` | — | 用户输出开关；**应用 preset / 切换模式等高层操作必须强制置 `false`**，用户需手动开输出 |
+| `mode` | `u8` | — | `1=CC` / `2=CV` |
+| `target_i_ma` | `i32` | mA | CC 目标电流；为保持 wire 稳定，CV 模式下仍存在但忽略 |
+| `target_v_mv` | `i32` | mV | CV 目标电压；为保持 wire 稳定，CC 模式下仍存在但忽略 |
+| `min_v_mv` | `i32` | mV | 欠压阈值（用于欠压锁存）；触发后退流并锁存，需用户“关→开”解除（见 `state_flags[UV_LATCHED]`） |
+| `max_i_ma_total` | `i32` | mA | 总电流上限（软件限值，与硬限制共同 clamp） |
+| `max_p_mw` | `u32` | mW | 总功率上限（软件限值，与硬限制共同 clamp） |
 
 - 波特率与节拍（建议）
   - 波特率：当前固件使用 115200 baud、8N1；在后续硬件与信号质量验证通过后，可按本节带宽估算提升到 460800–1M（结合布线与时钟抖动评估，最终以硬件定型为准）。
@@ -130,6 +155,7 @@
 | 数据块 | 字段概要 | 单帧字节 | 更新频率 | 估算带宽 | 备注 |
 | --- | --- | --- | --- | --- | --- |
 | `SET_POINT` (0x22) | `seq`、`target_i_ma`（mA，两通道合计 CC 设定值） | ≈18 B | 当前固件：10 Hz（编码器驱动）；规划：50–100 Hz | 0.9 kB/s ≈ 7.2 kbps（按 50 Hz 规划估算；当前 10 Hz 实际带宽约为其 1/5） | 当前固件已实现 v0：总电流恒流设定，全部要求 ACK；G431 将 `target_i_ma` clamp 到 `[0,5_000]` mA，并按 `<2 A 单通道、≥2 A 双通道近似均分` 在 CH1/CH2 间拆分目标电流；数字侧在 `setpoint_tx_task` 中实现 ACK 等待、退避重传与“最新值优先”，模拟侧应用后回 `FLAG_IS_ACK` 空载帧，并在 FastStatus 中回显 `target_value`（即总目标电流） |
+| `SET_MODE` (0x21) | `preset_id`、`output_enabled`、`mode`、`target_i_ma`（mA）、`target_v_mv`（mV）、`min_v_mv`（mV）、`max_i_ma_total`（mA）、`max_p_mw`（mW） | ≈30–40 B | 0–10 Hz（按 UI/HTTP 操作触发） | ≤400 B/s ≈ 3.2 kbps | **原子 Active Control（v1 冻结）**：一次下发 active preset + 输出开关 + 模式/目标/限值；应用 preset 必须强制 `output_enabled=false`；需 ACK |
 | `LIMIT_PROFILE` (0x23) | `max_i`、`max_p`、`ovp_mv`、`temp_trip`、`thermal_derate`、预留 | ≈20 B | 0.2–1 Hz（用户修改时） | ≤20 B/s ≈ 0.16 kbps | 每次下发表征最大允许功率/电流的参数，并附 ESP 根据风扇控制计算出的 `thermal_derate`，便于版本化；当前固件尚未实现此帧，风扇控制仅在文档与协议层预留 |
 | `CONTROL_CMD` (0x20/0x24/0x25 等) | `SetEnable`、`ModeSwitch`、`GetStatus`、`FaultClear` 等短指令 | 8–12 B | 0–20 Hz（按键/脚本触发） | ≤160 B/s ≈ 1.3 kbps | 均带 ACK_REQ，失败可按 5/10/20 ms 退避重试；当前固件仅实际使用 `SetEnable(0x20)`，其余命令仍在规划中 |
 | `CAL_MODE` (0x25) | `kind`（0=off,1=voltage,2=current_ch1,3=current_ch2） | ≈10 B | 仅在进入/退出校准 Tab 或切换通道时发送（<1 Hz） | ≈10 B/s | 用于让模拟侧按校准类型附加 Raw ADC/DAC 字段；正常工作保持 off |
@@ -205,6 +231,26 @@
   - `v_remote_mv` 仅在 `REMOTE_SENSE_ACTIVE=1` 时用于控制，否则 UI 仍可显示（但会叠加“未连接”提示）；
   - `i_local_ma`/`i_remote_ma` 分别反映 CH1/CH2 实测电流：在 `<2 A` 总目标区间内，预期 `i_remote_ma≈0`；在 `≥2 A` 区间，两路电流预期近似均分，总电流约为二者之和。
 - **UI 映射**：ESP32‑S3 根据 `state_flags` 决定右侧“REMOTE/LOCAL” 卡片的强调态；若远端失效，则 REMOTE 显示 `--.--` 并提示用户检查 Sense 线。
+
+### FastStatus.mode 与 state_flags（v1 冻结）
+
+`FAST_STATUS.mode` 与 `SetMode.mode` 使用相同数值：
+
+| mode 值 | 含义 |
+| --- | --- |
+| `1` | CC |
+| `2` | CV |
+
+`FAST_STATUS.state_flags` 为 `u32` 位掩码（**不得复用已有 bit**）：
+
+| bit | 常量名 | 含义 |
+| --- | --- | --- |
+| 0 | `STATE_FLAG_REMOTE_ACTIVE` | 远端 sense 生效（控制/显示以 `v_remote_mv` 为主） |
+| 1 | `STATE_FLAG_LINK_GOOD` | 模拟侧认为链路健康（超时/错误时清零） |
+| 2 | `STATE_FLAG_ENABLED` | 模拟侧输出 gating 为真（具体验证以固件实现为准） |
+| 3 | `STATE_FLAG_UV_LATCHED` | 欠压锁存：触发后强制退流并锁存；仅能通过用户 `output_enabled` 关→开边沿清除 |
+| 4 | `STATE_FLAG_POWER_LIMITED` |（建议）因功率上限进入限功率态 |
+| 5 | `STATE_FLAG_CURRENT_LIMITED` |（建议）因电流上限进入限流态 |
 
 ### 散热片温度传感器布点
 

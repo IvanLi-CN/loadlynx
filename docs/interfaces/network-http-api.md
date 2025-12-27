@@ -99,6 +99,8 @@ interface DeviceCapabilities {
   cc_supported: boolean;
   cv_supported: boolean;
   cp_supported: boolean;
+  presets_supported: boolean;
+  preset_count: number; // 固定为 5
   api_version: string; // HTTP API 语义版本，如 "2.0.0"
 }
 ```
@@ -159,7 +161,7 @@ interface CcControlView {
 ```ts
 interface FastStatusJson {
   uptime_ms: number;
-  mode: number;             // 当前工作模式（数值，具体枚举在协议 crate 中定义）
+  mode: number;             // 当前工作模式（1=CC, 2=CV；其他值保留）
   state_flags: number;      // 状态位掩码（uint32）
   enable: boolean;          // 来自模拟板 FastStatus；与 /api/v1/cc 中的 enable（负载开关）不是同一概念
   target_value: number;     // 目标总电流（mA）
@@ -198,6 +200,33 @@ interface FastStatusView {
 }
 ```
 
+### 2.5 Preset/Control（v1 冻结）
+
+```ts
+type LoadMode = "cc" | "cv";
+
+interface Preset {
+  preset_id: number;        // 1..=5
+  mode: LoadMode;
+
+  // Targets (units fixed; unused field still present for wire stability).
+  target_i_ma: number;      // mA (used when mode="cc")
+  target_v_mv: number;      // mV (used when mode="cv")
+
+  // Limits
+  min_v_mv: number;         // mV (undervoltage threshold for uv latch)
+  max_i_ma_total: number;   // mA (total current limit)
+  max_p_mw: number;         // mW (power limit)
+}
+
+interface ControlView {
+  active_preset_id: number; // 1..=5
+  output_enabled: boolean;  // user output switch
+  uv_latched: boolean;      // undervoltage latched (clears on off->on edge)
+  preset: Preset;           // snapshot of the active preset contents
+}
+```
+
 ## 3. API 端点定义
 
 ### 3.1 `GET /api/v1/identity`
@@ -221,8 +250,10 @@ interface FastStatusView {
   },
   "capabilities": {
     "cc_supported": true,
-    "cv_supported": false,
+    "cv_supported": true,
     "cp_supported": false,
+    "presets_supported": true,
+    "preset_count": 5,
     "api_version": "2.0.0"
   }
 }
@@ -441,6 +472,84 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   - `503 LINK_DOWN`：链路不可用；
   - `503 UNAVAILABLE`：Wi‑Fi/网络未就绪；
   - `409 CONFLICT`：当前已有 SoftReset 操作进行中（若固件实现互斥）。
+
+### 3.6 `GET /api/v1/presets`（冻结）
+
+读取 5 组 Preset（必须始终返回 **恰好 5 条**，按 `preset_id` 1..5 排序）。
+
+- 请求：无请求体。
+- 响应（200）：
+
+```jsonc
+{
+  "presets": [
+    {
+      "preset_id": 1,
+      "mode": "cc",
+      "target_i_ma": 1500,
+      "target_v_mv": 12000,
+      "min_v_mv": 0,
+      "max_i_ma_total": 10000,
+      "max_p_mw": 150000
+    }
+    // ... preset_id=2..5
+  ]
+}
+```
+
+### 3.7 `PUT /api/v1/presets`（冻结）
+
+更新单个 Preset。请求体必须包含完整 Preset payload（包括 `preset_id`），固件需对范围做 clamp/校验。
+
+- 请求：
+
+```jsonc
+{
+  "preset_id": 3,
+  "mode": "cv",
+  "target_i_ma": 1500,
+  "target_v_mv": 12000,
+  "min_v_mv": 0,
+  "max_i_ma_total": 10000,
+  "max_p_mw": 150000
+}
+```
+
+- 响应（200）：返回更新后的 Preset（同请求结构）。
+
+### 3.8 `POST /api/v1/presets/apply`（冻结）
+
+应用指定 `preset_id` 作为 active preset，并 **必须强制输出关闭**（`output_enabled=false`），用户需后续通过 `/api/v1/control` 手动开启输出。
+
+- 请求：
+
+```jsonc
+{ "preset_id": 3 }
+```
+
+- 响应（200）：返回更新后的 `ControlView`。
+
+### 3.9 `GET /api/v1/control`（冻结）
+
+读取统一的控制视图（active preset + 输出开关 + 欠压锁存）。
+
+- 请求：无请求体。
+- 响应（200）：`ControlView`。
+
+### 3.10 `PUT /api/v1/control`（冻结）
+
+切换输出开关。
+
+- 请求：
+
+```jsonc
+{ "output_enabled": true }
+```
+
+- 语义（冻结）：
+  - 仅切换输出开关，不修改 preset 内容；
+  - `uv_latched` **仅能通过** `output_enabled` 的 “关→开” 边沿清除（即必须先 `false` 再 `true`）。
+- 响应（200）：`ControlView`。
 
 ## 4. 错误码一览表（建议实现）
 

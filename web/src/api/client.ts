@@ -11,9 +11,12 @@ import type {
   CalibrationWriteRequestWire,
   CcControlView,
   CcUpdateRequest,
+  ControlView,
   FastStatusJson,
   FastStatusView,
   Identity,
+  Preset,
+  PresetId,
 } from "./types.ts";
 
 const TAB_ID =
@@ -223,6 +226,10 @@ interface MockDeviceState {
   identity: Identity;
   status: FastStatusView;
   cc: CcControlView;
+  presets: Preset[];
+  active_preset_id: PresetId;
+  output_enabled: boolean;
+  uv_latched: boolean;
   calibrationMode: CalibrationModeRequest["kind"];
   calibration: MockCalibrationState;
 }
@@ -329,6 +336,22 @@ function createInitialCc(): CcControlView {
   };
 }
 
+function createInitialPresets(): Preset[] {
+  const presets: Preset[] = [];
+  for (let idx = 1 as PresetId; idx <= 5; idx = (idx + 1) as PresetId) {
+    presets.push({
+      preset_id: idx,
+      mode: "cc",
+      target_i_ma: 1_500 + (idx - 1) * 250,
+      target_v_mv: 12_000,
+      min_v_mv: 0,
+      max_i_ma_total: 10_000,
+      max_p_mw: 150_000,
+    });
+  }
+  return presets;
+}
+
 function createInitialIdentity(baseUrl: string, index: number): Identity {
   const deviceId = `llx-mock-${String(index).padStart(3, "0")}`;
 
@@ -351,8 +374,10 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
     short_id: String(index).padStart(6, "a"),
     capabilities: {
       cc_supported: true,
-      cv_supported: false,
+      cv_supported: true,
       cp_supported: false,
+      presets_supported: true,
+      preset_count: 5,
       api_version: "2.0.0-mock",
     },
   };
@@ -368,6 +393,7 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
   const identity = createInitialIdentity(baseUrl, index);
   const status = createInitialStatus();
   const cc = createInitialCc();
+  const presets = createInitialPresets();
   const factoryProfile = createInitialCalibrationProfileWire();
   const calibration: MockCalibrationState = {
     factory: structuredClone(factoryProfile),
@@ -379,6 +405,10 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     identity,
     status,
     cc,
+    presets,
+    active_preset_id: 1,
+    output_enabled: false,
+    uv_latched: false,
     calibrationMode: "off",
     calibration,
   };
@@ -522,6 +552,181 @@ async function mockUpdateCc(
   state.status = nextStatus;
 
   return structuredClone(nextCc);
+}
+
+function mockInvalidRequest(message: string): never {
+  throw new HttpApiError({
+    status: 400,
+    code: "INVALID_REQUEST",
+    message,
+    retryable: false,
+    details: null,
+  });
+}
+
+function assertPresetId(presetId: number): PresetId {
+  if (!Number.isFinite(presetId) || !Number.isInteger(presetId)) {
+    mockInvalidRequest("preset_id must be an integer");
+  }
+  if (presetId < 1 || presetId > 5) {
+    mockInvalidRequest("preset_id out of range (expected 1..=5)");
+  }
+  return presetId as PresetId;
+}
+
+function mockGetActivePreset(state: MockDeviceState): Preset {
+  const preset = state.presets.find(
+    (p) => p.preset_id === state.active_preset_id,
+  );
+  if (!preset) {
+    mockInvalidRequest("active preset missing");
+  }
+  return preset;
+}
+
+function mockMakeControlView(state: MockDeviceState): ControlView {
+  return {
+    active_preset_id: state.active_preset_id,
+    output_enabled: state.output_enabled,
+    uv_latched: state.uv_latched,
+    preset: structuredClone(mockGetActivePreset(state)),
+  };
+}
+
+function mockUpdateStatusFromControl(state: MockDeviceState) {
+  const preset = mockGetActivePreset(state);
+  const next = { ...state.status, raw: { ...state.status.raw } };
+
+  next.raw.mode = preset.mode === "cc" ? 1 : 2;
+  next.raw.enable = state.output_enabled;
+
+  const vMv = next.raw.v_remote_mv ?? 0;
+
+  if (!state.output_enabled) {
+    next.raw.target_value = 0;
+    next.raw.i_local_ma = 0;
+    next.raw.i_remote_ma = 0;
+    next.raw.calc_p_mw = 0;
+    state.status = next;
+    return;
+  }
+
+  if (preset.mode === "cc") {
+    const unclampedIMa = Math.max(0, preset.target_i_ma);
+    const iLimit = Math.max(0, preset.max_i_ma_total);
+    const pLimitMw = Math.max(0, preset.max_p_mw);
+    const pLimitedIMa =
+      vMv > 0 ? Math.floor((pLimitMw * 1000) / vMv) : unclampedIMa;
+    const iMa = Math.min(unclampedIMa, iLimit, pLimitedIMa);
+    next.raw.target_value = iMa;
+    next.raw.i_local_ma = Math.round(iMa * 0.9);
+    next.raw.i_remote_ma = iMa - next.raw.i_local_ma;
+    next.raw.calc_p_mw = Math.round((iMa * vMv) / 1000);
+  } else {
+    // Extremely simple CV approximation: track target voltage, draw a small current.
+    next.raw.v_remote_mv = Math.max(0, preset.target_v_mv);
+    next.raw.v_local_mv = next.raw.v_remote_mv + 50;
+    const iMa = Math.min(Math.max(0, preset.max_i_ma_total), 1_000);
+    next.raw.target_value = iMa;
+    next.raw.i_local_ma = Math.round(iMa * 0.9);
+    next.raw.i_remote_ma = iMa - next.raw.i_local_ma;
+    next.raw.calc_p_mw = Math.round((iMa * next.raw.v_remote_mv) / 1000);
+  }
+
+  state.status = next;
+}
+
+async function mockGetPresets(baseUrl: string): Promise<{ presets: Preset[] }> {
+  const state = getOrCreateMockDevice(baseUrl);
+  return { presets: structuredClone(state.presets) };
+}
+
+async function mockUpdatePreset(
+  baseUrl: string,
+  payload: Preset,
+): Promise<Preset> {
+  const state = getOrCreateMockDevice(baseUrl);
+  const presetId = assertPresetId(payload.preset_id);
+
+  const idx = state.presets.findIndex((p) => p.preset_id === presetId);
+  if (idx < 0) {
+    mockInvalidRequest("preset not found");
+  }
+
+  const nextPreset: Preset = {
+    preset_id: presetId,
+    mode: payload.mode,
+    target_i_ma: Number.isFinite(payload.target_i_ma) ? payload.target_i_ma : 0,
+    target_v_mv: Number.isFinite(payload.target_v_mv) ? payload.target_v_mv : 0,
+    min_v_mv: Number.isFinite(payload.min_v_mv) ? payload.min_v_mv : 0,
+    max_i_ma_total: Number.isFinite(payload.max_i_ma_total)
+      ? payload.max_i_ma_total
+      : 0,
+    max_p_mw: Number.isFinite(payload.max_p_mw) ? payload.max_p_mw : 0,
+  };
+
+  state.presets[idx] = nextPreset;
+  mockUpdateStatusFromControl(state);
+  return structuredClone(nextPreset);
+}
+
+async function mockApplyPreset(
+  baseUrl: string,
+  preset_id: number,
+): Promise<ControlView> {
+  const state = getOrCreateMockDevice(baseUrl);
+  const presetId = assertPresetId(preset_id);
+
+  state.active_preset_id = presetId;
+  // Spec requirement: applying a preset forces output off.
+  state.output_enabled = false;
+  mockUpdateStatusFromControl(state);
+
+  return mockMakeControlView(state);
+}
+
+async function mockGetControl(baseUrl: string): Promise<ControlView> {
+  const state = getOrCreateMockDevice(baseUrl);
+  mockUpdateStatusFromControl(state);
+  return mockMakeControlView(state);
+}
+
+async function mockUpdateControl(
+  baseUrl: string,
+  payload: { output_enabled: boolean },
+): Promise<ControlView> {
+  const state = getOrCreateMockDevice(baseUrl);
+
+  const nextOutputEnabled = Boolean(payload.output_enabled);
+  const prevOutputEnabled = state.output_enabled;
+
+  state.output_enabled = nextOutputEnabled;
+
+  // Spec requirement: uv_latched clears only on output off->on edge.
+  if (!prevOutputEnabled && nextOutputEnabled && state.uv_latched) {
+    state.uv_latched = false;
+  }
+
+  // Derived rule (mock-only): latch UV when enabled and v < min_v_mv.
+  if (nextOutputEnabled) {
+    const preset = mockGetActivePreset(state);
+    const vMv = state.status.raw.v_remote_mv ?? 0;
+    if (preset.min_v_mv > 0 && vMv < preset.min_v_mv) {
+      state.uv_latched = true;
+    }
+  }
+
+  mockUpdateStatusFromControl(state);
+  return mockMakeControlView(state);
+}
+
+async function mockDebugSetUvLatched(
+  baseUrl: string,
+  uv_latched: boolean,
+): Promise<ControlView> {
+  const state = getOrCreateMockDevice(baseUrl);
+  state.uv_latched = Boolean(uv_latched);
+  return mockMakeControlView(state);
 }
 
 async function mockSoftReset(
@@ -832,6 +1037,98 @@ export async function updateCc(
       "Content-Type": "text/plain",
     },
   });
+}
+
+// Presets / unified control view (docs/interfaces/network-http-api.md §3.6..§3.10)
+
+export async function getPresets(baseUrl: string): Promise<Preset[]> {
+  if (isMockBaseUrl(baseUrl)) {
+    const payload = await mockGetPresets(baseUrl);
+    return payload.presets;
+  }
+  const payload = await httpJsonQueued<{ presets: Preset[] }>(
+    baseUrl,
+    "/api/v1/presets",
+  );
+  return payload.presets;
+}
+
+export async function updatePreset(
+  baseUrl: string,
+  payload: Preset,
+): Promise<Preset> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockUpdatePreset(baseUrl, payload);
+  }
+
+  const body = JSON.stringify(payload);
+
+  // Use POST + text/plain to stay within the CORS simple-request surface.
+  return httpJsonQueued<Preset>(baseUrl, "/api/v1/presets", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
+}
+
+export async function applyPreset(
+  baseUrl: string,
+  preset_id: number,
+): Promise<ControlView> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockApplyPreset(baseUrl, preset_id);
+  }
+
+  const body = JSON.stringify({ preset_id });
+
+  return httpJsonQueued<ControlView>(baseUrl, "/api/v1/presets/apply", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
+}
+
+export async function getControl(baseUrl: string): Promise<ControlView> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockGetControl(baseUrl);
+  }
+  return httpJsonQueued<ControlView>(baseUrl, "/api/v1/control");
+}
+
+export async function updateControl(
+  baseUrl: string,
+  payload: { output_enabled: boolean },
+): Promise<ControlView> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockUpdateControl(baseUrl, payload);
+  }
+
+  const body = JSON.stringify(payload);
+
+  // Use POST + text/plain to stay within the CORS simple-request surface.
+  return httpJsonQueued<ControlView>(baseUrl, "/api/v1/control", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
+}
+
+export async function __debugSetUvLatched(
+  baseUrl: string,
+  uv_latched: boolean,
+): Promise<ControlView> {
+  if (!isMockBaseUrl(baseUrl)) {
+    throw new Error(
+      "UV latch debug toggle is only available for mock:// devices",
+    );
+  }
+  return mockDebugSetUvLatched(baseUrl, uv_latched);
 }
 
 export async function postSoftReset(
