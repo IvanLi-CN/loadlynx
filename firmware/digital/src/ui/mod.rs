@@ -8,6 +8,7 @@ use heapless::String;
 use lcd_async::raw_framebuf::RawFrameBuf;
 use loadlynx_protocol::LoadMode;
 
+use crate::control::AdjustDigit;
 use crate::touch::TouchMarker;
 use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
@@ -47,6 +48,75 @@ const CARD_BG_RIGHT: i32 = 182;
 const CARD_BG_TOP_OFFSET: i32 = 6;
 const CARD_BG_BOTTOM_OFFSET: i32 = 80;
 
+// Control row (v2) layout: CC/CV mode + preset target selector.
+pub(crate) const CONTROL_ROW_TOP: i32 = 144;
+pub(crate) const CONTROL_ROW_BOTTOM: i32 = 172;
+pub(crate) const CONTROL_MODE_PILL_LEFT: i32 = 198;
+pub(crate) const CONTROL_MODE_PILL_RIGHT: i32 = 252;
+pub(crate) const CONTROL_VALUE_PILL_LEFT: i32 = 256;
+pub(crate) const CONTROL_VALUE_PILL_RIGHT: i32 = 314;
+pub(crate) const CONTROL_CC_LEFT: i32 = 200;
+pub(crate) const CONTROL_CC_RIGHT: i32 = 224;
+pub(crate) const CONTROL_CV_LEFT: i32 = 226;
+pub(crate) const CONTROL_CV_RIGHT: i32 = 250;
+pub(crate) const CONTROL_BUTTON_TOP: i32 = 146;
+pub(crate) const CONTROL_BUTTON_BOTTOM: i32 = 170;
+const CONTROL_TEXT_Y: i32 = 152;
+const CONTROL_UNDERLINE_Y: i32 = 167;
+const CONTROL_PILL_RADIUS: i32 = 6;
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum ControlRowHit {
+    ModeCc,
+    ModeCv,
+    Digit(AdjustDigit),
+}
+
+pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
+    if x < CONTROL_MODE_PILL_LEFT
+        || x > CONTROL_VALUE_PILL_RIGHT
+        || y < CONTROL_ROW_TOP
+        || y > CONTROL_ROW_BOTTOM
+    {
+        return None;
+    }
+
+    // Mode segmented controls.
+    if x >= CONTROL_CC_LEFT
+        && x <= CONTROL_CC_RIGHT
+        && y >= CONTROL_BUTTON_TOP
+        && y <= CONTROL_BUTTON_BOTTOM
+    {
+        return Some(ControlRowHit::ModeCc);
+    }
+    if x >= CONTROL_CV_LEFT
+        && x <= CONTROL_CV_RIGHT
+        && y >= CONTROL_BUTTON_TOP
+        && y <= CONTROL_BUTTON_BOTTOM
+    {
+        return Some(ControlRowHit::ModeCv);
+    }
+
+    // Digit selection inside the right-aligned fixed-width value string ("00.00U").
+    if x >= CONTROL_VALUE_PILL_LEFT && x <= CONTROL_VALUE_PILL_RIGHT {
+        let glyph = SMALL_FONT.width() as i32;
+        let value_width = glyph * 6;
+        let value_x = CONTROL_VALUE_PILL_RIGHT - value_width;
+        if x < value_x || x > CONTROL_VALUE_PILL_RIGHT {
+            return None;
+        }
+        let idx = (x - value_x) / glyph;
+        return match idx {
+            1 => Some(ControlRowHit::Digit(AdjustDigit::Ones)),
+            3 => Some(ControlRowHit::Digit(AdjustDigit::Tenths)),
+            4 => Some(ControlRowHit::Digit(AdjustDigit::Hundredths)),
+            _ => None,
+        };
+    }
+
+    None
+}
+
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum WifiUiStatus {
     Disabled,
@@ -61,6 +131,7 @@ pub struct UiChangeMask {
     pub main_metrics: bool,
     pub voltage_pair: bool,
     pub current_pair: bool,
+    pub control_row: bool,
     pub telemetry_lines: bool,
     pub bars: bool,
     pub wifi_status: bool,
@@ -72,6 +143,7 @@ impl UiChangeMask {
         !(self.main_metrics
             || self.voltage_pair
             || self.current_pair
+            || self.control_row
             || self.telemetry_lines
             || self.bars
             || self.wifi_status
@@ -142,7 +214,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.ch1_current_text.as_str(),
         data.ch2_current_text.as_str(),
     );
-    draw_set_current(&mut canvas, data.set_current_text.as_str());
+    draw_control_row(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
     render_wifi_status(&mut canvas, data.wifi_status);
@@ -218,11 +290,22 @@ pub fn render_partial(
 
     if mask.current_pair {
         // 清理右侧电流对所占区域的背景，再重绘标题和条形图。
-        canvas.fill_rect(Rect::new(190, 96, LOGICAL_WIDTH, 180), rgb(0x080f19));
+        canvas.fill_rect(
+            Rect::new(190, 96, LOGICAL_WIDTH, CONTROL_ROW_TOP),
+            rgb(0x080f19),
+        );
         let ch1_text = curr.ch1_current_text.as_str();
         let ch2_text = curr.ch2_current_text.as_str();
         draw_current_pair(&mut canvas, curr, ch1_text, ch2_text);
-        draw_set_current(&mut canvas, curr.set_current_text.as_str());
+    }
+
+    if mask.control_row {
+        // 控制行（CC/CV + 目标值 + 选中位下划线）：独立刷新，避免与电流对清屏互相干扰。
+        canvas.fill_rect(
+            Rect::new(190, CONTROL_ROW_TOP, LOGICAL_WIDTH, 180),
+            rgb(0x080f19),
+        );
+        draw_control_row(&mut canvas, curr);
     }
 
     if mask.telemetry_lines {
@@ -358,14 +441,74 @@ fn small_text_width(text: &str, spacing: i32) -> i32 {
     (text.chars().count() as i32) * glyph
 }
 
-fn draw_set_current(canvas: &mut Canvas, text: &str) {
-    // CC 模式设定电流行："SET I" + 右对齐的设定值。
-    let baseline = 156;
-    draw_small_text(canvas, "SET I", 198, baseline, rgb(0x6d7fa4), 0);
+fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
+    // Rounded rectangle pills (no border), per v2 design.
+    canvas.fill_round_rect(
+        Rect::new(
+            CONTROL_MODE_PILL_LEFT,
+            CONTROL_ROW_TOP,
+            CONTROL_MODE_PILL_RIGHT,
+            CONTROL_ROW_BOTTOM,
+        ),
+        CONTROL_PILL_RADIUS,
+        rgb(0x1c2638),
+    );
+    canvas.fill_round_rect(
+        Rect::new(
+            CONTROL_VALUE_PILL_LEFT,
+            CONTROL_ROW_TOP,
+            CONTROL_VALUE_PILL_RIGHT,
+            CONTROL_ROW_BOTTOM,
+        ),
+        CONTROL_PILL_RADIUS,
+        rgb(0x1c2638),
+    );
 
-    let width = small_text_width(text, 0);
-    let value_x = 314 - width;
-    draw_small_text(canvas, text, value_x, baseline, rgb(0xdfe7ff), 0);
+    // MODE segmented labels (CC / CV) with no border; active is highlighted by color only.
+    let (cc_color, cv_color) = match data.active_mode {
+        LoadMode::Cc => (rgb(0xFF5252), rgb(0x6d7fa4)),
+        LoadMode::Cv => (rgb(0x6d7fa4), rgb(0xFFB347)),
+        LoadMode::Reserved(_) => (rgb(0xFF5252), rgb(0x6d7fa4)),
+    };
+
+    // Optional visual separator between CC and CV inside the pill.
+    canvas.draw_line(
+        CONTROL_CC_RIGHT + 1,
+        CONTROL_BUTTON_TOP,
+        CONTROL_CC_RIGHT + 1,
+        CONTROL_BUTTON_BOTTOM - 1,
+        rgb(0x080f19),
+    );
+
+    let cc_text_w = small_text_width("CC", 0);
+    let cv_text_w = small_text_width("CV", 0);
+    let cc_x = CONTROL_CC_LEFT + ((CONTROL_CC_RIGHT - CONTROL_CC_LEFT) - cc_text_w) / 2;
+    let cv_x = CONTROL_CV_LEFT + ((CONTROL_CV_RIGHT - CONTROL_CV_LEFT) - cv_text_w) / 2;
+    draw_small_text(canvas, "CC", cc_x, CONTROL_TEXT_Y, cc_color, 0);
+    draw_small_text(canvas, "CV", cv_x, CONTROL_TEXT_Y, cv_color, 0);
+
+    // Preset target value (fixed-width "xx.xxU", right-aligned inside VALUE pill).
+    let target = data.control_target_text.as_str();
+    let width = small_text_width(target, 0);
+    let value_x = CONTROL_VALUE_PILL_RIGHT - width;
+    draw_small_text(canvas, target, value_x, CONTROL_TEXT_Y, rgb(0xdfe7ff), 0);
+
+    // Digit-selection underline: ones / tenths / hundredths (0.1 default),
+    // without showing explicit “step” text.
+    let glyph = SMALL_FONT.width() as i32;
+    let idx = match data.adjust_digit {
+        AdjustDigit::Ones => 1,
+        AdjustDigit::Tenths => 3,
+        AdjustDigit::Hundredths => 4,
+    };
+    let underline_x0 = value_x + idx * glyph;
+    canvas.draw_line(
+        underline_x0,
+        CONTROL_UNDERLINE_Y,
+        underline_x0 + glyph - 1,
+        CONTROL_UNDERLINE_Y,
+        rgb(0x4cc9f0),
+    );
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -556,6 +699,38 @@ fn format_pair_value(value: f32, unit: char) -> String<6> {
     s
 }
 
+fn format_setpoint_milli(value_milli: i32, unit: char) -> String<6> {
+    // Fixed-width numeric text for the control row: always "xx.xxU" (6 chars),
+    // with a leading space for single-digit integers.
+    //
+    // This intentionally avoids float formatting and keeps digit columns stable
+    // so the underline indicator can map to ones/tenths/hundredths consistently.
+    let mut s = String::<6>::new();
+    let mut v = value_milli.max(0);
+    // Round to 0.01 units (10 milli) for display stability.
+    v = v.saturating_add(5) / 10 * 10;
+
+    let centi = (v / 10) as u32; // 0.01 units
+    let int_part = centi / 100;
+    let frac_part = centi % 100;
+
+    if int_part < 10 {
+        let _ = s.push(' ');
+        let _ = s.push((b'0' + int_part as u8) as char);
+    } else {
+        let tens = (int_part / 10).min(9);
+        let ones = int_part % 10;
+        let _ = s.push((b'0' + tens as u8) as char);
+        let _ = s.push((b'0' + ones as u8) as char);
+    }
+
+    let _ = s.push('.');
+    let _ = s.push((b'0' + (frac_part / 10) as u8) as char);
+    let _ = s.push((b'0' + (frac_part % 10) as u8) as char);
+    let _ = s.push(unit);
+    s
+}
+
 fn format_four_digits(value: f32) -> String<5> {
     // 生成恰好 4 个字符的“整数+小数”数字，不使用核心库浮点 fmt。
     let mut s = String::<5>::new();
@@ -690,6 +865,62 @@ impl<'a> Canvas<'a> {
         }
     }
 
+    fn fill_round_rect(&mut self, rect: Rect, radius: i32, color: Rgb565) {
+        let w = rect.right - rect.left;
+        let h = rect.bottom - rect.top;
+        if w <= 0 || h <= 0 {
+            return;
+        }
+        let mut r = radius.max(0);
+        r = r.min(w / 2).min(h / 2);
+        if r == 0 {
+            self.fill_rect(rect, color);
+            return;
+        }
+        let r2 = r * r;
+
+        let tl_cx = rect.left + r;
+        let tl_cy = rect.top + r;
+        let tr_cx = rect.right - r - 1;
+        let tr_cy = rect.top + r;
+        let bl_cx = rect.left + r;
+        let bl_cy = rect.bottom - r - 1;
+        let br_cx = rect.right - r - 1;
+        let br_cy = rect.bottom - r - 1;
+
+        let left_r = rect.left + r;
+        let right_r = rect.right - r;
+        let top_r = rect.top + r;
+        let bottom_r = rect.bottom - r;
+
+        for y in rect.top..rect.bottom {
+            for x in rect.left..rect.right {
+                let inside = if x < left_r && y < top_r {
+                    let dx = x - tl_cx;
+                    let dy = y - tl_cy;
+                    dx * dx + dy * dy <= r2
+                } else if x >= right_r && y < top_r {
+                    let dx = x - tr_cx;
+                    let dy = y - tr_cy;
+                    dx * dx + dy * dy <= r2
+                } else if x < left_r && y >= bottom_r {
+                    let dx = x - bl_cx;
+                    let dy = y - bl_cy;
+                    dx * dx + dy * dy <= r2
+                } else if x >= right_r && y >= bottom_r {
+                    let dx = x - br_cx;
+                    let dy = y - br_cy;
+                    dx * dx + dy * dy <= r2
+                } else {
+                    true
+                };
+                if inside {
+                    self.set_pixel(x, y, color);
+                }
+            }
+        }
+    }
+
     fn draw_line(&mut self, x0: i32, y0: i32, x1: i32, y1: i32, color: Rgb565) {
         let mut x0 = x0;
         let mut y0 = y0;
@@ -725,7 +956,9 @@ pub struct UiSnapshot {
     pub local_voltage: f32,
     pub ch1_current: f32,
     pub ch2_current: f32,
-    pub set_current_a: f32,
+    pub control_target_milli: i32,
+    pub control_target_unit: char,
+    pub adjust_digit: AdjustDigit,
     pub run_time: String<16>,
     pub sink_core_temp: f32,
     pub sink_exhaust_temp: f32,
@@ -749,7 +982,7 @@ pub struct UiSnapshot {
     pub local_voltage_text: String<6>,
     pub ch1_current_text: String<6>,
     pub ch2_current_text: String<6>,
-    pub set_current_text: String<6>,
+    pub control_target_text: String<6>,
     pub status_lines: [String<20>; 5],
 }
 
@@ -765,7 +998,9 @@ impl UiSnapshot {
             local_voltage: 24.47,
             ch1_current: 4.20,
             ch2_current: 3.50,
-            set_current_a: 12.00,
+            control_target_milli: 12_000,
+            control_target_unit: 'A',
+            adjust_digit: AdjustDigit::DEFAULT,
             run_time,
             sink_core_temp: 42.3,
             sink_exhaust_temp: 38.1,
@@ -786,7 +1021,7 @@ impl UiSnapshot {
             local_voltage_text: String::new(),
             ch1_current_text: String::new(),
             ch2_current_text: String::new(),
-            set_current_text: String::new(),
+            control_target_text: String::new(),
             status_lines: Default::default(),
         }
     }
@@ -808,6 +1043,12 @@ impl UiSnapshot {
         self.uv_latched = uv_latched;
     }
 
+    pub fn set_control_row(&mut self, target_milli: i32, unit: char, adjust_digit: AdjustDigit) {
+        self.control_target_milli = target_milli;
+        self.control_target_unit = unit;
+        self.adjust_digit = adjust_digit;
+    }
+
     /// Recompute all preformatted strings from the current numeric snapshot.
     pub fn update_strings(&mut self) {
         self.main_voltage_text = format_value(self.main_voltage, 2);
@@ -823,7 +1064,8 @@ impl UiSnapshot {
         self.local_voltage_text = format_pair_value(self.local_voltage, 'V');
         self.ch1_current_text = format_pair_value(self.ch1_current, 'A');
         self.ch2_current_text = format_pair_value(self.ch2_current, 'A');
-        self.set_current_text = format_pair_value(self.set_current_a, 'A');
+        self.control_target_text =
+            format_setpoint_milli(self.control_target_milli, self.control_target_unit);
 
         self.status_lines = self.compute_status_lines();
     }

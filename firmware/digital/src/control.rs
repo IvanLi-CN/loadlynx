@@ -4,9 +4,29 @@ use loadlynx_protocol::LoadMode;
 pub const PRESET_COUNT: usize = 5;
 
 pub const HARD_MAX_I_MA_TOTAL: i32 = 10_000;
+pub const HARD_MAX_V_MV: i32 = 55_000;
 pub const DEFAULT_MIN_V_MV: i32 = 0;
 pub const DEFAULT_MAX_I_MA_TOTAL: i32 = HARD_MAX_I_MA_TOTAL;
 pub const DEFAULT_MAX_P_MW: u32 = 150_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
+pub enum AdjustDigit {
+    Ones,
+    Tenths,
+    Hundredths,
+}
+
+impl AdjustDigit {
+    pub const DEFAULT: Self = Self::Tenths;
+
+    pub fn step_milli(self) -> i32 {
+        match self {
+            AdjustDigit::Ones => 1_000,    // 1.00
+            AdjustDigit::Tenths => 100,    // 0.10
+            AdjustDigit::Hundredths => 10, // 0.01
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Preset {
@@ -25,8 +45,8 @@ impl Preset {
 
         // Non-negative invariants.
         self.target_i_ma = self.target_i_ma.max(0);
-        self.target_v_mv = self.target_v_mv.max(0);
-        self.min_v_mv = self.min_v_mv.max(0);
+        self.target_v_mv = self.target_v_mv.max(0).min(HARD_MAX_V_MV);
+        self.min_v_mv = self.min_v_mv.max(0).min(HARD_MAX_V_MV);
         self.max_i_ma_total = self.max_i_ma_total.max(0);
 
         // Hard clamps.
@@ -34,8 +54,7 @@ impl Preset {
         let hard_max_p = crate::LIMIT_PROFILE_DEFAULT.max_p_mw;
         self.max_p_mw = self.max_p_mw.min(hard_max_p);
 
-        // Targets should never exceed the current/power caps. Voltage cap is
-        // not defined at the digital layer (only non-negative is enforced).
+        // Targets should never exceed the current/power caps.
         self.target_i_ma = self.target_i_ma.min(self.max_i_ma_total);
         self
     }
@@ -98,6 +117,7 @@ pub struct ControlState {
     pub presets: [Preset; PRESET_COUNT],
     pub active_preset_id: u8, // 1..=5
     pub output_enabled: bool,
+    pub adjust_digit: AdjustDigit,
 }
 
 impl ControlState {
@@ -106,6 +126,7 @@ impl ControlState {
             presets,
             active_preset_id: 1,
             output_enabled: false,
+            adjust_digit: AdjustDigit::DEFAULT,
         }
     }
 
