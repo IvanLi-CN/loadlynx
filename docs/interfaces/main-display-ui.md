@@ -1,6 +1,8 @@
 # LoadLynx Main Display UI
 
-![Main display mock](../assets/main-display/main-display-mock.png)
+![Main display mock](../assets/main-display/main-display-mock-v2-cc.png)
+
+![Main display mock (CV)](../assets/main-display/main-display-mock-v2-cv.png)
 
 > Mock is rendered at 320×240 px, matching the landscape frame buffer of the P024C128-CTP module (`docs/other-datasheets/p024c128-ctp.md`).
 
@@ -48,7 +50,7 @@
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,44)-(314,50)`，中心 x=256 |
 | Current pair | 左列 CH1 `4.20 A`，右列 CH2 `3.50 A` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 同上 | 左列起点 (198,96)，右列起点 (258,96) |
 | Current mirror bar | 0 A 居中，上限 5 A/通道 | — | 轨道 `#1C2638`，填充 `#4CC9F0` | 长条 `(198,132)-(314,138)`，中心 x=256 |
-| CC set current line | 文本 “SET” + 右对齐设定电流值 “12.00A” | SmallFont 标签 + SmallFont 数值（状态值字体族，与 CH1/CH2 一致） | 标签 `#6D7FA4`，数值 `#DFE7FF` | 标签起点 `(198,156)`，数值右对齐至 x=314（绘制前测量文本宽度，计算 `value_x = 314 − text_width`） |
+| Control row (v2) | 模式切换（CC/CV）+ 当前 preset 目标值（单位随模式变更） | SmallFont | 背景 `#1C2638`；CC 文本 `#FF5252`；CV 文本 `#FFB347`；数值 `#DFE7FF`；选中位下划线 `#4CC9F0` | 行背景：`y=144..172`；MODE pill `(198,144)-(252,172)`；VALUE pill `(256,144)-(314,172)`；默认选中十分位（0.1），不显示“步长”文本 |
 | Run status line | “RUN 01:32:10” | SmallFont | `#DFE7FF` | Baseline at `(198,200)` |
 | Temperature line | “TEMP 37.8°C” | SmallFont | `#DFE7FF` | Baseline at `(198,214)` |
 | Energy line | “ENERGY 125.4Wh” | SmallFont | `#DFE7FF` | Baseline at `(198,228)` |
@@ -91,16 +93,35 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
 2. **Right status**
    - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 30 V`.
    - Channel bars = `clamp(I_actual / I_rating)`（默认：CH1 5 A，CH2 5 A，对应两路 5 A 额定功率通道；总目标电流 <2 A 时 CH2 预期为 0 A，≥2 A 时两路条形图预期近似对称）。
-   - CC 设定电流一行（“SET  12.00A”）展示当前 CC 模式下的目标总电流：数值来自数字板当前的 CC setpoint（非测量值），单位固定为 A，格式为 4 位数 + 单位（例如 `0.50A`, `12.0A`, `25.0A`），始终右对齐至 x=314，刷新频率与左列电流设定更新节奏一致（推荐 10–20 Hz 或在 setpoint 变化事件时立即更新）。
+   - **Control row (v2)** replaces the legacy “SET I” line:
+     - Shows the **current preset** `mode` (`CC`/`CV`) and the **current preset target** (unit follows the active mode).
+     - Target value is sourced from the digital preset model (not measured values), right-aligned to x=314.
+     - The selected adjustment digit is indicated by a short underline; do not show explicit “step” text.
    - Runtime + energy update at 2 Hz, temperature at 5 Hz. Keep color semantics fixed for muscle memory.
 
 ## Interaction Hooks
 
-- (Optional CTP) tap on any metric tile to open its detail drawer（对远/近端电压可切换 sense 设置，对通道可切换 CC/CV/CP）。
-- Drag horizontally on the voltage/current bars to trim setpoints in ±10 mV / ±10 mA steps；长按可锁定通道。
-- 提供 320×240 RGB565 framebuffer dump，方便产线校验像素级界面。
+### Control row (v2) touch + encoder
+
+#### Tap targets (logical pixel bounds)
+
+- MODE pill background: `(198,144)-(252,172)` (rounded rectangle, no border)
+  - **CC button**: `(200,146)-(224,170)`
+  - **CV button**: `(226,146)-(250,170)`
+- VALUE pill background: `(256,144)-(314,172)` (rounded rectangle, no border)
+  - Tap the **ones / tenths / hundredths** digit to select the active adjustment digit (highlighted by a short underline). The underline is *not* a “step display”.
+
+#### Behavior
+
+- Tap **CC** / **CV**: updates the **current preset** `mode` immediately (temporary v2 behavior; no extra “apply” step), and MUST force `output_enabled=false` for safety.
+- Rotate encoder: adjusts the selected target for the **current preset**:
+  - CC: `target_i_ma` (A)
+  - CV: `target_v_mv` (V)
+  - Adjustment digit options: ones / tenths / hundredths; default is tenths (0.1).
+  - The selected digit MUST be remembered (do not show step text in the UI).
 
 ## Assets
 
-- `docs/assets/main-display/main-display-mock.png` — pixel-level mock (rendered with UTFT fonts).
+- `docs/assets/main-display/main-display-mock-v2-cc.png` — pixel-level mock (v2, CC active).
+- `docs/assets/main-display/main-display-mock-v2-cv.png` — pixel-level mock (v2, CV active).
 - `docs/assets/fonts/*.c` — raw UTFT fonts bundled for reproducible rendering.
