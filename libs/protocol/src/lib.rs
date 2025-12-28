@@ -48,6 +48,28 @@ pub const MSG_CAL_WRITE: u8 = 0x30;
 /// Reserved for future calibration readback support.
 pub const MSG_CAL_READ: u8 = 0x31;
 
+/// Wire-level load mode mapping shared between control messages and telemetry.
+///
+/// Values not listed here are reserved for future expansion.
+pub const LOAD_MODE_CC: u8 = 1;
+pub const LOAD_MODE_CV: u8 = 2;
+
+/// FastStatus mode values.
+///
+/// This mapping is intentionally identical to [`LOAD_MODE_CC`] / [`LOAD_MODE_CV`].
+pub const FAST_STATUS_MODE_CC: u8 = LOAD_MODE_CC;
+pub const FAST_STATUS_MODE_CV: u8 = LOAD_MODE_CV;
+
+/// `FastStatus.state_flags` shared bit definitions.
+///
+/// Bits 0..=2 are already in use in current firmware and MUST NOT be repurposed.
+pub const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
+pub const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
+pub const STATE_FLAG_ENABLED: u32 = 1 << 2;
+pub const STATE_FLAG_UV_LATCHED: u32 = 1 << 3;
+pub const STATE_FLAG_POWER_LIMITED: u32 = 1 << 4;
+pub const STATE_FLAG_CURRENT_LIMITED: u32 = 1 << 5;
+
 /// Fault bitmask definitions shared between analog and digital firmware.
 ///
 /// These bits live in `FastStatus.fault_flags` and represent latched protection
@@ -124,6 +146,95 @@ pub struct FastStatus {
     /// Optional raw DAC code used by the control loop.
     #[n(20)]
     pub raw_dac_code: Option<u16>,
+}
+
+/// Stable load mode contract carried in control frames and surfaced via telemetry.
+///
+/// Only CC and CV are currently defined for protocol v1; other values are reserved.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadMode {
+    Cc,
+    Cv,
+    Reserved(u8),
+}
+
+impl From<u8> for LoadMode {
+    fn from(value: u8) -> Self {
+        match value {
+            LOAD_MODE_CC => LoadMode::Cc,
+            LOAD_MODE_CV => LoadMode::Cv,
+            other => LoadMode::Reserved(other),
+        }
+    }
+}
+
+impl From<LoadMode> for u8 {
+    fn from(mode: LoadMode) -> Self {
+        match mode {
+            LoadMode::Cc => LOAD_MODE_CC,
+            LoadMode::Cv => LOAD_MODE_CV,
+            LoadMode::Reserved(raw) => raw,
+        }
+    }
+}
+
+impl Default for LoadMode {
+    fn default() -> Self {
+        LoadMode::Cc
+    }
+}
+
+impl<C> Encode<C> for LoadMode {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.u8((*self).into())?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for LoadMode {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let raw = d.u8()?;
+        Ok(raw.into())
+    }
+}
+
+/// Atomic active-control message (digital → analog) carried in [`MSG_SET_MODE`].
+///
+/// This payload freezes the v1 wire contract for CC/CV mode selection plus a
+/// complete set of safety limits and one active preset slot.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
+#[cbor(map)]
+pub struct SetMode {
+    /// 1..=5
+    #[n(0)]
+    pub preset_id: u8,
+    /// User output switch (higher layers may force false when applying a preset).
+    #[n(1)]
+    pub output_enabled: bool,
+    /// Active load mode (CC/CV).
+    #[n(2)]
+    pub mode: LoadMode,
+    /// CC target (mA). Present for wire stability; ignored in CV mode.
+    #[n(3)]
+    pub target_i_ma: i32,
+    /// CV target (mV). Present for wire stability; ignored in CC mode.
+    #[n(4)]
+    pub target_v_mv: i32,
+    /// Minimum allowed voltage (mV) (e.g. undervoltage threshold).
+    #[n(5)]
+    pub min_v_mv: i32,
+    /// Total current limit (mA) across all channels.
+    #[n(6)]
+    pub max_i_ma_total: i32,
+    /// Power limit (mW).
+    #[n(7)]
+    pub max_p_mw: u32,
 }
 
 /// Minimal control payload for adjusting the analog board's current setpoint.
@@ -654,6 +765,44 @@ pub fn encode_set_enable_frame(seq: u8, cmd: &SetEnable, out: &mut [u8]) -> Resu
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
+/// Encode an atomic `SetMode` control frame from the digital side to the analog side.
+pub fn encode_set_mode_frame(seq: u8, cmd: &SetMode, out: &mut [u8]) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = FLAG_ACK_REQ;
+    out[2] = seq;
+    out[3] = MSG_SET_MODE;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(cmd).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
 /// Encode a GetStatus control frame from the digital side. The analog side may
 /// respond by sending an immediate FastStatus frame.
 pub fn encode_get_status_frame(seq: u8, req: &GetStatus, out: &mut [u8]) -> Result<usize, Error> {
@@ -832,6 +981,17 @@ pub fn decode_set_enable_frame(frame: &[u8]) -> Result<(FrameHeader, SetEnable),
     }
     let mut decoder = minicbor::Decoder::new(payload);
     let cmd: SetEnable = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, cmd))
+}
+
+/// Decode a `SetMode` frame.
+pub fn decode_set_mode_frame(frame: &[u8]) -> Result<(FrameHeader, SetMode), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_SET_MODE {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let cmd: SetMode = decoder.decode().map_err(map_decode_err)?;
     Ok((header, cmd))
 }
 
@@ -1137,6 +1297,73 @@ mod tests {
 
         let (_hdr, decoded) = decode_cal_mode_frame(&raw[..total_len]).unwrap();
         assert_eq!(decoded.kind, CalKind::Off);
+    }
+
+    #[test]
+    fn set_mode_roundtrip_cc_and_header() {
+        let cmd = SetMode {
+            preset_id: 1,
+            output_enabled: false,
+            mode: LoadMode::Cc,
+            target_i_ma: 2500,
+            target_v_mv: 12_000,
+            min_v_mv: 500,
+            max_i_ma_total: 5000,
+            max_p_mw: 60_000,
+        };
+
+        let mut raw = [0u8; 96];
+        let len = encode_set_mode_frame(3, &cmd, &mut raw).unwrap();
+        let (hdr, decoded) = decode_set_mode_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.msg, MSG_SET_MODE);
+        assert_eq!(hdr.seq, 3);
+        assert_eq!(hdr.flags & FLAG_ACK_REQ, FLAG_ACK_REQ);
+        assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn set_mode_roundtrip_cv() {
+        let cmd = SetMode {
+            preset_id: 5,
+            output_enabled: true,
+            mode: LoadMode::Cv,
+            target_i_ma: 1234,
+            target_v_mv: 42_000,
+            min_v_mv: 1000,
+            max_i_ma_total: 3000,
+            max_p_mw: 120_000,
+        };
+
+        let mut raw = [0u8; 96];
+        let len = encode_set_mode_frame(200, &cmd, &mut raw).unwrap();
+        let (_hdr, decoded) = decode_set_mode_frame(&raw[..len]).unwrap();
+        assert_eq!(decoded.mode, LoadMode::Cv);
+        assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn set_mode_decode_rejects_wrong_msg_id() {
+        let cmd = SetMode {
+            preset_id: 1,
+            output_enabled: false,
+            mode: LoadMode::Cc,
+            target_i_ma: 0,
+            target_v_mv: 0,
+            min_v_mv: 0,
+            max_i_ma_total: 0,
+            max_p_mw: 0,
+        };
+
+        let mut raw = [0u8; 96];
+        let len = encode_set_mode_frame(1, &cmd, &mut raw).unwrap();
+        raw[3] = MSG_SET_ENABLE;
+        let crc = crc16_ccitt_false(&raw[..len - CRC_LEN]);
+        let crc_bytes = crc.to_le_bytes();
+        raw[len - 2] = crc_bytes[0];
+        raw[len - 1] = crc_bytes[1];
+
+        let err = decode_set_mode_frame(&raw[..len]).unwrap_err();
+        assert!(matches!(err, Error::UnsupportedMessage(MSG_SET_ENABLE)));
     }
 
     #[test]

@@ -68,6 +68,23 @@ Hardware-in-the-loop verification is now driven by the single-instance `tools/mc
 - When analyzing logs, always cross-check `LOADLYNX_FW_VERSION` against local `tmp/{analog|digital}-fw-version.txt`.
 - Treat probe-rs/espflash failures as repository engineering issues first; adjust config or command arguments before escalating.
 
+### Hardware Safety Guardrails (STRICT)
+
+These rules exist to prevent an Agent from silently switching the owner's connected devices (wrong probe/port) during HIL work.
+
+- **Never change cached ports/probes without explicit owner permission.**
+  - Forbidden unless the owner explicitly approves the *exact command*:
+    - `just agentd set-port analog ...`
+    - `just agentd set-port digital ...`
+    - any direct `loadlynx-agentd set-port ...` equivalent
+  - **Important:** vague instructions like “继续 / 你自己做 / 再试试 / finish it” are *NOT* permission to change ports/probes. They only permit using the currently cached/approved device selection.
+- **Do not "try switching probes/ports" as a debugging tactic.**
+  - If `flash/reset/monitor` fails, collect evidence (logs + `just agentd-get-port ...` + `just agentd list-ports ...`) and ask the owner which probe/port to use.
+- **Avoid side-channel device selection changes.**
+  - Do not edit or write to any device-selection cache files (e.g. `.stm32-port`, `.esp32-port`) unless the owner explicitly asks.
+- **Before any HIL action, echo the target device selection.**
+  - Always state which `analog` probe selector / `digital` serial port will be used (as returned by `just agentd-get-port ...`) before running `flash/reset`.
+
 ## Commit & Pull Request Guidelines
 
 - Use Conventional Commits: `feat:`, `fix:`, `docs:`, `chore:`, etc. Examples from history: `feat: scaffold ...`, `docs: add Markdown datasheets ...`.

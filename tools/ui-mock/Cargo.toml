@@ -1,0 +1,13 @@
+[package]
+name = "ui-mock"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+embedded-graphics = "0.8"
+heapless = "0.8"
+image = "0.25"
+lcd-async = "0.1.1"
+loadlynx-protocol = { path = "../../libs/protocol" }
+

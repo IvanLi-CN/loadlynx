@@ -54,11 +54,12 @@ use lcd_async::{
 };
 use loadlynx_protocol::{
     CRC_LEN, CalKind, CalMode, FLAG_ACK_REQ, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
-    LimitProfile, MSG_CAL_MODE, MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO, MSG_LIMIT_PROFILE,
-    MSG_SET_POINT, MSG_SOFT_RESET, SetEnable, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
-    decode_cal_mode_frame, decode_fast_status_frame, decode_frame, decode_hello_frame,
-    decode_soft_reset_frame, encode_cal_mode_frame, encode_cal_write_frame,
-    encode_limit_profile_frame, encode_set_enable_frame, encode_set_point_frame,
+    LimitProfile, LoadMode, MSG_CAL_MODE, MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO,
+    MSG_LIMIT_PROFILE, MSG_SET_MODE, MSG_SET_POINT, MSG_SOFT_RESET, STATE_FLAG_UV_LATCHED,
+    SetEnable, SetMode, SetPoint, SlipDecoder, SoftReset, SoftResetReason, decode_cal_mode_frame,
+    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_soft_reset_frame,
+    encode_cal_mode_frame, encode_cal_write_frame, encode_limit_profile_frame,
+    encode_set_enable_frame, encode_set_mode_frame, encode_set_point_frame,
     encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
@@ -67,6 +68,9 @@ use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over
 pub(crate) const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
+
+mod control;
+use control::{ControlState, PresetsBlobError};
 
 mod ui;
 use ui::{AnalogState, UiSnapshot};
@@ -147,7 +151,6 @@ const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
 pub(crate) const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 pub(crate) const TARGET_I_MIN_MA: i32 = 0;
 pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
-const ENCODER_MAX_STEPS: i32 = TARGET_I_MAX_MA / ENCODER_STEP_MA;
 // 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
 pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     max_i_ma: TARGET_I_MAX_MA,
@@ -160,6 +163,10 @@ const ENABLE_UART_UHCI_DMA: bool = true;
 // SetPoint 可靠传输：ACK 等待与退避重传（最新值优先）。
 const SETPOINT_ACK_TIMEOUT_MS: u32 = 40;
 const SETPOINT_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
+// SetMode 可靠传输：与 SetPoint 类似的 ACK 等待与退避重传（最新值优先）。
+const SETMODE_ACK_TIMEOUT_MS: u32 = 40;
+const SETMODE_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
+const SETMODE_TX_PERIOD_MS: u32 = 250;
 
 // Fan PWM control (ESP32‑S3 本地，根据 G431 上报的 sink_core_temp + 功率驱动风扇占空比)。
 // 数值集中在此处，便于后续调参。
@@ -220,6 +227,14 @@ impl CalibrationState {
 
 pub type CalibrationMutex = Mutex<CriticalSectionRawMutex, CalibrationState>;
 static CALIBRATION: StaticCell<CalibrationMutex> = StaticCell::new();
+
+pub type ControlMutex = Mutex<CriticalSectionRawMutex, ControlState>;
+static CONTROL: StaticCell<ControlMutex> = StaticCell::new();
+pub(crate) static CONTROL_REV: AtomicU32 = AtomicU32::new(0);
+
+pub(crate) fn bump_control_rev() -> u32 {
+    CONTROL_REV.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
+}
 
 // Soft-reset requests originating from the HTTP API are funneled through this
 // small channel so they can be serialized onto the existing UART TX task.
@@ -300,6 +315,13 @@ static SETPOINT_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static SETPOINT_ACK_PENDING: AtomicBool = AtomicBool::new(false);
+
+static SETMODE_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETMODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETMODE_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETMODE_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SETMODE_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
+static SETMODE_ACK_PENDING: AtomicBool = AtomicBool::new(false);
 pub(crate) static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
 pub(crate) static LINK_UP: AtomicBool = AtomicBool::new(false);
 pub(crate) static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
@@ -493,6 +515,7 @@ async fn encoder_task(
     _unit: &'static pcnt::unit::Unit<'static, 0>,
     counter: pcnt::unit::Counter<'static, 0>,
     button: Input<'static>,
+    control: &'static ControlMutex,
 ) {
     info!(
         "encoder task starting (GPIO1=ENC_A, GPIO2=ENC_B, GPIO0=ENC_SW active-low, counts_per_step={})",
@@ -503,6 +526,9 @@ async fn encoder_task(
     let mut residual: i16 = 0;
     let mut last_button = button.is_low();
     let mut debounce: u8 = 0;
+    let mut down_since_ms: Option<u32> = None;
+    let mut long_action_fired: bool = false;
+    const LONG_PRESS_MS: u32 = 800;
 
     loop {
         let count = counter.get();
@@ -517,47 +543,55 @@ async fn encoder_task(
 
                 // Reverse logical direction to match panel orientation (CW increments).
                 let logical_step = -phys_step;
-                let mut prev_steps = ENCODER_VALUE.load(Ordering::SeqCst);
-                let (old_steps, new_steps) = loop {
-                    let candidate = (prev_steps + logical_step as i32).clamp(0, ENCODER_MAX_STEPS);
-                    match ENCODER_VALUE.compare_exchange(
-                        prev_steps,
-                        candidate,
-                        Ordering::SeqCst,
-                        Ordering::SeqCst,
-                    ) {
-                        Ok(old) => break (old, candidate),
-                        Err(cur) => prev_steps = cur,
-                    }
-                };
+                let mut guard = control.lock().await;
+                let preset_id = guard.active_preset_id;
+                let preset_idx = preset_id.saturating_sub(1) as usize;
+                if preset_idx >= control::PRESET_COUNT {
+                    continue;
+                }
 
-                if new_steps != old_steps {
-                    if logical_step > 0 {
-                        info!(
-                            "encoder cw: value={} ({} mA)",
-                            new_steps,
-                            new_steps * ENCODER_STEP_MA
-                        );
-                    } else {
-                        info!(
-                            "encoder ccw: value={} ({} mA)",
-                            new_steps,
-                            new_steps * ENCODER_STEP_MA
-                        );
-                    }
+                let digit = guard.adjust_digit;
+                let step = digit.step_milli().saturating_mul(logical_step as i32);
+                let mode = guard.presets[preset_idx].mode;
 
-                    // Rule A: if setpoint hits 0, force load switch OFF.
-                    if new_steps == 0 && old_steps != 0 {
-                        LOAD_SWITCH_ENABLED.store(false, Ordering::SeqCst);
+                let mut changed = false;
+                match mode {
+                    LoadMode::Cc | LoadMode::Reserved(_) => {
+                        let prev = guard.presets[preset_idx].target_i_ma;
+                        let max = guard.presets[preset_idx].max_i_ma_total;
+                        let next = (prev.saturating_add(step)).clamp(0, max);
+                        if next != prev {
+                            guard.presets[preset_idx].target_i_ma = next;
+                            changed = true;
+                            info!(
+                                "encoder {}: preset_id={} mode=CC target_i={} mA (digit={})",
+                                if logical_step > 0 { "cw" } else { "ccw" },
+                                preset_id,
+                                next,
+                                digit
+                            );
+                        }
                     }
-                } else if (new_steps == 0 && logical_step < 0)
-                    || (new_steps == ENCODER_MAX_STEPS && logical_step > 0)
-                {
-                    info!(
-                        "encoder at limit: value={} ({} mA)",
-                        new_steps,
-                        new_steps * ENCODER_STEP_MA
-                    );
+                    LoadMode::Cv => {
+                        let prev = guard.presets[preset_idx].target_v_mv;
+                        let next = (prev.saturating_add(step)).clamp(0, control::HARD_MAX_V_MV);
+                        if next != prev {
+                            guard.presets[preset_idx].target_v_mv = next;
+                            changed = true;
+                            info!(
+                                "encoder {}: preset_id={} mode=CV target_v={} mV (digit={})",
+                                if logical_step > 0 { "cw" } else { "ccw" },
+                                preset_id,
+                                next,
+                                digit
+                            );
+                        }
+                    }
+                }
+
+                if changed {
+                    guard.presets[preset_idx] = guard.presets[preset_idx].clamp();
+                    bump_control_rev();
                 }
             }
         }
@@ -569,28 +603,130 @@ async fn encoder_task(
                 last_button = pressed;
                 debounce = 0;
                 if pressed {
-                    let steps = ENCODER_VALUE.load(Ordering::SeqCst);
-                    let setpoint_ma = clamp_target_ma(steps.saturating_mul(ENCODER_STEP_MA));
-                    if setpoint_ma == 0 {
-                        info!("encoder button pressed: setpoint is 0 mA (no-op)");
-                    } else {
-                        let prev = LOAD_SWITCH_ENABLED.fetch_xor(true, Ordering::SeqCst);
+                    // Start press window: short press toggles output, long press cycles preset.
+                    down_since_ms = Some(now_ms32());
+                    long_action_fired = false;
+                } else {
+                    // Release: if we didn't fire long action, treat as short press.
+                    if down_since_ms.is_some() && !long_action_fired {
+                        let mut guard = control.lock().await;
+                        let prev = guard.output_enabled;
+                        guard.output_enabled = !prev;
+                        bump_control_rev();
                         info!(
-                            "encoder button pressed: load switch {} -> {} (setpoint={} mA)",
+                            "encoder short-press: output_enabled {} -> {} (preset_id={})",
                             if prev { "ON" } else { "OFF" },
                             if !prev { "ON" } else { "OFF" },
-                            setpoint_ma
+                            guard.active_preset_id
                         );
                     }
+                    down_since_ms = None;
+                    long_action_fired = false;
                 }
             }
         } else {
             debounce = 0;
         }
 
+        // Long press: cycle active preset once per press, force output OFF.
+        if pressed {
+            if let Some(start) = down_since_ms {
+                let now = now_ms32();
+                if !long_action_fired && now.wrapping_sub(start) >= LONG_PRESS_MS {
+                    let mut guard = control.lock().await;
+                    guard.active_preset_id = if guard.active_preset_id >= 5 {
+                        1
+                    } else {
+                        guard.active_preset_id + 1
+                    };
+                    if guard.output_enabled {
+                        guard.output_enabled = false;
+                    }
+                    bump_control_rev();
+                    long_action_fired = true;
+                    info!(
+                        "encoder long-press: active_preset_id -> {} (output forced OFF)",
+                        guard.active_preset_id
+                    );
+                }
+            }
+        }
+
         for _ in 0..ENCODER_POLL_YIELD_LOOPS {
             yield_now().await;
         }
+    }
+}
+
+#[embassy_executor::task]
+async fn touch_ui_task(control: &'static ControlMutex) {
+    info!("touch-ui task starting (control row hit-test)");
+    let mut last_seq: u32 = 0;
+
+    loop {
+        let seq = touch::touch_marker_seq();
+        if seq == last_seq {
+            yield_now().await;
+            continue;
+        }
+        last_seq = seq;
+
+        let Some(marker) = touch::load_touch_marker() else {
+            yield_now().await;
+            continue;
+        };
+
+        // FT6336U: event=0 is typically “down”. Act only once per touch-down.
+        if marker.event != 0 {
+            yield_now().await;
+            continue;
+        }
+
+        let Some(hit) = ui::hit_test_control_row(marker.x, marker.y) else {
+            yield_now().await;
+            continue;
+        };
+
+        match hit {
+            ui::ControlRowHit::ModeCc | ui::ControlRowHit::ModeCv => {
+                let desired = match hit {
+                    ui::ControlRowHit::ModeCc => LoadMode::Cc,
+                    ui::ControlRowHit::ModeCv => LoadMode::Cv,
+                    _ => LoadMode::Cc,
+                };
+
+                let mut guard = control.lock().await;
+                let preset_id = guard.active_preset_id;
+                let preset_idx = preset_id.saturating_sub(1) as usize;
+                if preset_idx >= control::PRESET_COUNT {
+                    yield_now().await;
+                    continue;
+                }
+                let prev = guard.presets[preset_idx].mode;
+                if prev != desired {
+                    guard.presets[preset_idx].mode = desired;
+                    if guard.output_enabled {
+                        guard.output_enabled = false;
+                    }
+                    guard.presets[preset_idx] = guard.presets[preset_idx].clamp();
+                    bump_control_rev();
+                    info!(
+                        "touch: preset_id={} mode {:?} -> {:?} (output forced OFF)",
+                        preset_id, prev, desired
+                    );
+                }
+            }
+            ui::ControlRowHit::Digit(digit) => {
+                let mut guard = control.lock().await;
+                if guard.adjust_digit != digit {
+                    let prev = guard.adjust_digit;
+                    guard.adjust_digit = digit;
+                    info!("touch: adjust_digit {:?} -> {:?}", prev, digit);
+                }
+            }
+        }
+
+        yield_now().await;
     }
 }
 
@@ -682,12 +818,6 @@ impl TelemetryModel {
     /// This is used by the display task to drive partial, character-aware
     /// updates on top of the existing framebuffer diff logic.
     fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask) {
-        // 将当前编码器位置转换为 CC 模式下的目标总电流（A），用于右侧 “SET I” 文本。
-        let steps = ENCODER_VALUE.load(Ordering::Relaxed);
-        let raw_ma = steps.saturating_mul(ENCODER_STEP_MA);
-        let clamped_ma = clamp_target_ma(raw_ma);
-        self.snapshot.set_current_a = clamped_ma as f32 / 1000.0;
-
         // Keep all display strings in sync with the latest numeric values so
         // the UI layer can render based purely on preformatted text. This is
         // intentionally called from the display task (UI context), not from the
@@ -721,9 +851,15 @@ impl TelemetryModel {
 
             if prev.ch1_current_text != current.ch1_current_text
                 || prev.ch2_current_text != current.ch2_current_text
-                || prev.set_current_text != current.set_current_text
             {
                 mask.current_pair = true;
+            }
+
+            if prev.active_mode != current.active_mode
+                || prev.control_target_text != current.control_target_text
+                || prev.adjust_digit != current.adjust_digit
+            {
+                mask.control_row = true;
             }
 
             if prev.status_lines != current.status_lines {
@@ -742,6 +878,7 @@ impl TelemetryModel {
             mask.main_metrics = true;
             mask.voltage_pair = true;
             mask.current_pair = true;
+            mask.control_row = true;
             mask.telemetry_lines = true;
             mask.bars = true;
             mask.wifi_status = true;
@@ -1017,7 +1154,11 @@ impl AsyncDelayNs for AsyncDelay {
 }
 
 #[embassy_executor::task]
-async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static TelemetryMutex) {
+async fn display_task(
+    ctx: &'static mut DisplayResources,
+    telemetry: &'static TelemetryMutex,
+    control: &'static ControlMutex,
+) {
     DISPLAY_TASK_RUNNING.store(true, Ordering::Relaxed);
     info!("Display task starting");
 
@@ -1118,8 +1259,42 @@ async fn display_task(ctx: &'static mut DisplayResources, telemetry: &'static Te
             // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
             fps_window_frames = fps_window_frames.wrapping_add(1);
 
+            let (active_preset_id, output_enabled, mode, target_milli, target_unit, adjust_digit) = {
+                let guard = control.lock().await;
+                let preset = guard.active_preset();
+                let mode = match preset.mode {
+                    LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+                };
+                let (target_milli, target_unit) = match mode {
+                    LoadMode::Cv => (preset.target_v_mv, 'V'),
+                    LoadMode::Cc | LoadMode::Reserved(_) => (preset.target_i_ma, 'A'),
+                };
+                (
+                    guard.active_preset_id,
+                    guard.output_enabled,
+                    mode,
+                    target_milli,
+                    target_unit,
+                    guard.adjust_digit,
+                )
+            };
+
             let (snapshot, mask) = {
                 let mut guard = telemetry.lock().await;
+                let uv_latched = guard
+                    .last_status
+                    .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
+                    .unwrap_or(false);
+                guard.snapshot.set_control_overlay(
+                    active_preset_id,
+                    output_enabled,
+                    mode,
+                    uv_latched,
+                );
+                guard
+                    .snapshot
+                    .set_control_row(target_milli, target_unit, adjust_digit);
                 guard.diff_for_render()
             };
 
@@ -1525,6 +1700,15 @@ async fn feed_decoder(
                                 rate_limited_proto_warn("unexpected setpoint frame", None);
                             }
                         }
+                        MSG_SET_MODE => {
+                            if header.flags & FLAG_IS_ACK != 0 {
+                                record_link_activity();
+                                handle_setmode_ack(&header);
+                            } else {
+                                // For now we do not expect SetMode requests on the digital side.
+                                rate_limited_proto_warn("unexpected setmode frame", None);
+                            }
+                        }
                         MSG_SOFT_RESET => match decode_soft_reset_frame(&frame) {
                             Ok((hdr, reset)) => {
                                 record_link_activity();
@@ -1598,6 +1782,16 @@ fn handle_setpoint_ack(header: &FrameHeader) {
     let total = SETPOINT_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
     info!(
         "setpoint ack received: seq={} flags=0x{:02x} len={} (ack_total={})",
+        header.seq, header.flags, header.len, total
+    );
+}
+
+fn handle_setmode_ack(header: &FrameHeader) {
+    SETMODE_LAST_ACK_SEQ.store(header.seq, Ordering::Relaxed);
+    SETMODE_ACK_PENDING.store(false, Ordering::Release);
+    let total = SETMODE_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    info!(
+        "setmode ack received: seq={} flags=0x{:02x} len={} (ack_total={})",
         header.seq, header.flags, header.len, total
     );
 }
@@ -1740,6 +1934,37 @@ async fn main(spawner: Spawner) {
         }
     };
 
+    // Load presets from EEPROM (non-overlapping with the calibration blob).
+    // On invalid blob (version/CRC), fall back to firmware defaults.
+    let initial_presets = {
+        let mut guard = eeprom.lock().await;
+        match guard.read_presets_blob().await {
+            Ok(blob) => match control::decode_presets_blob(&blob) {
+                Ok(presets) => {
+                    info!("EEPROM presets loaded (count={})", presets.len());
+                    presets
+                }
+                Err(err) => {
+                    let kind = match err {
+                        PresetsBlobError::InvalidMagic => "magic",
+                        PresetsBlobError::UnsupportedVersion(_) => "version",
+                        PresetsBlobError::InvalidCount(_) => "count",
+                        PresetsBlobError::CrcMismatch { .. } => "crc32",
+                        PresetsBlobError::InvalidLayout => "layout",
+                        PresetsBlobError::InvalidPresetId(_) => "preset_id",
+                        PresetsBlobError::InvalidMode(_) => "mode",
+                    };
+                    warn!("EEPROM presets invalid; using defaults (err={})", kind);
+                    control::default_presets()
+                }
+            },
+            Err(err) => {
+                warn!("EEPROM presets read failed; using defaults (err={:?})", err);
+                control::default_presets()
+            }
+        }
+    };
+
     // SPI2 provides the high-speed channel for the TFT.
     let spi_peripheral = peripherals.SPI2;
     let sck = peripherals.GPIO12;
@@ -1846,6 +2071,8 @@ async fn main(spawner: Spawner) {
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
     let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
+    let control = CONTROL.init(Mutex::new(ControlState::new(initial_presets)));
+    CONTROL_REV.store(1, Ordering::Relaxed);
 
     let touch_input_cfg = InputConfig::default().with_pull(Pull::Up);
     let ctp_int = Input::new(peripherals.GPIO7, touch_input_cfg);
@@ -1976,7 +2203,12 @@ async fn main(spawner: Spawner) {
     {
         info!("spawning encoder task");
         spawner
-            .spawn(encoder_task(encoder_unit, encoder_counter, encoder_button))
+            .spawn(encoder_task(
+                encoder_unit,
+                encoder_counter,
+                encoder_button,
+                control,
+            ))
             .expect("encoder_task spawn");
     }
 
@@ -1989,12 +2221,16 @@ async fn main(spawner: Spawner) {
     }
     info!("spawning display task");
     spawner
-        .spawn(display_task(resources, telemetry))
+        .spawn(display_task(resources, telemetry, control))
         .expect("display_task spawn");
     info!("spawning touch task");
     spawner
         .spawn(touch::touch_task(ctp_int, ctp_rst))
         .expect("touch_task spawn");
+    info!("spawning touch-ui task");
+    spawner
+        .spawn(touch_ui_task(control))
+        .expect("touch_ui_task spawn");
     info!("spawning fan task");
     spawner
         .spawn(fan_task(telemetry, fan_channel))
@@ -2020,12 +2256,12 @@ async fn main(spawner: Spawner) {
     info!("spawning stats task");
     spawner.spawn(stats_task()).expect("stats_task spawn");
     if let Some(uhci_tx) = uhci_tx_opt.take() {
-        info!("spawning setpoint tx task (UHCI TX, 20Hz fixed target)");
+        info!("spawning SetMode tx task (UHCI TX, active control)");
         spawner
-            .spawn(setpoint_tx_task(uhci_tx, calibration))
-            .expect("setpoint_tx_task spawn");
+            .spawn(setmode_tx_task(uhci_tx, calibration, control))
+            .expect("setmode_tx_task spawn");
     } else {
-        warn!("setpoint tx task not started (UHCI TX unavailable)");
+        warn!("SetMode tx task not started (UHCI TX unavailable)");
     }
 
     // Wi‑Fi + HTTP server: runs as a separate Embassy task tree. Failures are
@@ -2042,6 +2278,7 @@ async fn main(spawner: Spawner) {
             telemetry,
             calibration,
             eeprom,
+            control,
         );
         info!("spawning Wi-Fi UI bridge task");
         spawner
@@ -2648,6 +2885,464 @@ async fn send_setpoint_frame(
         Err(err) => {
             warn!(
                 "{}: uart write error for setpoint seq={}: {:?}",
+                ctx, seq, err
+            );
+            false
+        }
+    }
+}
+
+/// SetMode 发送任务：原子 Active Control（CC/CV + 目标 + 限值），带 ACK 等待与退避重传，最新值优先。
+#[embassy_executor::task]
+async fn setmode_tx_task(
+    mut uhci_tx: uhci::UhciTx<'static, Async>,
+    calibration: &'static CalibrationMutex,
+    control: &'static ControlMutex,
+) {
+    info!(
+        "SetMode TX task starting (ack_timeout={} ms, backoff={:?}, period={} ms)",
+        SETMODE_ACK_TIMEOUT_MS, SETMODE_RETRY_BACKOFF_MS, SETMODE_TX_PERIOD_MS
+    );
+
+    #[derive(Clone, Copy)]
+    struct Pending {
+        seq: u8,
+        cmd: SetMode,
+        attempts: u8, // includes initial send
+        ack_total_at_send: u32,
+        deadline_ms: u32,
+    }
+
+    let mut raw = [0u8; 64];
+    let mut slip = [0u8; 192];
+
+    // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
+    let soft_reset_seq: u8 = 0;
+    let soft_reset_acked =
+        send_soft_reset_handshake(&mut uhci_tx, soft_reset_seq, &mut raw, &mut slip).await;
+    if !soft_reset_acked {
+        warn!("soft_reset ack missing within retry window; continuing after quiet gap");
+    }
+
+    // 更长的静默让模拟侧 UART 启动稳定，避免一上电被突发刷屏。
+    cooperative_delay_ms(300).await;
+
+    let mut seq: u8 = 1;
+
+    // Cold boot: send the full 4-curve calibration set so the analog side can
+    // reach CAL_READY (empty curves are rejected on G431).
+    let profile = { calibration.lock().await.profile.clone() };
+    send_all_calibration_curves(
+        &mut uhci_tx,
+        &mut seq,
+        &profile,
+        &mut raw,
+        &mut slip,
+        "boot",
+    )
+    .await;
+
+    // 启动链路后发送一次 SetEnable(true)，用于拉起模拟侧输出 gating。
+    let enable_cmd = SetEnable { enable: true };
+    match encode_set_enable_frame(seq, &enable_cmd, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "SetEnable(true) frame sent seq={} len={} slip_len={}",
+                        seq, frame_len, slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "SetEnable(true) short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "SetEnable(true) uart write error for seq={}: {:?}",
+                        seq, err
+                    );
+                }
+            },
+            Err(err) => {
+                warn!("SetEnable(true) slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!("SetEnable(true) encode_set_enable_frame error: {:?}", err);
+        }
+    }
+    seq = seq.wrapping_add(1);
+
+    // 在握手完成后发送一次静态 LimitProfile v0，供模拟板建立软件软限。
+    match encode_limit_profile_frame(seq, &LIMIT_PROFILE_DEFAULT, &mut raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "LimitProfile v0 sent (msg=0x{:02x}): max_i={}mA max_p={}mW ovp={}mV temp_trip={}mC derate={}%, seq={} len={} slip_len={}",
+                        MSG_LIMIT_PROFILE,
+                        LIMIT_PROFILE_DEFAULT.max_i_ma,
+                        LIMIT_PROFILE_DEFAULT.max_p_mw,
+                        LIMIT_PROFILE_DEFAULT.ovp_mv,
+                        LIMIT_PROFILE_DEFAULT.temp_trip_mc,
+                        LIMIT_PROFILE_DEFAULT.thermal_derate_pct,
+                        seq,
+                        frame_len,
+                        slip_len
+                    );
+                }
+                Ok(written) => {
+                    warn!(
+                        "LimitProfile v0 short write {} < {} (seq={})",
+                        written, slip_len, seq
+                    );
+                }
+                Err(err) => {
+                    warn!(
+                        "LimitProfile v0 uart write error for seq={}: {:?}",
+                        seq, err
+                    );
+                }
+            },
+            Err(err) => {
+                warn!("LimitProfile v0 slip_encode error: {:?}", err);
+            }
+        },
+        Err(err) => {
+            warn!(
+                "LimitProfile v0 encode_limit_profile_frame error: {:?}",
+                err
+            );
+        }
+    }
+    seq = seq.wrapping_add(1);
+
+    let mut pending: Option<Pending> = None;
+    let mut last_sent_cmd: Option<SetMode> = None;
+    let mut last_sent_ms: u32 = now_ms32();
+    let mut last_sent_rev: u32 = 0;
+    let mut prev_link_up: bool = LINK_UP.load(Ordering::Relaxed);
+    let mut force_send: bool = true; // boot
+
+    loop {
+        yield_now().await;
+
+        // Drain at most one pending soft-reset request per loop iteration.
+        if let Some(reason) = crate::dequeue_soft_reset() {
+            let soft_seq = seq;
+            seq = seq.wrapping_add(1);
+            send_soft_reset_one_shot(&mut uhci_tx, soft_seq, &mut raw, &mut slip, reason).await;
+        }
+
+        // Handle low-frequency calibration UART commands from the HTTP API.
+        #[cfg(feature = "net_http")]
+        if let Some(cmd) = crate::dequeue_cal_uart() {
+            match cmd {
+                CalUartCommand::SendAllCurves => {
+                    let profile = { calibration.lock().await.profile.clone() };
+                    send_all_calibration_curves(
+                        &mut uhci_tx,
+                        &mut seq,
+                        &profile,
+                        &mut raw,
+                        &mut slip,
+                        "http-cal",
+                    )
+                    .await;
+                }
+                CalUartCommand::SendCurve(kind) => {
+                    let profile = { calibration.lock().await.profile.clone() };
+                    send_calibration_curve(
+                        &mut uhci_tx,
+                        &mut seq,
+                        &profile,
+                        kind,
+                        &mut raw,
+                        &mut slip,
+                        "http-cal",
+                    )
+                    .await;
+                }
+                CalUartCommand::SetMode(kind) => {
+                    let seq_now = seq;
+                    seq = seq.wrapping_add(1);
+                    let _ = send_cal_mode_frame(
+                        &mut uhci_tx,
+                        seq_now,
+                        kind,
+                        &mut raw,
+                        &mut slip,
+                        "http-cal",
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // On link recovery, re-send the full calibration set and force a SetMode snapshot.
+        let link_up_now = LINK_UP.load(Ordering::Relaxed);
+        if link_up_now && !prev_link_up {
+            prev_link_up = true;
+            let profile = { calibration.lock().await.profile.clone() };
+            send_all_calibration_curves(
+                &mut uhci_tx,
+                &mut seq,
+                &profile,
+                &mut raw,
+                &mut slip,
+                "link-recover",
+            )
+            .await;
+            force_send = true;
+        } else if !link_up_now && prev_link_up {
+            prev_link_up = false;
+        }
+
+        let now = now_ms32();
+        let (rev_now, desired_cmd) = {
+            let guard = control.lock().await;
+            let p = guard.active_preset();
+            let cmd = SetMode {
+                preset_id: guard.active_preset_id,
+                output_enabled: guard.output_enabled,
+                mode: match p.mode {
+                    LoadMode::Cc => LoadMode::Cc,
+                    LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Reserved(_) => LoadMode::Cc,
+                },
+                target_i_ma: p.target_i_ma,
+                target_v_mv: p.target_v_mv,
+                min_v_mv: p.min_v_mv,
+                max_i_ma_total: p.max_i_ma_total,
+                max_p_mw: p.max_p_mw,
+            };
+            (CONTROL_REV.load(Ordering::Relaxed), sanitize_setmode(cmd))
+        };
+
+        // ACK arrival check for the current pending seq.
+        let ack_hit = if let Some(p) = pending.as_ref() {
+            let ack_total = SETMODE_ACK_TOTAL.load(Ordering::Relaxed);
+            let ack_seq = SETMODE_LAST_ACK_SEQ.load(Ordering::Relaxed);
+            ack_total != p.ack_total_at_send && ack_seq == p.seq
+        } else {
+            false
+        };
+        if ack_hit {
+            if let Some(p) = pending.take() {
+                SETMODE_ACK_PENDING.store(false, Ordering::Release);
+                last_sent_cmd = Some(p.cmd);
+                last_sent_ms = now;
+                last_sent_rev = rev_now;
+            }
+            continue;
+        }
+
+        // Pre-empt with latest value if changed while waiting.
+        let mut should_send_new = false;
+        let mut send_reason = "periodic";
+        if let Some(p) = pending.as_ref() {
+            if p.cmd != desired_cmd {
+                should_send_new = true;
+                send_reason = "latest-value-preempt";
+                pending = None;
+            }
+        } else if force_send {
+            should_send_new = true;
+            send_reason = "force";
+        } else if rev_now != last_sent_rev {
+            should_send_new = true;
+            send_reason = "rev-change";
+        } else if now.saturating_sub(last_sent_ms) >= SETMODE_TX_PERIOD_MS {
+            if last_sent_cmd.map(|c| c != desired_cmd).unwrap_or(true) {
+                should_send_new = true;
+                send_reason = "state-change";
+            } else {
+                // Keepalive (rare).
+                should_send_new = true;
+                send_reason = "periodic";
+            }
+        }
+
+        if should_send_new {
+            // Avoid attempting to drive output ON when we have no healthy link.
+            if desired_cmd.output_enabled && !LINK_UP.load(Ordering::Relaxed) {
+                let now_ms = now;
+                let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
+                if now_ms.wrapping_sub(last_gate) >= 1_000 {
+                    LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
+                    warn!(
+                        "SetMode TX gated (link_up=false, hello_seen={}, preset_id={}, output_enabled=true)",
+                        HELLO_SEEN.load(Ordering::Relaxed),
+                        desired_cmd.preset_id
+                    );
+                }
+                force_send = false;
+                continue;
+            }
+
+            let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+            if desired_cmd.output_enabled {
+                match analog_state {
+                    AnalogState::Faulted => {
+                        warn!("SetMode TX gated: analog fault (state=FAULTED)");
+                        force_send = false;
+                        continue;
+                    }
+                    // CalMissing means "not producing enable" (FastStatus.enable==false),
+                    // not "missing calibration". We must still allow output_enabled=true
+                    // to be sent, otherwise HTTP/UI output enable becomes deadlocked.
+                    //
+                    // The analog firmware remains the source of truth for safety gating.
+                    AnalogState::CalMissing => {}
+                    AnalogState::Offline => {
+                        warn!("SetMode TX gated: analog offline");
+                        force_send = false;
+                        continue;
+                    }
+                    AnalogState::Ready => {}
+                }
+            }
+
+            let send_seq = seq;
+            seq = seq.wrapping_add(1);
+            let ack_baseline = SETMODE_ACK_TOTAL.load(Ordering::Relaxed);
+            if send_setmode_frame(
+                &mut uhci_tx,
+                send_seq,
+                &desired_cmd,
+                &mut raw,
+                &mut slip,
+                send_reason,
+            )
+            .await
+            {
+                SETMODE_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
+                let deadline = now.saturating_add(SETMODE_ACK_TIMEOUT_MS);
+                last_sent_cmd = Some(desired_cmd);
+                last_sent_ms = now;
+                last_sent_rev = rev_now;
+                pending = Some(Pending {
+                    seq: send_seq,
+                    cmd: desired_cmd,
+                    attempts: 1,
+                    ack_total_at_send: ack_baseline,
+                    deadline_ms: deadline,
+                });
+                force_send = false;
+            } else {
+                SETMODE_ACK_PENDING.store(false, Ordering::Release);
+                force_send = false;
+            }
+        } else if let Some(mut p) = pending.take() {
+            // Timeout + retry path
+            if now >= p.deadline_ms {
+                if (p.attempts as usize) <= SETMODE_RETRY_BACKOFF_MS.len() {
+                    let backoff_ms = SETMODE_RETRY_BACKOFF_MS[(p.attempts - 1) as usize];
+                    let ack_baseline = SETMODE_ACK_TOTAL.load(Ordering::Relaxed);
+                    let send_seq = p.seq;
+                    if send_setmode_frame(
+                        &mut uhci_tx,
+                        send_seq,
+                        &p.cmd,
+                        &mut raw,
+                        &mut slip,
+                        "retx",
+                    )
+                    .await
+                    {
+                        SETMODE_RETX_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        p.attempts = p.attempts.saturating_add(1);
+                        p.ack_total_at_send = ack_baseline;
+                        p.deadline_ms = now.saturating_add(backoff_ms);
+                        last_sent_ms = now;
+                        pending = Some(p);
+                    } else {
+                        SETMODE_ACK_PENDING.store(false, Ordering::Release);
+                        pending = None;
+                    }
+                } else {
+                    SETMODE_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+                    warn!(
+                        "setmode ack timeout after {} attempts (seq={}, preset_id={}, output_enabled={})",
+                        p.attempts, p.seq, p.cmd.preset_id, p.cmd.output_enabled
+                    );
+                    SETMODE_ACK_PENDING.store(false, Ordering::Release);
+                    pending = None;
+                }
+            } else {
+                pending = Some(p);
+            }
+        }
+
+        cooperative_delay_ms(10).await;
+    }
+}
+
+fn sanitize_setmode(mut cmd: SetMode) -> SetMode {
+    if cmd.preset_id == 0 || cmd.preset_id > 5 {
+        cmd.preset_id = 1;
+    }
+    cmd.target_i_ma = cmd.target_i_ma.max(0);
+    cmd.target_v_mv = cmd.target_v_mv.max(0);
+    cmd.min_v_mv = cmd.min_v_mv.max(0);
+    cmd.max_i_ma_total = cmd.max_i_ma_total.max(0).min(control::HARD_MAX_I_MA_TOTAL);
+    let hard_max_p = LIMIT_PROFILE_DEFAULT.max_p_mw;
+    cmd.max_p_mw = cmd.max_p_mw.min(hard_max_p);
+    if cmd.target_i_ma > cmd.max_i_ma_total {
+        cmd.target_i_ma = cmd.max_i_ma_total;
+    }
+    cmd
+}
+
+async fn send_setmode_frame(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    cmd: &SetMode,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) -> bool {
+    let frame_len = match encode_set_mode_frame(seq, cmd, raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: encode_set_mode_frame error: {:?}", ctx, err);
+            return false;
+        }
+    };
+
+    let slip_len = match slip_encode(&raw[..frame_len], slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("{}: slip_encode error: {:?}", ctx, err);
+            return false;
+        }
+    };
+
+    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+        Ok(written) if written == slip_len => {
+            let _ = uhci_tx.uart_tx.flush_async().await;
+            SETMODE_ACK_PENDING.store(true, Ordering::Release);
+            info!(
+                "{}: setmode frame sent seq={} preset_id={} mode={:?} out={} len={} slip_len={}",
+                ctx, seq, cmd.preset_id, cmd.mode, cmd.output_enabled, frame_len, slip_len
+            );
+            true
+        }
+        Ok(written) => {
+            warn!(
+                "{}: short write {} < {} (seq={}, preset_id={})",
+                ctx, written, slip_len, seq, cmd.preset_id
+            );
+            false
+        }
+        Err(err) => {
+            warn!(
+                "{}: uart write error for setmode seq={}: {:?}",
                 ctx, seq, err
             );
             false
