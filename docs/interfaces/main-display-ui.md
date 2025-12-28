@@ -119,9 +119,28 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
   - CV: `target_v_mv` (V)
   - Adjustment digit options: ones / tenths / hundredths; default is tenths (0.1).
   - The selected digit MUST be remembered (do not show step text in the UI).
+- Encoder push button (temporary v2 behavior):
+  - Short press: toggle `output_enabled` for the current preset.
+  - Long press (~800ms): cycle `active_preset_id` (P1..P5), and force `output_enabled=false`.
+
+### Operator quick guide (v2)
+
+- Tap the **CC** or **CV** text inside the right-side rounded pill to switch the current preset mode (output is forced OFF for safety).
+- Tap a digit in the right-side value pill to select the adjustment digit (underline indicates ones / tenths / hundredths; default is tenths = 0.1).
+- Rotate the encoder to change the current preset target:
+  - CC → current target (A)
+  - CV → voltage target (V)
 
 ## Assets
 
 - `docs/assets/main-display/main-display-mock-v2-cc.png` — pixel-level mock (v2, CC active).
 - `docs/assets/main-display/main-display-mock-v2-cv.png` — pixel-level mock (v2, CV active).
 - `docs/assets/fonts/*.c` — raw UTFT fonts bundled for reproducible rendering.
+
+## Regenerating the mock PNGs
+
+Run:
+
+- `cargo run --manifest-path tools/ui-mock/Cargo.toml`
+
+This renders `UiSnapshot::demo()` through the firmware UI code and writes fresh PNGs into `docs/assets/main-display/`.
