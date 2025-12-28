@@ -33,12 +33,13 @@
 | Power digits | `#6EF58C` | 294.0 | SevenSegNumFont | 左区 80 px 高度段 #3：区域 `(24,188)-(170,232)`，右对齐至 x=170，支持 0.1 W 精度 |
 | Power unit | `#9AB0D8` | W | SmallFont | 基线 y=232，与数字紧贴并仍留 8 px 底边距 |
 
-### 数字精度规范
+### 数字精度规范（布局稳定：固定总位数）
 
 | 指标 | 显示形式 | 备注 |
 | --- | --- | --- |
-| 左列电压/电流/功率 | 固定 4 位数（含小数点）；最小分辨率 0.001 → 例如 `24.50`, `12.00`, `294.0` | 若数值不足四位，用前导空格/零补齐；若超限，则采用科学计数或滚动提示而非截断。 |
-| 右列远/近端电压、通道电流 | 同样 4 位数 + 单位，分辨率与传感器一致（最高千分位） | 条形长度仍按真实比例渲染。 |
+| 左列电压/电流 | 固定 `DD.dd`（4 个数字 + 1 个小数点），四舍五入到 0.01 → 例如 `24.50`, `03.20` | 固定宽度用于布局稳定；两位整数不足时左侧补零。异常/超出显示能力时显示 `99.99`。 |
+| 左列功率 | 固定 `DDD.d`（4 个数字 + 1 个小数点），四舍五入到 0.1 → 例如 `294.0`, `001.1` | 固定宽度用于布局稳定；三位整数不足时左侧补零。异常/超出显示能力时显示 `999.9`。 |
+| 右列远/近端电压、通道电流 | 固定 `DD.dd` + 单位（例如 `24.52V`, `04.20A`），四舍五入到 0.01 | 保持与左侧主读数一致的总位数策略以避免“空间忽大忽小”的观感。 |
 | 温度 | 0 或 1 位小数（`37°` 或 `37.8°`），根据传感器噪声门限自动选择 | 单位符号与数值之间保留 1 空格。 |
 | 运行时间、能量 | 现有格式 (`HH:MM:SS`, `125.4Wh`) | 如需更多精度，在右列列表中扩展即可。 |
 
@@ -80,7 +81,7 @@
 | --- | --- | --- |
 | Large numerics | `SevenSegNumFont` (32×50) | Numeric-only font from rinkydink; decimal dot drawn as a 6×6 block aligned 8 px above the baseline. Stored at `docs/assets/fonts/SevenSegNumFont.c`. |
 | Labels & units | `SmallFont` (8×12) | Default UTFT font. Stored at `docs/assets/fonts/SmallFont.c`. |
-| Status values | `arial_bold` (16×16) | UTFT bitmap submitted by MBWK; stored at `docs/assets/fonts/arial_bold.c`. |
+| Status values | `SmallFont` (8×12) | Current firmware UI uses UTFT `SmallFont` for all right-column text (labels + values) for predictable spacing. |
 
 All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Public Domain) and rendered pixel-by-pixel to ensure firmware/layout parity.
 

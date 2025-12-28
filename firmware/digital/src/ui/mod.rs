@@ -643,56 +643,64 @@ fn draw_small_text(
     }
 }
 
-fn format_value(value: f32, decimals: usize) -> String<8> {
-    // 手写一个小型格式化器，避免依赖核心库的浮点 fmt 路径（会拉入大整数算法）。
-    // 约定：总宽度最多 5 个字符（含符号和小数点），不足左侧不强制补空格。
+fn format_fixed_2dp(value: f32) -> String<8> {
+    // 固定格式：DD.dd（总计 4 个数字 + 1 个小数点），四舍五入到 0.01。
+    // 用于主电压/电流、右侧电压/电流对、以及控制行 setpoint 的数值部分。
     let mut s = String::<8>::new();
 
-    // 处理符号
-    let mut v = value;
-    if v.is_nan() {
-        let _ = s.push_str("NaN");
+    if !value.is_finite() {
+        let _ = s.push_str("99.99");
         return s;
     }
-    if v.is_infinite() {
-        if v.is_sign_negative() {
-            let _ = s.push_str("-Inf");
-        } else {
-            let _ = s.push_str("Inf");
-        }
+
+    let v = value.abs();
+    let scaled = (v * 100.0 + 0.5) as u32; // 0.01 units, half-up rounding
+    if scaled > 9_999 {
+        let _ = s.push_str("99.99");
         return s;
     }
-    if v < 0.0 {
-        let _ = s.push('-');
-        v = -v;
+
+    let int_part = scaled / 100; // 0..99
+    let frac_part = scaled % 100; // 0..99
+
+    let _ = s.push((b'0' + (int_part / 10) as u8) as char);
+    let _ = s.push((b'0' + (int_part % 10) as u8) as char);
+    let _ = s.push('.');
+    let _ = s.push((b'0' + (frac_part / 10) as u8) as char);
+    let _ = s.push((b'0' + (frac_part % 10) as u8) as char);
+    s
+}
+
+fn format_fixed_1dp_3i(value: f32) -> String<8> {
+    // 固定格式：DDD.d（总计 4 个数字 + 1 个小数点），四舍五入到 0.1。
+    // 用于主功率显示。
+    let mut s = String::<8>::new();
+
+    if !value.is_finite() {
+        let _ = s.push_str("999.9");
+        return s;
     }
 
-    let scale = match decimals {
-        0 => 1.0,
-        1 => 10.0,
-        _ => 100.0,
-    };
-    let scaled = (v * scale + 0.5) as u32;
-    let int_part = scaled / (scale as u32);
-    let frac_part = scaled % (scale as u32);
-
-    append_u32(&mut s, int_part);
-
-    if decimals > 0 {
-        let _ = s.push('.');
-        let frac_digits = match decimals {
-            0 => 0,
-            1 => 1,
-            _ => 2,
-        };
-        append_frac(&mut s, frac_part, frac_digits);
+    let v = value.abs();
+    let scaled = (v * 10.0 + 0.5) as u32; // 0.1 units, half-up rounding
+    if scaled > 9_999 {
+        let _ = s.push_str("999.9");
+        return s;
     }
 
+    let int_part = scaled / 10; // 0..999
+    let frac_part = scaled % 10; // 0..9
+
+    let _ = s.push((b'0' + ((int_part / 100) % 10) as u8) as char);
+    let _ = s.push((b'0' + ((int_part / 10) % 10) as u8) as char);
+    let _ = s.push((b'0' + (int_part % 10) as u8) as char);
+    let _ = s.push('.');
+    let _ = s.push((b'0' + frac_part as u8) as char);
     s
 }
 
 fn format_pair_value(value: f32, unit: char) -> String<6> {
-    let digits = format_four_digits(value);
+    let digits = format_fixed_2dp(value);
     let mut s = String::<6>::new();
     let _ = s.push_str(digits.as_str());
     let _ = s.push(unit);
@@ -700,77 +708,32 @@ fn format_pair_value(value: f32, unit: char) -> String<6> {
 }
 
 fn format_setpoint_milli(value_milli: i32, unit: char) -> String<6> {
-    // Fixed-width numeric text for the control row: always "xx.xxU" (6 chars),
-    // with a leading space for single-digit integers.
-    //
-    // This intentionally avoids float formatting and keeps digit columns stable
-    // so the underline indicator can map to ones/tenths/hundredths consistently.
+    // Fixed-width numeric text for the control row: always "DD.ddU" (6 chars).
+    // This keeps digit columns stable so the underline indicator can map to
+    // ones/tenths/hundredths consistently.
     let mut s = String::<6>::new();
     let mut v = value_milli.max(0);
-    // Round to 0.01 units (10 milli) for display stability.
+
+    // Round to 0.01 units (10 milli) using half-up rounding.
     v = v.saturating_add(5) / 10 * 10;
 
-    let centi = (v / 10) as u32; // 0.01 units
-    let int_part = centi / 100;
-    let frac_part = centi % 100;
-
-    if int_part < 10 {
-        let _ = s.push(' ');
-        let _ = s.push((b'0' + int_part as u8) as char);
-    } else {
-        let tens = (int_part / 10).min(9);
-        let ones = int_part % 10;
-        let _ = s.push((b'0' + tens as u8) as char);
-        let _ = s.push((b'0' + ones as u8) as char);
+    // Convert to centi-units: 0.01 units.
+    let centi = (v / 10) as u32;
+    if centi > 9_999 {
+        let _ = s.push_str("--.--");
+        let _ = s.push(unit);
+        return s;
     }
 
+    let int_part = centi / 100; // 0..99
+    let frac_part = centi % 100; // 0..99
+
+    let _ = s.push((b'0' + (int_part / 10) as u8) as char);
+    let _ = s.push((b'0' + (int_part % 10) as u8) as char);
     let _ = s.push('.');
     let _ = s.push((b'0' + (frac_part / 10) as u8) as char);
     let _ = s.push((b'0' + (frac_part % 10) as u8) as char);
     let _ = s.push(unit);
-    s
-}
-
-fn format_four_digits(value: f32) -> String<5> {
-    // 生成恰好 4 个字符的“整数+小数”数字，不使用核心库浮点 fmt。
-    let mut s = String::<5>::new();
-
-    let mut v = value;
-    if v.is_nan() {
-        let _ = s.push_str("----");
-        return s;
-    }
-    if v < 0.0 {
-        v = -v;
-    }
-
-    let (scale, frac_digits) = if v >= 100.0 {
-        (1.0, 0)
-    } else if v >= 10.0 {
-        (10.0, 1)
-    } else {
-        (100.0, 2)
-    };
-
-    let scaled = (v * scale + 0.5) as u32;
-    let int_part = scaled / (scale as u32);
-    let frac_part = scaled % (scale as u32);
-
-    // 暂存在临时 buffer 中，再根据总宽度裁剪到 4 个字符。
-    let mut tmp = String::<8>::new();
-    append_u32(&mut tmp, int_part);
-    if frac_digits > 0 {
-        let _ = tmp.push('.');
-        append_frac(&mut tmp, frac_part, frac_digits);
-    }
-
-    // 若超过 4 字符，截断右侧多余部分；不足则左侧不补空格（UI 仍使用等宽字体保障稳定）。
-    if tmp.len() > 4 {
-        s.push_str(&tmp.as_str()[0..4]).ok();
-    } else {
-        s.push_str(tmp.as_str()).ok();
-    }
-
     s
 }
 
@@ -1051,9 +1014,9 @@ impl UiSnapshot {
 
     /// Recompute all preformatted strings from the current numeric snapshot.
     pub fn update_strings(&mut self) {
-        self.main_voltage_text = format_value(self.main_voltage, 2);
-        self.main_current_text = format_value(self.main_current, 2);
-        self.main_power_text = format_value(self.main_power, 1);
+        self.main_voltage_text = format_fixed_2dp(self.main_voltage);
+        self.main_current_text = format_fixed_2dp(self.main_current);
+        self.main_power_text = format_fixed_1dp_3i(self.main_power);
 
         if self.remote_active {
             self.remote_voltage_text = format_pair_value(self.remote_voltage, 'V');
