@@ -85,7 +85,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cc = ui::UiSnapshot::demo();
     cc.set_control_overlay(1, false, LoadMode::Cc, false);
     cc.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
-    render_snapshot(&out_dir.join("main-display-mock-v2-cc.png"), &cc)?;
+    render_snapshot(&out_dir.join("main-display-mock-cc.png"), &cc)?;
 
     let mut cv = ui::UiSnapshot::demo();
     cv.main_voltage = 24.50;
@@ -93,7 +93,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cv.local_voltage = 24.47;
     cv.set_control_overlay(1, false, LoadMode::Cv, false);
     cv.set_control_row(24_500, 'V', control::AdjustDigit::DEFAULT);
-    render_snapshot(&out_dir.join("main-display-mock-v2-cv.png"), &cv)?;
+    render_snapshot(&out_dir.join("main-display-mock-cv.png"), &cv)?;
 
     Ok(())
 }

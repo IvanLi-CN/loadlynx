@@ -852,7 +852,7 @@ impl TelemetryModel {
             if prev.ch1_current_text != current.ch1_current_text
                 || prev.ch2_current_text != current.ch2_current_text
             {
-                mask.current_pair = true;
+                mask.current_load_bar = true;
             }
 
             if prev.active_mode != current.active_mode
@@ -865,10 +865,6 @@ impl TelemetryModel {
             if prev.status_lines != current.status_lines {
                 mask.telemetry_lines = true;
             }
-
-            if mask.voltage_pair || mask.current_pair {
-                mask.bars = true;
-            }
             if prev.wifi_status != current.wifi_status {
                 mask.wifi_status = true;
             }
@@ -877,10 +873,9 @@ impl TelemetryModel {
             // initial layout is fully drawn.
             mask.main_metrics = true;
             mask.voltage_pair = true;
-            mask.current_pair = true;
+            mask.current_load_bar = true;
             mask.control_row = true;
             mask.telemetry_lines = true;
-            mask.bars = true;
             mask.wifi_status = true;
             mask.touch_marker = true;
         }
