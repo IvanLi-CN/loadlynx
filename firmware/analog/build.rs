@@ -14,8 +14,8 @@ use std::process::Command;
 fn main() {
     // Re-run when local sources or git HEAD change.
     println!("cargo:rerun-if-changed=src/");
-    if let Some(head) = git_head_path() {
-        println!("cargo:rerun-if-changed={}", head.display());
+    for path in git_watch_paths() {
+        println!("cargo:rerun-if-changed={}", path.display());
     }
 
     let pkg_name = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
@@ -52,10 +52,83 @@ fn repo_root_from_manifest() -> Option<PathBuf> {
     manifest_dir.parent()?.parent().map(|p| p.to_path_buf())
 }
 
-fn git_head_path() -> Option<PathBuf> {
-    let repo_root = repo_root_from_manifest()?;
-    let head = repo_root.join(".git/HEAD");
-    if head.exists() { Some(head) } else { None }
+fn git_watch_paths() -> Vec<PathBuf> {
+    let Some(repo_root) = repo_root_from_manifest() else {
+        return Vec::new();
+    };
+    let Some((git_dir, common_dir)) = git_dirs(&repo_root) else {
+        return Vec::new();
+    };
+
+    let mut paths = Vec::new();
+
+    let head = git_dir.join("HEAD");
+    if head.exists() {
+        paths.push(head.clone());
+    } else {
+        return paths;
+    }
+
+    // When refs are packed, commits update packed-refs rather than a loose ref file.
+    let packed_refs = common_dir.join("packed-refs");
+    if packed_refs.exists() {
+        paths.push(packed_refs);
+    }
+
+    // Track the active branch ref file so commits rerun the build script and
+    // the embedded version string stays accurate.
+    if let Ok(contents) = fs::read_to_string(&head) {
+        if let Some(line) = contents.lines().next() {
+            let line = line.trim();
+            if let Some(rest) = line.strip_prefix("ref:") {
+                let ref_name = rest.trim();
+                if !ref_name.is_empty() {
+                    let ref_path = common_dir.join(ref_name);
+                    if ref_path.exists() {
+                        paths.push(ref_path);
+                    }
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+fn git_dirs(repo_root: &PathBuf) -> Option<(PathBuf, PathBuf)> {
+    let dot_git = repo_root.join(".git");
+    let git_dir = if dot_git.is_dir() {
+        dot_git
+    } else if dot_git.is_file() {
+        let contents = fs::read_to_string(&dot_git).ok()?;
+        let line = contents.lines().next()?.trim();
+        let raw = line.strip_prefix("gitdir:")?.trim();
+        resolve_maybe_relative(repo_root, raw)
+    } else {
+        return None;
+    };
+
+    let common_dir = {
+        let commondir = git_dir.join("commondir");
+        if commondir.exists() {
+            let contents = fs::read_to_string(commondir).ok()?;
+            let raw = contents.lines().next()?.trim();
+            resolve_maybe_relative(&git_dir, raw)
+        } else {
+            git_dir.clone()
+        }
+    };
+
+    Some((git_dir, common_dir))
+}
+
+fn resolve_maybe_relative(base: &PathBuf, raw: &str) -> PathBuf {
+    let path = PathBuf::from(raw);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
+    }
 }
 
 fn git_describe() -> Option<String> {
