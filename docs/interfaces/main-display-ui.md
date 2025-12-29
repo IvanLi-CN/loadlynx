@@ -1,10 +1,19 @@
 # LoadLynx Main Display UI
 
-![Main display mock](../assets/main-display/main-display-mock-v2-cc.png)
+![Main display mock (CC)](../assets/main-display/main-display-mock-cc.png)
 
-![Main display mock (CV)](../assets/main-display/main-display-mock-v2-cv.png)
+![Main display mock (CV)](../assets/main-display/main-display-mock-cv.png)
 
 > Mock is rendered at 320×240 px, matching the landscape frame buffer of the P024C128-CTP module (`docs/other-datasheets/p024c128-ctp.md`).
+
+## 需求说明
+
+- 右列 control row（模式 + 目标值）移动到 `REMOTE/LOCAL` 电压区块上方。
+- 右列 `CH1/CH2`：**不再显示**（不显示标签、不显示数值、不显示条形图）。
+- 右列 `REMOTE/LOCAL` 电压区块整体下移，使其与右列 status lines 之间的间隔保持“正常间隔”。
+- 右列 status lines（`RUN/CORE/SINK/MCU/P1 ...`）移动到右侧区域底部，底部留合理边距。
+- 将“电流能量条”（原右列 CH1/CH2 条形图）移动到左列 `CURRENT` label 右侧，并根据可用空间自适应宽度；同时右列移除 `CH1/CH2` 标签与条形图。
+- 除以上要点外，其余布局与信息保持不变（左列三大读数、右列 status lines 等）。
 
 ## Panel Constraints
 
@@ -17,7 +26,7 @@
 | Zone | Pixel bounds (x1,y1)-(x2,y2) | Notes |
 | --- | --- | --- |
 | Left primary block | (0,0)-(189,239) | Holds voltage, current, power. Each card is 72 px tall with 6 px gutters and tinted slab backgrounds to reinforce grouping. |
-| Right status block | (190,0)-(319,239) | Remote/local voltage、CH1/CH2 currents、runtime、temperature、energy，依次垂直排列。 |
+| Right status block | (190,0)-(319,239) | control row、Remote/local voltage、status lines，依次垂直排列。 |
 
 ### Left block element map
 
@@ -27,6 +36,7 @@
 | Voltage digits | `#FFB347` | 24.50 (decimal dot rendered manually) | SevenSegNumFont (32×50) | 左区 80 px 高度段 #1：数字/单位右对齐至 x=170，绘制区域 `(24,28)-(170,72)` |
 | Voltage unit | `#9AB0D8` | V | SmallFont | 基线 y=72，与数字紧贴 |
 | Current label | `#9AB0D8` | CURRENT | SmallFont | (16,90) |
+| Current load bar | Outer `#192031` + track `#1C2638` | 两路电流“能量条”（镜像双值条） | — | 左列 `CURRENT` label 右侧：外框 `(76,90)-(176,103)`；内轨道 `(78,92)-(174,101)`；中心刻度 x=126 |
 | Current digits | `#FF5252` | 12.00 | SevenSegNumFont | 左区 80 px 高度段 #2：区域 `(24,108)-(170,152)`，右对齐至 x=170 |
 | Current unit | `#9AB0D8` | A | SmallFont | 基线 y=152，与数字相连 |
 | Power label | `#9AB0D8` | POWER | SmallFont | (16,170) |
@@ -39,7 +49,8 @@
 | --- | --- | --- |
 | 左列电压/电流 | 固定 `DD.dd`（4 个数字 + 1 个小数点），四舍五入到 0.01 → 例如 `24.50`, `03.20` | 固定宽度用于布局稳定；两位整数不足时左侧补零。异常/超出显示能力时显示 `99.99`。 |
 | 左列功率 | 固定 `DDD.d`（4 个数字 + 1 个小数点），四舍五入到 0.1 → 例如 `294.0`, `001.1` | 固定宽度用于布局稳定；三位整数不足时左侧补零。异常/超出显示能力时显示 `999.9`。 |
-| 右列远/近端电压、通道电流 | 固定 `DD.dd` + 单位（例如 `24.52V`, `04.20A`），四舍五入到 0.01 | 保持与左侧主读数一致的总位数策略以避免“空间忽大忽小”的观感。 |
+| 右列远/近端电压 | 固定 `DD.dd` + 单位（例如 `24.52V`），四舍五入到 0.01 | 保持与左侧主读数一致的总位数策略以避免“空间忽大忽小”的观感。 |
+| 右列通道电流 | 不显示（不显示 `CH1/CH2`、不显示数值、不显示条形图） | 两路电流负载以左列 `CURRENT` label 右侧的“能量条”统一表达。 |
 | 温度 | 0 或 1 位小数（`37°` 或 `37.8°`），根据传感器噪声门限自动选择 | 单位符号与数值之间保留 1 空格。 |
 | 运行时间、能量 | 现有格式 (`HH:MM:SS`, `125.4Wh`) | 如需更多精度，在右列列表中扩展即可。 |
 
@@ -47,14 +58,10 @@
 
 | Pair | Payload | Font | Color | Placement |
 | --- | --- | --- | --- | --- |
-| Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,8)，右列起点 (258,8) |
-| Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,44)-(314,50)`，中心 x=256 |
-| Current pair | 左列 CH1 `4.20 A`，右列 CH2 `3.50 A` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 同上 | 左列起点 (198,96)，右列起点 (258,96) |
-| Current mirror bar | 0 A 居中，上限 5 A/通道 | — | 轨道 `#1C2638`，填充 `#4CC9F0` | 长条 `(198,132)-(314,138)`，中心 x=256 |
-| Control row (v2) | 模式切换（CC/CV）+ 当前 preset 目标值（单位随模式变更） | SmallFont | 背景 `#1C2638`；CC 文本 `#FF5252`；CV 文本 `#FFB347`；数值 `#DFE7FF`；选中位下划线 `#4CC9F0` | 行背景：`y=144..172`；MODE pill `(198,144)-(252,172)`；VALUE pill `(256,144)-(314,172)`；默认选中十分位（0.1），不显示“步长”文本 |
-| Run status line | “RUN 01:32:10” | SmallFont | `#DFE7FF` | Baseline at `(198,200)` |
-| Temperature line | “TEMP 37.8°C” | SmallFont | `#DFE7FF` | Baseline at `(198,214)` |
-| Energy line | “ENERGY 125.4Wh” | SmallFont | `#DFE7FF` | Baseline at `(198,228)` |
+| Control row | 模式切换（CC/CV）+ 当前 preset 目标值（单位随模式变更） | SmallFont | 背景 `#1C2638`；CC 文本 `#FF5252`；CV 文本 `#FFB347`；数值 `#DFE7FF`；选中位高亮背景 `#4CC9F0`（高亮位字符改为深色） | 行背景：`y=10..38`；MODE pill `(198,10)-(252,38)`；VALUE pill `(256,10)-(314,38)`；默认选中十分位（0.1），不显示“步长”文本 |
+| Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,40)，右列起点 (258,40) |
+| Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,74)-(314,81)`，中心 x=256 |
+| Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`P1 CC OUT0 UV0 RDY`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px |
 
 > Mirror bars：中心刻度标注 `0`，左半对应该对数据中的左值，右半对应右值。左/右填充长度 = `min(value / limit, 1.0) * half_width`，其中电压上限 40 V，电流上限 5 A。
 
@@ -91,57 +98,49 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
    - Sample at 1 kHz, low-pass (α = 0.3), refresh UI at 20 Hz.
    - When a limit is exceeded, flash a 2 px strip along the top edge of the affected card using `#FF5252` (over) or `#6EF58C` (under).
    - Decimal dot: draw a filled 6×6 square at `y = glyph_baseline − 8` so it lines up with the mock.
+   - Current load bar (left column) is a compact representation of channel utilization; width MUST adapt to the space between `CURRENT` label and the right padding of the left column.
 2. **Right status**
-   - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 30 V`.
-   - Channel bars = `clamp(I_actual / I_rating)`（默认：CH1 5 A，CH2 5 A，对应两路 5 A 额定功率通道；总目标电流 <2 A 时 CH2 预期为 0 A，≥2 A 时两路条形图预期近似对称）。
-   - **Control row (v2)** replaces the legacy “SET I” line:
+   - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 40 V`.
+   - **Control row** replaces the legacy “SET I” line:
      - Shows the **current preset** `mode` (`CC`/`CV`) and the **current preset target** (unit follows the active mode).
      - Target value is sourced from the digital preset model (not measured values), right-aligned to x=314.
-     - The selected adjustment digit is indicated by a short underline; do not show explicit “step” text.
+     - The selected adjustment digit MUST be shown with a special background highlight (do not rely on underline).
    - Runtime + energy update at 2 Hz, temperature at 5 Hz. Keep color semantics fixed for muscle memory.
 
 ## Interaction Hooks
 
-### Control row (v2) touch + encoder
+### Control row touch + encoder
 
 #### Tap targets (logical pixel bounds)
 
-- MODE pill background: `(198,144)-(252,172)` (rounded rectangle, no border)
-  - **CC button**: `(200,146)-(224,170)`
-  - **CV button**: `(226,146)-(250,170)`
-- VALUE pill background: `(256,144)-(314,172)` (rounded rectangle, no border)
-  - Tap the **ones / tenths / hundredths** digit to select the active adjustment digit (highlighted by a short underline). The underline is *not* a “step display”.
+- MODE pill background: `(198,10)-(252,38)` (rounded rectangle, no border)
+  - **CC button**: `(200,12)-(224,36)`
+  - **CV button**: `(226,12)-(250,36)`
+- VALUE pill background: `(256,10)-(314,38)` (rounded rectangle, no border)
+  - Tap the **ones / tenths / hundredths** digit to select the active adjustment digit (highlighted by a special background color; do not rely on underline).
 
 #### Behavior
 
-- Tap **CC** / **CV**: updates the **current preset** `mode` immediately (temporary v2 behavior; no extra “apply” step), and MUST force `output_enabled=false` for safety.
+- Tap **CC** / **CV**: updates the **current preset** `mode` immediately (no extra “apply” step), and MUST force `output_enabled=false` for safety.
 - Rotate encoder: adjusts the selected target for the **current preset**:
   - CC: `target_i_ma` (A)
   - CV: `target_v_mv` (V)
   - Adjustment digit options: ones / tenths / hundredths; default is tenths (0.1).
   - The selected digit MUST be remembered (do not show step text in the UI).
-- Encoder push button (temporary v2 behavior):
+- Encoder push button:
   - Short press: toggle `output_enabled` for the current preset.
   - Long press (~800ms): cycle `active_preset_id` (P1..P5), and force `output_enabled=false`.
 
-### Operator quick guide (v2)
+### Operator quick guide
 
 - Tap the **CC** or **CV** text inside the right-side rounded pill to switch the current preset mode (output is forced OFF for safety).
-- Tap a digit in the right-side value pill to select the adjustment digit (underline indicates ones / tenths / hundredths; default is tenths = 0.1).
+- Tap a digit in the right-side value pill to select the adjustment digit (the selected digit is highlighted with a special background color; default is tenths = 0.1).
 - Rotate the encoder to change the current preset target:
   - CC → current target (A)
   - CV → voltage target (V)
 
 ## Assets
 
-- `docs/assets/main-display/main-display-mock-v2-cc.png` — pixel-level mock (v2, CC active).
-- `docs/assets/main-display/main-display-mock-v2-cv.png` — pixel-level mock (v2, CV active).
+- `docs/assets/main-display/main-display-mock-cc.png` — pixel-level mock (CC active).
+- `docs/assets/main-display/main-display-mock-cv.png` — pixel-level mock (CV active).
 - `docs/assets/fonts/*.c` — raw UTFT fonts bundled for reproducible rendering.
-
-## Regenerating the mock PNGs
-
-Run:
-
-- `cargo run --manifest-path tools/ui-mock/Cargo.toml`
-
-This renders `UiSnapshot::demo()` through the firmware UI code and writes fresh PNGs into `docs/assets/main-display/`.
