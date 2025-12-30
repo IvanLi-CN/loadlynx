@@ -59,7 +59,15 @@
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
 | Channel current pair | 左列 CH1，右列 CH2（仅标签） | 标签 SmallFont | 标签 `#6D7FA4` | 左列起点 (198,96)，右列起点 (258,96) |
 | Channel current mirror bar | 中心 0 A，左右各 55 px 行程（上限 5 A） | — | 轨道 `#1C2638`，填充 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,130)-(314,137)`，中心 x=256 |
-| Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`P1 CC OUT0 UV0 RDY`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px |
+| Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `FLT 0x12345678`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
+
+### Status line #5：状态文案（禁止 debug 噪声）
+
+- 正常就绪：`RDY`
+- 模拟板离线：`OFF`
+- 校准缺失：`CAL`
+- 故障：`FLT`（仅状态）或 `FLT 0x12345678`（fault_flags 非 0）
+- **禁止显示**：`P1..P5`、`CC/CV`、`OUT0/OUT1`、`UV0/UV1` 等调试位域（易误读且会被裁切）
 
 > Mirror bars：中心刻度标注 `0`，左半对应该对数据中的左值，右半对应右值。左/右填充长度 = `min(value / limit, 1.0) * half_width`，其中电压上限 40 V，电流上限 5 A。
 

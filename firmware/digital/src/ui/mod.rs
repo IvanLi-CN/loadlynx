@@ -1077,30 +1077,14 @@ impl UiSnapshot {
         let _ = mcu.push('C');
 
         let mut ctl = String::<20>::new();
-        if self.fault_flags != 0 || self.analog_state == AnalogState::Faulted {
-            let _ = ctl.push_str("ANLG FAULT 0x");
+        if self.fault_flags != 0 {
+            // Max 15 chars @ x=198 with SmallFont (8px/char): keep it compact to avoid clipping.
+            // Example: "FLT 0x12345678"
+            let _ = ctl.push_str("FLT 0x");
             append_u32_hex(&mut ctl, self.fault_flags);
         } else {
-            // Example: "P1 CC OUT0 UV0 RDY"
-            let _ = ctl.push('P');
-            append_u32(&mut ctl, self.active_preset_id as u32);
-            let _ = ctl.push(' ');
-            match self.active_mode {
-                LoadMode::Cc => {
-                    let _ = ctl.push_str("CC");
-                }
-                LoadMode::Cv => {
-                    let _ = ctl.push_str("CV");
-                }
-                LoadMode::Reserved(_) => {
-                    let _ = ctl.push_str("CC");
-                }
-            }
-            let _ = ctl.push_str(" OUT");
-            let _ = ctl.push(if self.output_enabled { '1' } else { '0' });
-            let _ = ctl.push_str(" UV");
-            let _ = ctl.push(if self.uv_latched { '1' } else { '0' });
-            let _ = ctl.push(' ');
+            // UI state line intentionally avoids debug-y bitfields like "P1 CC OUT0 UV0 ...",
+            // which are easy to misread on SmallFont (0/O) and exceed the visible width.
             match self.analog_state {
                 AnalogState::Offline => {
                     let _ = ctl.push_str("OFF");
