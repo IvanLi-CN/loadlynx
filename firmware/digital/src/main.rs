@@ -784,7 +784,7 @@ impl TelemetryModel {
         self.snapshot.remote_voltage = remote_voltage;
         self.snapshot.local_voltage = local_voltage;
         self.snapshot.remote_active = remote_active;
-        // 左侧主电流显示：两通道合计电流；右侧 CH1/CH2 各自显示单通道电流。
+        // 左侧主电流显示：两通道合计电流；CURRENT 标签右侧镜像条形图反映 CH1/CH2 单通道电流。
         self.snapshot.main_current = i_total;
         self.snapshot.ch1_current = i_local;
         self.snapshot.ch2_current = i_remote;
@@ -852,7 +852,7 @@ impl TelemetryModel {
             if prev.ch1_current_text != current.ch1_current_text
                 || prev.ch2_current_text != current.ch2_current_text
             {
-                mask.current_pair = true;
+                mask.channel_currents = true;
             }
 
             if prev.active_mode != current.active_mode
@@ -865,10 +865,6 @@ impl TelemetryModel {
             if prev.status_lines != current.status_lines {
                 mask.telemetry_lines = true;
             }
-
-            if mask.voltage_pair || mask.current_pair {
-                mask.bars = true;
-            }
             if prev.wifi_status != current.wifi_status {
                 mask.wifi_status = true;
             }
@@ -877,10 +873,9 @@ impl TelemetryModel {
             // initial layout is fully drawn.
             mask.main_metrics = true;
             mask.voltage_pair = true;
-            mask.current_pair = true;
+            mask.channel_currents = true;
             mask.control_row = true;
             mask.telemetry_lines = true;
-            mask.bars = true;
             mask.wifi_status = true;
             mask.touch_marker = true;
         }
