@@ -852,7 +852,7 @@ impl TelemetryModel {
             if prev.ch1_current_text != current.ch1_current_text
                 || prev.ch2_current_text != current.ch2_current_text
             {
-                mask.current_load_bar = true;
+                mask.channel_currents = true;
             }
 
             if prev.active_mode != current.active_mode
@@ -873,7 +873,7 @@ impl TelemetryModel {
             // initial layout is fully drawn.
             mask.main_metrics = true;
             mask.voltage_pair = true;
-            mask.current_load_bar = true;
+            mask.channel_currents = true;
             mask.control_row = true;
             mask.telemetry_lines = true;
             mask.wifi_status = true;

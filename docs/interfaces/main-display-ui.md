@@ -8,12 +8,9 @@
 
 ## 需求说明
 
-- 右列 control row（模式 + 目标值）移动到 `REMOTE/LOCAL` 电压区块上方。
-- 右列 `CH1/CH2`：**不再显示**（不显示标签、不显示数值、不显示条形图）。
-- 右列 `REMOTE/LOCAL` 电压区块整体下移，使其与右列 status lines 之间的间隔保持“正常间隔”。
-- 右列 status lines（`RUN/CORE/SINK/MCU/P1 ...`）移动到右侧区域底部，底部留合理边距。
-- 将“电流能量条”（原右列 CH1/CH2 条形图）移动到左列 `CURRENT` label 右侧，并根据可用空间自适应宽度；同时右列移除 `CH1/CH2` 标签与条形图。
-- 除以上要点外，其余布局与信息保持不变（左列三大读数、右列 status lines 等）。
+- 右列 `CH1/CH2`：**只删除电流数值文本**（不再显示 `xx.xxA`），保留 `CH1/CH2` 标签与条形图。
+- 右列 `REMOTE/LOCAL` 电压区块整体**下移**，使其与 `CH1/CH2` 电流区块之间的间隔缩小到“正常间隔”。
+- 除以上要点外，其余布局与信息保持不变（control row、左列三大读数、右列 status lines 等）。
 
 ## Panel Constraints
 
@@ -36,7 +33,6 @@
 | Voltage digits | `#FFB347` | 24.50 (decimal dot rendered manually) | SevenSegNumFont (32×50) | 左区 80 px 高度段 #1：数字/单位右对齐至 x=170，绘制区域 `(24,28)-(170,72)` |
 | Voltage unit | `#9AB0D8` | V | SmallFont | 基线 y=72，与数字紧贴 |
 | Current label | `#9AB0D8` | CURRENT | SmallFont | (16,90) |
-| Current load bar | Outer `#192031` + track `#1C2638` | 两路电流“能量条”（镜像双值条） | — | 左列 `CURRENT` label 右侧：外框 `(76,90)-(176,103)`；内轨道 `(78,92)-(174,101)`；中心刻度 x=126 |
 | Current digits | `#FF5252` | 12.00 | SevenSegNumFont | 左区 80 px 高度段 #2：区域 `(24,108)-(170,152)`，右对齐至 x=170 |
 | Current unit | `#9AB0D8` | A | SmallFont | 基线 y=152，与数字相连 |
 | Power label | `#9AB0D8` | POWER | SmallFont | (16,170) |
@@ -50,7 +46,7 @@
 | 左列电压/电流 | 固定 `DD.dd`（4 个数字 + 1 个小数点），四舍五入到 0.01 → 例如 `24.50`, `03.20` | 固定宽度用于布局稳定；两位整数不足时左侧补零。异常/超出显示能力时显示 `99.99`。 |
 | 左列功率 | 固定 `DDD.d`（4 个数字 + 1 个小数点），四舍五入到 0.1 → 例如 `294.0`, `001.1` | 固定宽度用于布局稳定；三位整数不足时左侧补零。异常/超出显示能力时显示 `999.9`。 |
 | 右列远/近端电压 | 固定 `DD.dd` + 单位（例如 `24.52V`），四舍五入到 0.01 | 保持与左侧主读数一致的总位数策略以避免“空间忽大忽小”的观感。 |
-| 右列通道电流 | 不显示（不显示 `CH1/CH2`、不显示数值、不显示条形图） | 两路电流负载以左列 `CURRENT` label 右侧的“能量条”统一表达。 |
+| 右列通道电流 | 显示 `CH1/CH2` 标签 + 条形图，不显示数值文本（不显示 `xx.xxA`） | 只删除数值文本，其它布局不变。 |
 | 温度 | 0 或 1 位小数（`37°` 或 `37.8°`），根据传感器噪声门限自动选择 | 单位符号与数值之间保留 1 空格。 |
 | 运行时间、能量 | 现有格式 (`HH:MM:SS`, `125.4Wh`) | 如需更多精度，在右列列表中扩展即可。 |
 
@@ -59,11 +55,23 @@
 | Pair | Payload | Font | Color | Placement |
 | --- | --- | --- | --- | --- |
 | Control row | 模式切换（CC/CV）+ 当前 preset 目标值（单位随模式变更） | SmallFont | 背景 `#1C2638`；CC 文本 `#FF5252`；CV 文本 `#FFB347`；数值 `#DFE7FF`；选中位高亮背景 `#4CC9F0`（高亮位字符改为深色） | 行背景：`y=10..38`；MODE pill `(198,10)-(252,38)`；VALUE pill `(256,10)-(314,38)`；默认选中十分位（0.1），不显示“步长”文本 |
-| Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,40)，右列起点 (258,40) |
-| Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,74)-(314,81)`，中心 x=256 |
+| Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
+| Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
+| Channel current pair | 左列 CH1，右列 CH2（仅标签） | 标签 SmallFont | 标签 `#6D7FA4` | 左列起点 (198,96)，右列起点 (258,96) |
+| Channel current mirror bar | 中心 0 A，左右各 55 px 行程（上限 5 A） | — | 轨道 `#1C2638`，填充 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,130)-(314,137)`，中心 x=256 |
 | Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`P1 CC OUT0 UV0 RDY`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px |
 
 > Mirror bars：中心刻度标注 `0`，左半对应该对数据中的左值，右半对应右值。左/右填充长度 = `min(value / limit, 1.0) * half_width`，其中电压上限 40 V，电流上限 5 A。
+
+### Control row：选中位背景高亮（固定宽度字体，禁止“视觉居中”偏移）
+
+- 目标值文本固定为 6 字符：`DD.ddU`（例如 `12.00A`、`24.50V`），使用 `SmallFont`（8×12）绘制，字符间距为 0（固定宽度字形单元格）。
+- 目标值文本在 VALUE pill 内 **右对齐**，右内边距 **4 px**；因此该 6 字符串宽度固定 48 px，用于保持布局稳定。
+- 选中位高亮背景（颜色 `#4CC9F0`）以 `SmallFont` 数字字形的稳定 bbox 为基准绘制：
+  - 数字字形 bbox：`x=0..4`、`y=2..9`（5×8）
+  - 高亮背景内边距：左/右各 **1 px**，上/下各 **2 px**（得到 7×12 的高亮块；避免 padding 溢出到相邻字符）
+- 选中位字符本身改为深色（推荐 `#080F19`），其余字符保持 `#DFE7FF`。
+- 选中位索引（按 `DD.ddU` 的字符索引）：`ones=1`、`tenths=3`、`hundredths=4`。
 
 ## Color Palette
 
@@ -98,13 +106,14 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
    - Sample at 1 kHz, low-pass (α = 0.3), refresh UI at 20 Hz.
    - When a limit is exceeded, flash a 2 px strip along the top edge of the affected card using `#FF5252` (over) or `#6EF58C` (under).
    - Decimal dot: draw a filled 6×6 square at `y = glyph_baseline − 8` so it lines up with the mock.
-   - Current load bar (left column) is a compact representation of channel utilization; width MUST adapt to the space between `CURRENT` label and the right padding of the left column.
+   - 左侧 `CURRENT` 仅显示合计电流主读数（数值 + 单位）；两路通道电流以右列 `CH1/CH2` 的镜像条形图表达，不显示数值文本。
 2. **Right status**
    - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 40 V`.
    - **Control row** replaces the legacy “SET I” line:
      - Shows the **current preset** `mode` (`CC`/`CV`) and the **current preset target** (unit follows the active mode).
      - Target value is sourced from the digital preset model (not measured values), right-aligned to x=314.
      - The selected adjustment digit MUST be shown with a special background highlight (do not rely on underline).
+     - Highlight padding: **1 px** left/right, **2 px** top/bottom around the selected `SmallFont` digit bbox (`x=0..4`, `y=2..9`).
    - Runtime + energy update at 2 Hz, temperature at 5 Hz. Keep color semantics fixed for muscle memory.
 
 ## Interaction Hooks

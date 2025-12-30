@@ -49,15 +49,9 @@ const CARD_BG_TOP_OFFSET: i32 = 6;
 const CARD_BG_BOTTOM_OFFSET: i32 = 80;
 
 // Right-side layout (logical 320×240 coordinate space).
-const VOLTAGE_PAIR_TOP: i32 = 40;
+const VOLTAGE_PAIR_TOP: i32 = 50;
+const CHANNEL_CURRENT_PAIR_TOP: i32 = 96;
 const TELEMETRY_TOP: i32 = 172;
-
-// Left-side current load bar (mirrored dual-value bar) next to the CURRENT label.
-const CURRENT_BAR_TOP: i32 = 90;
-const CURRENT_BAR_BOTTOM: i32 = 103;
-const CURRENT_BAR_BORDER: i32 = 2;
-const CURRENT_BAR_GAP: i32 = 4;
-const CURRENT_BAR_RIGHT_PAD: i32 = 6;
 
 // Control row layout: CC/CV mode + preset target selector.
 pub(crate) const CONTROL_ROW_TOP: i32 = 10;
@@ -141,7 +135,7 @@ pub enum WifiUiStatus {
 pub struct UiChangeMask {
     pub main_metrics: bool,
     pub voltage_pair: bool,
-    pub current_load_bar: bool,
+    pub channel_currents: bool,
     pub control_row: bool,
     pub telemetry_lines: bool,
     pub wifi_status: bool,
@@ -152,7 +146,7 @@ impl UiChangeMask {
     pub fn is_empty(&self) -> bool {
         !(self.main_metrics
             || self.voltage_pair
-            || self.current_load_bar
+            || self.channel_currents
             || self.control_row
             || self.telemetry_lines
             || self.wifi_status
@@ -210,9 +204,6 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         rgb(0x6EF58C),
     );
 
-    // Compact dual-channel current utilization bar (replaces right-side CH1/CH2 panel).
-    draw_current_load_bar(&mut canvas, data);
-
     draw_control_row(&mut canvas, data);
     draw_voltage_pair(
         &mut canvas,
@@ -220,6 +211,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.remote_voltage_text.as_str(),
         data.local_voltage_text.as_str(),
     );
+    draw_channel_current_pair(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
     render_wifi_status(&mut canvas, data.wifi_status);
@@ -283,15 +275,17 @@ pub fn render_partial(
             160,
             rgb(0x6EF58C),
         );
-
-        // Current load bar lives inside the CURRENT card background.
-        draw_current_load_bar(&mut canvas, curr);
     }
 
     if mask.voltage_pair {
         // 清理右侧电压对所占区域的背景，再重绘标题和条形图。
         canvas.fill_rect(
-            Rect::new(190, VOLTAGE_PAIR_TOP, LOGICAL_WIDTH, 96),
+            Rect::new(
+                190,
+                VOLTAGE_PAIR_TOP,
+                LOGICAL_WIDTH,
+                CHANNEL_CURRENT_PAIR_TOP,
+            ),
             rgb(0x080f19),
         );
         let remote_text = curr.remote_voltage_text.as_str();
@@ -299,8 +293,13 @@ pub fn render_partial(
         draw_voltage_pair(&mut canvas, curr, remote_text, local_text);
     }
 
-    if mask.current_load_bar {
-        draw_current_load_bar(&mut canvas, curr);
+    if mask.channel_currents {
+        // 右侧两路电流通道信息：先擦除对应背景区域，再重绘标签与条形图。
+        canvas.fill_rect(
+            Rect::new(190, CHANNEL_CURRENT_PAIR_TOP, LOGICAL_WIDTH, TELEMETRY_TOP),
+            rgb(0x080f19),
+        );
+        draw_channel_current_pair(&mut canvas, curr);
     }
 
     if mask.control_row {
@@ -423,49 +422,15 @@ fn draw_voltage_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, r
     );
 }
 
-fn draw_current_load_bar(canvas: &mut Canvas, data: &UiSnapshot) {
-    let label_w = small_text_width("CURRENT", 0);
-    let outer_left = 16 + label_w + CURRENT_BAR_GAP;
-    let outer_right = CARD_BG_RIGHT - CURRENT_BAR_RIGHT_PAD;
-    if outer_right - outer_left <= CURRENT_BAR_BORDER * 2 + 8 {
-        return;
-    }
-
-    let outer = Rect::new(outer_left, CURRENT_BAR_TOP, outer_right, CURRENT_BAR_BOTTOM);
-    canvas.fill_rect(outer, rgb(0x192031));
-
-    let inner = Rect::new(
-        outer_left + CURRENT_BAR_BORDER,
-        CURRENT_BAR_TOP + CURRENT_BAR_BORDER,
-        outer_right - CURRENT_BAR_BORDER,
-        CURRENT_BAR_BOTTOM - CURRENT_BAR_BORDER,
+fn draw_channel_current_pair(canvas: &mut Canvas, data: &UiSnapshot) {
+    // Only show CH1/CH2 labels + mirror bar; numeric current values are intentionally omitted.
+    draw_pair_header(canvas, ("CH1", ""), ("CH2", ""), CHANNEL_CURRENT_PAIR_TOP);
+    draw_mirror_bar(
+        canvas,
+        CHANNEL_CURRENT_PAIR_TOP + 34,
+        data.ch1_current / 5.0,
+        data.ch2_current / 5.0,
     );
-    canvas.fill_rect(inner, rgb(0x1c2638));
-
-    let center = (inner.left + inner.right) / 2;
-    canvas.draw_line(
-        center,
-        outer.top - 2,
-        center,
-        outer.bottom + 1,
-        rgb(0x6d7fa4),
-    );
-
-    let half_width = (inner.right - inner.left) / 2;
-    let left_fill = (half_width as f32 * (data.ch1_current / 5.0).clamp(0.0, 1.0) + 0.5) as i32;
-    let right_fill = (half_width as f32 * (data.ch2_current / 5.0).clamp(0.0, 1.0) + 0.5) as i32;
-    if left_fill > 0 {
-        canvas.fill_rect(
-            Rect::new(center - left_fill, inner.top, center, inner.bottom),
-            rgb(0x4cc9f0),
-        );
-    }
-    if right_fill > 0 {
-        canvas.fill_rect(
-            Rect::new(center, inner.top, center + right_fill, inner.bottom),
-            rgb(0x4cc9f0),
-        );
-    }
 }
 
 fn small_text_width(text: &str, spacing: i32) -> i32 {
@@ -524,20 +489,28 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
     let width = small_text_width(target, 0);
     let value_x = CONTROL_VALUE_PILL_RIGHT - 4 - width;
 
-    // Selected digit: highlight background (centered) instead of underline.
+    // Selected digit: highlight background (digit bbox + padding) instead of underline.
     let glyph = SMALL_FONT.width() as i32;
     let idx = match data.adjust_digit {
         AdjustDigit::Ones => 1,
         AdjustDigit::Tenths => 3,
         AdjustDigit::Hundredths => 4,
     };
+    // SmallFont digits live in a stable 5×8 bbox at (x=0..4, y=2..9) inside
+    // the 8×12 cell. Use that bbox (not the full cell) so the highlight
+    // doesn't bleed into neighboring characters when padding is applied.
+    let digit_bbox_min_x = 0;
+    let digit_bbox_max_x = 4;
+    let digit_bbox_min_y = 2;
+    let digit_bbox_max_y = 9;
     let highlight_pad_x = 1;
-    let highlight_pad_y = 1;
+    let highlight_pad_y = 2;
+    let cell_x = value_x + idx * glyph;
     let highlight = Rect::new(
-        value_x + idx * glyph - highlight_pad_x,
-        CONTROL_TEXT_Y - highlight_pad_y,
-        value_x + (idx + 1) * glyph + highlight_pad_x,
-        CONTROL_TEXT_Y + SMALL_FONT.height() as i32 + highlight_pad_y,
+        cell_x + digit_bbox_min_x - highlight_pad_x,
+        CONTROL_TEXT_Y + digit_bbox_min_y - highlight_pad_y,
+        cell_x + digit_bbox_max_x + 1 + highlight_pad_x,
+        CONTROL_TEXT_Y + digit_bbox_max_y + 1 + highlight_pad_y,
     );
     canvas.fill_rect(highlight, rgb(0x4cc9f0));
 
