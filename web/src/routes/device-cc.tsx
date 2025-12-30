@@ -16,6 +16,7 @@ import {
   updatePreset,
 } from "../api/client.ts";
 import type {
+  AnalogState,
   ControlView,
   FastStatusView,
   Identity,
@@ -31,10 +32,12 @@ import {
   sevenSegFontHeight,
   sevenSegFontWidth,
 } from "../fonts/sevenSegFont.ts";
+import {
+  isSmallFontPixel,
+  smallFontHeight,
+  smallFontWidth,
+} from "../fonts/smallFont.ts";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
-
-const MONO_FONT_FAMILY =
-  'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace';
 
 const FAST_STATUS_REFETCH_MS = 400;
 const RETRY_DELAY_MS = 500;
@@ -359,10 +362,28 @@ export function DeviceCcRoute() {
     status?.raw.uptime_ms != null
       ? Math.floor(status.raw.uptime_ms / 1_000)
       : 0;
-  const tempC =
+  const tempCoreC =
     status?.raw.sink_core_temp_mc != null
       ? status.raw.sink_core_temp_mc / 1_000
       : undefined;
+  const tempSinkC =
+    status?.raw.sink_exhaust_temp_mc != null
+      ? status.raw.sink_exhaust_temp_mc / 1_000
+      : undefined;
+  const tempMcuC =
+    status?.raw.mcu_temp_mc != null
+      ? status.raw.mcu_temp_mc / 1_000
+      : undefined;
+
+  const controlMode: LoadMode = control?.preset.mode ?? "cc";
+  const controlTargetMilli =
+    controlMode === "cv"
+      ? (control?.preset.target_v_mv ?? 0)
+      : (control?.preset.target_i_ma ?? 0);
+  const controlTargetUnit = controlMode === "cv" ? "V" : "A";
+  const remoteActive = Boolean(status?.link_up);
+  const analogState = status?.analog_state ?? "offline";
+  const faultFlags = status?.raw.fault_flags ?? 0;
 
   const handleSavePreset = () => {
     const payload: Preset = {
@@ -836,37 +857,58 @@ export function DeviceCcRoute() {
           remoteCurrentA={remoteCurrentA}
           totalCurrentA={totalCurrentA}
           totalPowerW={totalPowerW}
-          setTargetA={(status?.raw.target_value ?? 0) / 1_000}
+          controlMode={controlMode}
+          controlTargetMilli={controlTargetMilli}
+          controlTargetUnit={controlTargetUnit}
           uptimeSeconds={uptimeSeconds}
-          tempC={tempC}
+          tempCoreC={tempCoreC}
+          tempSinkC={tempSinkC}
+          tempMcuC={tempMcuC}
+          remoteActive={remoteActive}
+          analogState={analogState}
+          faultFlags={faultFlags}
         />
       </section>
     </PageContainer>
   );
 }
 
-interface MainDisplayCanvasProps {
+export interface MainDisplayCanvasProps {
   remoteVoltageV: number;
   localVoltageV: number;
   localCurrentA: number;
   remoteCurrentA: number;
   totalCurrentA: number;
   totalPowerW: number;
-  setTargetA: number;
+  controlMode: LoadMode;
+  controlTargetMilli: number;
+  controlTargetUnit: "A" | "V";
   uptimeSeconds: number;
-  tempC: number | undefined;
+  tempCoreC: number | undefined;
+  tempSinkC: number | undefined;
+  tempMcuC: number | undefined;
+  remoteActive: boolean;
+  analogState: AnalogState;
+  faultFlags: number;
 }
 
-function MainDisplayCanvas({
+export function MainDisplayCanvas({
   remoteVoltageV,
   localVoltageV,
   localCurrentA,
   remoteCurrentA,
   totalCurrentA,
   totalPowerW,
-  setTargetA,
+  controlMode,
+  controlTargetMilli,
+  controlTargetUnit,
   uptimeSeconds,
-  tempC,
+  tempCoreC,
+  tempSinkC,
+  tempMcuC,
+  remoteActive,
+  analogState,
+  faultFlags,
 }: MainDisplayCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const [canvasSize, setCanvasSize] = useState<{
@@ -929,271 +971,388 @@ function MainDisplayCanvas({
     const width = baseWidth;
     const height = baseHeight;
 
-    // Base background.
-    ctx.fillStyle = "#05070D";
-    ctx.fillRect(0, 0, width, height);
+    type Rect = { left: number; top: number; right: number; bottom: number };
 
-    // Left primary block background.
-    ctx.fillStyle = "#101829";
-    ctx.fillRect(0, 0, 190, height);
+    const COLOR_CANVAS = "#05070D";
+    const COLOR_LEFT_BASE = "#101829";
+    const COLOR_RIGHT_BASE = "#080F19";
+    const CARD_TINTS = ["#171F33", "#141D2F", "#111828"] as const;
 
-    // Right block background.
-    ctx.fillStyle = "#05070D";
-    ctx.fillRect(190, 0, width - 190, height);
+    const COLOR_CAPTION = "#9AB0D8";
+    const COLOR_VOLTAGE = "#FFB347";
+    const COLOR_CURRENT = "#FF5252";
+    const COLOR_POWER = "#6EF58C";
+    const COLOR_RIGHT_LABEL = "#6D7FA4";
+    const COLOR_RIGHT_VALUE = "#DFE7FF";
+    const COLOR_BAR_TRACK = "#1C2638";
+    const COLOR_BAR_FILL = "#4CC9F0";
 
-    const labelColor = "#9AB0D8";
-    const voltageColor = "#FFB347";
-    const currentColor = "#FF5252";
-    const powerColor = "#6EF58C";
-    const rightLabel = "#6D7FA4";
-    const rightValue = "#DFE7FF";
+    const fillRect = (rect: Rect, color: string) => {
+      const w = rect.right - rect.left;
+      const h = rect.bottom - rect.top;
+      if (w <= 0 || h <= 0) {
+        return;
+      }
+      ctx.fillStyle = color;
+      ctx.fillRect(rect.left, rect.top, w, h);
+    };
 
-    const drawSevenSegmentNumber = (
-      value: number,
-      precision: number,
-      xRight: number,
-      baselineY: number,
+    const drawSmallChar = (
+      ch: string,
+      x0: number,
+      y0: number,
       color: string,
     ) => {
-      const text =
-        Number.isFinite(value) && !Number.isNaN(value)
-          ? value.toFixed(precision)
-          : "----";
-
-      const glyphWidth = sevenSegFontWidth;
-      const glyphHeight = sevenSegFontHeight;
-      const digitSpacing = 4;
-      const dotSize = 6;
-      const dotBaselineOffset = 8; // dot center is 8 px above baseline in the reference mock
-
+      if (!ch) {
+        return;
+      }
+      const code = ch.charCodeAt(0);
       ctx.fillStyle = color;
-
-      const drawDigitGlyph = (
-        code: number,
-        leftX: number,
-        baseline: number,
-      ) => {
-        if (
-          code < sevenSegFontFirstChar ||
-          code >= sevenSegFontFirstChar + sevenSegFontCharCount
-        ) {
-          return;
-        }
-        const topY = baseline - glyphHeight;
-        for (let gy = 0; gy < glyphHeight; gy += 1) {
-          for (let gx = 0; gx < glyphWidth; gx += 1) {
-            if (isSevenSegPixel(code, gx, gy)) {
-              const px = leftX + gx;
-              const py = topY + gy;
-              ctx.fillRect(px, py, 1, 1);
-            }
+      for (let y = 0; y < smallFontHeight; y += 1) {
+        for (let x = 0; x < smallFontWidth; x += 1) {
+          if (isSmallFontPixel(code, x, y)) {
+            ctx.fillRect(x0 + x, y0 + y, 1, 1);
           }
         }
-      };
+      }
+    };
 
-      let cursorX = xRight;
-      for (let index = text.length - 1; index >= 0; index -= 1) {
-        const ch = text[index];
+    const drawSmallText = (
+      text: string,
+      x: number,
+      y: number,
+      color: string,
+      spacing: number = 0,
+    ) => {
+      let cursorX = x;
+      for (const ch of text) {
+        if (ch === " ") {
+          cursorX += smallFontWidth + spacing;
+          continue;
+        }
+        drawSmallChar(ch, cursorX, y, color);
+        cursorX += smallFontWidth + spacing;
+      }
+    };
 
-        if (ch >= "0" && ch <= "9") {
-          const code = ch.charCodeAt(0);
-          const glyphLeft = cursorX - glyphWidth;
-          drawDigitGlyph(code, glyphLeft, baselineY);
-          cursorX = glyphLeft - digitSpacing;
-        } else if (ch === ".") {
-          const dotLeft = cursorX - dotSize;
-          const dotTop = baselineY - dotBaselineOffset - dotSize;
-          ctx.fillRect(dotLeft, dotTop, dotSize, dotSize);
-          cursorX = dotLeft - digitSpacing;
-        } else if (ch === " ") {
-          cursorX -= glyphWidth / 2;
-        } else if (ch === "-") {
-          const dashWidth = glyphWidth * 0.6;
-          const dashHeight = 4;
-          const dashLeft = cursorX - dashWidth;
-          const dashY = baselineY - glyphHeight / 2;
-          ctx.fillRect(dashLeft, dashY, dashWidth, dashHeight);
-          cursorX = dashLeft - digitSpacing;
+    const drawSevenSegDigit = (
+      code: number,
+      x0: number,
+      y0: number,
+      color: string,
+    ) => {
+      if (
+        code < sevenSegFontFirstChar ||
+        code >= sevenSegFontFirstChar + sevenSegFontCharCount
+      ) {
+        return;
+      }
+      ctx.fillStyle = color;
+      for (let y = 0; y < sevenSegFontHeight; y += 1) {
+        for (let x = 0; x < sevenSegFontWidth; x += 1) {
+          if (isSevenSegPixel(code, x, y)) {
+            ctx.fillRect(x0 + x, y0 + y, 1, 1);
+          }
         }
       }
     };
 
-    const drawMetric = (
-      y: number,
-      label: string,
-      value: number,
-      unit: string,
-      color: string,
-      precision: number,
-    ) => {
-      const slabTop = y + 4;
-      const slabHeight = 72;
-      ctx.fillStyle = "#171F33";
-      ctx.beginPath();
-      const radius = 6;
-      const x = 8;
-      const w = 174;
-      ctx.moveTo(x + radius, slabTop);
-      ctx.lineTo(x + w - radius, slabTop);
-      ctx.quadraticCurveTo(x + w, slabTop, x + w, slabTop + radius);
-      ctx.lineTo(x + w, slabTop + slabHeight - radius);
-      ctx.quadraticCurveTo(
-        x + w,
-        slabTop + slabHeight,
-        x + w - radius,
-        slabTop + slabHeight,
-      );
-      ctx.lineTo(x + radius, slabTop + slabHeight);
-      ctx.quadraticCurveTo(
-        x,
-        slabTop + slabHeight,
-        x,
-        slabTop + slabHeight - radius,
-      );
-      ctx.lineTo(x, slabTop + radius);
-      ctx.quadraticCurveTo(x, slabTop, x + radius, slabTop);
-      ctx.closePath();
-      ctx.fill();
+    const drawSevenSegValue = (text: string, area: Rect, color: string) => {
+      const spacing = 4;
+      let totalWidth = 0;
+      for (const ch of text) {
+        totalWidth += (ch === "." ? 8 : sevenSegFontWidth) + spacing;
+      }
+      if (text.length > 0) {
+        totalWidth -= spacing;
+      }
 
-      // Label.
-      ctx.fillStyle = labelColor;
-      ctx.font = `8px ${MONO_FONT_FAMILY}`;
-      ctx.textBaseline = "top";
-      ctx.fillText(label, 16, y + 6);
-
-      // Main digits: SevenSegNumFont rendering aligned to the right edge
-      // of the slab area. Baseline matches the hardware mock at y = 72
-      // for the top card, hence y + 72 for subsequent cards.
-      const digitsBaselineY = y + 72;
-
-      // Reserve space for the unit on the far right and push the numeric
-      // value slightly left so glyphs and unit never collide.
-      ctx.font = `10px ${MONO_FONT_FAMILY}`;
-      ctx.textBaseline = "alphabetic";
-      const unitRightX = x + w - 6;
-      const unitWidth = ctx.measureText(unit).width;
-      const unitLeftX = unitRightX - unitWidth;
-
-      const digitsRightX = unitLeftX - 6;
-      drawSevenSegmentNumber(
-        value,
-        precision,
-        digitsRightX,
-        digitsBaselineY,
-        color,
-      );
-
-      // Unit.
-      ctx.fillStyle = labelColor;
-      ctx.font = `10px ${MONO_FONT_FAMILY}`;
-      ctx.textBaseline = "alphabetic";
-      ctx.fillText(unit, unitLeftX, digitsBaselineY);
-    };
-
-    drawMetric(0, "VOLTAGE", remoteVoltageV, "V", voltageColor, 2);
-    drawMetric(80, "CURRENT", totalCurrentA, "A", currentColor, 2);
-    drawMetric(160, "POWER", totalPowerW, "W", powerColor, 1);
-
-    // Right column: REMOTE/LOCAL voltages.
-    ctx.font = `8px ${MONO_FONT_FAMILY}`;
-    ctx.textBaseline = "top";
-    ctx.fillStyle = rightLabel;
-    ctx.fillText("REMOTE", 198, 8);
-    ctx.fillText("LOCAL", 258, 8);
-
-    ctx.fillStyle = rightValue;
-    const remoteText = `${remoteVoltageV.toFixed(2)}V`;
-    const localText = `${localVoltageV.toFixed(2)}V`;
-    const voltageValueY = 18;
-    ctx.fillText(remoteText, 198, voltageValueY);
-    ctx.fillText(localText, 258, voltageValueY);
-
-    // Voltage mirror bar.
-    const barLeft = 198;
-    const barRight = 314;
-    const barHeight = 6;
-    const barOffsetY = 12;
-    const barTop = voltageValueY + barOffsetY;
-    const barCenter = (barLeft + barRight) / 2;
-    ctx.fillStyle = "#1C2638";
-    ctx.fillRect(barLeft, barTop, barRight - barLeft, barHeight);
-
-    const drawMirrorFill = (
-      value: number,
-      max: number,
-      side: "left" | "right",
-    ) => {
-      const ratio = Math.max(0, Math.min(1, value / max));
-      ctx.fillStyle = "#4CC9F0";
-      if (side === "left") {
-        const widthHalf = (barRight - barLeft) / 2;
-        const widthVal = widthHalf * ratio;
-        ctx.fillRect(barCenter - widthVal, barTop, widthVal, barHeight);
-      } else {
-        const widthHalf = (barRight - barLeft) / 2;
-        const widthVal = widthHalf * ratio;
-        ctx.fillRect(barCenter, barTop, widthVal, barHeight);
+      let cursorX = area.right - totalWidth;
+      for (const ch of text) {
+        if (ch === ".") {
+          ctx.fillStyle = color;
+          ctx.fillRect(cursorX, area.bottom - 10, 6, 6);
+          cursorX += 8 + spacing;
+          continue;
+        }
+        drawSevenSegDigit(ch.charCodeAt(0), cursorX, area.top, color);
+        cursorX += sevenSegFontWidth + spacing;
       }
     };
 
-    drawMirrorFill(remoteVoltageV, 40, "left");
-    drawMirrorFill(localVoltageV, 40, "right");
+    const fillRoundRect = (rect: Rect, radius: number, color: string) => {
+      const w = rect.right - rect.left;
+      const h = rect.bottom - rect.top;
+      if (w <= 0 || h <= 0) {
+        return;
+      }
+      const r = Math.max(0, Math.min(radius, w / 2, h / 2));
+      ctx.fillStyle = color;
+      if (r === 0) {
+        ctx.fillRect(rect.left, rect.top, w, h);
+        return;
+      }
+      ctx.beginPath();
+      ctx.moveTo(rect.left + r, rect.top);
+      ctx.lineTo(rect.right - r, rect.top);
+      ctx.quadraticCurveTo(rect.right, rect.top, rect.right, rect.top + r);
+      ctx.lineTo(rect.right, rect.bottom - r);
+      ctx.quadraticCurveTo(
+        rect.right,
+        rect.bottom,
+        rect.right - r,
+        rect.bottom,
+      );
+      ctx.lineTo(rect.left + r, rect.bottom);
+      ctx.quadraticCurveTo(rect.left, rect.bottom, rect.left, rect.bottom - r);
+      ctx.lineTo(rect.left, rect.top + r);
+      ctx.quadraticCurveTo(rect.left, rect.top, rect.left + r, rect.top);
+      ctx.closePath();
+      ctx.fill();
+    };
 
-    // Current pair (CH1 / CH2).
-    ctx.fillStyle = rightLabel;
-    ctx.fillText("CH1", 198, 80);
-    ctx.fillText("CH2", 258, 80);
+    const clamp01 = (value: number) => Math.max(0, Math.min(1, value));
 
-    ctx.fillStyle = rightValue;
-    const iLocalText = `${localCurrentA.toFixed(2)}A`;
-    const iRemoteText = `${remoteCurrentA.toFixed(2)}A`;
-    const currentValueY = 90;
-    ctx.fillText(iLocalText, 198, currentValueY);
-    ctx.fillText(iRemoteText, 258, currentValueY);
+    const drawMirrorBar = (
+      top: number,
+      left: number,
+      right: number,
+      leftRatio: number,
+      rightRatio: number,
+    ) => {
+      const barHeight = 8;
+      const center = Math.floor((left + right) / 2);
+      fillRect({ left, top, right, bottom: top + barHeight }, COLOR_BAR_TRACK);
+      fillRect(
+        {
+          left: center,
+          top: top - 2,
+          right: center + 1,
+          bottom: top + barHeight + 2,
+        },
+        COLOR_RIGHT_LABEL,
+      );
 
-    // Second mirror bar: same offset from the CURRENT numeric values as the
-    // first bar has from the voltage numeric values, to keep symmetry.
-    const bar2Top = currentValueY + barOffsetY;
-    ctx.fillStyle = "#1C2638";
-    ctx.fillRect(barLeft, bar2Top, barRight - barLeft, barHeight);
-    drawMirrorFill(localCurrentA, 5, "left");
-    drawMirrorFill(remoteCurrentA, 5, "right");
+      const halfWidth = Math.floor((right - left) / 2);
+      const leftFill = Math.round(halfWidth * clamp01(leftRatio));
+      const rightFill = Math.round(halfWidth * clamp01(rightRatio));
+      if (leftFill > 0) {
+        fillRect(
+          {
+            left: center - leftFill,
+            top,
+            right: center,
+            bottom: top + barHeight,
+          },
+          COLOR_BAR_FILL,
+        );
+      }
+      if (rightFill > 0) {
+        fillRect(
+          {
+            left: center,
+            top,
+            right: center + rightFill,
+            bottom: top + barHeight,
+          },
+          COLOR_BAR_FILL,
+        );
+      }
+    };
 
-    // SET line.
-    ctx.fillStyle = rightLabel;
-    const setBaselineY = bar2Top + barHeight + 8;
-    ctx.fillText("SET", 198, setBaselineY);
-    ctx.fillStyle = rightValue;
-    const ccText = `${setTargetA.toFixed(1)}A`;
-    const ccTextWidth = ctx.measureText(ccText).width;
-    ctx.fillText(ccText, barRight - ccTextWidth, setBaselineY);
+    const formatFixed2dp = (value: number) => {
+      if (!Number.isFinite(value)) {
+        return "99.99";
+      }
+      const v = Math.abs(value);
+      const scaled = Math.floor(v * 100 + 0.5);
+      if (scaled > 9_999) {
+        return "99.99";
+      }
+      const intPart = Math.floor(scaled / 100);
+      const fracPart = scaled % 100;
+      return `${String(intPart).padStart(2, "0")}.${String(fracPart).padStart(2, "0")}`;
+    };
 
-    // RUN / TEMP / ENERGY.
-    const timeText = `${String(Math.floor(uptimeSeconds / 3_600)).padStart(
-      2,
-      "0",
-    )}:${String(Math.floor((uptimeSeconds % 3_600) / 60)).padStart(
-      2,
-      "0",
-    )}:${String(uptimeSeconds % 60).padStart(2, "0")}`;
+    const formatFixed1dp3i = (value: number) => {
+      if (!Number.isFinite(value)) {
+        return "999.9";
+      }
+      const v = Math.abs(value);
+      const scaled = Math.floor(v * 10 + 0.5);
+      if (scaled > 9_999) {
+        return "999.9";
+      }
+      const intPart = Math.floor(scaled / 10);
+      const fracPart = scaled % 10;
+      return `${String(intPart).padStart(3, "0")}.${fracPart}`;
+    };
 
-    let infoY = 168;
-    ctx.fillStyle = rightValue;
-    ctx.fillText(`RUN ${timeText}`, 198, infoY);
-    infoY += 12;
+    const formatPairValue = (value: number, unit: "V" | "A") =>
+      `${formatFixed2dp(value)}${unit}`;
 
-    if (typeof tempC === "number") {
-      const tempText = `TEMP ${tempC.toFixed(1)}°C`;
-      ctx.fillText(tempText, 198, infoY);
-      infoY += 12;
+    const formatSetpointMilli = (valueMilli: number, unit: "V" | "A") => {
+      let v = Math.max(0, Math.trunc(valueMilli));
+      v = Math.floor((v + 5) / 10) * 10;
+      const centi = Math.floor(v / 10);
+      if (centi > 9_999) {
+        return `--.--${unit}`;
+      }
+      const intPart = Math.floor(centi / 100);
+      const fracPart = centi % 100;
+      return `${String(intPart).padStart(2, "0")}.${String(fracPart).padStart(2, "0")}${unit}`;
+    };
+
+    const formatRunTime = (secs: number) => {
+      const hours = Math.floor(secs / 3_600);
+      const minutes = Math.floor((secs % 3_600) / 60);
+      const seconds = Math.floor(secs % 60);
+      return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+    };
+
+    const formatTemp1dp = (temp: number | undefined) => {
+      if (typeof temp !== "number" || !Number.isFinite(temp)) {
+        return "--.-";
+      }
+      return temp.toFixed(1);
+    };
+
+    const formatStatusLine5 = () => {
+      if (faultFlags !== 0) {
+        const hex = (faultFlags >>> 0)
+          .toString(16)
+          .toUpperCase()
+          .padStart(8, "0");
+        return `FLT 0x${hex}`;
+      }
+      switch (analogState) {
+        case "ready":
+          return "RDY";
+        case "cal_missing":
+          return "CAL";
+        case "faulted":
+          return "FLT";
+        default:
+          return "OFF";
+      }
+    };
+
+    // Background blocks.
+    fillRect({ left: 0, top: 0, right: width, bottom: height }, COLOR_CANVAS);
+    fillRect({ left: 0, top: 0, right: 190, bottom: height }, COLOR_LEFT_BASE);
+    fillRect(
+      { left: 190, top: 0, right: width, bottom: height },
+      COLOR_RIGHT_BASE,
+    );
+
+    // Slab backgrounds.
+    const cardTops = [0, 80, 160] as const;
+    for (let idx = 0; idx < cardTops.length; idx += 1) {
+      const top = cardTops[idx];
+      fillRect(
+        { left: 8, top: top + 6, right: 182, bottom: top + 80 },
+        CARD_TINTS[idx],
+      );
     }
 
-    const energyWh =
-      totalPowerW > 0 && uptimeSeconds > 0
-        ? (totalPowerW * uptimeSeconds) / 3_600
-        : 0;
-    const energyText = `ENERGY ${energyWh.toFixed(1)}Wh`;
-    ctx.fillText(energyText, 198, infoY);
+    // Left metrics.
+    drawSmallText("VOLTAGE", 16, 10, COLOR_CAPTION);
+    drawSevenSegValue(
+      formatFixed2dp(remoteVoltageV),
+      { left: 24, top: 28, right: 170, bottom: 72 },
+      COLOR_VOLTAGE,
+    );
+    drawSmallText("V", 170, 56, COLOR_CAPTION, 1);
+
+    drawSmallText("CURRENT", 16, 90, COLOR_CAPTION);
+    drawMirrorBar(92, 76, 180, localCurrentA / 5, remoteCurrentA / 5);
+    drawSevenSegValue(
+      formatFixed2dp(totalCurrentA),
+      { left: 24, top: 108, right: 170, bottom: 152 },
+      COLOR_CURRENT,
+    );
+    drawSmallText("A", 170, 136, COLOR_CAPTION, 1);
+
+    drawSmallText("POWER", 16, 170, COLOR_CAPTION);
+    drawSevenSegValue(
+      formatFixed1dp3i(totalPowerW),
+      { left: 24, top: 188, right: 170, bottom: 232 },
+      COLOR_POWER,
+    );
+    drawSmallText("W", 170, 216, COLOR_CAPTION, 1);
+
+    // Right column: control row.
+    fillRoundRect(
+      { left: 198, top: 10, right: 252, bottom: 38 },
+      6,
+      COLOR_BAR_TRACK,
+    );
+    fillRoundRect(
+      { left: 256, top: 10, right: 314, bottom: 38 },
+      6,
+      COLOR_BAR_TRACK,
+    );
+    fillRect({ left: 225, top: 12, right: 226, bottom: 36 }, COLOR_RIGHT_BASE);
+
+    const ccColor = controlMode === "cc" ? COLOR_CURRENT : COLOR_RIGHT_LABEL;
+    const cvColor = controlMode === "cv" ? COLOR_VOLTAGE : COLOR_RIGHT_LABEL;
+    drawSmallText("CC", 204, 18, ccColor);
+    drawSmallText("CV", 230, 18, cvColor);
+
+    const targetText = formatSetpointMilli(
+      controlTargetMilli,
+      controlTargetUnit,
+    );
+    const valueX = 314 - 4 - targetText.length * smallFontWidth;
+    const valueY = 18;
+    const selectedIdx = 3; // tenths (0.1) by default
+    const cellX = valueX + selectedIdx * smallFontWidth;
+    fillRect(
+      { left: cellX - 1, top: valueY, right: cellX + 6, bottom: valueY + 12 },
+      COLOR_BAR_FILL,
+    );
+    drawSmallText(targetText, valueX, valueY, COLOR_RIGHT_VALUE);
+    if (selectedIdx >= 0 && selectedIdx < targetText.length) {
+      drawSmallChar(targetText[selectedIdx], cellX, valueY, COLOR_RIGHT_BASE);
+    }
+
+    // Right column: remote/local voltage pair + mirror bar.
+    drawSmallText("REMOTE", 198, 50, COLOR_RIGHT_LABEL);
+    const remoteText = remoteActive
+      ? formatPairValue(remoteVoltageV, "V")
+      : "--.--";
+    drawSmallText(remoteText, 198, 62, COLOR_RIGHT_VALUE);
+    drawSmallText("LOCAL", 258, 50, COLOR_RIGHT_LABEL);
+    drawSmallText(
+      formatPairValue(localVoltageV, "V"),
+      258,
+      62,
+      COLOR_RIGHT_VALUE,
+    );
+
+    const remoteBar = remoteActive ? remoteVoltageV / 40 : 0;
+    drawMirrorBar(84, 198, 314, remoteBar, localVoltageV / 40);
+
+    // Status lines.
+    const runText = `RUN ${formatRunTime(uptimeSeconds)}`;
+    const coreText = `CORE ${formatTemp1dp(tempCoreC)}C`;
+    const sinkText = `SINK ${formatTemp1dp(tempSinkC)}C`;
+    const mcuText = `MCU  ${formatTemp1dp(tempMcuC)}C`;
+    const statusText = formatStatusLine5();
+    const statusLines = [
+      runText,
+      coreText,
+      sinkText,
+      mcuText,
+      statusText,
+    ] as const;
+    for (let idx = 0; idx < statusLines.length; idx += 1) {
+      drawSmallText(statusLines[idx], 198, 172 + idx * 12, COLOR_RIGHT_VALUE);
+    }
+
+    // Wi‑Fi status overlay (not yet wired to API; render disabled state).
+    fillRect({ left: 288, top: 0, right: 320, bottom: 10 }, COLOR_RIGHT_BASE);
+    drawSmallText("W:--", 290, 1, COLOR_RIGHT_LABEL);
   }, [
     canvasSize.height,
     canvasSize.width,
@@ -1203,9 +1362,16 @@ function MainDisplayCanvas({
     remoteCurrentA,
     totalCurrentA,
     totalPowerW,
-    setTargetA,
+    controlMode,
+    controlTargetMilli,
+    controlTargetUnit,
     uptimeSeconds,
-    tempC,
+    tempCoreC,
+    tempSinkC,
+    tempMcuC,
+    remoteActive,
+    analogState,
+    faultFlags,
   ]);
 
   return (
