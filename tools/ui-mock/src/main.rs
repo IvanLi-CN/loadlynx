@@ -80,7 +80,10 @@ fn render_snapshot(
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = PathBuf::from("docs/assets/main-display");
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
+    let out_dir = repo_root.join("docs/assets/main-display");
 
     let mut cc = ui::UiSnapshot::demo();
     cc.set_control_overlay(1, false, LoadMode::Cc, false);

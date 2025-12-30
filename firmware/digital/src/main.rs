@@ -784,7 +784,7 @@ impl TelemetryModel {
         self.snapshot.remote_voltage = remote_voltage;
         self.snapshot.local_voltage = local_voltage;
         self.snapshot.remote_active = remote_active;
-        // 左侧主电流显示：两通道合计电流；右侧 CH1/CH2 各自显示单通道电流。
+        // 左侧主电流显示：两通道合计电流；CURRENT 标签右侧镜像条形图反映 CH1/CH2 单通道电流。
         self.snapshot.main_current = i_total;
         self.snapshot.ch1_current = i_local;
         self.snapshot.ch2_current = i_remote;

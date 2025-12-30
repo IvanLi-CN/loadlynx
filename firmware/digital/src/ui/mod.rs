@@ -43,6 +43,8 @@ const DEBUG_OVERLAY: bool = false;
 const CARD_TOPS: [i32; 3] = [0, 80, 160];
 const CARD_BG_LEFT: i32 = 8;
 const CARD_BG_RIGHT: i32 = 182;
+const MAIN_LABEL_X: i32 = 16;
+const MAIN_DIGITS_RIGHT: i32 = 170;
 // 背景在 Y 方向的偏移：与原设计保持上边距 6px，同时向下扩展到 +80，
 // 以完全覆盖 32x50 的七段字体（area.top = top+28，高度 50 → bottom=top+78）。
 const CARD_BG_TOP_OFFSET: i32 = 6;
@@ -50,7 +52,7 @@ const CARD_BG_BOTTOM_OFFSET: i32 = 80;
 
 // Right-side layout (logical 320×240 coordinate space).
 const VOLTAGE_PAIR_TOP: i32 = 50;
-const CHANNEL_CURRENT_PAIR_TOP: i32 = 96;
+const VOLTAGE_PAIR_BOTTOM: i32 = 96;
 const TELEMETRY_TOP: i32 = 172;
 
 // Control row layout: CC/CV mode + preset target selector.
@@ -195,6 +197,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         80,
         rgb(0xFF5252),
     );
+    draw_current_mirror_bar(&mut canvas, data);
     draw_main_metric(
         &mut canvas,
         "POWER",
@@ -211,7 +214,6 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.remote_voltage_text.as_str(),
         data.local_voltage_text.as_str(),
     );
-    draw_channel_current_pair(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
     render_wifi_status(&mut canvas, data.wifi_status);
@@ -267,6 +269,7 @@ pub fn render_partial(
             80,
             rgb(0xFF5252),
         );
+        draw_current_mirror_bar(&mut canvas, curr);
         draw_main_metric(
             &mut canvas,
             "POWER",
@@ -280,12 +283,7 @@ pub fn render_partial(
     if mask.voltage_pair {
         // 清理右侧电压对所占区域的背景，再重绘标题和条形图。
         canvas.fill_rect(
-            Rect::new(
-                190,
-                VOLTAGE_PAIR_TOP,
-                LOGICAL_WIDTH,
-                CHANNEL_CURRENT_PAIR_TOP,
-            ),
+            Rect::new(190, VOLTAGE_PAIR_TOP, LOGICAL_WIDTH, VOLTAGE_PAIR_BOTTOM),
             rgb(0x080f19),
         );
         let remote_text = curr.remote_voltage_text.as_str();
@@ -294,12 +292,8 @@ pub fn render_partial(
     }
 
     if mask.channel_currents {
-        // 右侧两路电流通道信息：先擦除对应背景区域，再重绘标签与条形图。
-        canvas.fill_rect(
-            Rect::new(190, CHANNEL_CURRENT_PAIR_TOP, LOGICAL_WIDTH, TELEMETRY_TOP),
-            rgb(0x080f19),
-        );
-        draw_channel_current_pair(&mut canvas, curr);
+        // CURRENT 标签右侧的镜像条形图（CH1/CH2），与主电流读数解耦刷新。
+        draw_current_mirror_bar(&mut canvas, curr);
     }
 
     if mask.control_row {
@@ -396,10 +390,27 @@ fn draw_main_metric(
     top: i32,
     digit_color: Rgb565,
 ) {
-    draw_small_text(canvas, label, 16, top + 10, rgb(0x9ab0d8), 0);
-    let area = Rect::new(24, top + 28, 170, top + 72);
+    draw_small_text(canvas, label, MAIN_LABEL_X, top + 10, rgb(0x9ab0d8), 0);
+    let area = Rect::new(24, top + 28, MAIN_DIGITS_RIGHT, top + 72);
     draw_seven_seg_value(canvas, value, &area, digit_color);
     draw_small_text(canvas, unit, area.right, top + 56, rgb(0x9ab0d8), 1);
+}
+
+fn draw_current_mirror_bar(canvas: &mut Canvas, data: &UiSnapshot) {
+    let top = CARD_TOPS[1];
+    let label_width = small_text_width("CURRENT", 0);
+    let bar_left = (MAIN_LABEL_X + label_width + 4).min(CARD_BG_RIGHT - 4);
+    // Keep the bar inside the current card slab; do not spill into the right column.
+    let bar_right = CARD_BG_RIGHT - 2;
+    let bar_top = top + 12;
+    draw_mirror_bar_in_bounds(
+        canvas,
+        bar_top,
+        bar_left,
+        bar_right,
+        data.ch1_current / 5.0,
+        data.ch2_current / 5.0,
+    );
 }
 
 fn draw_voltage_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, right_value: &str) {
@@ -414,22 +425,13 @@ fn draw_voltage_pair(canvas: &mut Canvas, data: &UiSnapshot, left_value: &str, r
     } else {
         0.0
     };
-    draw_mirror_bar(
+    draw_mirror_bar_in_bounds(
         canvas,
         VOLTAGE_PAIR_TOP + 34,
+        198,
+        314,
         remote_bar,
         data.local_voltage / 40.0,
-    );
-}
-
-fn draw_channel_current_pair(canvas: &mut Canvas, data: &UiSnapshot) {
-    // Only show CH1/CH2 labels + mirror bar; numeric current values are intentionally omitted.
-    draw_pair_header(canvas, ("CH1", ""), ("CH2", ""), CHANNEL_CURRENT_PAIR_TOP);
-    draw_mirror_bar(
-        canvas,
-        CHANNEL_CURRENT_PAIR_TOP + 34,
-        data.ch1_current / 5.0,
-        data.ch2_current / 5.0,
     );
 }
 
@@ -539,10 +541,15 @@ fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str)
     draw_small_text(canvas, right.1, 258, top + 12, rgb(0xdfe7ff), 0);
 }
 
-fn draw_mirror_bar(canvas: &mut Canvas, top: i32, left_ratio: f32, right_ratio: f32) {
+fn draw_mirror_bar_in_bounds(
+    canvas: &mut Canvas,
+    top: i32,
+    left: i32,
+    right: i32,
+    left_ratio: f32,
+    right_ratio: f32,
+) {
     let bar_height = 8;
-    let left = 198;
-    let right = 314;
     let center = (left + right) / 2;
     canvas.fill_rect(Rect::new(left, top, right, top + bar_height), rgb(0x1c2638));
     canvas.draw_line(center, top - 2, center, top + bar_height + 2, rgb(0x6d7fa4));

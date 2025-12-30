@@ -8,8 +8,8 @@
 
 ## 需求说明
 
-- 右列 `CH1/CH2`：**只删除电流数值文本**（不再显示 `xx.xxA`），保留 `CH1/CH2` 标签与条形图。
-- 右列 `REMOTE/LOCAL` 电压区块整体**下移**，使其与 `CH1/CH2` 电流区块之间的间隔缩小到“正常间隔”。
+- 左列 `CURRENT`：将两路电流镜像条（CH1/CH2）移动到 `CURRENT` 标签右侧，仅显示条形图（不显示 `CH1/CH2` 文本标签）；条形图宽度自适应剩余空间，不得溢出当前卡片。
+- 右列：删除原 `CH1/CH2` 电流区块（标签与条形图均不显示）。
 - 除以上要点外，其余布局与信息保持不变（control row、左列三大读数、右列 status lines 等）。
 
 ## Panel Constraints
@@ -33,6 +33,7 @@
 | Voltage digits | `#FFB347` | 24.50 (decimal dot rendered manually) | SevenSegNumFont (32×50) | 左区 80 px 高度段 #1：数字/单位右对齐至 x=170，绘制区域 `(24,28)-(170,72)` |
 | Voltage unit | `#9AB0D8` | V | SmallFont | 基线 y=72，与数字紧贴 |
 | Current label | `#9AB0D8` | CURRENT | SmallFont | (16,90) |
+| Current mirror bar | 轨道 `#1C2638`、填充 `#4CC9F0`、中心刻度 `#6D7FA4` | Mirror bar（CH1 left / CH2 right，无标签） | — | `CURRENT` 标签右侧，动态宽度：`x=(label_end+4)..(CARD_BG_RIGHT-2)`（限制在当前卡片背景内，不得溢出到右侧区块）；默认 `CURRENT` 文本宽 56 px → `x=76..180`；`y=92..99` |
 | Current digits | `#FF5252` | 12.00 | SevenSegNumFont | 左区 80 px 高度段 #2：区域 `(24,108)-(170,152)`，右对齐至 x=170 |
 | Current unit | `#9AB0D8` | A | SmallFont | 基线 y=152，与数字相连 |
 | Power label | `#9AB0D8` | POWER | SmallFont | (16,170) |
@@ -46,7 +47,7 @@
 | 左列电压/电流 | 固定 `DD.dd`（4 个数字 + 1 个小数点），四舍五入到 0.01 → 例如 `24.50`, `03.20` | 固定宽度用于布局稳定；两位整数不足时左侧补零。异常/超出显示能力时显示 `99.99`。 |
 | 左列功率 | 固定 `DDD.d`（4 个数字 + 1 个小数点），四舍五入到 0.1 → 例如 `294.0`, `001.1` | 固定宽度用于布局稳定；三位整数不足时左侧补零。异常/超出显示能力时显示 `999.9`。 |
 | 右列远/近端电压 | 固定 `DD.dd` + 单位（例如 `24.52V`），四舍五入到 0.01 | 保持与左侧主读数一致的总位数策略以避免“空间忽大忽小”的观感。 |
-| 右列通道电流 | 显示 `CH1/CH2` 标签 + 条形图，不显示数值文本（不显示 `xx.xxA`） | 只删除数值文本，其它布局不变。 |
+| 电流镜像条 | 仅显示两路镜像条形图（无 `CH1/CH2` 文本标签，不显示单通道数值） | 条形图位于左列 `CURRENT` 标签右侧；右列不再显示 `CH1/CH2` 区块。 |
 | 温度 | 0 或 1 位小数（`37°` 或 `37.8°`），根据传感器噪声门限自动选择 | 单位符号与数值之间保留 1 空格。 |
 | 运行时间、能量 | 现有格式 (`HH:MM:SS`, `125.4Wh`) | 如需更多精度，在右列列表中扩展即可。 |
 
@@ -57,8 +58,6 @@
 | Control row | 模式切换（CC/CV）+ 当前 preset 目标值（单位随模式变更） | SmallFont | 背景 `#1C2638`；CC 文本 `#FF5252`；CV 文本 `#FFB347`；数值 `#DFE7FF`；选中位高亮背景 `#4CC9F0`（高亮位字符改为深色） | 行背景：`y=10..38`；MODE pill `(198,10)-(252,38)`；VALUE pill `(256,10)-(314,38)`；默认选中十分位（0.1），不显示“步长”文本 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
-| Channel current pair | 左列 CH1，右列 CH2（仅标签） | 标签 SmallFont | 标签 `#6D7FA4` | 左列起点 (198,96)，右列起点 (258,96) |
-| Channel current mirror bar | 中心 0 A，左右各 55 px 行程（上限 5 A） | — | 轨道 `#1C2638`，填充 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,130)-(314,137)`，中心 x=256 |
 | Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `FLT 0x12345678`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
 
 ### Status line #5：状态文案（禁止 debug 噪声）
@@ -114,7 +113,7 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
    - Sample at 1 kHz, low-pass (α = 0.3), refresh UI at 20 Hz.
    - When a limit is exceeded, flash a 2 px strip along the top edge of the affected card using `#FF5252` (over) or `#6EF58C` (under).
    - Decimal dot: draw a filled 6×6 square at `y = glyph_baseline − 8` so it lines up with the mock.
-   - 左侧 `CURRENT` 仅显示合计电流主读数（数值 + 单位）；两路通道电流以右列 `CH1/CH2` 的镜像条形图表达，不显示数值文本。
+   - 左侧 `CURRENT` 仅显示合计电流主读数（数值 + 单位）；两路通道电流以 `CURRENT` 标签右侧镜像条形图表达（无文字标签，不显示单通道数值文本）。
 2. **Right status**
    - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 40 V`.
    - **Control row** replaces the legacy “SET I” line:
