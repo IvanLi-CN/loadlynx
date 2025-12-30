@@ -129,7 +129,7 @@ fn linker_error_hints() {
 
 use std::env;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn repo_root_from_manifest() -> Option<PathBuf> {
@@ -162,16 +162,16 @@ fn git_watch_paths() -> Vec<PathBuf> {
 
     // Track the active branch ref file so commits rerun the build script and
     // the embedded version string stays accurate.
-    if let Ok(contents) = fs::read_to_string(&head) {
-        if let Some(line) = contents.lines().next() {
-            let line = line.trim();
-            if let Some(rest) = line.strip_prefix("ref:") {
-                let ref_name = rest.trim();
-                if !ref_name.is_empty() {
-                    let ref_path = common_dir.join(ref_name);
-                    if ref_path.exists() {
-                        paths.push(ref_path);
-                    }
+    if let Ok(contents) = fs::read_to_string(&head)
+        && let Some(line) = contents.lines().next()
+    {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("ref:") {
+            let ref_name = rest.trim();
+            if !ref_name.is_empty() {
+                let ref_path = common_dir.join(ref_name);
+                if ref_path.exists() {
+                    paths.push(ref_path);
                 }
             }
         }
@@ -180,7 +180,7 @@ fn git_watch_paths() -> Vec<PathBuf> {
     paths
 }
 
-fn git_dirs(repo_root: &PathBuf) -> Option<(PathBuf, PathBuf)> {
+fn git_dirs(repo_root: &Path) -> Option<(PathBuf, PathBuf)> {
     let dot_git = repo_root.join(".git");
     let git_dir = if dot_git.is_dir() {
         dot_git
@@ -207,7 +207,7 @@ fn git_dirs(repo_root: &PathBuf) -> Option<(PathBuf, PathBuf)> {
     Some((git_dir, common_dir))
 }
 
-fn resolve_maybe_relative(base: &PathBuf, raw: &str) -> PathBuf {
+fn resolve_maybe_relative(base: &Path, raw: &str) -> PathBuf {
     let path = PathBuf::from(raw);
     if path.is_absolute() {
         path
@@ -251,7 +251,7 @@ fn source_digest() -> Option<u64> {
         }
     }
 
-    fn walk_dir(dir: &PathBuf, state: &mut u64) -> std::io::Result<()> {
+    fn walk_dir(dir: &Path, state: &mut u64) -> std::io::Result<()> {
         for entry in fs::read_dir(dir)? {
             let entry = entry?;
             let path = entry.path();
