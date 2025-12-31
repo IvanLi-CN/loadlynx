@@ -22,7 +22,7 @@
 ## 非目标（Out of scope）
 
 - 不做 Wi‑Fi/网络配置、校准、SoftReset 等非 preset 相关功能。
-- 不在本设计中确定“负载开关”UI 位置与交互（仅预留空间/约束）。
+- 不在本设计中确定 **主界面**“负载开关（OUTPUT）”UI 位置与交互。
 - 不扩展 preset 数量与字段（固定 5 组，字段集以现有协议/固件模型为准）。
 
 ## 术语
@@ -36,6 +36,20 @@
 
 ## UI 信息架构
 
+UI mock（320×240 PNG）：
+
+- 主界面（Dashboard）
+
+  ![Dashboard](../assets/on-device-preset-ui/dashboard.png)
+
+- 预设设置面板（OUTPUT=OFF）
+
+  ![Preset panel output off](../assets/on-device-preset-ui/preset-panel-output-off.png)
+
+- 预设设置面板（OUTPUT=ON）
+
+  ![Preset panel output on](../assets/on-device-preset-ui/preset-panel-output-on.png)
+
 ### 1) 主界面（Main）
 
 - 将当前界面中“CC/CV 选择区域”替换为 `<PRESET><MODE>` 的入口按钮（视觉为组合展示，例如 `M2` + `CC`，不要求使用斜杠文本）。
@@ -46,7 +60,26 @@
 - 触发方式：点击主界面 `<PRESET><MODE>` 按钮打开；可关闭返回主界面。
 - 顶部：tabs（M1..M5）用于选择 **editing_preset**（单击只切换编辑对象，不激活）。
 - 中部：字段编辑区（见“字段与格式”）。
-- 底部：仅一个 `保存` 按钮（无 `应用` 按钮）。
+- 底部：左侧为 **OUTPUT** 滑动开关（负载开关，非 preset 字段）；右侧为 `SAVE` 按钮（无 `Apply` 按钮）。
+
+#### MODE 字段：双选按钮（CV / CC）
+
+- 表现形式：分段控件（segmented control），直接显示两个选项 `CV` 与 `CC`。
+- 交互：点击某一段立即设置 `mode`（无需进入“字段编辑态”再旋钮切换），并按“安全关断负载”规则处理副作用。
+- 视觉：延续主界面语义色：`CC` 红 `#FF5252`、`CV` 橙 `#FFB24A`；未选中项用灰 `#7A7F8C`。
+- 尺寸：分段控件高度建议 ≤ **12 px**（与 UI mock 一致），并与下一行选中高亮保持 ≥ **1 px** 间隙，避免视觉粘连。
+
+#### OUTPUT 滑动开关（视觉规范）
+
+> 需要在 UI mock 与实现中保持一致：像素级渲染，避免缩放造成的模糊或形变。
+
+- 结构：外轮廓胶囊（1 px）+ 胶囊背景（track）+ 圆形滑块（thumb）。
+- 轮廓：位于背景胶囊外侧一圈，线宽 **1 px**（推荐使用 `divider #1C2A3F`）。
+- 尺寸：背景胶囊（track）的高度必须 **等于** 圆形滑块（thumb）的直径（推荐 thumb 直径 10 px）。
+- 颜色：
+  - `OFF`：track 使用更暗的红色（例如 `#4A1824`），thumb 为灰色（`#555F75`）。
+  - `ON`：track 使用更暗的绿色（例如 `#134B2D`），thumb 为主题色（`#4CC9F0`）。
+- 渲染：thumb 必须为严格正圆（在 320×240 的像素网格下可清晰辨认），不得用“类圆形位图”糊弄。
 
 ## 核心交互规范
 
@@ -146,4 +179,3 @@
 - 电流/电压/功率显示均为固定宽度格式；光标循环与可选位限制按本文规定生效。
 - 保存按钮无改动时禁用视觉但可点；保存成功/失败 toast；保存失败阻塞且只能重复点同一保存按钮重试。
 - 未保存改动丢弃规则按本文冻结规则生效。
-
