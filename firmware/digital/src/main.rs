@@ -29,7 +29,7 @@ use esp_hal::{
     self as hal, Async,
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
-    gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
+    gpio::{DriveMode, DriveStrength, Level, NoPin, Output, OutputConfig},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self as ledc_channel, ChannelIFace as _},
@@ -77,6 +77,7 @@ use ui::{AnalogState, UiSnapshot};
 
 mod eeprom;
 mod i2c0;
+mod prompt_tone;
 mod touch;
 
 // Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
@@ -196,6 +197,8 @@ static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = Stati
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static BUZZER_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
+static BUZZER_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
@@ -541,6 +544,11 @@ async fn encoder_task(
                 let phys_step = if residual > 0 { 1 } else { -1 };
                 residual -= phys_step * ENCODER_COUNTS_PER_STEP;
 
+                // Every detent MUST produce a tick sound. The prompt tone
+                // manager is responsible for queuing and for suppressing ticks
+                // during active faults.
+                prompt_tone::enqueue_ticks(1);
+
                 // Reverse logical direction to match panel orientation (CW increments).
                 let logical_step = -phys_step;
                 let mut guard = control.lock().await;
@@ -611,14 +619,39 @@ async fn encoder_task(
                     if down_since_ms.is_some() && !long_action_fired {
                         let mut guard = control.lock().await;
                         let prev = guard.output_enabled;
-                        guard.output_enabled = !prev;
-                        bump_control_rev();
-                        info!(
-                            "encoder short-press: output_enabled {} -> {} (preset_id={})",
-                            if prev { "ON" } else { "OFF" },
-                            if !prev { "ON" } else { "OFF" },
-                            guard.active_preset_id
-                        );
+                        let desired = !prev;
+
+                        // Business failure is defined as an explicit local policy
+                        // reject (NOT link/ACK/timeout). For now we reject enabling
+                        // output while analog is offline or faulted.
+                        let analog_state =
+                            AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+                        let allow_enable =
+                            matches!(analog_state, AnalogState::Ready | AnalogState::CalMissing);
+
+                        if desired && !allow_enable {
+                            let state_str = match analog_state {
+                                AnalogState::Offline => "offline",
+                                AnalogState::Faulted => "faulted",
+                                AnalogState::Ready => "ready",
+                                AnalogState::CalMissing => "cal_missing",
+                            };
+                            info!(
+                                "encoder short-press: enable rejected (analog_state={}, preset_id={})",
+                                state_str, guard.active_preset_id
+                            );
+                            prompt_tone::enqueue_ui_fail();
+                        } else {
+                            guard.output_enabled = desired;
+                            bump_control_rev();
+                            info!(
+                                "encoder short-press: output_enabled {} -> {} (preset_id={})",
+                                if prev { "ON" } else { "OFF" },
+                                if desired { "ON" } else { "OFF" },
+                                guard.active_preset_id
+                            );
+                            prompt_tone::enqueue_ui_ok();
+                        }
                     }
                     down_since_ms = None;
                     long_action_fired = false;
@@ -648,6 +681,7 @@ async fn encoder_task(
                         "encoder long-press: active_preset_id -> {} (output forced OFF)",
                         guard.active_preset_id
                     );
+                    prompt_tone::enqueue_ui_ok();
                 }
             }
         }
@@ -681,6 +715,9 @@ async fn touch_ui_task(control: &'static ControlMutex) {
             yield_now().await;
             continue;
         }
+
+        // Any touch-down counts as a local interaction for prompt tones.
+        prompt_tone::enqueue_ui_ok();
 
         let Some(hit) = ui::hit_test_control_row(marker.x, marker.y) else {
             yield_now().await;
@@ -1062,6 +1099,9 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
             warn!("analog fault flags set: 0x{:08x}", fault_flags);
         }
     }
+
+    // Drive the prompt tone manager with the latest fault snapshot.
+    prompt_tone::set_fault_flags(fault_flags);
 }
 
 fn protocol_error_str(err: &loadlynx_protocol::Error) -> &'static str {
@@ -1969,6 +2009,7 @@ async fn main(spawner: Spawner) {
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
     let fan_pwm_pin = peripherals.GPIO39; // MTCK / FAN_PWM（PAD‑JTAG 已在启动早期释放）
+    let buzzer_pin = peripherals.GPIO21; // BUZZER (GPIO21)
     // NOTE: GPIO40 (MTDO) is wired to FAN_TACH and intentionally left unused here;
     // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
@@ -2047,6 +2088,37 @@ async fn main(spawner: Spawner) {
     fan_channel
         .set_duty(FAN_DUTY_DEFAULT_PCT)
         .expect("fan duty default");
+
+    // BUZZER: 低速 LEDC 通道，固定 ~2.2 kHz 基频；提示音通过占空比 + 节奏体现。
+    //
+    // 通过先将 GPIO 配置为保守的推挽输出（低驱动强度）并冻结后再路由到 LEDC，
+    // 避免外围外设覆盖引脚驱动设置。
+    let buzzer_cfg = OutputConfig::default()
+        .with_drive_mode(DriveMode::PushPull)
+        .with_drive_strength(DriveStrength::_5mA)
+        .with_pull(Pull::None);
+    let buzzer_out = Output::new(buzzer_pin, Level::Low, buzzer_cfg).into_peripheral_output();
+
+    let mut buzzer_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer2);
+    buzzer_timer
+        .configure(ledc_timer::config::Config {
+            duty: ledc_timer::config::Duty::Duty10Bit,
+            clock_source: ledc_timer::LSClockSource::APBClk,
+            frequency: Rate::from_hz(2_200),
+        })
+        .expect("buzzer timer");
+    let buzzer_timer = BUZZER_TIMER.init(buzzer_timer);
+
+    let mut buzzer_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel2, buzzer_out);
+    buzzer_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*buzzer_timer,
+            duty_pct: 0,
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("buzzer channel");
+    let buzzer_channel = BUZZER_CHANNEL.init(buzzer_channel);
+    buzzer_channel.set_duty(0).expect("buzzer duty init");
 
     let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
     #[cfg(not(feature = "net_http"))]
@@ -2226,6 +2298,10 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(touch_ui_task(control))
         .expect("touch_ui_task spawn");
+    info!("spawning prompt-tone task");
+    spawner
+        .spawn(prompt_tone::prompt_tone_task(buzzer_channel))
+        .expect("prompt_tone_task spawn");
     info!("spawning fan task");
     spawner
         .spawn(fan_task(telemetry, fan_channel))
