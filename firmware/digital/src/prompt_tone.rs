@@ -31,6 +31,7 @@ static UI_SOUNDS: Channel<CriticalSectionRawMutex, UiSound, 8> = Channel::new();
 static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 static FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
+static LOCAL_ACTIVITY: AtomicU32 = AtomicU32::new(0);
 static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
 
 /// Update the latest analog-side `fault_flags` snapshot.
@@ -53,6 +54,18 @@ pub fn enqueue_ui_ok() {
 /// This MUST represent a "business reject" (not link/ACK/timeout failures).
 pub fn enqueue_ui_fail() {
     let _ = UI_SOUNDS.try_send(UiSound::Fail);
+    WAKE.signal(());
+}
+
+/// Notify a local user interaction that should count for "fault cleared needs
+/// local ack", without necessarily producing a sound.
+///
+/// Example: touch-down on a non-interactive area of the screen.
+pub fn notify_local_activity() {
+    // Saturate to keep it bounded; we only care about "non-zero".
+    let _ = LOCAL_ACTIVITY.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_add(1).min(1_000_000))
+    });
     WAKE.signal(());
 }
 
@@ -302,11 +315,13 @@ pub async fn prompt_tone_task(
                 fault_cleared_wait_ack = false;
                 pending_ok = 0;
                 pending_fail = 0;
+                LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
                 PENDING_TICKS.store(0, Ordering::Relaxed); // discard suppressed ticks
                 player = Some(start_player(ActiveSound::FaultAlarm, buzzer_channel));
             } else if last_fault_flags != 0 && fault_flags == 0 {
                 info!("prompt_tone: fault cleared; waiting for local ack");
                 fault_cleared_wait_ack = true;
+                LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
                 // Keep alarm playing until we see a local interaction (sound or detent).
                 if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::FaultAlarm) {
                     player = Some(start_player(ActiveSound::FaultAlarm, buzzer_channel));
@@ -332,11 +347,13 @@ pub async fn prompt_tone_task(
             // the first local interaction happens.
             if fault_cleared_wait_ack {
                 drain_ui_sounds(&mut pending_ok, &mut pending_fail, false);
+                let has_activity = LOCAL_ACTIVITY.load(Ordering::Relaxed) > 0;
                 let has_detent = PENDING_TICKS.load(Ordering::Relaxed) > 0;
                 let has_sound = pending_ok > 0 || pending_fail > 0;
-                if has_detent || has_sound {
+                if has_activity || has_detent || has_sound {
                     info!("prompt_tone: local ack observed; stopping fault alarm");
                     fault_cleared_wait_ack = false;
+                    LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
                     // Stop alarm immediately; next loop will play queued UI sounds / ticks.
                     buzzer_apply(buzzer_channel, 0);
                     player = None;

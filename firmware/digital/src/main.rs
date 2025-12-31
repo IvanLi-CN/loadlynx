@@ -716,13 +716,16 @@ async fn touch_ui_task(control: &'static ControlMutex) {
             continue;
         }
 
-        // Any touch-down counts as a local interaction for prompt tones.
-        prompt_tone::enqueue_ui_ok();
-
         let Some(hit) = ui::hit_test_control_row(marker.x, marker.y) else {
+            // Non-interactive touch: counts as a local interaction (e.g. for
+            // "fault cleared needs local ack"), but should not emit a UI sound.
+            prompt_tone::notify_local_activity();
             yield_now().await;
             continue;
         };
+
+        // Interactive touch: emit a confirmation tone.
+        prompt_tone::enqueue_ui_ok();
 
         match hit {
             ui::ControlRowHit::ModeCc | ui::ControlRowHit::ModeCv => {
