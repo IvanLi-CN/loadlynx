@@ -1,4 +1,5 @@
 mod fonts;
+pub mod preset_panel;
 
 use embedded_graphics::pixelcolor::{
     Rgb565,
