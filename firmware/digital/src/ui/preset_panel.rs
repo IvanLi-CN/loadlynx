@@ -628,9 +628,9 @@ fn row_y(field: PresetPanelField, mode: LoadMode) -> i32 {
 
 fn row_hit_rect(y: i32) -> Rect {
     Rect::new(
-        PANEL_LEFT + 24,
+        PANEL_LEFT + 10,
         y - 2,
-        PANEL_RIGHT - 24,
+        PANEL_RIGHT - 8,
         y + SMALL_FONT.height() as i32 + 2,
     )
 }
