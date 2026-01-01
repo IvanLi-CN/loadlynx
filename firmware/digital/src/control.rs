@@ -1,6 +1,8 @@
 use loadlynx_calibration_format as calfmt;
 use loadlynx_protocol::LoadMode;
 
+use crate::ui::preset_panel::{PresetPanelDigit, PresetPanelField};
+
 pub const PRESET_COUNT: usize = 5;
 
 pub const HARD_MAX_I_MA_TOTAL: i32 = 10_000;
@@ -112,6 +114,13 @@ pub fn default_presets() -> [Preset; PRESET_COUNT] {
     ]
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiView {
+    Main,
+    PresetPanel,
+    PresetPanelBlocked,
+}
+
 #[derive(Clone, Debug)]
 pub struct ControlState {
     /// Mutable in-RAM working presets.
@@ -124,6 +133,9 @@ pub struct ControlState {
     pub editing_preset_id: u8, // 1..=5
     pub output_enabled: bool,
     pub adjust_digit: AdjustDigit,
+    pub ui_view: UiView,
+    pub panel_selected_field: PresetPanelField,
+    pub panel_selected_digit: PresetPanelDigit,
 }
 
 impl ControlState {
@@ -136,6 +148,9 @@ impl ControlState {
             editing_preset_id: 1,
             output_enabled: false,
             adjust_digit: AdjustDigit::DEFAULT,
+            ui_view: UiView::Main,
+            panel_selected_field: PresetPanelField::Target,
+            panel_selected_digit: PresetPanelDigit::Tenths,
         }
     }
 
@@ -155,6 +170,21 @@ impl ControlState {
         if idx < PRESET_COUNT {
             self.dirty[idx] = self.presets[idx] != self.saved[idx];
         }
+    }
+
+    pub fn update_dirty_for_preset_id(&mut self, preset_id: u8) {
+        let Some(idx) = Self::preset_idx(preset_id) else {
+            return;
+        };
+        self.update_dirty_for_idx(idx);
+    }
+
+    pub fn commit_saved_for_preset_id(&mut self, preset_id: u8) {
+        let Some(idx) = Self::preset_idx(preset_id) else {
+            return;
+        };
+        self.saved[idx] = self.presets[idx];
+        self.dirty[idx] = false;
     }
 
     /// Discard dirty changes for all *non-active* presets.
