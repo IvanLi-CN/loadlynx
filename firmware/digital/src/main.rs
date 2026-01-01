@@ -234,6 +234,7 @@ static CALIBRATION: StaticCell<CalibrationMutex> = StaticCell::new();
 pub type ControlMutex = Mutex<CriticalSectionRawMutex, ControlState>;
 static CONTROL: StaticCell<ControlMutex> = StaticCell::new();
 pub(crate) static CONTROL_REV: AtomicU32 = AtomicU32::new(0);
+static PRESET_PREVIEW_ID: AtomicU8 = AtomicU8::new(0);
 
 pub(crate) fn bump_control_rev() -> u32 {
     CONTROL_REV.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
@@ -694,8 +695,17 @@ async fn encoder_task(
 
 #[embassy_executor::task]
 async fn touch_ui_task(control: &'static ControlMutex) {
-    info!("touch-ui task starting (control row hit-test)");
+    info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
+    let mut quick_switch: Option<(i32, u8, bool, u8)> = None;
+    const DRAG_START_THRESHOLD_PX: i32 = 10;
+    const SWIPE_STEP_PX: i32 = 24;
+
+    fn wrap_preset_id(base: u8, delta: i32) -> u8 {
+        let base0 = (base.saturating_sub(1)) as i32;
+        let wrapped = (base0 + delta).rem_euclid(control::PRESET_COUNT as i32);
+        (wrapped as u8) + 1
+    }
 
     loop {
         let seq = touch::touch_marker_seq();
@@ -710,60 +720,72 @@ async fn touch_ui_task(control: &'static ControlMutex) {
             continue;
         };
 
-        // FT6336U: event=0 is typically “down”. Act only once per touch-down.
-        if marker.event != 0 {
-            yield_now().await;
-            continue;
-        }
-
-        let Some(hit) = ui::hit_test_control_row(marker.x, marker.y) else {
-            // Non-interactive touch: counts as a local interaction (e.g. for
-            // "fault cleared needs local ack"), but should not emit a UI sound.
-            prompt_tone::notify_local_activity();
-            yield_now().await;
-            continue;
-        };
-
-        // Interactive touch: emit a confirmation tone.
-        prompt_tone::enqueue_ui_ok();
-
-        match hit {
-            ui::ControlRowHit::ModeCc | ui::ControlRowHit::ModeCv => {
-                let desired = match hit {
-                    ui::ControlRowHit::ModeCc => LoadMode::Cc,
-                    ui::ControlRowHit::ModeCv => LoadMode::Cv,
-                    _ => LoadMode::Cc,
+        match marker.event {
+            // down
+            0 => {
+                let Some(ui::ControlRowHit::PresetEntry) =
+                    ui::hit_test_control_row(marker.x, marker.y)
+                else {
+                    quick_switch = None;
+                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                    yield_now().await;
+                    continue;
                 };
 
-                let mut guard = control.lock().await;
-                let preset_id = guard.active_preset_id;
-                let preset_idx = preset_id.saturating_sub(1) as usize;
-                if preset_idx >= control::PRESET_COUNT {
+                let base_id = { control.lock().await.active_preset_id };
+                quick_switch = Some((marker.x, base_id, false, base_id));
+            }
+            // contact/move
+            2 => {
+                let Some((start_x, base_id, dragging, last_preview_id)) = quick_switch else {
+                    yield_now().await;
+                    continue;
+                };
+                let dx = marker.x - start_x;
+                let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
+                if !now_dragging {
                     yield_now().await;
                     continue;
                 }
-                let prev = guard.presets[preset_idx].mode;
-                if prev != desired {
-                    guard.presets[preset_idx].mode = desired;
-                    if guard.output_enabled {
+
+                let delta = dx / SWIPE_STEP_PX;
+                let preview_id = wrap_preset_id(base_id, delta);
+                if preview_id != last_preview_id {
+                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                    quick_switch = Some((start_x, base_id, true, preview_id));
+                } else if !dragging {
+                    // Entered drag state but preset index did not move yet.
+                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                    quick_switch = Some((start_x, base_id, true, last_preview_id));
+                }
+            }
+            // up
+            1 => {
+                let Some((_start_x, base_id, dragging, preview_id)) = quick_switch else {
+                    yield_now().await;
+                    continue;
+                };
+
+                if dragging {
+                    if preview_id != base_id {
+                        let mut guard = control.lock().await;
+                        guard.active_preset_id = preview_id;
                         guard.output_enabled = false;
+                        bump_control_rev();
+                        info!(
+                            "touch: quick switch preset {} -> {} (output forced OFF)",
+                            base_id, preview_id
+                        );
                     }
-                    guard.presets[preset_idx] = guard.presets[preset_idx].clamp();
-                    bump_control_rev();
-                    info!(
-                        "touch: preset_id={} mode {:?} -> {:?} (output forced OFF)",
-                        preset_id, prev, desired
-                    );
+                } else {
+                    // Tap intent: open Preset Panel (integration TODO).
+                    info!("touch: preset entry tap -> open preset panel (TODO)");
                 }
+
+                quick_switch = None;
+                PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
             }
-            ui::ControlRowHit::Digit(digit) => {
-                let mut guard = control.lock().await;
-                if guard.adjust_digit != digit {
-                    let prev = guard.adjust_digit;
-                    guard.adjust_digit = digit;
-                    info!("touch: adjust_digit {:?} -> {:?}", prev, digit);
-                }
-            }
+            _ => {}
         }
 
         yield_now().await;
@@ -1297,9 +1319,21 @@ async fn display_task(
             // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
             fps_window_frames = fps_window_frames.wrapping_add(1);
 
+            let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
             let (active_preset_id, output_enabled, mode, target_milli, target_unit, adjust_digit) = {
                 let guard = control.lock().await;
-                let preset = guard.active_preset();
+                let active_preset_id =
+                    if (1..=(control::PRESET_COUNT as u8)).contains(&preview_id) {
+                        preview_id
+                    } else {
+                        guard.active_preset_id
+                    };
+                let preset_idx = active_preset_id.saturating_sub(1) as usize;
+                let preset = if preset_idx < control::PRESET_COUNT {
+                    guard.presets[preset_idx]
+                } else {
+                    guard.active_preset()
+                };
                 let mode = match preset.mode {
                     LoadMode::Cv => LoadMode::Cv,
                     LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
@@ -1308,14 +1342,7 @@ async fn display_task(
                     LoadMode::Cv => (preset.target_v_mv, 'V'),
                     LoadMode::Cc | LoadMode::Reserved(_) => (preset.target_i_ma, 'A'),
                 };
-                (
-                    guard.active_preset_id,
-                    guard.output_enabled,
-                    mode,
-                    target_milli,
-                    target_unit,
-                    guard.adjust_digit,
-                )
+                (active_preset_id, guard.output_enabled, mode, target_milli, target_unit, guard.adjust_digit)
             };
 
             let (snapshot, mask) = {
