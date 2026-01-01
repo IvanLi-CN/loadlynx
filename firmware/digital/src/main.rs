@@ -546,7 +546,51 @@ async fn encoder_task(
                 let logical_step = -phys_step;
                 let mut guard = control.lock().await;
                 match guard.ui_view {
-                    control::UiView::Main | control::UiView::PresetPanelBlocked => {}
+                    control::UiView::Main => {
+                        let preset_id = guard.active_preset_id;
+                        let preset_idx = preset_id.saturating_sub(1) as usize;
+                        if preset_idx >= control::PRESET_COUNT {
+                            continue;
+                        }
+
+                        let digit = guard.adjust_digit;
+                        let step = digit.step_milli().saturating_mul(logical_step as i32);
+
+                        let mut preset = guard.presets[preset_idx];
+                        let mode = match preset.mode {
+                            LoadMode::Cv => LoadMode::Cv,
+                            LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+                        };
+
+                        let mut changed = false;
+                        match mode {
+                            LoadMode::Cc | LoadMode::Reserved(_) => {
+                                let prev = preset.target_i_ma;
+                                let max = preset.max_i_ma_total;
+                                let next = (prev.saturating_add(step)).clamp(0, max);
+                                if next != prev {
+                                    preset.target_i_ma = next;
+                                    changed = true;
+                                }
+                            }
+                            LoadMode::Cv => {
+                                let prev = preset.target_v_mv;
+                                let next =
+                                    (prev.saturating_add(step)).clamp(0, control::HARD_MAX_V_MV);
+                                if next != prev {
+                                    preset.target_v_mv = next;
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        if changed {
+                            guard.presets[preset_idx] = preset.clamp();
+                            guard.update_dirty_for_preset_id(preset_id);
+                            bump_control_rev();
+                        }
+                    }
+                    control::UiView::PresetPanelBlocked => {}
                     control::UiView::PresetPanel => {
                         let preset_id = guard.editing_preset_id;
                         let idx = preset_id.saturating_sub(1) as usize;
@@ -721,7 +765,18 @@ async fn encoder_task(
 async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMutex) {
     info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
-    let mut quick_switch: Option<(i32, u8, bool, u8)> = None;
+    enum ControlRowTouch {
+        PresetSwitch {
+            start_x: i32,
+            base_id: u8,
+            dragging: bool,
+            preview_id: u8,
+        },
+        TargetDigit {
+            digit: control::AdjustDigit,
+        },
+    }
+    let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
     const DRAG_START_THRESHOLD_PX: i32 = 10;
     const SWIPE_STEP_PX: i32 = 24;
@@ -753,15 +808,26 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                 if view == control::UiView::PresetPanelBlocked {
                     quick_switch = None;
                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
-                } else if matches!(
-                    ui::hit_test_control_row(marker.x, marker.y),
-                    Some(ui::ControlRowHit::PresetEntry)
-                ) {
-                    let base_id = { control.lock().await.active_preset_id };
-                    quick_switch = Some((marker.x, base_id, false, base_id));
                 } else {
-                    quick_switch = None;
-                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                    match ui::hit_test_control_row(marker.x, marker.y) {
+                        Some(ui::ControlRowHit::PresetEntry) => {
+                            let base_id = { control.lock().await.active_preset_id };
+                            quick_switch = Some(ControlRowTouch::PresetSwitch {
+                                start_x: marker.x,
+                                base_id,
+                                dragging: false,
+                                preview_id: base_id,
+                            });
+                        }
+                        Some(ui::ControlRowHit::TargetDigit(digit)) => {
+                            quick_switch = Some(ControlRowTouch::TargetDigit { digit });
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        }
+                        None => {
+                            quick_switch = None;
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        }
+                    }
                 }
             }
             // contact/move
@@ -773,7 +839,19 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     continue;
                 }
 
-                let Some((start_x, base_id, dragging, last_preview_id)) = quick_switch else {
+                // Only support press-swipe preview in the main Dashboard view.
+                if view != control::UiView::Main {
+                    yield_now().await;
+                    continue;
+                }
+
+                let Some(ControlRowTouch::PresetSwitch {
+                    start_x,
+                    base_id,
+                    dragging,
+                    preview_id: last_preview_id,
+                }) = quick_switch
+                else {
                     yield_now().await;
                     continue;
                 };
@@ -788,11 +866,21 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                 let preview_id = wrap_preset_id(base_id, delta);
                 if preview_id != last_preview_id {
                     PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
-                    quick_switch = Some((start_x, base_id, true, preview_id));
+                    quick_switch = Some(ControlRowTouch::PresetSwitch {
+                        start_x,
+                        base_id,
+                        dragging: true,
+                        preview_id,
+                    });
                 } else if !dragging {
                     // Entered drag state but preset index did not move yet.
                     PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
-                    quick_switch = Some((start_x, base_id, true, last_preview_id));
+                    quick_switch = Some(ControlRowTouch::PresetSwitch {
+                        start_x,
+                        base_id,
+                        dragging: true,
+                        preview_id: last_preview_id,
+                    });
                 }
             }
             // up
@@ -815,7 +903,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     continue;
                 }
 
-                let Some((_start_x, base_id, dragging, preview_id)) = quick_switch else {
+                let Some(action) = quick_switch.take() else {
                     if view == control::UiView::PresetPanel {
                         let vm = {
                             let guard = control.lock().await;
@@ -961,44 +1049,62 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     continue;
                 };
 
-                if dragging {
-                    if preview_id != base_id {
-                        let mut guard = control.lock().await;
-                        guard.activate_preset(preview_id);
-                        bump_control_rev();
-                        info!(
-                            "touch: quick switch preset {} -> {} (output forced OFF)",
-                            base_id, preview_id
-                        );
+                match action {
+                    ControlRowTouch::PresetSwitch {
+                        base_id,
+                        dragging,
+                        preview_id,
+                        ..
+                    } => {
+                        if dragging {
+                            if preview_id != base_id {
+                                let mut guard = control.lock().await;
+                                guard.activate_preset(preview_id);
+                                bump_control_rev();
+                                info!(
+                                    "touch: quick switch preset {} -> {} (output forced OFF)",
+                                    base_id, preview_id
+                                );
+                            }
+                        } else {
+                            match view {
+                                control::UiView::Main => {
+                                    let mut guard = control.lock().await;
+                                    guard.ui_view = control::UiView::PresetPanel;
+                                    guard.editing_preset_id = guard.active_preset_id;
+                                    guard.panel_selected_field =
+                                        ui::preset_panel::PresetPanelField::Target;
+                                    guard.panel_selected_digit =
+                                        ui::preset_panel::PresetPanelDigit::Tenths;
+                                    bump_control_rev();
+                                    info!(
+                                        "touch: preset entry tap -> open preset panel (editing preset_id={})",
+                                        guard.editing_preset_id
+                                    );
+                                }
+                                control::UiView::PresetPanel => {
+                                    let mut guard = control.lock().await;
+                                    guard.close_panel_discard();
+                                    guard.ui_view = control::UiView::Main;
+                                    bump_control_rev();
+                                    info!(
+                                        "touch: preset entry tap -> close preset panel (discard non-active)"
+                                    );
+                                }
+                                control::UiView::PresetPanelBlocked => {}
+                            }
+                        }
                     }
-                } else {
-                    match view {
-                        control::UiView::Main => {
+                    ControlRowTouch::TargetDigit { digit } => {
+                        if view == control::UiView::Main {
                             let mut guard = control.lock().await;
-                            guard.ui_view = control::UiView::PresetPanel;
-                            guard.editing_preset_id = guard.active_preset_id;
-                            guard.panel_selected_field = ui::preset_panel::PresetPanelField::Target;
-                            guard.panel_selected_digit = ui::preset_panel::PresetPanelDigit::Tenths;
+                            guard.adjust_digit = digit;
                             bump_control_rev();
-                            info!(
-                                "touch: preset entry tap -> open preset panel (editing preset_id={})",
-                                guard.editing_preset_id
-                            );
+                            info!("touch: dashboard target digit -> {}", digit);
                         }
-                        control::UiView::PresetPanel => {
-                            let mut guard = control.lock().await;
-                            guard.close_panel_discard();
-                            guard.ui_view = control::UiView::Main;
-                            bump_control_rev();
-                            info!(
-                                "touch: preset entry tap -> close preset panel (discard non-active)"
-                            );
-                        }
-                        control::UiView::PresetPanelBlocked => {}
                     }
                 }
 
-                quick_switch = None;
                 PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                 last_tab_tap = None;
             }

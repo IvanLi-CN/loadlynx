@@ -65,10 +65,12 @@ pub(crate) const CONTROL_VALUE_PILL_LEFT: i32 = 256;
 pub(crate) const CONTROL_VALUE_PILL_RIGHT: i32 = 314;
 const CONTROL_TEXT_Y: i32 = 18;
 const CONTROL_PILL_RADIUS: i32 = 6;
+const CONTROL_TARGET_SAMPLE: &str = "00.000A";
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ControlRowHit {
     PresetEntry,
+    TargetDigit(AdjustDigit),
 }
 
 pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
@@ -76,15 +78,47 @@ pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
         return None;
     }
 
-    // Only the <M#><MODE> entry is interactive on the main screen. All mode/target
-    // editing happens in the Preset Panel.
-    // Treat the whole combined pill area as a single button so taps on either
-    // the <M#><MODE> segment or the target value segment open the panel.
-    if x >= CONTROL_MODE_PILL_LEFT && x <= CONTROL_VALUE_PILL_RIGHT {
+    // Main screen control row semantics:
+    // - Left pill (<M#><MODE>) opens/closes the Preset Panel and supports press-swipe preview.
+    // - Right pill (target value) selects the currently edited digit for the encoder.
+    if x >= CONTROL_MODE_PILL_LEFT && x <= CONTROL_MODE_PILL_RIGHT {
         return Some(ControlRowHit::PresetEntry);
     }
 
+    if x >= CONTROL_VALUE_PILL_LEFT && x <= CONTROL_VALUE_PILL_RIGHT {
+        return Some(ControlRowHit::TargetDigit(pick_control_row_digit(x)));
+    }
+
     None
+}
+
+fn control_row_value_text_x() -> i32 {
+    let width = small_text_width(CONTROL_TARGET_SAMPLE, 0);
+    CONTROL_VALUE_PILL_RIGHT - 4 - width
+}
+
+fn pick_control_row_digit(x: i32) -> AdjustDigit {
+    // Target string is fixed-width "DD.dddU" (7 chars), SmallFont is monospaced.
+    // Select the nearest editable digit: ones/tenths/hundredths/thousandths.
+    let glyph = SMALL_FONT.width() as i32;
+    let base_x = control_row_value_text_x();
+    let centers = [
+        (1, AdjustDigit::Ones),
+        (3, AdjustDigit::Tenths),
+        (4, AdjustDigit::Hundredths),
+        (5, AdjustDigit::Thousandths),
+    ];
+    let mut best = AdjustDigit::Tenths;
+    let mut best_dist = i32::MAX;
+    for (idx, digit) in centers {
+        let cx = base_x + (idx as i32) * glyph + glyph / 2;
+        let dist = (x - cx).abs();
+        if dist < best_dist {
+            best_dist = dist;
+            best = digit;
+        }
+    }
+    best
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -464,11 +498,34 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
 
     // Preset target value (fixed-width "DD.dddU", right-aligned inside VALUE pill).
     let target = data.control_target_text.as_str();
-    let width = small_text_width(target, 0);
-    let value_x = CONTROL_VALUE_PILL_RIGHT - 4 - width;
+    let value_x = control_row_value_text_x();
+    let glyph = SMALL_FONT.width() as i32;
 
-    // Main screen does not show per-digit selection; editing occurs in the panel.
+    // Highlight the selected digit so the user can see what the encoder will edit.
+    let highlight_idx: i32 = match data.adjust_digit {
+        AdjustDigit::Ones => 1,
+        AdjustDigit::Tenths => 3,
+        AdjustDigit::Hundredths => 4,
+        AdjustDigit::Thousandths => 5,
+    };
+    let cell_x = value_x + highlight_idx * glyph;
+    let highlight = Rect::new(
+        cell_x - 1,
+        CONTROL_TEXT_Y - 2,
+        cell_x + glyph + 1,
+        CONTROL_TEXT_Y + SMALL_FONT.height() as i32 + 2,
+    );
+    canvas.fill_rect(highlight, rgb(0x4cc9f0));
+
     draw_small_text(canvas, target, value_x, CONTROL_TEXT_Y, rgb(0xdfe7ff), 0);
+    if let Some(ch) = target.chars().nth(highlight_idx as usize) {
+        SMALL_FONT.draw_char(
+            ch,
+            |px, py| canvas.set_pixel(px + cell_x, py + CONTROL_TEXT_Y, rgb(0x080f19)),
+            0,
+            0,
+        );
+    }
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {

@@ -16,6 +16,7 @@ pub enum AdjustDigit {
     Ones,
     Tenths,
     Hundredths,
+    Thousandths,
 }
 
 impl AdjustDigit {
@@ -26,6 +27,7 @@ impl AdjustDigit {
             AdjustDigit::Ones => 1_000,    // 1.00
             AdjustDigit::Tenths => 100,    // 0.10
             AdjustDigit::Hundredths => 10, // 0.01
+            AdjustDigit::Thousandths => 1, // 0.001
         }
     }
 }
