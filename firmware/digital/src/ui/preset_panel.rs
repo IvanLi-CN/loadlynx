@@ -200,7 +200,16 @@ pub fn hit_test_preset_panel(x: i32, y: i32, vm: &PresetPanelVm) -> Option<Prese
         return None;
     }
 
-    if hit_in_rect(x, y, mode_pill_rect()) {
+    // Treat the whole MODE row as the hit target (not just the inner pill),
+    // so the segmented control remains easy to use on hardware.
+    if hit_in_rect(
+        x,
+        y,
+        row_hit_rect(row_y(
+            PresetPanelField::Mode,
+            normalize_mode(vm.editing_mode),
+        )),
+    ) {
         let sep = mode_pill_separator_x();
         return if x < sep {
             Some(PresetPanelHit::ModeCv)
