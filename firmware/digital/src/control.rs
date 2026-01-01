@@ -1,6 +1,8 @@
 use loadlynx_calibration_format as calfmt;
 use loadlynx_protocol::LoadMode;
 
+use crate::ui::preset_panel::{PresetPanelDigit, PresetPanelField};
+
 pub const PRESET_COUNT: usize = 5;
 
 pub const HARD_MAX_I_MA_TOTAL: i32 = 10_000;
@@ -14,6 +16,7 @@ pub enum AdjustDigit {
     Ones,
     Tenths,
     Hundredths,
+    Thousandths,
 }
 
 impl AdjustDigit {
@@ -24,6 +27,7 @@ impl AdjustDigit {
             AdjustDigit::Ones => 1_000,    // 1.00
             AdjustDigit::Tenths => 100,    // 0.10
             AdjustDigit::Hundredths => 10, // 0.01
+            AdjustDigit::Thousandths => 1, // 0.001
         }
     }
 }
@@ -112,27 +116,133 @@ pub fn default_presets() -> [Preset; PRESET_COUNT] {
     ]
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UiView {
+    Main,
+    PresetPanel,
+    PresetPanelBlocked,
+}
+
 #[derive(Clone, Debug)]
 pub struct ControlState {
+    /// Mutable in-RAM working presets.
     pub presets: [Preset; PRESET_COUNT],
-    pub active_preset_id: u8, // 1..=5
+    /// Last successfully persisted snapshot (EEPROM baseline).
+    pub saved: [Preset; PRESET_COUNT],
+    /// Whether `presets[i] != saved[i]`.
+    pub dirty: [bool; PRESET_COUNT],
+    pub active_preset_id: u8,  // 1..=5
+    pub editing_preset_id: u8, // 1..=5
     pub output_enabled: bool,
     pub adjust_digit: AdjustDigit,
+    pub ui_view: UiView,
+    pub panel_selected_field: PresetPanelField,
+    pub panel_selected_digit: PresetPanelDigit,
 }
 
 impl ControlState {
     pub fn new(presets: [Preset; PRESET_COUNT]) -> Self {
         Self {
             presets,
+            saved: presets,
+            dirty: [false; PRESET_COUNT],
             active_preset_id: 1,
+            editing_preset_id: 1,
             output_enabled: false,
             adjust_digit: AdjustDigit::DEFAULT,
+            ui_view: UiView::Main,
+            panel_selected_field: PresetPanelField::Target,
+            panel_selected_digit: PresetPanelDigit::Tenths,
         }
     }
 
     pub fn active_preset(&self) -> Preset {
         let idx = self.active_preset_id.saturating_sub(1) as usize;
         self.presets.get(idx).copied().unwrap_or(self.presets[0])
+    }
+
+    fn preset_idx(preset_id: u8) -> Option<usize> {
+        if preset_id == 0 || preset_id > PRESET_COUNT as u8 {
+            return None;
+        }
+        Some((preset_id - 1) as usize)
+    }
+
+    fn update_dirty_for_idx(&mut self, idx: usize) {
+        if idx < PRESET_COUNT {
+            self.dirty[idx] = self.presets[idx] != self.saved[idx];
+        }
+    }
+
+    pub fn update_dirty_for_preset_id(&mut self, preset_id: u8) {
+        let Some(idx) = Self::preset_idx(preset_id) else {
+            return;
+        };
+        self.update_dirty_for_idx(idx);
+    }
+
+    pub fn commit_saved_for_preset_id(&mut self, preset_id: u8) {
+        let Some(idx) = Self::preset_idx(preset_id) else {
+            return;
+        };
+        self.saved[idx] = self.presets[idx];
+        self.dirty[idx] = false;
+    }
+
+    /// Discard dirty changes for all *non-active* presets.
+    ///
+    /// Frozen rule: closing the preset panel reverts non-active dirty presets
+    /// back to the last saved snapshot, but preserves the active preset.
+    pub fn close_panel_discard(&mut self) {
+        for idx in 0..PRESET_COUNT {
+            let preset_id = (idx + 1) as u8;
+            if preset_id == self.active_preset_id {
+                continue;
+            }
+            self.presets[idx] = self.saved[idx];
+            self.dirty[idx] = false;
+        }
+    }
+
+    /// Activate `preset_id` as the new active preset.
+    ///
+    /// Frozen rule: when switching active presets, discard dirty changes for the
+    /// old active preset (revert working <- saved) before switching, and always
+    /// force output OFF for safety.
+    pub fn activate_preset(&mut self, preset_id: u8) {
+        if preset_id != self.active_preset_id {
+            if let Some(old_idx) = Self::preset_idx(self.active_preset_id) {
+                self.presets[old_idx] = self.saved[old_idx];
+                self.dirty[old_idx] = false;
+            }
+            self.active_preset_id = preset_id;
+        }
+
+        // Safety: activation always forces output OFF.
+        self.output_enabled = false;
+    }
+
+    /// Set the mode for the current `editing_preset_id`.
+    ///
+    /// Frozen rule: if editing the active preset and the mode actually changes,
+    /// force output OFF. Editing a non-active preset must not affect output.
+    pub fn set_mode_for_editing_preset(&mut self, mode: LoadMode) {
+        let Some(idx) = Self::preset_idx(self.editing_preset_id) else {
+            return;
+        };
+
+        let prev_mode = self.presets[idx].mode;
+        if prev_mode == mode {
+            return;
+        }
+
+        self.presets[idx].mode = mode;
+        self.presets[idx] = self.presets[idx].clamp();
+        self.update_dirty_for_idx(idx);
+
+        if self.editing_preset_id == self.active_preset_id {
+            self.output_enabled = false;
+        }
     }
 }
 

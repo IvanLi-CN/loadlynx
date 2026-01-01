@@ -1,4 +1,5 @@
 mod fonts;
+pub mod preset_panel;
 
 use embedded_graphics::pixelcolor::{
     Rgb565,
@@ -55,73 +56,75 @@ const VOLTAGE_PAIR_TOP: i32 = 50;
 const VOLTAGE_PAIR_BOTTOM: i32 = 96;
 const TELEMETRY_TOP: i32 = 172;
 
-// Control row layout: CC/CV mode + preset target selector.
+// Control row layout: <M#><MODE> entry + fixed-width target summary.
 pub(crate) const CONTROL_ROW_TOP: i32 = 10;
 pub(crate) const CONTROL_ROW_BOTTOM: i32 = 38;
 pub(crate) const CONTROL_MODE_PILL_LEFT: i32 = 198;
 pub(crate) const CONTROL_MODE_PILL_RIGHT: i32 = 252;
 pub(crate) const CONTROL_VALUE_PILL_LEFT: i32 = 256;
 pub(crate) const CONTROL_VALUE_PILL_RIGHT: i32 = 314;
-pub(crate) const CONTROL_CC_LEFT: i32 = 200;
-pub(crate) const CONTROL_CC_RIGHT: i32 = 224;
-pub(crate) const CONTROL_CV_LEFT: i32 = 226;
-pub(crate) const CONTROL_CV_RIGHT: i32 = 250;
-pub(crate) const CONTROL_BUTTON_TOP: i32 = 12;
-pub(crate) const CONTROL_BUTTON_BOTTOM: i32 = 36;
 const CONTROL_TEXT_Y: i32 = 18;
 const CONTROL_PILL_RADIUS: i32 = 6;
+const CONTROL_TARGET_SAMPLE: &str = "00.000A";
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ControlRowHit {
-    ModeCc,
-    ModeCv,
-    Digit(AdjustDigit),
+    PresetEntry,
+    TargetDigit(AdjustDigit),
 }
 
 pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
-    if x < CONTROL_MODE_PILL_LEFT
-        || x > CONTROL_VALUE_PILL_RIGHT
-        || y < CONTROL_ROW_TOP
-        || y > CONTROL_ROW_BOTTOM
-    {
+    // Slightly expand the touch hit box to tolerate touch calibration offsets.
+    const HIT_PAD_X: i32 = 2;
+    const HIT_PAD_Y: i32 = 8;
+
+    if y < CONTROL_ROW_TOP - HIT_PAD_Y || y > CONTROL_ROW_BOTTOM + HIT_PAD_Y {
         return None;
     }
 
-    // Mode segmented controls.
-    if x >= CONTROL_CC_LEFT
-        && x <= CONTROL_CC_RIGHT
-        && y >= CONTROL_BUTTON_TOP
-        && y <= CONTROL_BUTTON_BOTTOM
-    {
-        return Some(ControlRowHit::ModeCc);
-    }
-    if x >= CONTROL_CV_LEFT
-        && x <= CONTROL_CV_RIGHT
-        && y >= CONTROL_BUTTON_TOP
-        && y <= CONTROL_BUTTON_BOTTOM
-    {
-        return Some(ControlRowHit::ModeCv);
+    // Main screen control row semantics:
+    // - Left pill (<M#><MODE>) opens/closes the Preset Panel and supports press-swipe preview.
+    // - Right pill (target value) selects the currently edited digit for the encoder.
+    //
+    // Prefer the value pill if the hit boxes overlap after padding.
+    if x >= CONTROL_VALUE_PILL_LEFT - HIT_PAD_X && x <= CONTROL_VALUE_PILL_RIGHT + HIT_PAD_X {
+        return Some(ControlRowHit::TargetDigit(pick_control_row_digit(x)));
     }
 
-    // Digit selection inside the right-aligned fixed-width value string ("00.00U").
-    if x >= CONTROL_VALUE_PILL_LEFT && x <= CONTROL_VALUE_PILL_RIGHT {
-        let glyph = SMALL_FONT.width() as i32;
-        let value_width = glyph * 6;
-        let value_x0 = CONTROL_VALUE_PILL_RIGHT - 4 - value_width;
-        let value_x1 = value_x0 + value_width;
-        if x < value_x0 || x >= value_x1 {
-            return None;
-        }
-        let idx = (x - value_x0) / glyph;
-        return match idx {
-            1 => Some(ControlRowHit::Digit(AdjustDigit::Ones)),
-            3 => Some(ControlRowHit::Digit(AdjustDigit::Tenths)),
-            4 => Some(ControlRowHit::Digit(AdjustDigit::Hundredths)),
-            _ => None,
-        };
+    if x >= CONTROL_MODE_PILL_LEFT - HIT_PAD_X && x <= CONTROL_MODE_PILL_RIGHT + HIT_PAD_X {
+        return Some(ControlRowHit::PresetEntry);
     }
 
     None
+}
+
+fn control_row_value_text_x() -> i32 {
+    let width = small_text_width(CONTROL_TARGET_SAMPLE, 0);
+    CONTROL_VALUE_PILL_RIGHT - 4 - width
+}
+
+fn pick_control_row_digit(x: i32) -> AdjustDigit {
+    // Target string is fixed-width "DD.dddU" (7 chars), SmallFont is monospaced.
+    // Select the nearest editable digit: ones/tenths/hundredths/thousandths.
+    let glyph = SMALL_FONT.width() as i32;
+    let base_x = control_row_value_text_x();
+    let centers = [
+        (1, AdjustDigit::Ones),
+        (3, AdjustDigit::Tenths),
+        (4, AdjustDigit::Hundredths),
+        (5, AdjustDigit::Thousandths),
+    ];
+    let mut best = AdjustDigit::Tenths;
+    let mut best_dist = i32::MAX;
+    for (idx, digit) in centers {
+        let cx = base_x + (idx as i32) * glyph + glyph / 2;
+        let dist = (x - cx).abs();
+        if dist < best_dist {
+            best_dist = dist;
+            best = digit;
+        }
+    }
+    best
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -463,71 +466,68 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
         rgb(0x1c2638),
     );
 
-    // MODE segmented labels (CC / CV) with no border; active is highlighted by color only.
-    let (cc_color, cv_color) = match data.active_mode {
-        LoadMode::Cc => (rgb(0xFF5252), rgb(0x6d7fa4)),
-        LoadMode::Cv => (rgb(0x6d7fa4), rgb(0xFFB347)),
-        LoadMode::Reserved(_) => (rgb(0xFF5252), rgb(0x6d7fa4)),
+    // <M#><MODE> entry: show active/preview preset id + mode, with mode-specific colors.
+    let (mode_text, mode_color) = match data.active_mode {
+        LoadMode::Cc | LoadMode::Reserved(_) => ("CC", rgb(0xFF5252)),
+        LoadMode::Cv => ("CV", rgb(0xFFB347)),
     };
 
-    // Optional visual separator between CC and CV inside the pill.
-    canvas.draw_line(
-        CONTROL_CC_RIGHT + 1,
-        CONTROL_BUTTON_TOP,
-        CONTROL_CC_RIGHT + 1,
-        CONTROL_BUTTON_BOTTOM - 1,
-        rgb(0x080f19),
+    let mut preset_text = String::<2>::new();
+    let _ = preset_text.push('M');
+    if (1..=9).contains(&data.active_preset_id) {
+        let _ = preset_text.push((b'0' + data.active_preset_id) as char);
+    } else {
+        let _ = preset_text.push('?');
+    }
+
+    let preset_w = small_text_width(preset_text.as_str(), 0);
+    let mode_w = small_text_width(mode_text, 0);
+    let entry_w = preset_w + mode_w;
+    let entry_x =
+        CONTROL_MODE_PILL_LEFT + ((CONTROL_MODE_PILL_RIGHT - CONTROL_MODE_PILL_LEFT) - entry_w) / 2;
+    draw_small_text(
+        canvas,
+        preset_text.as_str(),
+        entry_x,
+        CONTROL_TEXT_Y,
+        rgb(0xdfe7ff),
+        0,
+    );
+    draw_small_text(
+        canvas,
+        mode_text,
+        entry_x + preset_w,
+        CONTROL_TEXT_Y,
+        mode_color,
+        0,
     );
 
-    let cc_text_w = small_text_width("CC", 0);
-    let cv_text_w = small_text_width("CV", 0);
-    let cc_x = CONTROL_CC_LEFT + ((CONTROL_CC_RIGHT - CONTROL_CC_LEFT) - cc_text_w) / 2;
-    let cv_x = CONTROL_CV_LEFT + ((CONTROL_CV_RIGHT - CONTROL_CV_LEFT) - cv_text_w) / 2;
-    draw_small_text(canvas, "CC", cc_x, CONTROL_TEXT_Y, cc_color, 0);
-    draw_small_text(canvas, "CV", cv_x, CONTROL_TEXT_Y, cv_color, 0);
-
-    // Preset target value (fixed-width "xx.xxU", right-aligned inside VALUE pill).
+    // Preset target value (fixed-width "DD.dddU", right-aligned inside VALUE pill).
     let target = data.control_target_text.as_str();
-    let width = small_text_width(target, 0);
-    let value_x = CONTROL_VALUE_PILL_RIGHT - 4 - width;
-
-    // Selected digit: highlight background (digit bbox + padding) instead of underline.
+    let value_x = control_row_value_text_x();
     let glyph = SMALL_FONT.width() as i32;
-    let idx = match data.adjust_digit {
+
+    // Highlight the selected digit so the user can see what the encoder will edit.
+    let highlight_idx: i32 = match data.adjust_digit {
         AdjustDigit::Ones => 1,
         AdjustDigit::Tenths => 3,
         AdjustDigit::Hundredths => 4,
+        AdjustDigit::Thousandths => 5,
     };
-    // SmallFont digits live in a stable 5×8 bbox at (x=0..4, y=2..9) inside
-    // the 8×12 cell. Use that bbox (not the full cell) so the highlight
-    // doesn't bleed into neighboring characters when padding is applied.
-    let digit_bbox_min_x = 0;
-    let digit_bbox_max_x = 4;
-    let digit_bbox_min_y = 2;
-    let digit_bbox_max_y = 9;
-    let highlight_pad_x = 1;
-    let highlight_pad_y = 2;
-    let cell_x = value_x + idx * glyph;
+    let cell_x = value_x + highlight_idx * glyph;
     let highlight = Rect::new(
-        cell_x + digit_bbox_min_x - highlight_pad_x,
-        CONTROL_TEXT_Y + digit_bbox_min_y - highlight_pad_y,
-        cell_x + digit_bbox_max_x + 1 + highlight_pad_x,
-        CONTROL_TEXT_Y + digit_bbox_max_y + 1 + highlight_pad_y,
+        cell_x - 1,
+        CONTROL_TEXT_Y - 2,
+        cell_x + glyph + 1,
+        CONTROL_TEXT_Y + SMALL_FONT.height() as i32 + 2,
     );
     canvas.fill_rect(highlight, rgb(0x4cc9f0));
 
-    // Draw the full target, then redraw the selected digit in a darker color.
     draw_small_text(canvas, target, value_x, CONTROL_TEXT_Y, rgb(0xdfe7ff), 0);
-    if let Some(ch) = target.chars().nth(idx as usize) {
+    if let Some(ch) = target.chars().nth(highlight_idx as usize) {
         SMALL_FONT.draw_char(
             ch,
-            |px, py| {
-                canvas.set_pixel(
-                    px + value_x + idx * glyph,
-                    py + CONTROL_TEXT_Y,
-                    rgb(0x080f19),
-                )
-            },
+            |px, py| canvas.set_pixel(px + cell_x, py + CONTROL_TEXT_Y, rgb(0x080f19)),
             0,
             0,
         );
@@ -735,32 +735,25 @@ fn format_pair_value(value: f32, unit: char) -> String<6> {
     s
 }
 
-fn format_setpoint_milli(value_milli: i32, unit: char) -> String<6> {
-    // Fixed-width numeric text for the control row: always "DD.ddU" (6 chars).
-    // This keeps digit columns stable so the underline indicator can map to
-    // ones/tenths/hundredths consistently.
-    let mut s = String::<6>::new();
-    let mut v = value_milli.max(0);
+fn format_setpoint_milli(value_milli: i32, unit: char) -> String<7> {
+    // Fixed-width numeric text for the control row: always "DD.dddU" (7 chars).
+    // Matches `docs/dev-notes/on-device-preset-ui.md`.
+    let mut s = String::<7>::new();
+    let v = value_milli.max(0) as u32;
 
-    // Round to 0.01 units (10 milli) using half-up rounding.
-    v = v.saturating_add(5) / 10 * 10;
-
-    // Convert to centi-units: 0.01 units.
-    let centi = (v / 10) as u32;
-    if centi > 9_999 {
-        let _ = s.push_str("--.--");
+    if v > 99_999 {
+        let _ = s.push_str("--.---");
         let _ = s.push(unit);
         return s;
     }
 
-    let int_part = centi / 100; // 0..99
-    let frac_part = centi % 100; // 0..99
+    let int_part = v / 1000; // 0..99
+    let frac_part = v % 1000; // 0..999
 
     let _ = s.push((b'0' + (int_part / 10) as u8) as char);
     let _ = s.push((b'0' + (int_part % 10) as u8) as char);
     let _ = s.push('.');
-    let _ = s.push((b'0' + (frac_part / 10) as u8) as char);
-    let _ = s.push((b'0' + (frac_part % 10) as u8) as char);
+    append_frac(&mut s, frac_part, 3);
     let _ = s.push(unit);
     s
 }
@@ -973,7 +966,7 @@ pub struct UiSnapshot {
     pub local_voltage_text: String<6>,
     pub ch1_current_text: String<6>,
     pub ch2_current_text: String<6>,
-    pub control_target_text: String<6>,
+    pub control_target_text: String<7>,
     pub status_lines: [String<20>; 5],
 }
 

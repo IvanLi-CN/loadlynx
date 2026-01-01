@@ -29,7 +29,7 @@ use esp_hal::{
     self as hal, Async,
     delay::Delay,
     dma::{DmaRxBuf, DmaTxBuf},
-    gpio::{DriveMode, DriveStrength, Level, NoPin, Output, OutputConfig},
+    gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
         channel::{self as ledc_channel, ChannelIFace as _},
@@ -234,6 +234,7 @@ static CALIBRATION: StaticCell<CalibrationMutex> = StaticCell::new();
 pub type ControlMutex = Mutex<CriticalSectionRawMutex, ControlState>;
 static CONTROL: StaticCell<ControlMutex> = StaticCell::new();
 pub(crate) static CONTROL_REV: AtomicU32 = AtomicU32::new(0);
+static PRESET_PREVIEW_ID: AtomicU8 = AtomicU8::new(0);
 
 pub(crate) fn bump_control_rev() -> u32 {
     CONTROL_REV.fetch_add(1, Ordering::Relaxed).wrapping_add(1)
@@ -544,62 +545,138 @@ async fn encoder_task(
                 let phys_step = if residual > 0 { 1 } else { -1 };
                 residual -= phys_step * ENCODER_COUNTS_PER_STEP;
 
-                // Every detent MUST produce a tick sound. The prompt tone
-                // manager is responsible for queuing and for suppressing ticks
-                // during active faults.
-                prompt_tone::enqueue_ticks(1);
-
                 // Reverse logical direction to match panel orientation (CW increments).
                 let logical_step = -phys_step;
+                prompt_tone::enqueue_ticks(1);
                 let mut guard = control.lock().await;
-                let preset_id = guard.active_preset_id;
-                let preset_idx = preset_id.saturating_sub(1) as usize;
-                if preset_idx >= control::PRESET_COUNT {
-                    continue;
-                }
+                match guard.ui_view {
+                    control::UiView::Main => {
+                        let preset_id = guard.active_preset_id;
+                        let preset_idx = preset_id.saturating_sub(1) as usize;
+                        if preset_idx >= control::PRESET_COUNT {
+                            continue;
+                        }
 
-                let digit = guard.adjust_digit;
-                let step = digit.step_milli().saturating_mul(logical_step as i32);
-                let mode = guard.presets[preset_idx].mode;
+                        let digit = guard.adjust_digit;
+                        let step = digit.step_milli().saturating_mul(logical_step as i32);
 
-                let mut changed = false;
-                match mode {
-                    LoadMode::Cc | LoadMode::Reserved(_) => {
-                        let prev = guard.presets[preset_idx].target_i_ma;
-                        let max = guard.presets[preset_idx].max_i_ma_total;
-                        let next = (prev.saturating_add(step)).clamp(0, max);
-                        if next != prev {
-                            guard.presets[preset_idx].target_i_ma = next;
-                            changed = true;
-                            info!(
-                                "encoder {}: preset_id={} mode=CC target_i={} mA (digit={})",
-                                if logical_step > 0 { "cw" } else { "ccw" },
-                                preset_id,
-                                next,
-                                digit
-                            );
+                        let mut preset = guard.presets[preset_idx];
+                        let mode = match preset.mode {
+                            LoadMode::Cv => LoadMode::Cv,
+                            LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+                        };
+
+                        let mut changed = false;
+                        match mode {
+                            LoadMode::Cc | LoadMode::Reserved(_) => {
+                                let prev = preset.target_i_ma;
+                                let max = preset.max_i_ma_total;
+                                let next = (prev.saturating_add(step)).clamp(0, max);
+                                if next != prev {
+                                    preset.target_i_ma = next;
+                                    changed = true;
+                                }
+                            }
+                            LoadMode::Cv => {
+                                let prev = preset.target_v_mv;
+                                let next =
+                                    (prev.saturating_add(step)).clamp(0, control::HARD_MAX_V_MV);
+                                if next != prev {
+                                    preset.target_v_mv = next;
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        if changed {
+                            guard.presets[preset_idx] = preset.clamp();
+                            guard.update_dirty_for_preset_id(preset_id);
+                            bump_control_rev();
                         }
                     }
-                    LoadMode::Cv => {
-                        let prev = guard.presets[preset_idx].target_v_mv;
-                        let next = (prev.saturating_add(step)).clamp(0, control::HARD_MAX_V_MV);
-                        if next != prev {
-                            guard.presets[preset_idx].target_v_mv = next;
-                            changed = true;
-                            info!(
-                                "encoder {}: preset_id={} mode=CV target_v={} mV (digit={})",
-                                if logical_step > 0 { "cw" } else { "ccw" },
-                                preset_id,
-                                next,
-                                digit
-                            );
+                    control::UiView::PresetPanelBlocked => {}
+                    control::UiView::PresetPanel => {
+                        let preset_id = guard.editing_preset_id;
+                        let idx = preset_id.saturating_sub(1) as usize;
+                        let Some(mut preset) = guard.presets.get(idx).copied() else {
+                            continue;
+                        };
+                        let mode = match preset.mode {
+                            LoadMode::Cv => LoadMode::Cv,
+                            LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+                        };
+
+                        let field = coerce_panel_field_for_mode(mode, guard.panel_selected_field);
+                        guard.panel_selected_field = field;
+                        let digit = coerce_panel_digit_for_field(field, guard.panel_selected_digit);
+                        guard.panel_selected_digit = digit;
+                        let Some(step_unit) = panel_digit_step(field, digit) else {
+                            continue;
+                        };
+                        let step = step_unit.saturating_mul(logical_step as i32);
+
+                        let mut changed = false;
+                        match field {
+                            ui::preset_panel::PresetPanelField::Mode => {}
+                            ui::preset_panel::PresetPanelField::Target => match mode {
+                                LoadMode::Cc | LoadMode::Reserved(_) => {
+                                    let prev = preset.target_i_ma;
+                                    let max = preset.max_i_ma_total;
+                                    let next = (prev.saturating_add(step)).clamp(0, max);
+                                    if next != prev {
+                                        preset.target_i_ma = next;
+                                        changed = true;
+                                    }
+                                }
+                                LoadMode::Cv => {
+                                    let prev = preset.target_v_mv;
+                                    let next = (prev.saturating_add(step))
+                                        .clamp(0, control::HARD_MAX_V_MV);
+                                    if next != prev {
+                                        preset.target_v_mv = next;
+                                        changed = true;
+                                    }
+                                }
+                            },
+                            ui::preset_panel::PresetPanelField::VLim => {
+                                let prev = preset.min_v_mv;
+                                let next =
+                                    (prev.saturating_add(step)).clamp(0, control::HARD_MAX_V_MV);
+                                if next != prev {
+                                    preset.min_v_mv = next;
+                                    changed = true;
+                                }
+                            }
+                            ui::preset_panel::PresetPanelField::ILim => {
+                                if mode == LoadMode::Cv {
+                                    let prev = preset.max_i_ma_total;
+                                    let next = (prev.saturating_add(step))
+                                        .clamp(0, control::HARD_MAX_I_MA_TOTAL);
+                                    if next != prev {
+                                        preset.max_i_ma_total = next;
+                                        changed = true;
+                                    }
+                                }
+                            }
+                            ui::preset_panel::PresetPanelField::PLim => {
+                                let prev = preset.max_p_mw as i64;
+                                let next = (prev + step as i64).max(0) as u32;
+                                if next != preset.max_p_mw {
+                                    preset.max_p_mw = next;
+                                    changed = true;
+                                }
+                            }
+                        }
+
+                        if changed {
+                            preset = preset.clamp();
+                            if idx < control::PRESET_COUNT {
+                                guard.presets[idx] = preset;
+                            }
+                            guard.update_dirty_for_preset_id(preset_id);
+                            bump_control_rev();
                         }
                     }
-                }
-
-                if changed {
-                    guard.presets[preset_idx] = guard.presets[preset_idx].clamp();
-                    bump_control_rev();
                 }
             }
         }
@@ -618,39 +695,38 @@ async fn encoder_task(
                     // Release: if we didn't fire long action, treat as short press.
                     if down_since_ms.is_some() && !long_action_fired {
                         let mut guard = control.lock().await;
-                        let prev = guard.output_enabled;
-                        let desired = !prev;
-
-                        // Business failure is defined as an explicit local policy
-                        // reject (NOT link/ACK/timeout). For now we reject enabling
-                        // output while analog is offline or faulted.
-                        let analog_state =
-                            AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
-                        let allow_enable =
-                            matches!(analog_state, AnalogState::Ready | AnalogState::CalMissing);
-
-                        if desired && !allow_enable {
-                            let state_str = match analog_state {
-                                AnalogState::Offline => "offline",
-                                AnalogState::Faulted => "faulted",
-                                AnalogState::Ready => "ready",
-                                AnalogState::CalMissing => "cal_missing",
-                            };
-                            info!(
-                                "encoder short-press: enable rejected (analog_state={}, preset_id={})",
-                                state_str, guard.active_preset_id
-                            );
-                            prompt_tone::enqueue_ui_fail();
-                        } else {
-                            guard.output_enabled = desired;
-                            bump_control_rev();
-                            info!(
-                                "encoder short-press: output_enabled {} -> {} (preset_id={})",
-                                if prev { "ON" } else { "OFF" },
-                                if desired { "ON" } else { "OFF" },
-                                guard.active_preset_id
-                            );
-                            prompt_tone::enqueue_ui_ok();
+                        match guard.ui_view {
+                            control::UiView::Main => {
+                                let prev = guard.output_enabled;
+                                guard.output_enabled = !prev;
+                                bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
+                                info!(
+                                    "encoder short-press: output_enabled {} -> {} (preset_id={})",
+                                    if prev { "ON" } else { "OFF" },
+                                    if !prev { "ON" } else { "OFF" },
+                                    guard.active_preset_id
+                                );
+                            }
+                            control::UiView::PresetPanel => {
+                                let idx = guard.editing_preset_id.saturating_sub(1) as usize;
+                                let mode = guard
+                                    .presets
+                                    .get(idx)
+                                    .map(|p| match p.mode {
+                                        LoadMode::Cv => LoadMode::Cv,
+                                        LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+                                    })
+                                    .unwrap_or(LoadMode::Cc);
+                                let field =
+                                    coerce_panel_field_for_mode(mode, guard.panel_selected_field);
+                                guard.panel_selected_field = field;
+                                guard.panel_selected_digit =
+                                    cycle_panel_digit_right(field, guard.panel_selected_digit);
+                                bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
+                            }
+                            control::UiView::PresetPanelBlocked => {}
                         }
                     }
                     down_since_ms = None;
@@ -667,21 +743,21 @@ async fn encoder_task(
                 let now = now_ms32();
                 if !long_action_fired && now.wrapping_sub(start) >= LONG_PRESS_MS {
                     let mut guard = control.lock().await;
-                    guard.active_preset_id = if guard.active_preset_id >= 5 {
-                        1
-                    } else {
-                        guard.active_preset_id + 1
-                    };
-                    if guard.output_enabled {
-                        guard.output_enabled = false;
+                    if guard.ui_view == control::UiView::Main {
+                        let next = if guard.active_preset_id >= 5 {
+                            1
+                        } else {
+                            guard.active_preset_id + 1
+                        };
+                        guard.activate_preset(next);
+                        bump_control_rev();
+                        prompt_tone::enqueue_ui_ok();
+                        long_action_fired = true;
+                        info!(
+                            "encoder long-press: active_preset_id -> {} (output forced OFF)",
+                            guard.active_preset_id
+                        );
                     }
-                    bump_control_rev();
-                    long_action_fired = true;
-                    info!(
-                        "encoder long-press: active_preset_id -> {} (output forced OFF)",
-                        guard.active_preset_id
-                    );
-                    prompt_tone::enqueue_ui_ok();
                 }
             }
         }
@@ -693,9 +769,31 @@ async fn encoder_task(
 }
 
 #[embassy_executor::task]
-async fn touch_ui_task(control: &'static ControlMutex) {
-    info!("touch-ui task starting (control row hit-test)");
+async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMutex) {
+    info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
+    enum ControlRowTouch {
+        PresetSwitch {
+            start_x: i32,
+            base_id: u8,
+            dragging: bool,
+            preview_id: u8,
+        },
+        TargetDigit {
+            digit: control::AdjustDigit,
+        },
+    }
+    let mut quick_switch: Option<ControlRowTouch> = None;
+    let mut last_tab_tap: Option<(u8, u32)> = None;
+    const DRAG_START_THRESHOLD_PX: i32 = 10;
+    const SWIPE_STEP_PX: i32 = 24;
+    const DOUBLE_TAP_WINDOW_MS: u32 = 350;
+
+    fn wrap_preset_id(base: u8, delta: i32) -> u8 {
+        let base0 = (base.saturating_sub(1)) as i32;
+        let wrapped = (base0 + delta).rem_euclid(control::PRESET_COUNT as i32);
+        (wrapped as u8) + 1
+    }
 
     loop {
         let seq = touch::touch_marker_seq();
@@ -710,63 +808,507 @@ async fn touch_ui_task(control: &'static ControlMutex) {
             continue;
         };
 
-        // FT6336U: event=0 is typically “down”. Act only once per touch-down.
-        if marker.event != 0 {
-            yield_now().await;
-            continue;
-        }
-
-        let Some(hit) = ui::hit_test_control_row(marker.x, marker.y) else {
-            // Non-interactive touch: counts as a local interaction (e.g. for
-            // "fault cleared needs local ack"), but should not emit a UI sound.
-            prompt_tone::notify_local_activity();
-            yield_now().await;
-            continue;
-        };
-
-        // Interactive touch: emit a confirmation tone.
-        prompt_tone::enqueue_ui_ok();
-
-        match hit {
-            ui::ControlRowHit::ModeCc | ui::ControlRowHit::ModeCv => {
-                let desired = match hit {
-                    ui::ControlRowHit::ModeCc => LoadMode::Cc,
-                    ui::ControlRowHit::ModeCv => LoadMode::Cv,
-                    _ => LoadMode::Cc,
-                };
-
-                let mut guard = control.lock().await;
-                let preset_id = guard.active_preset_id;
-                let preset_idx = preset_id.saturating_sub(1) as usize;
-                if preset_idx >= control::PRESET_COUNT {
+        let view = { control.lock().await.ui_view };
+        match marker.event {
+            // down
+            0 => {
+                prompt_tone::notify_local_activity();
+                if view == control::UiView::PresetPanelBlocked {
+                    quick_switch = None;
+                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                } else {
+                    match ui::hit_test_control_row(marker.x, marker.y) {
+                        Some(ui::ControlRowHit::PresetEntry) => {
+                            let base_id = { control.lock().await.active_preset_id };
+                            quick_switch = Some(ControlRowTouch::PresetSwitch {
+                                start_x: marker.x,
+                                base_id,
+                                dragging: false,
+                                preview_id: base_id,
+                            });
+                        }
+                        Some(ui::ControlRowHit::TargetDigit(digit)) => {
+                            quick_switch = Some(ControlRowTouch::TargetDigit { digit });
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        }
+                        None => {
+                            quick_switch = None;
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        }
+                    }
+                }
+            }
+            // contact/move
+            2 => {
+                if view == control::UiView::PresetPanelBlocked {
+                    quick_switch = None;
+                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                     yield_now().await;
                     continue;
                 }
-                let prev = guard.presets[preset_idx].mode;
-                if prev != desired {
-                    guard.presets[preset_idx].mode = desired;
-                    if guard.output_enabled {
-                        guard.output_enabled = false;
+
+                // Only support press-swipe preview in the main Dashboard view.
+                if view != control::UiView::Main {
+                    yield_now().await;
+                    continue;
+                }
+
+                let Some(ControlRowTouch::PresetSwitch {
+                    start_x,
+                    base_id,
+                    dragging,
+                    preview_id: last_preview_id,
+                }) = quick_switch
+                else {
+                    yield_now().await;
+                    continue;
+                };
+                let dx = marker.x - start_x;
+                let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
+                if !now_dragging {
+                    yield_now().await;
+                    continue;
+                }
+
+                let delta = dx / SWIPE_STEP_PX;
+                let preview_id = wrap_preset_id(base_id, delta);
+                if preview_id != last_preview_id {
+                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                    quick_switch = Some(ControlRowTouch::PresetSwitch {
+                        start_x,
+                        base_id,
+                        dragging: true,
+                        preview_id,
+                    });
+                } else if !dragging {
+                    // Entered drag state but preset index did not move yet.
+                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                    quick_switch = Some(ControlRowTouch::PresetSwitch {
+                        start_x,
+                        base_id,
+                        dragging: true,
+                        preview_id: last_preview_id,
+                    });
+                }
+            }
+            // up
+            1 => {
+                if view == control::UiView::PresetPanelBlocked {
+                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                    quick_switch = None;
+                    last_tab_tap = None;
+
+                    let vm = {
+                        let guard = control.lock().await;
+                        build_preset_panel_vm(&guard)
+                    };
+                    if let Some(ui::preset_panel::PresetPanelHit::Save) =
+                        ui::preset_panel::hit_test_preset_panel(marker.x, marker.y, &vm)
+                    {
+                        let ok = save_editing_preset_to_eeprom(control, eeprom).await;
+                        if ok {
+                            prompt_tone::enqueue_ui_ok();
+                        } else {
+                            prompt_tone::enqueue_ui_fail();
+                        }
                     }
-                    guard.presets[preset_idx] = guard.presets[preset_idx].clamp();
-                    bump_control_rev();
-                    info!(
-                        "touch: preset_id={} mode {:?} -> {:?} (output forced OFF)",
-                        preset_id, prev, desired
-                    );
+                    yield_now().await;
+                    continue;
                 }
-            }
-            ui::ControlRowHit::Digit(digit) => {
-                let mut guard = control.lock().await;
-                if guard.adjust_digit != digit {
-                    let prev = guard.adjust_digit;
-                    guard.adjust_digit = digit;
-                    info!("touch: adjust_digit {:?} -> {:?}", prev, digit);
+
+                let Some(action) = quick_switch.take() else {
+                    if view == control::UiView::PresetPanel {
+                        let vm = {
+                            let guard = control.lock().await;
+                            build_preset_panel_vm(&guard)
+                        };
+                        if let Some(hit) =
+                            ui::preset_panel::hit_test_preset_panel(marker.x, marker.y, &vm)
+                        {
+                            use ui::preset_panel::PresetPanelField as Field;
+                            use ui::preset_panel::PresetPanelHit as Hit;
+
+                            match hit {
+                                Hit::Tab(preset_id) => {
+                                    let now = now_ms32();
+                                    let mut guard = control.lock().await;
+                                    if preset_id != guard.editing_preset_id {
+                                        guard.editing_preset_id = preset_id;
+                                        let idx = preset_id.saturating_sub(1) as usize;
+                                        if let Some(p) = guard.presets.get(idx).copied() {
+                                            let mode = match p.mode {
+                                                LoadMode::Cv => LoadMode::Cv,
+                                                LoadMode::Cc | LoadMode::Reserved(_) => {
+                                                    LoadMode::Cc
+                                                }
+                                            };
+                                            guard.panel_selected_field =
+                                                coerce_panel_field_for_mode(
+                                                    mode,
+                                                    guard.panel_selected_field,
+                                                );
+                                        }
+                                        guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                            guard.panel_selected_field,
+                                            guard.panel_selected_digit,
+                                        );
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                        last_tab_tap = None;
+                                    } else if let Some((last_id, last_ms)) = last_tab_tap {
+                                        if last_id == preset_id
+                                            && now.wrapping_sub(last_ms) <= DOUBLE_TAP_WINDOW_MS
+                                        {
+                                            guard.activate_preset(preset_id);
+                                            bump_control_rev();
+                                            prompt_tone::enqueue_ui_ok();
+                                            info!(
+                                                "touch: tab double-tap activate preset {} (output forced OFF)",
+                                                preset_id
+                                            );
+                                            last_tab_tap = None;
+                                        } else {
+                                            last_tab_tap = Some((preset_id, now));
+                                        }
+                                    } else {
+                                        last_tab_tap = Some((preset_id, now));
+                                    }
+                                }
+                                Hit::ModeCv | Hit::ModeCc => {
+                                    let mode = if hit == Hit::ModeCv {
+                                        LoadMode::Cv
+                                    } else {
+                                        LoadMode::Cc
+                                    };
+                                    let mut guard = control.lock().await;
+                                    let preset_id = guard.editing_preset_id;
+                                    let idx = preset_id.saturating_sub(1) as usize;
+                                    let prev = guard
+                                        .presets
+                                        .get(idx)
+                                        .map(|p| p.mode)
+                                        .unwrap_or(LoadMode::Cc);
+                                    guard.set_mode_for_editing_preset(mode);
+                                    guard.panel_selected_field = Field::Mode;
+                                    let next =
+                                        guard.presets.get(idx).map(|p| p.mode).unwrap_or(prev);
+                                    if next != prev {
+                                        guard.panel_selected_field = coerce_panel_field_for_mode(
+                                            mode,
+                                            guard.panel_selected_field,
+                                        );
+                                        guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                            guard.panel_selected_field,
+                                            guard.panel_selected_digit,
+                                        );
+                                        bump_control_rev();
+                                    } else {
+                                        bump_control_rev();
+                                    }
+                                    prompt_tone::enqueue_ui_ok();
+                                    last_tab_tap = None;
+                                }
+                                Hit::Target => {
+                                    let mut guard = control.lock().await;
+                                    guard.panel_selected_field = Field::Target;
+                                    guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                        guard.panel_selected_field,
+                                        guard.panel_selected_digit,
+                                    );
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    last_tab_tap = None;
+                                }
+                                Hit::VLim => {
+                                    let mut guard = control.lock().await;
+                                    guard.panel_selected_field = Field::VLim;
+                                    guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                        guard.panel_selected_field,
+                                        guard.panel_selected_digit,
+                                    );
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    last_tab_tap = None;
+                                }
+                                Hit::ILim => {
+                                    let mut guard = control.lock().await;
+                                    guard.panel_selected_field = Field::ILim;
+                                    guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                        guard.panel_selected_field,
+                                        guard.panel_selected_digit,
+                                    );
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    last_tab_tap = None;
+                                }
+                                Hit::PLim => {
+                                    let mut guard = control.lock().await;
+                                    guard.panel_selected_field = Field::PLim;
+                                    guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                        guard.panel_selected_field,
+                                        guard.panel_selected_digit,
+                                    );
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    last_tab_tap = None;
+                                }
+                                Hit::LoadToggle => {
+                                    let mut guard = control.lock().await;
+                                    guard.output_enabled = !guard.output_enabled;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    last_tab_tap = None;
+                                }
+                                Hit::Save => {
+                                    last_tab_tap = None;
+                                    let ok = save_editing_preset_to_eeprom(control, eeprom).await;
+                                    if ok {
+                                        prompt_tone::enqueue_ui_ok();
+                                    } else {
+                                        prompt_tone::enqueue_ui_fail();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    yield_now().await;
+                    continue;
+                };
+
+                match action {
+                    ControlRowTouch::PresetSwitch {
+                        base_id,
+                        dragging,
+                        preview_id,
+                        ..
+                    } => {
+                        if dragging {
+                            if preview_id != base_id {
+                                let mut guard = control.lock().await;
+                                guard.activate_preset(preview_id);
+                                bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
+                                info!(
+                                    "touch: quick switch preset {} -> {} (output forced OFF)",
+                                    base_id, preview_id
+                                );
+                            }
+                        } else {
+                            match view {
+                                control::UiView::Main => {
+                                    let mut guard = control.lock().await;
+                                    guard.ui_view = control::UiView::PresetPanel;
+                                    guard.editing_preset_id = guard.active_preset_id;
+                                    guard.panel_selected_field =
+                                        ui::preset_panel::PresetPanelField::Target;
+                                    guard.panel_selected_digit =
+                                        ui::preset_panel::PresetPanelDigit::Tenths;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    info!(
+                                        "touch: preset entry tap -> open preset panel (editing preset_id={})",
+                                        guard.editing_preset_id
+                                    );
+                                }
+                                control::UiView::PresetPanel => {
+                                    let mut guard = control.lock().await;
+                                    guard.close_panel_discard();
+                                    guard.ui_view = control::UiView::Main;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    info!(
+                                        "touch: preset entry tap -> close preset panel (discard non-active)"
+                                    );
+                                }
+                                control::UiView::PresetPanelBlocked => {}
+                            }
+                        }
+                    }
+                    ControlRowTouch::TargetDigit { digit } => {
+                        if view == control::UiView::Main {
+                            let mut guard = control.lock().await;
+                            guard.adjust_digit = digit;
+                            bump_control_rev();
+                            prompt_tone::enqueue_ui_ok();
+                            info!("touch: dashboard target digit -> {}", digit);
+                        }
+                    }
                 }
+
+                PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                last_tab_tap = None;
             }
+            _ => {}
         }
 
         yield_now().await;
+    }
+}
+
+fn preset_panel_visible(view: control::UiView) -> bool {
+    matches!(
+        view,
+        control::UiView::PresetPanel | control::UiView::PresetPanelBlocked
+    )
+}
+
+fn coerce_panel_field_for_mode(
+    mode: LoadMode,
+    field: ui::preset_panel::PresetPanelField,
+) -> ui::preset_panel::PresetPanelField {
+    if mode != LoadMode::Cv && field == ui::preset_panel::PresetPanelField::ILim {
+        ui::preset_panel::PresetPanelField::Target
+    } else {
+        field
+    }
+}
+
+fn coerce_panel_digit_for_field(
+    field: ui::preset_panel::PresetPanelField,
+    digit: ui::preset_panel::PresetPanelDigit,
+) -> ui::preset_panel::PresetPanelDigit {
+    use ui::preset_panel::PresetPanelDigit as D;
+    use ui::preset_panel::PresetPanelField as F;
+
+    match field {
+        F::PLim => match digit {
+            D::Tens | D::Ones | D::Tenths | D::Hundredths => digit,
+            D::Thousandths => D::Hundredths,
+        },
+        F::Mode => digit,
+        _ => match digit {
+            D::Ones | D::Tenths | D::Hundredths | D::Thousandths => digit,
+            D::Tens => D::Ones,
+        },
+    }
+}
+
+fn cycle_panel_digit_right(
+    field: ui::preset_panel::PresetPanelField,
+    digit: ui::preset_panel::PresetPanelDigit,
+) -> ui::preset_panel::PresetPanelDigit {
+    use ui::preset_panel::PresetPanelDigit as D;
+    use ui::preset_panel::PresetPanelField as F;
+
+    let digit = coerce_panel_digit_for_field(field, digit);
+    match field {
+        F::PLim => match digit {
+            D::Tens => D::Ones,
+            D::Ones => D::Tenths,
+            D::Tenths => D::Hundredths,
+            D::Hundredths => D::Tens,
+            D::Thousandths => D::Tens,
+        },
+        F::Mode => digit,
+        _ => match digit {
+            D::Ones => D::Tenths,
+            D::Tenths => D::Hundredths,
+            D::Hundredths => D::Thousandths,
+            D::Thousandths => D::Ones,
+            D::Tens => D::Ones,
+        },
+    }
+}
+
+fn panel_digit_step(
+    field: ui::preset_panel::PresetPanelField,
+    digit: ui::preset_panel::PresetPanelDigit,
+) -> Option<i32> {
+    use ui::preset_panel::PresetPanelDigit as D;
+    use ui::preset_panel::PresetPanelField as F;
+
+    match field {
+        F::PLim => match digit {
+            D::Tens => Some(10_000),
+            D::Ones => Some(1_000),
+            D::Tenths => Some(100),
+            D::Hundredths => Some(10),
+            _ => None,
+        },
+        F::Mode => None,
+        _ => match digit {
+            D::Ones => Some(1_000),
+            D::Tenths => Some(100),
+            D::Hundredths => Some(10),
+            D::Thousandths => Some(1),
+            _ => None,
+        },
+    }
+}
+
+fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelVm {
+    use ui::preset_panel::{format_av_3dp, format_power_2dp};
+
+    let idx = state.editing_preset_id.saturating_sub(1) as usize;
+    let editing = state
+        .presets
+        .get(idx)
+        .copied()
+        .unwrap_or_else(|| state.active_preset());
+    let editing_mode = match editing.mode {
+        LoadMode::Cv => LoadMode::Cv,
+        LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+    };
+
+    let selected_field = coerce_panel_field_for_mode(editing_mode, state.panel_selected_field);
+    let selected_digit = coerce_panel_digit_for_field(selected_field, state.panel_selected_digit);
+
+    let (target_milli, target_unit) = match editing_mode {
+        LoadMode::Cv => (editing.target_v_mv, 'V'),
+        LoadMode::Cc | LoadMode::Reserved(_) => (editing.target_i_ma, 'A'),
+    };
+
+    ui::preset_panel::PresetPanelVm {
+        active_preset_id: state.active_preset_id,
+        editing_preset_id: state.editing_preset_id,
+        editing_mode,
+        load_enabled: state.output_enabled,
+        blocked_save: state.ui_view == control::UiView::PresetPanelBlocked,
+        selected_field,
+        selected_digit,
+        target_text: format_av_3dp(target_milli, target_unit),
+        v_lim_text: format_av_3dp(editing.min_v_mv, 'V'),
+        i_lim_text: format_av_3dp(editing.max_i_ma_total, 'A'),
+        p_lim_text: format_power_2dp(editing.max_p_mw as i32),
+    }
+}
+
+async fn save_editing_preset_to_eeprom(control: &ControlMutex, eeprom: &EepromMutex) -> bool {
+    let (preset_id, blob) = {
+        let guard = control.lock().await;
+        let preset_id = guard.editing_preset_id;
+        let idx = preset_id.saturating_sub(1) as usize;
+        if idx >= control::PRESET_COUNT {
+            return false;
+        }
+        let mut to_write = guard.saved;
+        to_write[idx] = guard.presets[idx];
+        (preset_id, control::encode_presets_blob(&to_write))
+    };
+
+    let res = {
+        let mut guard = eeprom.lock().await;
+        guard.write_presets_blob(&blob).await
+    };
+
+    let mut guard = control.lock().await;
+    match res {
+        Ok(()) => {
+            guard.commit_saved_for_preset_id(preset_id);
+            if guard.ui_view == control::UiView::PresetPanelBlocked {
+                guard.ui_view = control::UiView::PresetPanel;
+            }
+            info!("touch: SAVE ok (preset_id={})", preset_id);
+            true
+        }
+        Err(err) => {
+            guard.ui_view = control::UiView::PresetPanelBlocked;
+            warn!(
+                "touch: SAVE failed (preset_id={}, err={:?})",
+                preset_id, err
+            );
+            false
+        }
     }
 }
 
@@ -1074,6 +1616,7 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
 async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fault_flags = status.fault_flags;
+    prompt_tone::set_fault_flags(fault_flags);
     let enabled = status.enable;
     let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
 
@@ -1102,9 +1645,6 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
             warn!("analog fault flags set: 0x{:08x}", fault_flags);
         }
     }
-
-    // Drive the prompt tone manager with the latest fault snapshot.
-    prompt_tone::set_fault_flags(fault_flags);
 }
 
 fn protocol_error_str(err: &loadlynx_protocol::Error) -> &'static str {
@@ -1281,6 +1821,7 @@ async fn display_task(
     let mut fps_window_start_ms = last_push_ms;
     let mut fps_window_frames: u32 = 0;
     let mut last_fps: u32 = 0;
+    let mut last_panel_visible: bool = false;
     loop {
         let now = timestamp_ms() as u32;
         let dt_ms = now.wrapping_sub(last_push_ms);
@@ -1297,9 +1838,30 @@ async fn display_task(
             // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
             fps_window_frames = fps_window_frames.wrapping_add(1);
 
-            let (active_preset_id, output_enabled, mode, target_milli, target_unit, adjust_digit) = {
+            let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
+            let (
+                active_preset_id,
+                output_enabled,
+                mode,
+                target_milli,
+                target_unit,
+                adjust_digit,
+                panel_visible,
+                panel_vm,
+            ) = {
                 let guard = control.lock().await;
-                let preset = guard.active_preset();
+                let active_preset_id = if (1..=(control::PRESET_COUNT as u8)).contains(&preview_id)
+                {
+                    preview_id
+                } else {
+                    guard.active_preset_id
+                };
+                let preset_idx = active_preset_id.saturating_sub(1) as usize;
+                let preset = if preset_idx < control::PRESET_COUNT {
+                    guard.presets[preset_idx]
+                } else {
+                    guard.active_preset()
+                };
                 let mode = match preset.mode {
                     LoadMode::Cv => LoadMode::Cv,
                     LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
@@ -1309,14 +1871,24 @@ async fn display_task(
                     LoadMode::Cc | LoadMode::Reserved(_) => (preset.target_i_ma, 'A'),
                 };
                 (
-                    guard.active_preset_id,
+                    active_preset_id,
                     guard.output_enabled,
                     mode,
                     target_milli,
                     target_unit,
                     guard.adjust_digit,
+                    preset_panel_visible(guard.ui_view),
+                    if preset_panel_visible(guard.ui_view) {
+                        Some(build_preset_panel_vm(&guard))
+                    } else {
+                        None
+                    },
                 )
             };
+
+            let force_full_render =
+                panel_visible || (panel_visible != last_panel_visible) || frame_idx == 1;
+            last_panel_visible = panel_visible;
 
             let (snapshot, mask) = {
                 let mut guard = telemetry.lock().await;
@@ -1336,7 +1908,7 @@ async fn display_task(
                 guard.diff_for_render()
             };
 
-            if mask.is_empty() {
+            if mask.is_empty() && !force_full_render {
                 if log_this_frame {
                     info!(
                         "display: frame {} skipped (no UI changes, dt_ms={})",
@@ -1350,12 +1922,15 @@ async fn display_task(
                         DISPLAY_WIDTH,
                         DISPLAY_HEIGHT,
                     );
-                    if frame_idx == 1 || mask.touch_marker {
+                    if force_full_render || mask.touch_marker {
                         // 首帧：完整绘制静态布局 + 动态内容。
                         ui::render(&mut frame, &snapshot);
                     } else {
                         // 后续帧：仅按掩码重绘受影响区域。
                         ui::render_partial(&mut frame, &snapshot, &mask);
+                    }
+                    if let Some(vm) = panel_vm.as_ref() {
+                        ui::preset_panel::render_preset_panel(&mut frame, vm);
                     }
                     // 在左上角叠加 FPS 信息，使用上一统计窗口得到的整数 FPS。
                     ui::render_fps_overlay(&mut frame, last_fps);
@@ -2012,7 +2587,7 @@ async fn main(spawner: Spawner) {
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
     let fan_pwm_pin = peripherals.GPIO39; // MTCK / FAN_PWM（PAD‑JTAG 已在启动早期释放）
-    let buzzer_pin = peripherals.GPIO21; // BUZZER (GPIO21)
+    let buzzer_pin = peripherals.GPIO21; // BUZZER (prompt tone manager)
     // NOTE: GPIO40 (MTDO) is wired to FAN_TACH and intentionally left unused here;
     // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
@@ -2092,27 +2667,18 @@ async fn main(spawner: Spawner) {
         .set_duty(FAN_DUTY_DEFAULT_PCT)
         .expect("fan duty default");
 
-    // BUZZER: 低速 LEDC 通道，固定 ~2.2 kHz 基频；提示音通过占空比 + 节奏体现。
-    //
-    // 通过先将 GPIO 配置为保守的推挽输出（低驱动强度）并冻结后再路由到 LEDC，
-    // 避免外围外设覆盖引脚驱动设置。
-    let buzzer_cfg = OutputConfig::default()
-        .with_drive_mode(DriveMode::PushPull)
-        .with_drive_strength(DriveStrength::_5mA)
-        .with_pull(Pull::None);
-    let buzzer_out = Output::new(buzzer_pin, Level::Low, buzzer_cfg).into_peripheral_output();
-
+    // BUZZER: low-speed LEDC Timer2/Channel2, used by prompt_tone_task.
     let mut buzzer_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer2);
     buzzer_timer
         .configure(ledc_timer::config::Config {
             duty: ledc_timer::config::Duty::Duty10Bit,
             clock_source: ledc_timer::LSClockSource::APBClk,
-            frequency: Rate::from_hz(2_200),
+            frequency: Rate::from_hz(prompt_tone::BUZZER_FREQ_HZ),
         })
         .expect("buzzer timer");
     let buzzer_timer = BUZZER_TIMER.init(buzzer_timer);
 
-    let mut buzzer_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel2, buzzer_out);
+    let mut buzzer_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel2, buzzer_pin);
     buzzer_channel
         .configure(ledc_channel::config::Config {
             timer: &*buzzer_timer,
@@ -2299,9 +2865,9 @@ async fn main(spawner: Spawner) {
         .expect("touch_task spawn");
     info!("spawning touch-ui task");
     spawner
-        .spawn(touch_ui_task(control))
+        .spawn(touch_ui_task(control, eeprom))
         .expect("touch_ui_task spawn");
-    info!("spawning prompt-tone task");
+    info!("spawning prompt tone task");
     spawner
         .spawn(prompt_tone::prompt_tone_task(buzzer_channel))
         .expect("prompt_tone_task spawn");
@@ -3229,8 +3795,12 @@ async fn setmode_tx_task(
             should_send_new = true;
             send_reason = "force";
         } else if rev_now != last_sent_rev {
-            should_send_new = true;
-            send_reason = "rev-change";
+            if last_sent_cmd.map(|c| c != desired_cmd).unwrap_or(true) {
+                should_send_new = true;
+                send_reason = "rev-change";
+            } else {
+                last_sent_rev = rev_now;
+            }
         } else if now.saturating_sub(last_sent_ms) >= SETMODE_TX_PERIOD_MS {
             if last_sent_cmd.map(|c| c != desired_cmd).unwrap_or(true) {
                 should_send_new = true;

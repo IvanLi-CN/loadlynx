@@ -12,6 +12,7 @@ logs/agentd/
 .stm32-probe
 .stm32-port
 .esp32-port
+.mcu-agentd/
 
 # Frontend build artifacts and dependencies
 **/node_modules/

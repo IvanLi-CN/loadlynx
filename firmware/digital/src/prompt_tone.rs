@@ -113,7 +113,7 @@ fn try_take_one_tick() -> bool {
 
 // --- Playback engine --------------------------------------------------------
 
-const BUZZER_FREQ_HZ: u32 = 2_200;
+pub const BUZZER_FREQ_HZ: u32 = 2_200;
 
 // Low-volume UI feedback (duty controls loudness).
 const UI_DUTY_PCT: u8 = 3;

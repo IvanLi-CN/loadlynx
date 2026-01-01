@@ -1656,6 +1656,8 @@ async fn handle_presets_update(
         }
 
         let old_presets = guard.presets;
+        let old_saved = guard.saved;
+        let old_dirty = guard.dirty;
         let old_output = guard.output_enabled;
 
         let prev_mode = guard.presets[idx].mode;
@@ -1666,8 +1668,10 @@ async fn handle_presets_update(
             guard.output_enabled = false;
         }
 
-        // Persist presets blob to EEPROM.
-        let blob = control::encode_presets_blob(&guard.presets);
+        // Persist presets blob to EEPROM (saved snapshot is the persisted baseline).
+        let mut next_saved = guard.saved;
+        next_saved[idx] = preset;
+        let blob = control::encode_presets_blob(&next_saved);
         let write_ok = {
             let mut ep = eeprom.lock().await;
             ep.write_presets_blob(&blob).await.is_ok()
@@ -1676,11 +1680,15 @@ async fn handle_presets_update(
         if !write_ok {
             // Roll back in-RAM state on persistence failure.
             guard.presets = old_presets;
+            guard.saved = old_saved;
+            guard.dirty = old_dirty;
             guard.output_enabled = old_output;
             write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
             return Err("503 Service Unavailable");
         }
 
+        guard.saved = next_saved;
+        guard.dirty[idx] = false;
         bump_control_rev();
         guard.presets[idx]
     };
@@ -1720,9 +1728,7 @@ async fn handle_presets_apply(
 
     {
         let mut guard = control.lock().await;
-        guard.active_preset_id = parsed.preset_id;
-        // ApplyPreset MUST force output OFF.
-        guard.output_enabled = false;
+        guard.activate_preset(parsed.preset_id);
         bump_control_rev();
     }
 
