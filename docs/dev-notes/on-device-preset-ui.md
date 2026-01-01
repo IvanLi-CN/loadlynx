@@ -17,12 +17,12 @@
   - 明确激活并生效（禁止“静默激活”）。
 - 激活 preset、以及激活 preset 的 mode 变化时，强制执行“安全关断负载”（后续由负载开关颜色表达，不在本设计内确定开关位置）。
 - 低风险数值编辑：光标位可选范围受限，避免大步跳变。
-- 开发阶段策略：保存失败必须阻塞，直到保存成功。
+- 保存失败必须阻塞，直到保存成功（量产保留）。
 
 ## 非目标（Out of scope）
 
 - 不做 Wi‑Fi/网络配置、校准、SoftReset 等非 preset 相关功能。
-- 不在本设计中确定 **主界面**“负载开关（OUTPUT）”UI 位置与交互。
+- 不在本设计中确定 **主界面**“负载开关（LOAD）”UI 位置与交互。
 - 不扩展 preset 数量与字段（固定 5 组，字段集以现有协议/固件模型为准）。
 
 ## 术语
@@ -32,7 +32,7 @@
 - **工作副本**（working）：RAM 中可变的 preset 值（编辑会修改）。
 - **已保存快照**（saved）：最近一次成功保存（写 EEPROM 成功）后的 preset 值，用于回退。
 - **未保存改动**（dirty）：working 与 saved 不一致。
-- **安全关断负载**：将负载置为安全关闭态（例如 `output_enabled=false` 或等价语义），不要求 toast/弹窗提示。
+- **安全关断负载**：将负载置为安全关闭态（例如 `load_enabled=false` / `output_enabled=false` 或等价语义），不要求 toast/弹窗提示。
 
 ## UI 信息架构
 
@@ -42,34 +42,37 @@ UI mock（320×240 PNG）：
 
   ![Dashboard](../assets/on-device-preset-ui/dashboard.png)
 
-- 预设设置面板（OUTPUT=OFF）
+- 预设设置面板（LOAD=OFF）
 
-  ![Preset panel output off](../assets/on-device-preset-ui/preset-panel-output-off.png)
+  ![Preset panel load off](../assets/on-device-preset-ui/preset-panel-output-off.png)
 
-- 预设设置面板（OUTPUT=ON）
+- 预设设置面板（LOAD=ON）
 
-  ![Preset panel output on](../assets/on-device-preset-ui/preset-panel-output-on.png)
+  ![Preset panel load on](../assets/on-device-preset-ui/preset-panel-output-on.png)
 
 ### 1) 主界面（Main）
 
 - 将当前界面中“CC/CV 选择区域”替换为 `<PRESET><MODE>` 的入口按钮（视觉为组合展示，例如 `M2` + `CC`，不要求使用斜杠文本）。
 - 主界面上显示“当前激活 preset 编号 + 其 mode”，作为用户确认当前工作状态的唯一真值来源。
+- 主界面不提供直接切 mode / 调 target 的交互（本设计替换 `docs/interfaces/main-display-ui.md` 中 control row 的 CC/CV/target 直改交互）；所有 preset 字段编辑均在设置面板完成。
 
 ### 2) 预设设置面板（Preset Settings Panel）
 
 - 触发方式：点击主界面 `<PRESET><MODE>` 按钮打开；可关闭返回主界面。
 - 顶部：tabs（M1..M5）用于选择 **editing_preset**（单击只切换编辑对象，不激活）。
 - 中部：字段编辑区（见“字段与格式”）。
-- 底部：左侧为 **OUTPUT** 滑动开关（负载开关，非 preset 字段）；右侧为 `SAVE` 按钮（无 `Apply` 按钮）。
+- 底部：左侧为 **LOAD** 滑动开关（负载开关，非 preset 字段）；右侧为 `SAVE` 按钮（无 `Apply` 按钮）。
 
 #### MODE 字段：双选按钮（CV / CC）
 
 - 表现形式：分段控件（segmented control），直接显示两个选项 `CV` 与 `CC`。
-- 交互：点击某一段立即设置 `mode`（无需进入“字段编辑态”再旋钮切换），并按“安全关断负载”规则处理副作用。
+- 交互：点击某一段立即设置 `mode`（无需进入“字段编辑态”再旋钮切换）。
+  - 若 `editing_preset_id == active_preset_id` 且 `mode` 实际发生变化：必须执行“安全关断负载”（`load_enabled=false`），避免静默切换后继续出力。
+  - 若当前仅在编辑非激活 preset：不影响当前输出状态。
 - 视觉：延续主界面语义色：`CC` 红 `#FF5252`、`CV` 橙 `#FFB24A`；未选中项用灰 `#7A7F8C`。
 - 尺寸：分段控件高度建议 ≤ **12 px**（与 UI mock 一致），并与下一行选中高亮保持 ≥ **1 px** 间隙，避免视觉粘连。
 
-#### OUTPUT 滑动开关（视觉规范）
+#### LOAD 滑动开关（视觉规范）
 
 > 需要在 UI mock 与实现中保持一致：像素级渲染，避免缩放造成的模糊或形变。
 
@@ -122,18 +125,33 @@ UI mock（320×240 PNG）：
   - 禁止切换 tab、禁止继续编辑、禁止关闭面板；
   - 只允许重复点击同一个 `保存` 继续重试；
   - 保存成功后解除阻塞态。
+  - 阻塞态必须显示一条**持续可见**的解释文案（不依赖 toast），推荐两行（SmallFont）：`SAVE FAILED` + `RETRY SAVE`。
 
 ## 字段与格式（固定宽度显示）
 
 > 显示格式要求固定宽度（含前导 0），以保证光标位稳定且可预测。
 
+### 字段集合（按 mode）
+
+> `V-LIM` / `I-LIM` / `P-LIM` 对应 `docs/dev-notes/cv-mode-presets-v1.md` 的 limit 字段语义。
+
 - `mode`：`CC` / `CV`
-- `target`：随 mode 切换编辑对象
-  - mode=CC：编辑电流目标，显示 `DD.ddd A`
-  - mode=CV：编辑电压目标，显示 `DD.ddd V`
-- `min_v`：显示 `DD.ddd V`
-- `max_i_total`：显示 `DD.ddd A`
-- `max_p`：显示 `DDD.dd W`
+- mode=CC（恒流）字段：
+  - `TARGET`：电流目标，显示 `DD.dddA`
+  - `V-LIM`：欠压阈值（`min_v_mv`），显示 `DD.dddV`
+  - `P-LIM`：功率上限（`max_p_mw`），显示 `DDD.ddW`
+  - 注：CC 模式不显示 `I-LIM` 行；`max_i_total` 仍作为内部安全上限存在（用于 clamp/保护），但不是 UI 字段。
+- mode=CV（电压钳位）字段：
+  - `TARGET`：电压目标，显示 `DD.dddV`
+  - `I-LIM`：总电流上限（`max_i_ma_total`），显示 `DD.dddA`
+  - `V-LIM`：欠压阈值（`min_v_mv`），显示 `DD.dddV`
+  - `P-LIM`：功率上限（`max_p_mw`），显示 `DDD.ddW`
+
+### 显示格式（冻结：固定长度对齐）
+
+- 目标值与各 `*-LIM` 的“值字符串”固定为 **7 字符**（单位紧贴，无空格），用于右对齐与行对齐：
+  - 电流/电压：`DD.dddX`（例如 `01.200A`、`24.500V`）
+  - 功率：`DDD.ddW`（例如 `300.00W`）
 
 ## 状态模型（概要）
 
@@ -151,6 +169,7 @@ UI mock（320×240 PNG）：
 - `dirty[preset_id]`：是否存在未保存改动
 - `active_preset_id`：当前激活 preset
 - `editing_preset_id`：面板当前编辑 preset
+- `active_preset` 始终绑定 `working[active_preset_id]`（激活 dirty 时直接使用 working 生效；无需先保存）。
 
 ### 未保存改动的丢弃规则（冻结）
 
@@ -178,4 +197,6 @@ UI mock（320×240 PNG）：
 - 目标字段随 mode 切换显示并编辑对应值（CC→电流目标；CV→电压目标）。
 - 电流/电压/功率显示均为固定宽度格式；光标循环与可选位限制按本文规定生效。
 - 保存按钮无改动时禁用视觉但可点；保存成功/失败 toast；保存失败阻塞且只能重复点同一保存按钮重试。
+- 保存失败阻塞态必须显示持续可见的解释文案（例如 `SAVE FAILED` + `RETRY SAVE`）。
 - 未保存改动丢弃规则按本文冻结规则生效。
+- 所有 UI 文案中 `LOAD` 一词保持一致，不出现 `OUTPUT`。

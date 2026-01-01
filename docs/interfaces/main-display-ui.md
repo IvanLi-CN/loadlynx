@@ -5,6 +5,8 @@
 ![Main display mock (CV)](../assets/main-display/main-display-mock-cv.png)
 
 > Mock is rendered at 320×240 px, matching the landscape frame buffer of the P024C128-CTP module (`docs/other-datasheets/p024c128-ctp.md`).
+>
+> NOTE: The main-screen control row interaction is defined by `docs/dev-notes/on-device-preset-ui.md` and replaces the legacy “tap CC/CV + encoder digit adjust” behavior previously described here.
 
 ## 需求说明
 
@@ -55,7 +57,7 @@
 
 | Pair | Payload | Font | Color | Placement |
 | --- | --- | --- | --- | --- |
-| Control row | 模式切换（CC/CV）+ 当前 preset 目标值（单位随模式变更） | SmallFont | 背景 `#1C2638`；CC 文本 `#FF5252`；CV 文本 `#FFB347`；数值 `#DFE7FF`；选中位高亮背景 `#4CC9F0`（高亮位字符改为深色） | 行背景：`y=10..38`；MODE pill `(198,10)-(252,38)`；VALUE pill `(256,10)-(314,38)`；默认选中十分位（0.1），不显示“步长”文本 |
+| Control row | 主界面 Preset 概览与入口：`<M#><MODE>` + active preset target（单位随 mode 变更） | SmallFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数值 `#DFE7FF` | 行背景：`y=10..38`；该区域仅用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；并作为进入 Preset Panel / 快速切换 preset 的交互入口（详见 `docs/dev-notes/on-device-preset-ui.md`）。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
 | Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `FLT 0x12345678`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
@@ -70,15 +72,10 @@
 
 > Mirror bars：中心刻度标注 `0`，左半对应该对数据中的左值，右半对应右值。左/右填充长度 = `min(value / limit, 1.0) * half_width`，其中电压上限 40 V，电流上限 5 A。
 
-### Control row：选中位背景高亮（固定宽度字体，禁止“视觉居中”偏移）
+### Control row：目标值文本格式（固定宽度）
 
-- 目标值文本固定为 6 字符：`DD.ddU`（例如 `12.00A`、`24.50V`），使用 `SmallFont`（8×12）绘制，字符间距为 0（固定宽度字形单元格）。
-- 目标值文本在 VALUE pill 内 **右对齐**，右内边距 **4 px**；因此该 6 字符串宽度固定 48 px，用于保持布局稳定。
-- 选中位高亮背景（颜色 `#4CC9F0`）以 `SmallFont` 数字字形的稳定 bbox 为基准绘制：
-  - 数字字形 bbox：`x=0..4`、`y=2..9`（5×8）
-  - 高亮背景内边距：左/右各 **1 px**，上/下各 **2 px**（得到 7×12 的高亮块；避免 padding 溢出到相邻字符）
-- 选中位字符本身改为深色（推荐 `#080F19`），其余字符保持 `#DFE7FF`。
-- 选中位索引（按 `DD.ddU` 的字符索引）：`ones=1`、`tenths=3`、`hundredths=4`。
+- 主界面的 target 摘要文本固定为 7 字符：`DD.dddU`（例如 `12.000A`、`24.500V`），使用 `SmallFont`（8×12）绘制，字符间距为 0（固定宽度字形单元格）。
+- 主界面不显示“选中位高亮”，也不在主界面直接调节 target 或 mode（交互见 `docs/dev-notes/on-device-preset-ui.md`）。
 
 ## Color Palette
 
@@ -117,43 +114,22 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
 2. **Right status**
    - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 40 V`.
    - **Control row** replaces the legacy “SET I” line:
-     - Shows the **current preset** `mode` (`CC`/`CV`) and the **current preset target** (unit follows the active mode).
-     - Target value is sourced from the digital preset model (not measured values), right-aligned to x=314.
-     - The selected adjustment digit MUST be shown with a special background highlight (do not rely on underline).
-     - Highlight padding: **1 px** left/right, **2 px** top/bottom around the selected `SmallFont` digit bbox (`x=0..4`, `y=2..9`).
+     - Shows the active preset `<M#><MODE>` and a target summary `DD.dddU` (unit follows the active mode).
+     - Target value is sourced from the digital preset model (not measured values).
+     - No per-digit adjustment highlight is shown on the main screen; editing occurs in the Preset Panel.
    - Runtime + energy update at 2 Hz, temperature at 5 Hz. Keep color semantics fixed for muscle memory.
 
 ## Interaction Hooks
 
-### Control row touch + encoder
+### Preset entry + quick switch
 
-#### Tap targets (logical pixel bounds)
-
-- MODE pill background: `(198,10)-(252,38)` (rounded rectangle, no border)
-  - **CC button**: `(200,12)-(224,36)`
-  - **CV button**: `(226,12)-(250,36)`
-- VALUE pill background: `(256,10)-(314,38)` (rounded rectangle, no border)
-  - Tap the **ones / tenths / hundredths** digit to select the active adjustment digit (highlighted by a special background color; do not rely on underline).
-
-#### Behavior
-
-- Tap **CC** / **CV**: updates the **current preset** `mode` immediately (no extra “apply” step), and MUST force `output_enabled=false` for safety.
-- Rotate encoder: adjusts the selected target for the **current preset**:
-  - CC: `target_i_ma` (A)
-  - CV: `target_v_mv` (V)
-  - Adjustment digit options: ones / tenths / hundredths; default is tenths (0.1).
-  - The selected digit MUST be remembered (do not show step text in the UI).
-- Encoder push button:
-  - Short press: toggle `output_enabled` for the current preset.
-  - Long press (~800ms): cycle `active_preset_id` (P1..P5), and force `output_enabled=false`.
+- Tap the control row `<M#><MODE>` entry to open the Preset Panel.
+- Press-and-swipe within the control row entry area performs a quick preset preview; releasing commits activation (and forces load OFF). Exact behavior and safety rules are defined in `docs/dev-notes/on-device-preset-ui.md`.
 
 ### Operator quick guide
 
-- Tap the **CC** or **CV** text inside the right-side rounded pill to switch the current preset mode (output is forced OFF for safety).
-- Tap a digit in the right-side value pill to select the adjustment digit (the selected digit is highlighted with a special background color; default is tenths = 0.1).
-- Rotate the encoder to change the current preset target:
-  - CC → current target (A)
-  - CV → voltage target (V)
+- Tap `<M#><MODE>` to open the Preset Panel for full editing and saving.
+- Use quick switch (press-and-swipe) to change active preset when you just need to move between stored presets quickly.
 
 ## Assets
 
