@@ -78,7 +78,9 @@ pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
 
     // Only the <M#><MODE> entry is interactive on the main screen. All mode/target
     // editing happens in the Preset Panel.
-    if x >= CONTROL_MODE_PILL_LEFT && x <= CONTROL_MODE_PILL_RIGHT {
+    // Treat the whole combined pill area as a single button so taps on either
+    // the <M#><MODE> segment or the target value segment open the panel.
+    if x >= CONTROL_MODE_PILL_LEFT && x <= CONTROL_VALUE_PILL_RIGHT {
         return Some(ControlRowHit::PresetEntry);
     }
 

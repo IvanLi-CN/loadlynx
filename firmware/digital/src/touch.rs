@@ -273,6 +273,22 @@ pub async fn touch_task(mut ctp_int: Input<'static>, mut ctp_rst: Output<'static
 }
 
 fn handle_report(report: &TouchReport) {
+    // Some FT6336U configurations report "release" as TD_STATUS=0 (no points)
+    // without emitting an explicit per-point event=1. Convert that into a
+    // synthetic "up" marker at the last known coordinates so the UI can
+    // reliably detect taps.
+    if report.points.is_empty() {
+        if let Some(last) = load_touch_marker() {
+            store_touch_marker(TouchMarker {
+                x: last.x,
+                y: last.y,
+                id: last.id,
+                event: 1,
+            });
+        }
+        return;
+    }
+
     for p in report.points.iter() {
         let (x, y) = map_to_logical(p.x, p.y);
         defmt::info!(
