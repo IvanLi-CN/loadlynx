@@ -77,6 +77,7 @@ use ui::{AnalogState, UiSnapshot};
 
 mod eeprom;
 mod i2c0;
+mod prompt_tone;
 mod touch;
 
 // Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
@@ -196,6 +197,8 @@ static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = Stati
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static BUZZER_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
+static BUZZER_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
@@ -544,6 +547,7 @@ async fn encoder_task(
 
                 // Reverse logical direction to match panel orientation (CW increments).
                 let logical_step = -phys_step;
+                prompt_tone::enqueue_ticks(1);
                 let mut guard = control.lock().await;
                 match guard.ui_view {
                     control::UiView::Main => {
@@ -696,6 +700,7 @@ async fn encoder_task(
                                 let prev = guard.output_enabled;
                                 guard.output_enabled = !prev;
                                 bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
                                 info!(
                                     "encoder short-press: output_enabled {} -> {} (preset_id={})",
                                     if prev { "ON" } else { "OFF" },
@@ -719,6 +724,7 @@ async fn encoder_task(
                                 guard.panel_selected_digit =
                                     cycle_panel_digit_right(field, guard.panel_selected_digit);
                                 bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
                             }
                             control::UiView::PresetPanelBlocked => {}
                         }
@@ -745,6 +751,7 @@ async fn encoder_task(
                         };
                         guard.activate_preset(next);
                         bump_control_rev();
+                        prompt_tone::enqueue_ui_ok();
                         long_action_fired = true;
                         info!(
                             "encoder long-press: active_preset_id -> {} (output forced OFF)",
@@ -805,6 +812,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
         match marker.event {
             // down
             0 => {
+                prompt_tone::notify_local_activity();
                 if view == control::UiView::PresetPanelBlocked {
                     quick_switch = None;
                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -897,7 +905,12 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     if let Some(ui::preset_panel::PresetPanelHit::Save) =
                         ui::preset_panel::hit_test_preset_panel(marker.x, marker.y, &vm)
                     {
-                        let _ = save_editing_preset_to_eeprom(control, eeprom).await;
+                        let ok = save_editing_preset_to_eeprom(control, eeprom).await;
+                        if ok {
+                            prompt_tone::enqueue_ui_ok();
+                        } else {
+                            prompt_tone::enqueue_ui_fail();
+                        }
                     }
                     yield_now().await;
                     continue;
@@ -940,6 +953,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                             guard.panel_selected_digit,
                                         );
                                         bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
                                         last_tab_tap = None;
                                     } else if let Some((last_id, last_ms)) = last_tab_tap {
                                         if last_id == preset_id
@@ -947,6 +961,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                         {
                                             guard.activate_preset(preset_id);
                                             bump_control_rev();
+                                            prompt_tone::enqueue_ui_ok();
                                             info!(
                                                 "touch: tab double-tap activate preset {} (output forced OFF)",
                                                 preset_id
@@ -990,6 +1005,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                     } else {
                                         bump_control_rev();
                                     }
+                                    prompt_tone::enqueue_ui_ok();
                                     last_tab_tap = None;
                                 }
                                 Hit::Target => {
@@ -1000,6 +1016,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                         guard.panel_selected_digit,
                                     );
                                     bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
                                     last_tab_tap = None;
                                 }
                                 Hit::VLim => {
@@ -1010,6 +1027,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                         guard.panel_selected_digit,
                                     );
                                     bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
                                     last_tab_tap = None;
                                 }
                                 Hit::ILim => {
@@ -1020,6 +1038,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                         guard.panel_selected_digit,
                                     );
                                     bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
                                     last_tab_tap = None;
                                 }
                                 Hit::PLim => {
@@ -1030,17 +1049,24 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                         guard.panel_selected_digit,
                                     );
                                     bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
                                     last_tab_tap = None;
                                 }
                                 Hit::LoadToggle => {
                                     let mut guard = control.lock().await;
                                     guard.output_enabled = !guard.output_enabled;
                                     bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
                                     last_tab_tap = None;
                                 }
                                 Hit::Save => {
                                     last_tab_tap = None;
-                                    let _ = save_editing_preset_to_eeprom(control, eeprom).await;
+                                    let ok = save_editing_preset_to_eeprom(control, eeprom).await;
+                                    if ok {
+                                        prompt_tone::enqueue_ui_ok();
+                                    } else {
+                                        prompt_tone::enqueue_ui_fail();
+                                    }
                                 }
                             }
                         }
@@ -1061,6 +1087,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 let mut guard = control.lock().await;
                                 guard.activate_preset(preview_id);
                                 bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
                                 info!(
                                     "touch: quick switch preset {} -> {} (output forced OFF)",
                                     base_id, preview_id
@@ -1077,6 +1104,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                     guard.panel_selected_digit =
                                         ui::preset_panel::PresetPanelDigit::Tenths;
                                     bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
                                     info!(
                                         "touch: preset entry tap -> open preset panel (editing preset_id={})",
                                         guard.editing_preset_id
@@ -1087,6 +1115,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                     guard.close_panel_discard();
                                     guard.ui_view = control::UiView::Main;
                                     bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
                                     info!(
                                         "touch: preset entry tap -> close preset panel (discard non-active)"
                                     );
@@ -1100,6 +1129,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             let mut guard = control.lock().await;
                             guard.adjust_digit = digit;
                             bump_control_rev();
+                            prompt_tone::enqueue_ui_ok();
                             info!("touch: dashboard target digit -> {}", digit);
                         }
                     }
@@ -1586,6 +1616,7 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
 async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fault_flags = status.fault_flags;
+    prompt_tone::set_fault_flags(fault_flags);
     let enabled = status.enable;
     let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
 
@@ -2556,6 +2587,7 @@ async fn main(spawner: Spawner) {
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
     let fan_pwm_pin = peripherals.GPIO39; // MTCK / FAN_PWM（PAD‑JTAG 已在启动早期释放）
+    let buzzer_pin = peripherals.GPIO21; // BUZZER (prompt tone manager)
     // NOTE: GPIO40 (MTDO) is wired to FAN_TACH and intentionally left unused here;
     // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
@@ -2634,6 +2666,28 @@ async fn main(spawner: Spawner) {
     fan_channel
         .set_duty(FAN_DUTY_DEFAULT_PCT)
         .expect("fan duty default");
+
+    // BUZZER: low-speed LEDC Timer2/Channel2, used by prompt_tone_task.
+    let mut buzzer_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer2);
+    buzzer_timer
+        .configure(ledc_timer::config::Config {
+            duty: ledc_timer::config::Duty::Duty10Bit,
+            clock_source: ledc_timer::LSClockSource::APBClk,
+            frequency: Rate::from_hz(prompt_tone::BUZZER_FREQ_HZ),
+        })
+        .expect("buzzer timer");
+    let buzzer_timer = BUZZER_TIMER.init(buzzer_timer);
+
+    let mut buzzer_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel2, buzzer_pin);
+    buzzer_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*buzzer_timer,
+            duty_pct: 0,
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("buzzer channel");
+    let buzzer_channel = BUZZER_CHANNEL.init(buzzer_channel);
+    buzzer_channel.set_duty(0).expect("buzzer duty init");
 
     let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
     #[cfg(not(feature = "net_http"))]
@@ -2813,6 +2867,10 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(touch_ui_task(control, eeprom))
         .expect("touch_ui_task spawn");
+    info!("spawning prompt tone task");
+    spawner
+        .spawn(prompt_tone::prompt_tone_task(buzzer_channel))
+        .expect("prompt_tone_task spawn");
     info!("spawning fan task");
     spawner
         .spawn(fan_task(telemetry, fan_channel))

@@ -74,19 +74,25 @@ pub enum ControlRowHit {
 }
 
 pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
-    if y < CONTROL_ROW_TOP || y > CONTROL_ROW_BOTTOM {
+    // Slightly expand the touch hit box to tolerate touch calibration offsets.
+    const HIT_PAD_X: i32 = 2;
+    const HIT_PAD_Y: i32 = 8;
+
+    if y < CONTROL_ROW_TOP - HIT_PAD_Y || y > CONTROL_ROW_BOTTOM + HIT_PAD_Y {
         return None;
     }
 
     // Main screen control row semantics:
     // - Left pill (<M#><MODE>) opens/closes the Preset Panel and supports press-swipe preview.
     // - Right pill (target value) selects the currently edited digit for the encoder.
-    if x >= CONTROL_MODE_PILL_LEFT && x <= CONTROL_MODE_PILL_RIGHT {
-        return Some(ControlRowHit::PresetEntry);
+    //
+    // Prefer the value pill if the hit boxes overlap after padding.
+    if x >= CONTROL_VALUE_PILL_LEFT - HIT_PAD_X && x <= CONTROL_VALUE_PILL_RIGHT + HIT_PAD_X {
+        return Some(ControlRowHit::TargetDigit(pick_control_row_digit(x)));
     }
 
-    if x >= CONTROL_VALUE_PILL_LEFT && x <= CONTROL_VALUE_PILL_RIGHT {
-        return Some(ControlRowHit::TargetDigit(pick_control_row_digit(x)));
+    if x >= CONTROL_MODE_PILL_LEFT - HIT_PAD_X && x <= CONTROL_MODE_PILL_RIGHT + HIT_PAD_X {
+        return Some(ControlRowHit::PresetEntry);
     }
 
     None
