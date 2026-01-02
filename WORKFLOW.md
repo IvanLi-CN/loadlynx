@@ -19,15 +19,15 @@
 
 ## MCU 端口/探针缓存与 Agentd
 
-- 守护与 CLI：`tools/mcu-agentd` 提供单实例守护进程与 CLI（二进制名 `loadlynx-agentd`），推荐通过 Just 封装调用：
+- 守护与 CLI：使用外部 `mcu-agentd`（配置见仓根 `mcu-agentd.toml`）。推荐先执行 `just agentd-init` 安装/升级二进制，再通过 Just 封装调用：
   - 启动/状态/停止：`just agentd-start` / `just agentd-status` / `just agentd-stop`。
 - 缓存文件：
   - Digital（ESP32‑S3）：仓根 `./.esp32-port`。
   - Analog（STM32G431）：仓根 `./.stm32-port`（旧版 `./.stm32-probe` 仅在 `.stm32-port` 不存在时作为迁移来源，读取后写回 `.stm32-port` 并删除旧文件）。
 - 设置与查看缓存（推荐流程）：
-  - 设置：`just agentd set-port digital /dev/cu.usbserial-xxxx`；`just agentd set-port analog 0483:3748:SERIAL`。
+  - 设置：`just agentd selector set digital /dev/cu.usbserial-xxxx`；`just agentd selector set analog 0483:3748:SERIAL`。
   - 查看：`just agentd-get-port digital` / `just agentd-get-port analog`。
-- 后续所有 `flash` / `reset` / `monitor` 子命令都会优先使用上述缓存值；仅当缓存缺失时才回退到 `scripts/ensure_esp32_port.sh` / `scripts/ensure_stm32_probe.sh` 的自动选择逻辑。
+- 后续所有 `flash` / `reset` / `monitor` 子命令都会优先使用上述缓存值；缓存缺失时可用 `just agentd selector list <mcu>` 查看候选，或用 `just agentd selector set <mcu> --auto`（仅当候选唯一时成功）。
 
 ## 后续里程碑（建议）
 - 驱动层：NTC/温度、风扇 PWM、分流/跨阻采样链路
