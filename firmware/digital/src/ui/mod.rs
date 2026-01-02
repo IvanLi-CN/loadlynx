@@ -13,7 +13,7 @@ use crate::control::AdjustDigit;
 use crate::touch::TouchMarker;
 use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
-use self::fonts::{SEVEN_SEG_FONT, SMALL_FONT};
+use self::fonts::{SETPOINT_FONT, SEVEN_SEG_FONT, SMALL_FONT};
 
 #[repr(u8)]
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -60,17 +60,15 @@ const TELEMETRY_TOP: i32 = 172;
 pub(crate) const CONTROL_ROW_TOP: i32 = 10;
 pub(crate) const CONTROL_ROW_BOTTOM: i32 = 38;
 pub(crate) const CONTROL_MODE_PILL_LEFT: i32 = 198;
-pub(crate) const CONTROL_MODE_PILL_RIGHT: i32 = 252;
-pub(crate) const CONTROL_VALUE_PILL_LEFT: i32 = 256;
+pub(crate) const CONTROL_MODE_PILL_RIGHT: i32 = 228;
+pub(crate) const CONTROL_VALUE_PILL_LEFT: i32 = 232;
 pub(crate) const CONTROL_VALUE_PILL_RIGHT: i32 = 314;
-const CONTROL_TEXT_Y: i32 = 18;
 const CONTROL_PILL_RADIUS: i32 = 6;
-const CONTROL_TARGET_SAMPLE: &str = "00.000A";
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum ControlRowHit {
     PresetEntry,
-    TargetDigit(AdjustDigit),
+    TargetEntry,
 }
 
 pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
@@ -82,49 +80,18 @@ pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
         return None;
     }
 
-    // Main screen control row semantics:
-    // - Left pill (<M#><MODE>) opens/closes the Preset Panel and supports press-swipe preview.
-    // - Right pill (target value) selects the currently edited digit for the encoder.
-    //
-    // Prefer the value pill if the hit boxes overlap after padding.
-    if x >= CONTROL_VALUE_PILL_LEFT - HIT_PAD_X && x <= CONTROL_VALUE_PILL_RIGHT + HIT_PAD_X {
-        return Some(ControlRowHit::TargetDigit(pick_control_row_digit(x)));
+    if x < CONTROL_MODE_PILL_LEFT - HIT_PAD_X || x > CONTROL_VALUE_PILL_RIGHT + HIT_PAD_X {
+        return None;
     }
 
-    if x >= CONTROL_MODE_PILL_LEFT - HIT_PAD_X && x <= CONTROL_MODE_PILL_RIGHT + HIT_PAD_X {
-        return Some(ControlRowHit::PresetEntry);
+    // The gap between the two pills should not become a dead zone: attribute it
+    // to the nearest half.
+    let split_x = (CONTROL_MODE_PILL_RIGHT + CONTROL_VALUE_PILL_LEFT) / 2;
+    if x <= split_x {
+        Some(ControlRowHit::PresetEntry)
+    } else {
+        Some(ControlRowHit::TargetEntry)
     }
-
-    None
-}
-
-fn control_row_value_text_x() -> i32 {
-    let width = small_text_width(CONTROL_TARGET_SAMPLE, 0);
-    CONTROL_VALUE_PILL_RIGHT - 4 - width
-}
-
-fn pick_control_row_digit(x: i32) -> AdjustDigit {
-    // Target string is fixed-width "DD.dddU" (7 chars), SmallFont is monospaced.
-    // Select the nearest editable digit: ones/tenths/hundredths/thousandths.
-    let glyph = SMALL_FONT.width() as i32;
-    let base_x = control_row_value_text_x();
-    let centers = [
-        (1, AdjustDigit::Ones),
-        (3, AdjustDigit::Tenths),
-        (4, AdjustDigit::Hundredths),
-        (5, AdjustDigit::Thousandths),
-    ];
-    let mut best = AdjustDigit::Tenths;
-    let mut best_dist = i32::MAX;
-    for (idx, digit) in centers {
-        let cx = base_x + (idx as i32) * glyph + glyph / 2;
-        let dist = (x - cx).abs();
-        if dist < best_dist {
-            best_dist = dist;
-            best = digit;
-        }
-    }
-    best
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -443,8 +410,13 @@ fn small_text_width(text: &str, spacing: i32) -> i32 {
     (text.chars().count() as i32) * glyph
 }
 
+fn setpoint_text_width(text: &str, spacing: i32) -> i32 {
+    let glyph = SETPOINT_FONT.width() as i32 + spacing;
+    (text.chars().count() as i32) * glyph
+}
+
 fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
-    // Rounded rectangle pills (no border), per v2 design.
+    // Two independent pills: preset/mode (left) and setpoint summary (right).
     canvas.fill_round_rect(
         Rect::new(
             CONTROL_MODE_PILL_LEFT,
@@ -480,58 +452,58 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
         let _ = preset_text.push('?');
     }
 
+    // Two-line preset label inside the left half: top = "M#", bottom = "CC"/"CV".
+    let small_h = SMALL_FONT.height() as i32;
+    let lines_h = small_h * 2;
+    let label_y0 = CONTROL_ROW_TOP + ((CONTROL_ROW_BOTTOM - CONTROL_ROW_TOP) - lines_h).max(0) / 2;
+
+    let label_left = CONTROL_MODE_PILL_LEFT;
+    let label_right = CONTROL_MODE_PILL_RIGHT;
+    let label_w = (label_right - label_left).max(1);
+
     let preset_w = small_text_width(preset_text.as_str(), 0);
     let mode_w = small_text_width(mode_text, 0);
-    let entry_w = preset_w + mode_w;
-    let entry_x =
-        CONTROL_MODE_PILL_LEFT + ((CONTROL_MODE_PILL_RIGHT - CONTROL_MODE_PILL_LEFT) - entry_w) / 2;
+    let preset_x = label_left + (label_w - preset_w).max(0) / 2;
+    let mode_x = label_left + (label_w - mode_w).max(0) / 2;
+
     draw_small_text(
         canvas,
         preset_text.as_str(),
-        entry_x,
-        CONTROL_TEXT_Y,
+        preset_x,
+        label_y0,
         rgb(0xdfe7ff),
         0,
     );
+    draw_small_text(canvas, mode_text, mode_x, label_y0 + small_h, mode_color, 0);
+
+    // Target summary: big digits + small unit, right-aligned in the right half.
+    let target = data.control_target_text.as_str();
+    let (num, unit) = target.split_at(target.len().saturating_sub(1));
+
+    let num_w = setpoint_text_width(num, 0);
+    let unit_w = small_text_width(unit, 0);
+    let unit_gap = 1;
+    let total_w = num_w + unit_gap + unit_w;
+
+    // Keep a small right padding so the unit doesn't visually touch the pill edge.
+    let right_pad = 3;
+    let value_right = CONTROL_VALUE_PILL_RIGHT - right_pad;
+    let value_x0 = (value_right - total_w).max(CONTROL_VALUE_PILL_LEFT);
+
+    let num_h = SETPOINT_FONT.height() as i32;
+    let num_y = CONTROL_ROW_TOP + ((CONTROL_ROW_BOTTOM - CONTROL_ROW_TOP) - num_h).max(0) / 2;
+    // Baseline-align the unit with the larger numeric font by matching bottom edges.
+    let unit_y = num_y + num_h - (SMALL_FONT.height() as i32);
+
+    draw_setpoint_text(canvas, num, value_x0, num_y, rgb(0xdfe7ff), 0);
     draw_small_text(
         canvas,
-        mode_text,
-        entry_x + preset_w,
-        CONTROL_TEXT_Y,
-        mode_color,
+        unit,
+        value_x0 + num_w + unit_gap,
+        unit_y,
+        rgb(0x9ab0d8),
         0,
     );
-
-    // Preset target value (fixed-width "DD.dddU", right-aligned inside VALUE pill).
-    let target = data.control_target_text.as_str();
-    let value_x = control_row_value_text_x();
-    let glyph = SMALL_FONT.width() as i32;
-
-    // Highlight the selected digit so the user can see what the encoder will edit.
-    let highlight_idx: i32 = match data.adjust_digit {
-        AdjustDigit::Ones => 1,
-        AdjustDigit::Tenths => 3,
-        AdjustDigit::Hundredths => 4,
-        AdjustDigit::Thousandths => 5,
-    };
-    let cell_x = value_x + highlight_idx * glyph;
-    let highlight = Rect::new(
-        cell_x - 1,
-        CONTROL_TEXT_Y - 2,
-        cell_x + glyph + 1,
-        CONTROL_TEXT_Y + SMALL_FONT.height() as i32 + 2,
-    );
-    canvas.fill_rect(highlight, rgb(0x4cc9f0));
-
-    draw_small_text(canvas, target, value_x, CONTROL_TEXT_Y, rgb(0xdfe7ff), 0);
-    if let Some(ch) = target.chars().nth(highlight_idx as usize) {
-        SMALL_FONT.draw_char(
-            ch,
-            |px, py| canvas.set_pixel(px + cell_x, py + CONTROL_TEXT_Y, rgb(0x080f19)),
-            0,
-            0,
-        );
-    }
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -668,6 +640,21 @@ fn draw_small_text(
         }
         SMALL_FONT.draw_char(ch, |px, py| canvas.set_pixel(px + x, py + y, color), 0, 0);
         x += SMALL_FONT.width() as i32 + spacing;
+    }
+}
+
+fn draw_setpoint_text(
+    canvas: &mut Canvas,
+    text: &str,
+    mut x: i32,
+    y: i32,
+    color: Rgb565,
+    spacing: i32,
+) {
+    let glyph = SETPOINT_FONT.width() as i32 + spacing;
+    for ch in text.chars() {
+        SETPOINT_FONT.draw_char(ch, |px, py| canvas.set_pixel(px + x, py + y, color), 0, 0);
+        x += glyph;
     }
 }
 

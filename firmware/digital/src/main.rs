@@ -772,6 +772,7 @@ async fn encoder_task(
 async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMutex) {
     info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
+    #[derive(Copy, Clone)]
     enum ControlRowTouch {
         PresetSwitch {
             start_x: i32,
@@ -779,9 +780,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             dragging: bool,
             preview_id: u8,
         },
-        TargetDigit {
-            digit: control::AdjustDigit,
-        },
+        TargetTap,
     }
     let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
@@ -827,8 +826,8 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 preview_id: base_id,
                             });
                         }
-                        Some(ui::ControlRowHit::TargetDigit(digit)) => {
-                            quick_switch = Some(ControlRowTouch::TargetDigit { digit });
+                        Some(ui::ControlRowHit::TargetEntry) => {
+                            quick_switch = Some(ControlRowTouch::TargetTap);
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                         None => {
@@ -1124,13 +1123,23 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             }
                         }
                     }
-                    ControlRowTouch::TargetDigit { digit } => {
+                    ControlRowTouch::TargetTap => {
                         if view == control::UiView::Main {
                             let mut guard = control.lock().await;
-                            guard.adjust_digit = digit;
+                            guard.adjust_digit = match guard.adjust_digit {
+                                control::AdjustDigit::Ones => control::AdjustDigit::Tenths,
+                                control::AdjustDigit::Tenths => control::AdjustDigit::Hundredths,
+                                control::AdjustDigit::Hundredths => {
+                                    control::AdjustDigit::Thousandths
+                                }
+                                control::AdjustDigit::Thousandths => control::AdjustDigit::Ones,
+                            };
                             bump_control_rev();
                             prompt_tone::enqueue_ui_ok();
-                            info!("touch: dashboard target digit -> {}", digit);
+                            info!(
+                                "touch: setpoint entry tap -> cycle adjust_digit ({:?})",
+                                guard.adjust_digit
+                            );
                         }
                     }
                 }

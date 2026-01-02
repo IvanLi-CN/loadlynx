@@ -2,6 +2,7 @@
 
 mod data {
     include!("fonts_data.rs");
+    include!("setpoint_font_data.rs");
 }
 
 pub struct UtftFont {
@@ -72,3 +73,4 @@ impl UtftFont {
 
 pub const SMALL_FONT: UtftFont = UtftFont::from_bytes(&data::SMALL_FONT);
 pub const SEVEN_SEG_FONT: UtftFont = UtftFont::from_bytes(&data::SEVEN_SEG);
+pub const SETPOINT_FONT: UtftFont = UtftFont::from_bytes(&data::SETPOINT_FONT);
