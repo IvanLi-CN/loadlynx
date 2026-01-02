@@ -52,9 +52,11 @@ UI mock（320×240 PNG）：
 
 ### 1) 主界面（Main）
 
-- 将当前界面中“CC/CV 选择区域”替换为 `<PRESET><MODE>` 的入口按钮（视觉为组合展示，例如 `M2` + `CC`，不要求使用斜杠文本）。
+- 将当前界面中“CC/CV 选择区域”替换为两个**独立**的圆角按钮（control row）：
+  - 左侧 **Preset/Mode**：两行显示 `M#` / `CC|CV`（作为进入 Preset Panel / 快速切换 preset 的入口）。
+  - 右侧 **Setpoint**：显示 active preset 的 target 摘要 `DD.dddU`（数值部分更大，单位仍用小字号），作为“目标值设置”的入口。
 - 主界面上显示“当前激活 preset 编号 + 其 mode”，作为用户确认当前工作状态的唯一真值来源。
-- 主界面不提供直接切 mode / 调 target 的交互（本设计替换 `docs/interfaces/main-display-ui.md` 中 control row 的 CC/CV/target 直改交互）；所有 preset 字段编辑均在设置面板完成。
+- 主界面不提供“同一圆角矩形内的子区域命中”：Preset/Mode 与 Setpoint 各自为一个按钮，避免误触造成“点了没反应”的困惑。旋钮在主界面允许对 active preset 的 target 做小步进微调；完整字段编辑仍在设置面板完成。
 
 ### 2) 预设设置面板（Preset Settings Panel）
 
@@ -88,12 +90,17 @@ UI mock（320×240 PNG）：
 
 ### A. 快速切换（主界面按住滑动，松手激活）
 
-- 手势：在主界面 `<PRESET><MODE>` 区域 **按住并左右滑动**。
+- 手势：在主界面 **Preset/Mode** 区域（左侧 `M# / CC|CV` 按钮）**按住并左右滑动**。
 - 视觉：采用“选中项保持在中间、列表循环滚动（wrap-around）”的 iPhone 选择器风格。
 - 行为：
   - 滑动过程中仅“预览选择”，不改变激活 preset；
   - **松手（touch up）时**才提交：切换激活 preset 到最终选中项，并立刻生效；
   - 提交激活时必须执行“安全关断负载”。
+
+### A2. 目标值设置（主界面 Setpoint 按钮）
+
+- 单击主界面 **Setpoint** 区域（右侧 `DD.dddU` 按钮）用于切换旋钮调节的步进档位：`1.000 → 0.100 → 0.010 → 0.001 → …`（循环）。
+- 不做“数字位子区域命中”（避免误以为需要点选某一位）；目标值的精细调节仍由旋钮完成。
 
 ### B. 设置面板 tabs：单击仅编辑，双击当前 tab 才激活
 

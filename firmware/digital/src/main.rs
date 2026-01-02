@@ -772,6 +772,7 @@ async fn encoder_task(
 async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMutex) {
     info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
+    #[derive(Copy, Clone)]
     enum ControlRowTouch {
         PresetSwitch {
             start_x: i32,
@@ -779,9 +780,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             dragging: bool,
             preview_id: u8,
         },
-        TargetDigit {
-            digit: control::AdjustDigit,
-        },
+        TargetTap,
     }
     let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
@@ -827,8 +826,8 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 preview_id: base_id,
                             });
                         }
-                        Some(ui::ControlRowHit::TargetDigit(digit)) => {
-                            quick_switch = Some(ControlRowTouch::TargetDigit { digit });
+                        Some(ui::ControlRowHit::TargetEntry) => {
+                            quick_switch = Some(ControlRowTouch::TargetTap);
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                         None => {
@@ -845,6 +844,28 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                     yield_now().await;
                     continue;
+                }
+
+                // The FT6336U can emit "contact" very quickly after "down", and our UI marker transport
+                // only retains the latest sample. If touch_ui_task misses the initial down (event=0),
+                // treat the first contact as an implicit arm so taps remain reliable.
+                if quick_switch.is_none() {
+                    match ui::hit_test_control_row(marker.x, marker.y) {
+                        Some(ui::ControlRowHit::PresetEntry) => {
+                            let base_id = { control.lock().await.active_preset_id };
+                            quick_switch = Some(ControlRowTouch::PresetSwitch {
+                                start_x: marker.x,
+                                base_id,
+                                dragging: false,
+                                preview_id: base_id,
+                            });
+                        }
+                        Some(ui::ControlRowHit::TargetEntry) => {
+                            quick_switch = Some(ControlRowTouch::TargetTap);
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        }
+                        None => {}
+                    }
                 }
 
                 // Only support press-swipe preview in the main Dashboard view.
@@ -917,6 +938,74 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                 }
 
                 let Some(action) = quick_switch.take() else {
+                    // Fallback: if we missed both down and contact arming, infer a tap from the up
+                    // location for the control row. This keeps the Preset pill responsive even under
+                    // marker sample loss.
+                    if matches!(view, control::UiView::Main | control::UiView::PresetPanel) {
+                        if let Some(hit) = ui::hit_test_control_row(marker.x, marker.y) {
+                            match hit {
+                                ui::ControlRowHit::PresetEntry => match view {
+                                    control::UiView::Main => {
+                                        let mut guard = control.lock().await;
+                                        guard.ui_view = control::UiView::PresetPanel;
+                                        guard.editing_preset_id = guard.active_preset_id;
+                                        guard.panel_selected_field =
+                                            ui::preset_panel::PresetPanelField::Target;
+                                        guard.panel_selected_digit =
+                                            ui::preset_panel::PresetPanelDigit::Tenths;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                        info!(
+                                            "touch: preset entry tap (fallback) -> open preset panel (editing preset_id={})",
+                                            guard.editing_preset_id
+                                        );
+                                    }
+                                    control::UiView::PresetPanel => {
+                                        let mut guard = control.lock().await;
+                                        guard.close_panel_discard();
+                                        guard.ui_view = control::UiView::Main;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                        info!(
+                                            "touch: preset entry tap (fallback) -> close preset panel (discard non-active)"
+                                        );
+                                    }
+                                    control::UiView::PresetPanelBlocked => {}
+                                },
+                                ui::ControlRowHit::TargetEntry => {
+                                    if view == control::UiView::Main {
+                                        let mut guard = control.lock().await;
+                                        guard.adjust_digit = match guard.adjust_digit {
+                                            control::AdjustDigit::Ones => {
+                                                control::AdjustDigit::Tenths
+                                            }
+                                            control::AdjustDigit::Tenths => {
+                                                control::AdjustDigit::Hundredths
+                                            }
+                                            control::AdjustDigit::Hundredths => {
+                                                control::AdjustDigit::Thousandths
+                                            }
+                                            control::AdjustDigit::Thousandths => {
+                                                control::AdjustDigit::Ones
+                                            }
+                                        };
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                        info!(
+                                            "touch: setpoint entry tap (fallback) -> cycle adjust_digit ({:?})",
+                                            guard.adjust_digit
+                                        );
+                                    }
+                                }
+                            }
+
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                            last_tab_tap = None;
+                            yield_now().await;
+                            continue;
+                        }
+                    }
+
                     if view == control::UiView::PresetPanel {
                         let vm = {
                             let guard = control.lock().await;
@@ -1124,13 +1213,23 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             }
                         }
                     }
-                    ControlRowTouch::TargetDigit { digit } => {
+                    ControlRowTouch::TargetTap => {
                         if view == control::UiView::Main {
                             let mut guard = control.lock().await;
-                            guard.adjust_digit = digit;
+                            guard.adjust_digit = match guard.adjust_digit {
+                                control::AdjustDigit::Ones => control::AdjustDigit::Tenths,
+                                control::AdjustDigit::Tenths => control::AdjustDigit::Hundredths,
+                                control::AdjustDigit::Hundredths => {
+                                    control::AdjustDigit::Thousandths
+                                }
+                                control::AdjustDigit::Thousandths => control::AdjustDigit::Ones,
+                            };
                             bump_control_rev();
                             prompt_tone::enqueue_ui_ok();
-                            info!("touch: dashboard target digit -> {}", digit);
+                            info!(
+                                "touch: setpoint entry tap -> cycle adjust_digit ({:?})",
+                                guard.adjust_digit
+                            );
                         }
                     }
                 }

@@ -57,7 +57,7 @@
 
 | Pair | Payload | Font | Color | Placement |
 | --- | --- | --- | --- | --- |
-| Control row | 主界面 Preset 概览与入口：`<M#><MODE>` + active preset target（单位随 mode 变更） | SmallFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数值 `#DFE7FF` | 行背景：`y=10..38`；该区域仅用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；并作为进入 Preset Panel / 快速切换 preset 的交互入口（详见 `docs/dev-notes/on-device-preset-ui.md`）。 |
+| Control row | 主界面 Preset 概览与入口：左侧两行 `M#` / `CC|CV`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更） | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；分别用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；交互语义详见 `docs/dev-notes/on-device-preset-ui.md`。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
 | Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `FLT 0x12345678`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
@@ -74,8 +74,9 @@
 
 ### Control row：目标值文本格式（固定宽度）
 
-- 主界面的 target 摘要文本固定为 7 字符：`DD.dddU`（例如 `12.000A`、`24.500V`），使用 `SmallFont`（8×12）绘制，字符间距为 0（固定宽度字形单元格）。
-- 主界面不显示“选中位高亮”，也不在主界面直接调节 target 或 mode（交互见 `docs/dev-notes/on-device-preset-ui.md`）。
+- 主界面的 target 摘要文本固定为 7 字符：`DD.dddU`（例如 `12.000A`、`24.500V`）。
+- 数值部分 `DD.ddd` 使用 `SetpointFont`（10×18）绘制；单位 `U` 仍使用 `SmallFont`（8×12）绘制并紧贴其右侧。
+- 主界面不显示“选中位高亮”（避免被误认为可点选子区域）。
 
 ## Color Palette
 
@@ -100,9 +101,10 @@
 | --- | --- | --- |
 | Large numerics | `SevenSegNumFont` (32×50) | Numeric-only font from rinkydink; decimal dot drawn as a 6×6 block aligned 8 px above the baseline. Stored at `docs/assets/fonts/SevenSegNumFont.c`. |
 | Labels & units | `SmallFont` (8×12) | Default UTFT font. Stored at `docs/assets/fonts/SmallFont.c`. |
+| Setpoint digits | `SetpointFont` (10×18) | Larger numeric font for the control-row target summary (`DD.ddd`). Derived from UTFT `arial_bold` (16×16) by cropping (no resampling) into a consistent 10 px window and padding the height to 18 px; unit stays on `SmallFont`. |
 | Status values | `SmallFont` (8×12) | Current firmware UI uses UTFT `SmallFont` for all right-column text (labels + values) for predictable spacing. |
 
-All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Public Domain) and rendered pixel-by-pixel to ensure firmware/layout parity.
+`SevenSegNumFont` / `SmallFont` were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Public Domain). `SetpointFont` is a small custom bitmap font to keep the control row readable without changing the overall layout grid.
 
 ## Data Binding & Refresh
 
@@ -123,8 +125,9 @@ All fonts were downloaded from http://rinkydinkelectronics.com/r_fonts.php (Publ
 
 ### Preset entry + quick switch
 
-- Tap the control row `<M#><MODE>` entry to open the Preset Panel.
-- Press-and-swipe within the control row entry area performs a quick preset preview; releasing commits activation (and forces load OFF). Exact behavior and safety rules are defined in `docs/dev-notes/on-device-preset-ui.md`.
+- Tap the Preset/Mode pill (`M# / CC|CV`) to open the Preset Panel.
+- Press-and-swipe within the Preset/Mode pill performs a quick preset preview; releasing commits activation (and forces load OFF). Exact behavior and safety rules are defined in `docs/dev-notes/on-device-preset-ui.md`.
+- Tap the Setpoint pill (`DD.dddU`) to cycle encoder step size for the active preset (1.000 → 0.100 → 0.010 → 0.001 → …).
 
 ### Operator quick guide
 
