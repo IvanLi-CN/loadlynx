@@ -1,0 +1,28 @@
+[project]
+id = "loadlynx"
+
+[agentd]
+auto_start_daemon = true
+tail_default = 200
+
+[mcu.digital]
+backend = "espflash"
+chip = "esp32s3"
+artifact_elf = "firmware/digital/target/xtensa-esp32s3-none-elf/release/digital"
+selector_cache_file = ".esp32-port"
+
+[mcu.digital.espflash]
+log_format = "defmt"
+baud = 921600
+skip_update_check = true
+
+[mcu.analog]
+backend = "probe-rs"
+chip = "STM32G431CB"
+artifact_elf = "firmware/analog/target/thumbv7em-none-eabihf/release/analog"
+selector_cache_file = ".stm32-port"
+
+[mcu.analog.probe_rs]
+protocol = "swd"
+speed_khz = 4000
+connect_under_reset = false
