@@ -504,6 +504,31 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
         rgb(0x9ab0d8),
         0,
     );
+
+    // Indicate which digit is currently selected for encoder adjustment.
+    // Format is fixed-width "DD.ddd", so indices are stable:
+    //   0 tens, 1 ones, 2 '.', 3 tenths, 4 hundredths, 5 thousandths.
+    let idx = match data.adjust_digit {
+        AdjustDigit::Ones => 1,
+        AdjustDigit::Tenths => 3,
+        AdjustDigit::Hundredths => 4,
+        AdjustDigit::Thousandths => 5,
+    };
+    let glyph_w = SETPOINT_FONT.width() as i32;
+    let cell_x = value_x0 + idx as i32 * glyph_w;
+    // Place a short underline inside the pill, below the digit baseline.
+    let underline_top = (num_y + num_h + 1).min(CONTROL_ROW_BOTTOM - 3);
+    let underline_bottom = underline_top + 2;
+    if underline_bottom <= CONTROL_ROW_BOTTOM {
+        let left = cell_x + 1;
+        let right = cell_x + glyph_w - 1;
+        if right > left {
+            canvas.fill_rect(
+                Rect::new(left, underline_top, right, underline_bottom),
+                rgb(0x4cc9f0),
+            );
+        }
+    }
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
