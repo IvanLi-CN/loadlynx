@@ -600,80 +600,153 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
         return;
     }
 
-    const PANEL_LEFT: i32 = 192;
-    const PANEL_RIGHT: i32 = LOGICAL_WIDTH - 2;
-    const PANEL_TOP: i32 = CONTROL_ROW_BOTTOM + 4;
-    const PANEL_RADIUS_OUTER: i32 = 5;
-    const PANEL_RADIUS_INNER: i32 = 4;
-    const PAD_X: i32 = 6;
-    const PAD_Y: i32 = 6;
+    // A1 preset preview info panel: mirror `tools/ui-mock/src/preset_preview_panel.rs`
+    // for pixel-perfect constants/layout (logical 320x240 coordinate space).
+    const PANEL_LEFT: i32 = 154;
+    const PANEL_RIGHT: i32 = 314;
+    const PANEL_TOP: i32 = 44;
 
-    let digit_h = SETPOINT_FONT.height() as i32;
-    let small_h = SMALL_FONT.height() as i32;
-    let row_step = digit_h + 4;
+    const BORDER: i32 = 1;
+    const RADIUS: i32 = 6;
+    const PAD_X: i32 = 10;
+    const PAD_Y: i32 = 8;
+    const ROW_H: i32 = 24;
+    const UNIT_GAP: i32 = 1;
 
-    let rows_cc: [(&str, &str); 3] = [
-        ("TARGET", data.control_target_text.as_str()),
-        ("V-LIM", data.preset_preview_v_lim_text.as_str()),
-        ("P-LIM", data.preset_preview_p_lim_text.as_str()),
-    ];
-    let rows_cv: [(&str, &str); 4] = [
-        ("TARGET", data.control_target_text.as_str()),
-        ("I-LIM", data.preset_preview_i_lim_text.as_str()),
-        ("V-LIM", data.preset_preview_v_lim_text.as_str()),
-        ("P-LIM", data.preset_preview_p_lim_text.as_str()),
-    ];
+    const COLOR_BG: u32 = 0x1c2638;
+    const COLOR_BORDER: u32 = 0x1c2a3f;
+    const COLOR_TEXT_LABEL: u32 = 0x9ab0d8;
+    const COLOR_TEXT_VALUE: u32 = 0xdfe7ff;
+    const COLOR_MODE_CV: u32 = 0xffb24a;
+    const COLOR_MODE_CC: u32 = 0xff5252;
 
-    let rows: &[(&str, &str)] = match data.active_mode {
-        LoadMode::Cv => &rows_cv,
-        LoadMode::Cc | LoadMode::Reserved(_) => &rows_cc,
+    let mode = match data.active_mode {
+        LoadMode::Cv => LoadMode::Cv,
+        _ => LoadMode::Cc,
     };
+    let rows = match mode {
+        LoadMode::Cv => 6,
+        _ => 5,
+    };
+    let panel_h = BORDER * 2 + PAD_Y * 2 + rows * ROW_H;
 
-    let row_count = rows.len() as i32;
-    let panel_bottom = PANEL_TOP + PAD_Y * 2 + row_step * row_count;
+    let outer = Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_TOP + panel_h);
+    canvas.fill_round_rect(outer, RADIUS, rgb(COLOR_BORDER));
 
-    let outer = Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, panel_bottom);
-    canvas.fill_round_rect(outer, PANEL_RADIUS_OUTER, rgb(0x1c2a3f));
     let inner = Rect::new(
-        PANEL_LEFT + 1,
-        PANEL_TOP + 1,
-        PANEL_RIGHT - 1,
-        panel_bottom - 1,
+        PANEL_LEFT + BORDER,
+        PANEL_TOP + BORDER,
+        PANEL_RIGHT - BORDER,
+        PANEL_TOP + panel_h - BORDER,
     );
-    canvas.fill_round_rect(inner, PANEL_RADIUS_INNER, rgb(0x171f33));
+    canvas.fill_round_rect(inner, (RADIUS - BORDER).max(0), rgb(COLOR_BG));
 
-    let value_right = PANEL_RIGHT - PAD_X;
     let label_x = PANEL_LEFT + PAD_X;
-    let label_y_offset = (digit_h - small_h).max(0);
+    let value_right = PANEL_RIGHT - PAD_X;
+    let small_h = SMALL_FONT.height() as i32;
+    let num_h = SETPOINT_FONT.height() as i32;
 
-    for (idx, (label, value)) in rows.iter().enumerate() {
-        let y = PANEL_TOP + PAD_Y + idx as i32 * row_step;
-        draw_small_text(canvas, label, label_x, y + label_y_offset, rgb(0x9ab0d8), 0);
-        draw_setpoint_value(canvas, value, value_right, y);
+    let label_color = rgb(COLOR_TEXT_LABEL);
+    let value_color = rgb(COLOR_TEXT_VALUE);
+
+    let mut row_idx = 0;
+    while row_idx < rows {
+        let row_top = PANEL_TOP + BORDER + PAD_Y + row_idx * ROW_H;
+        let row_bottom = row_top + ROW_H;
+
+        let label_y = row_top + (ROW_H - small_h).max(0) / 2;
+
+        match row_idx {
+            0 => {
+                draw_small_text(canvas, "PRESET", label_x, label_y, label_color, 0);
+
+                let mut preset_value = String::<3>::new();
+                let _ = preset_value.push('M');
+                if (1..=9).contains(&data.active_preset_id) {
+                    let _ = preset_value.push(char::from(b'0' + data.active_preset_id));
+                } else {
+                    let _ = preset_value.push('?');
+                }
+                let value_w = small_text_width(preset_value.as_str(), 0);
+                let value_x0 = (value_right - value_w).max(label_x);
+                draw_small_text(
+                    canvas,
+                    preset_value.as_str(),
+                    value_x0,
+                    label_y,
+                    value_color,
+                    0,
+                );
+            }
+            1 => {
+                draw_small_text(canvas, "MODE", label_x, label_y, label_color, 0);
+
+                let (mode_text, mode_color) = match mode {
+                    LoadMode::Cv => ("CV", rgb(COLOR_MODE_CV)),
+                    _ => ("CC", rgb(COLOR_MODE_CC)),
+                };
+                let value_w = small_text_width(mode_text, 0);
+                let value_x0 = (value_right - value_w).max(label_x);
+                draw_small_text(canvas, mode_text, value_x0, label_y, mode_color, 0);
+            }
+            _ => {
+                let (field_label, field_value) = match mode {
+                    LoadMode::Cv => match row_idx - 2 {
+                        0 => ("TARGET", data.preset_preview_target_text.as_str()),
+                        1 => ("I-LIM", data.preset_preview_i_lim_text.as_str()),
+                        2 => ("V-LIM", data.preset_preview_v_lim_text.as_str()),
+                        _ => ("P-LIM", data.preset_preview_p_lim_text.as_str()),
+                    },
+                    _ => match row_idx - 2 {
+                        0 => ("TARGET", data.preset_preview_target_text.as_str()),
+                        1 => ("V-LIM", data.preset_preview_v_lim_text.as_str()),
+                        _ => ("P-LIM", data.preset_preview_p_lim_text.as_str()),
+                    },
+                };
+
+                draw_small_text(canvas, field_label, label_x, label_y, label_color, 0);
+
+                let (num, unit) = split_unit(field_value);
+                let num_w = setpoint_text_width(num, 0);
+                let unit_w = small_text_width(unit, 0);
+                let total_w = num_w + UNIT_GAP + unit_w;
+                let value_x0 = (value_right - total_w).max(label_x);
+
+                let num_y = row_top + (ROW_H - num_h).max(0) / 2;
+                let unit_y = num_y + num_h - small_h;
+
+                draw_setpoint_text(canvas, num, value_x0, num_y, value_color, 0);
+                draw_small_text(
+                    canvas,
+                    unit,
+                    value_x0 + num_w + UNIT_GAP,
+                    unit_y,
+                    label_color,
+                    0,
+                );
+            }
+        }
+
+        row_idx += 1;
+        if row_idx < rows {
+            canvas.fill_rect(
+                Rect::new(
+                    PANEL_LEFT + BORDER,
+                    row_bottom,
+                    PANEL_RIGHT - BORDER,
+                    row_bottom + 1,
+                ),
+                rgb(COLOR_BORDER),
+            );
+        }
     }
 }
 
-fn draw_setpoint_value(canvas: &mut Canvas, value: &str, right_x: i32, top_y: i32) {
-    let (num, unit) = value.split_at(value.len().saturating_sub(1));
-
-    let num_w = setpoint_text_width(num, 0);
-    let unit_w = small_text_width(unit, 0);
-    let unit_gap = 1;
-    let total_w = num_w + unit_gap + unit_w;
-    let x0 = (right_x - total_w).max(0);
-
-    let num_h = SETPOINT_FONT.height() as i32;
-    let unit_y = top_y + num_h - (SMALL_FONT.height() as i32);
-
-    draw_setpoint_text(canvas, num, x0, top_y, rgb(0xdfe7ff), 0);
-    draw_small_text(
-        canvas,
-        unit,
-        x0 + num_w + unit_gap,
-        unit_y,
-        rgb(0x9ab0d8),
-        0,
-    );
+fn split_unit(value: &str) -> (&str, &str) {
+    if value.len() < 2 {
+        return ("", "");
+    }
+    value.split_at(value.len() - 1)
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -1116,6 +1189,7 @@ pub struct UiSnapshot {
     pub active_mode: LoadMode,
     pub uv_latched: bool,
     pub preset_preview_active: bool,
+    pub preset_preview_target_text: String<8>,
     pub preset_preview_v_lim_text: String<8>,
     pub preset_preview_i_lim_text: String<8>,
     pub preset_preview_p_lim_text: String<8>,
@@ -1160,6 +1234,7 @@ impl UiSnapshot {
             active_mode: LoadMode::Cc,
             uv_latched: false,
             preset_preview_active: false,
+            preset_preview_target_text: String::new(),
             preset_preview_v_lim_text: String::new(),
             preset_preview_i_lim_text: String::new(),
             preset_preview_p_lim_text: String::new(),
