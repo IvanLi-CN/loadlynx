@@ -111,24 +111,26 @@ UI mock（320×240 PNG）：
 
 > 生成 mock：`(cd tools/ui-mock && cargo run)`，输出为 `docs/assets/on-device-preset-ui/preset-preview-panel-{cc,cv}.png`。
 
-- CC 示例（`TARGET / V-LIM / P-LIM`）：
+- CC 示例（`PRESET / MODE / TARGET / V-LIM / P-LIM`）：
 
   ![Preset preview panel CC](../assets/on-device-preset-ui/preset-preview-panel-cc.png)
 
-- CV 示例（`TARGET / I-LIM / V-LIM / P-LIM`）：
+- CV 示例（`PRESET / MODE / TARGET / I-LIM / V-LIM / P-LIM`）：
 
   ![Preset preview panel CV](../assets/on-device-preset-ui/preset-preview-panel-cv.png)
 
 #### 字段与顺序（冻结）
 
-- `mode=CC`：`TARGET` → `V-LIM` → `P-LIM`
-- `mode=CV`：`TARGET` → `I-LIM` → `V-LIM` → `P-LIM`
+- `row0`：`PRESET`（预览 preset 的编号），值为 `M#`（例如 `M2`）
+- `row1`：`MODE`（预览 preset 的模式），值为 `CC` / `CV`
+- `mode=CC`：`row2..row4` = `TARGET` → `V-LIM` → `P-LIM`
+- `mode=CV`：`row2..row5` = `TARGET` → `I-LIM` → `V-LIM` → `P-LIM`
 
 #### 几何（冻结；逻辑坐标 320×240）
 
 - 外框（圆角矩形）：
   - `x=154, y=44, w=160`
-  - `h=90`（CC，3 行）/ `h=114`（CV，4 行）
+  - `h=138`（CC，5 行：含 PRESET/MODE）/ `h=162`（CV，6 行：含 PRESET/MODE）
   - `radius=6`，`border=1 px`
   - 与主界面 control-row 的垂直关系：`control_row_bottom=38`，面板 `y=44`（间距 6px，严格位于按钮下方）
   - 对齐：面板右边缘 `x+w=314` 与主界面 Setpoint pill 右边缘对齐（允许覆盖右侧信息区）
@@ -147,10 +149,13 @@ UI mock（320×240 PNG）：
 - 外框/分隔线：`#1C2A3F`（divider）
 - 字段名/单位：`#9AB0D8`
 - 数字：`#DFE7FF`
+- `MODE` 值语义色：`CC=#FF5252`，`CV=#FFB24A`
 
 #### 字体与对齐（冻结）
 
-- 字段名（`TARGET`/`I-LIM`/`V-LIM`/`P-LIM`）：`SmallFont`（8×12），左对齐。
+- 字段名（含 `PRESET`/`MODE`/`TARGET`/`I-LIM`/`V-LIM`/`P-LIM`）：`SmallFont`（8×12），左对齐。
+- `PRESET` 值（例如 `M2`）：`SmallFont`（8×12），右对齐。
+- `MODE` 值（`CC`/`CV`）：`SmallFont`（8×12），右对齐；使用上面的语义色。
 - 字段值：按固定宽度 7 字符值串（见“显示格式（冻结）”）拆分为：
   - 数字部分（末尾单位前的 6 字符，例如 `24.500` / `300.00`）：使用主界面 Setpoint 的数字字体 `SetpointFont`（10×18）。
   - 单位字符（末尾 1 字符，例如 `V/A/W`）：使用 `SmallFont`，与数字部分做**底边对齐**（参考主界面 Setpoint 的单位对齐方式）。
