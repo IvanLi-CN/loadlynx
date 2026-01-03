@@ -7,6 +7,50 @@ CACHE_FILE="$REPO_ROOT/.esp32-port"
 
 err() { printf '%s\n' "$1" >&2; }
 
+cache_selector=""
+cache_extras=()
+
+trim_ws() {
+  # Trim leading/trailing ASCII whitespace from a string.
+  # Usage: trimmed="$(trim_ws "$value")"
+  local s="${1:-}"
+  s="${s#"${s%%[![:space:]]*}"}"
+  s="${s%"${s##*[![:space:]]}"}"
+  printf '%s' "$s"
+}
+
+load_cache() {
+  cache_selector=""
+  cache_extras=()
+
+  [ -f "$CACHE_FILE" ] || return 0
+
+  local line raw
+  while IFS= read -r raw || [ -n "$raw" ]; do
+    line="$(trim_ws "$raw")"
+    [ -z "$line" ] && continue
+    case "$line" in
+      \#*) continue ;;
+    esac
+
+    if [ -z "$cache_selector" ]; then
+      case "$line" in
+        selector=*)
+          cache_selector="$(trim_ws "${line#selector=}")"
+          ;;
+        *)
+          cache_selector="$line"
+          ;;
+      esac
+      continue
+    fi
+
+    cache_extras+=("$line")
+  done < "$CACHE_FILE"
+
+  return 0
+}
+
 if ! command -v espflash >/dev/null 2>&1; then
   err "[esp32-port] espflash not found; install via 'cargo install espflash'"
   exit 127
@@ -45,7 +89,17 @@ contains_port() {
 
 pick_port() {
   local candidate="$1"
-  echo "$candidate" > "$CACHE_FILE"
+  load_cache
+  if [ "$candidate" = "$cache_selector" ] && [ "${#cache_extras[@]}" -gt 0 ]; then
+    {
+      printf '%s\n' "$candidate"
+      for line in "${cache_extras[@]}"; do
+        printf '%s\n' "$line"
+      done
+    } > "$CACHE_FILE"
+  else
+    printf '%s\n' "$candidate" > "$CACHE_FILE"
+  fi
   echo "$candidate"
 }
 
@@ -69,9 +123,9 @@ if [ "${#ALL_PORTS[@]}" -eq 1 ]; then
 fi
 
 if [ -f "$CACHE_FILE" ]; then
-  cached=$(cat "$CACHE_FILE" 2>/dev/null || true)
-  if [ -n "$cached" ] && contains_port "$cached" "${ALL_PORTS[@]}"; then
-    echo "$cached"
+  load_cache
+  if [ -n "$cache_selector" ] && contains_port "$cache_selector" "${ALL_PORTS[@]}"; then
+    echo "$cache_selector"
     exit 0
   fi
 fi

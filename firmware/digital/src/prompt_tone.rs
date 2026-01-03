@@ -117,6 +117,8 @@ pub const BUZZER_FREQ_HZ: u32 = 2_200;
 
 // Low-volume UI feedback (duty controls loudness).
 const UI_DUTY_PCT: u8 = 3;
+// Stronger duty for "fail" so it feels clearly negative/distinct.
+const UI_FAIL_DUTY_PCT: u8 = 6;
 const FAULT_DUTY_PCT: u8 = 6;
 
 // UI tick: keep short so normal rotation does not backlog.
@@ -125,7 +127,12 @@ const UI_TICK_GAP_MS: u32 = 8;
 
 // UI ok/fail patterns.
 const UI_OK_MS: u32 = 25;
-const UI_FAIL_GAP_MS: u32 = 30;
+// Make "fail" clearly distinct *and* emotionally negative:
+// a short "pip" followed by a longer "buuu" and a pause.
+const UI_FAIL_ON1_MS: u32 = 30;
+const UI_FAIL_GAP_MS: u32 = 45;
+const UI_FAIL_ON2_MS: u32 = 160;
+const UI_FAIL_TAIL_MS: u32 = 120;
 
 // Fault alarm cadence.
 const FAULT_ON_MS: u32 = 300;
@@ -155,16 +162,20 @@ const STEPS_UI_OK: &[Step] = &[Step {
 
 const STEPS_UI_FAIL: &[Step] = &[
     Step {
-        duty_pct: UI_DUTY_PCT,
-        duration_ms: UI_OK_MS,
+        duty_pct: UI_FAIL_DUTY_PCT,
+        duration_ms: UI_FAIL_ON1_MS,
     },
     Step {
         duty_pct: 0,
         duration_ms: UI_FAIL_GAP_MS,
     },
     Step {
-        duty_pct: UI_DUTY_PCT,
-        duration_ms: UI_OK_MS,
+        duty_pct: UI_FAIL_DUTY_PCT,
+        duration_ms: UI_FAIL_ON2_MS,
+    },
+    Step {
+        duty_pct: 0,
+        duration_ms: UI_FAIL_TAIL_MS,
     },
 ];
 

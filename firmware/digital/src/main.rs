@@ -779,20 +779,24 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             base_id: u8,
             dragging: bool,
             preview_id: u8,
+            boundary_fail_fired: bool,
         },
-        TargetTap,
+        TargetSelect {
+            start_x: i32,
+            unit: char,
+            dragging: bool,
+            last_digit: control::AdjustDigit,
+            boundary_fail_fired: bool,
+        },
     }
     let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
     const DRAG_START_THRESHOLD_PX: i32 = 10;
     const SWIPE_STEP_PX: i32 = 24;
+    // Setpoint digit selection should feel like a deliberate left/right swipe.
+    // Use a smaller threshold than preset swiping so it works reliably.
+    const SETPOINT_SWIPE_STEP_PX: i32 = 14;
     const DOUBLE_TAP_WINDOW_MS: u32 = 350;
-
-    fn wrap_preset_id(base: u8, delta: i32) -> u8 {
-        let base0 = (base.saturating_sub(1)) as i32;
-        let wrapped = (base0 + delta).rem_euclid(control::PRESET_COUNT as i32);
-        (wrapped as u8) + 1
-    }
 
     loop {
         let seq = touch::touch_marker_seq();
@@ -824,10 +828,26 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 base_id,
                                 dragging: false,
                                 preview_id: base_id,
+                                boundary_fail_fired: false,
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
-                            quick_switch = Some(ControlRowTouch::TargetTap);
+                            let (unit, digit) = {
+                                let guard = control.lock().await;
+                                let preset = guard.active_preset();
+                                let unit = match preset.mode {
+                                    LoadMode::Cv => 'V',
+                                    LoadMode::Cc | LoadMode::Reserved(_) => 'A',
+                                };
+                                (unit, guard.adjust_digit)
+                            };
+                            quick_switch = Some(ControlRowTouch::TargetSelect {
+                                start_x: marker.x,
+                                unit,
+                                dragging: false,
+                                last_digit: digit,
+                                boundary_fail_fired: false,
+                            });
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                         None => {
@@ -858,58 +878,175 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 base_id,
                                 dragging: false,
                                 preview_id: base_id,
+                                boundary_fail_fired: false,
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
-                            quick_switch = Some(ControlRowTouch::TargetTap);
+                            let (unit, digit) = {
+                                let guard = control.lock().await;
+                                let preset = guard.active_preset();
+                                let unit = match preset.mode {
+                                    LoadMode::Cv => 'V',
+                                    LoadMode::Cc | LoadMode::Reserved(_) => 'A',
+                                };
+                                (unit, guard.adjust_digit)
+                            };
+                            quick_switch = Some(ControlRowTouch::TargetSelect {
+                                start_x: marker.x,
+                                unit,
+                                dragging: false,
+                                last_digit: digit,
+                                boundary_fail_fired: false,
+                            });
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                         None => {}
                     }
                 }
 
-                // Only support press-swipe preview in the main Dashboard view.
+                // Only support control-row drag gestures in the main Dashboard view.
                 if view != control::UiView::Main {
                     yield_now().await;
                     continue;
                 }
 
-                let Some(ControlRowTouch::PresetSwitch {
-                    start_x,
-                    base_id,
-                    dragging,
-                    preview_id: last_preview_id,
-                }) = quick_switch
-                else {
+                let Some(action) = quick_switch else {
                     yield_now().await;
                     continue;
                 };
-                let dx = marker.x - start_x;
-                let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
-                if !now_dragging {
-                    yield_now().await;
-                    continue;
-                }
 
-                let delta = dx / SWIPE_STEP_PX;
-                let preview_id = wrap_preset_id(base_id, delta);
-                if preview_id != last_preview_id {
-                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
-                    quick_switch = Some(ControlRowTouch::PresetSwitch {
+                match action {
+                    ControlRowTouch::PresetSwitch {
                         start_x,
                         base_id,
-                        dragging: true,
-                        preview_id,
-                    });
-                } else if !dragging {
-                    // Entered drag state but preset index did not move yet.
-                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
-                    quick_switch = Some(ControlRowTouch::PresetSwitch {
-                        start_x,
-                        base_id,
-                        dragging: true,
+                        dragging,
                         preview_id: last_preview_id,
-                    });
+                        boundary_fail_fired,
+                    } => {
+                        let dx = marker.x - start_x;
+                        let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
+                        if !now_dragging {
+                            yield_now().await;
+                            continue;
+                        }
+
+                        let delta = dx / SWIPE_STEP_PX;
+                        let raw_preview = base_id as i32 + delta;
+                        let clamped_preview = raw_preview.clamp(1, control::PRESET_COUNT as i32);
+                        let preview_id = clamped_preview as u8;
+                        let attempted_oob = raw_preview != clamped_preview;
+
+                        // If the user keeps dragging past the boundary, re-anchor the gesture so
+                        // returning by one detent distance moves exactly one preset again.
+                        // Otherwise, the extra overscroll distance would "stack up" and require a
+                        // much larger movement to leave the boundary.
+                        let mut next_start_x = start_x;
+                        if attempted_oob {
+                            let clamped_delta = clamped_preview - base_id as i32;
+                            next_start_x = marker.x - clamped_delta * SWIPE_STEP_PX;
+                        }
+
+                        let mut next_boundary_fail_fired = boundary_fail_fired;
+                        let mut need_state_update = false;
+
+                        if attempted_oob && !next_boundary_fail_fired {
+                            prompt_tone::enqueue_ui_fail();
+                            next_boundary_fail_fired = true;
+                            need_state_update = true;
+                        }
+
+                        if attempted_oob {
+                            // Update the anchored start position even if fail has already fired.
+                            need_state_update = true;
+                        }
+
+                        if preview_id != last_preview_id {
+                            let steps = (preview_id as i32 - last_preview_id as i32).abs() as u32;
+                            prompt_tone::enqueue_ticks(steps);
+                            need_state_update = true;
+                        }
+
+                        if !dragging {
+                            // Entered drag state but preset index may not have moved yet.
+                            need_state_update = true;
+                        }
+
+                        if need_state_update {
+                            PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                            quick_switch = Some(ControlRowTouch::PresetSwitch {
+                                start_x: next_start_x,
+                                base_id,
+                                dragging: true,
+                                preview_id,
+                                boundary_fail_fired: next_boundary_fail_fired,
+                            });
+                        }
+                    }
+                    ControlRowTouch::TargetSelect {
+                        start_x,
+                        unit,
+                        dragging,
+                        last_digit,
+                        boundary_fail_fired,
+                    } => {
+                        let dx = marker.x - start_x;
+                        let now_dragging = dragging || dx.abs() >= SETPOINT_SWIPE_STEP_PX;
+                        if !now_dragging {
+                            yield_now().await;
+                            continue;
+                        }
+
+                        let mut next_boundary_fail_fired = boundary_fail_fired;
+                        let mut next_digit = last_digit;
+                        let mut need_state_update = false;
+
+                        // Setpoint digit selection: recognize a single left/right swipe per gesture.
+                        // Once the swipe is consumed (dragging=true), ignore further motion until release.
+                        if !dragging {
+                            let dir = if dx > 0 { 1 } else { -1 };
+                            let cur_rank = match last_digit {
+                                control::AdjustDigit::Ones => 0,
+                                control::AdjustDigit::Tenths => 1,
+                                control::AdjustDigit::Hundredths => 2,
+                                control::AdjustDigit::Thousandths => 3,
+                            };
+                            let raw_rank = cur_rank + dir;
+                            let attempted_oob = raw_rank < 0 || raw_rank > 3;
+
+                            if attempted_oob {
+                                if !next_boundary_fail_fired {
+                                    prompt_tone::enqueue_ui_fail();
+                                    next_boundary_fail_fired = true;
+                                }
+                            } else {
+                                let pick_digit = match raw_rank {
+                                    0 => control::AdjustDigit::Ones,
+                                    1 => control::AdjustDigit::Tenths,
+                                    2 => control::AdjustDigit::Hundredths,
+                                    _ => control::AdjustDigit::Thousandths,
+                                };
+                                if pick_digit != last_digit {
+                                    prompt_tone::enqueue_ticks(1);
+                                    let mut guard = control.lock().await;
+                                    guard.adjust_digit = pick_digit;
+                                    bump_control_rev();
+                                    next_digit = pick_digit;
+                                }
+                            }
+
+                            need_state_update = true;
+                        }
+
+                        if need_state_update {
+                            quick_switch = Some(ControlRowTouch::TargetSelect {
+                                start_x,
+                                unit,
+                                dragging: true,
+                                last_digit: next_digit,
+                                boundary_fail_fired: next_boundary_fail_fired,
+                            });
+                        }
+                    }
                 }
             }
             // up
@@ -975,26 +1112,22 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 ui::ControlRowHit::TargetEntry => {
                                     if view == control::UiView::Main {
                                         let mut guard = control.lock().await;
-                                        guard.adjust_digit = match guard.adjust_digit {
-                                            control::AdjustDigit::Ones => {
-                                                control::AdjustDigit::Tenths
-                                            }
-                                            control::AdjustDigit::Tenths => {
-                                                control::AdjustDigit::Hundredths
-                                            }
-                                            control::AdjustDigit::Hundredths => {
-                                                control::AdjustDigit::Thousandths
-                                            }
-                                            control::AdjustDigit::Thousandths => {
-                                                control::AdjustDigit::Ones
-                                            }
+                                        let preset = guard.active_preset();
+                                        let unit = match preset.mode {
+                                            LoadMode::Cv => 'V',
+                                            LoadMode::Cc | LoadMode::Reserved(_) => 'A',
                                         };
-                                        bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
-                                        info!(
-                                            "touch: setpoint entry tap (fallback) -> cycle adjust_digit ({:?})",
-                                            guard.adjust_digit
-                                        );
+                                        let pick =
+                                            ui::pick_control_row_setpoint_digit(marker.x, unit);
+                                        if pick.digit != guard.adjust_digit {
+                                            guard.adjust_digit = pick.digit;
+                                            bump_control_rev();
+                                            prompt_tone::enqueue_ui_ok();
+                                            info!(
+                                                "touch: setpoint entry tap (fallback) -> select adjust_digit ({:?})",
+                                                guard.adjust_digit
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1176,7 +1309,6 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 let mut guard = control.lock().await;
                                 guard.activate_preset(preview_id);
                                 bump_control_rev();
-                                prompt_tone::enqueue_ui_ok();
                                 info!(
                                     "touch: quick switch preset {} -> {} (output forced OFF)",
                                     base_id, preview_id
@@ -1213,23 +1345,24 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             }
                         }
                     }
-                    ControlRowTouch::TargetTap => {
-                        if view == control::UiView::Main {
-                            let mut guard = control.lock().await;
-                            guard.adjust_digit = match guard.adjust_digit {
-                                control::AdjustDigit::Ones => control::AdjustDigit::Tenths,
-                                control::AdjustDigit::Tenths => control::AdjustDigit::Hundredths,
-                                control::AdjustDigit::Hundredths => {
-                                    control::AdjustDigit::Thousandths
-                                }
-                                control::AdjustDigit::Thousandths => control::AdjustDigit::Ones,
-                            };
-                            bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
-                            info!(
-                                "touch: setpoint entry tap -> cycle adjust_digit ({:?})",
-                                guard.adjust_digit
-                            );
+                    ControlRowTouch::TargetSelect {
+                        unit,
+                        dragging,
+                        last_digit,
+                        ..
+                    } => {
+                        if view == control::UiView::Main && !dragging {
+                            let pick = ui::pick_control_row_setpoint_digit(marker.x, unit);
+                            if pick.digit != last_digit {
+                                let mut guard = control.lock().await;
+                                guard.adjust_digit = pick.digit;
+                                bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
+                                info!(
+                                    "touch: setpoint entry tap -> select adjust_digit ({:?})",
+                                    guard.adjust_digit
+                                );
+                            }
                         }
                     }
                 }
@@ -1536,7 +1669,8 @@ impl TelemetryModel {
                 mask.channel_currents = true;
             }
 
-            if prev.active_mode != current.active_mode
+            if prev.active_preset_id != current.active_preset_id
+                || prev.active_mode != current.active_mode
                 || prev.control_target_text != current.control_target_text
                 || prev.adjust_digit != current.adjust_digit
             {
@@ -1921,6 +2055,8 @@ async fn display_task(
     let mut fps_window_frames: u32 = 0;
     let mut last_fps: u32 = 0;
     let mut last_panel_visible: bool = false;
+    let mut last_preview_active: bool = false;
+    let mut last_preview_mode: LoadMode = LoadMode::Cc;
     loop {
         let now = timestamp_ms() as u32;
         let dt_ms = now.wrapping_sub(last_push_ms);
@@ -1939,43 +2075,65 @@ async fn display_task(
 
             let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
             let (
-                active_preset_id,
+                overlay_preset_id,
                 output_enabled,
-                mode,
-                target_milli,
-                target_unit,
+                overlay_mode,
+                active_target_milli,
+                active_target_unit,
                 adjust_digit,
+                preview_panel,
                 panel_visible,
                 panel_vm,
             ) = {
                 let guard = control.lock().await;
-                let active_preset_id = if (1..=(control::PRESET_COUNT as u8)).contains(&preview_id)
-                {
+                let preview_active = (1..=(control::PRESET_COUNT as u8)).contains(&preview_id);
+                let overlay_preset_id = if preview_active {
                     preview_id
                 } else {
                     guard.active_preset_id
                 };
-                let preset_idx = active_preset_id.saturating_sub(1) as usize;
-                let preset = if preset_idx < control::PRESET_COUNT {
-                    guard.presets[preset_idx]
+                let overlay_idx = overlay_preset_id.saturating_sub(1) as usize;
+                let overlay_preset = if overlay_idx < control::PRESET_COUNT {
+                    guard.presets[overlay_idx]
                 } else {
                     guard.active_preset()
                 };
-                let mode = match preset.mode {
+                let overlay_mode = match overlay_preset.mode {
                     LoadMode::Cv => LoadMode::Cv,
                     LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
                 };
-                let (target_milli, target_unit) = match mode {
-                    LoadMode::Cv => (preset.target_v_mv, 'V'),
-                    LoadMode::Cc | LoadMode::Reserved(_) => (preset.target_i_ma, 'A'),
+                let active_preset = guard.active_preset();
+                let active_mode = match active_preset.mode {
+                    LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+                };
+                let (active_target_milli, active_target_unit) = match active_mode {
+                    LoadMode::Cv => (active_preset.target_v_mv, 'V'),
+                    LoadMode::Cc | LoadMode::Reserved(_) => (active_preset.target_i_ma, 'A'),
+                };
+                let preview_panel = if preview_active {
+                    use ui::preset_panel::{format_av_3dp, format_power_2dp};
+                    let (target_milli, target_unit) = match overlay_mode {
+                        LoadMode::Cv => (overlay_preset.target_v_mv, 'V'),
+                        _ => (overlay_preset.target_i_ma, 'A'),
+                    };
+                    Some((
+                        format_av_3dp(target_milli, target_unit),
+                        format_av_3dp(overlay_preset.min_v_mv, 'V'),
+                        format_av_3dp(overlay_preset.max_i_ma_total, 'A'),
+                        format_power_2dp(overlay_preset.max_p_mw as i32),
+                    ))
+                } else {
+                    None
                 };
                 (
-                    active_preset_id,
+                    overlay_preset_id,
                     guard.output_enabled,
-                    mode,
-                    target_milli,
-                    target_unit,
+                    overlay_mode,
+                    active_target_milli,
+                    active_target_unit,
                     guard.adjust_digit,
+                    preview_panel,
                     preset_panel_visible(guard.ui_view),
                     if preset_panel_visible(guard.ui_view) {
                         Some(build_preset_panel_vm(&guard))
@@ -1985,9 +2143,20 @@ async fn display_task(
                 )
             };
 
-            let force_full_render =
+            let preview_active = preview_panel.is_some();
+            let mut force_full_render =
                 panel_visible || (panel_visible != last_panel_visible) || frame_idx == 1;
+            if preview_active != last_preview_active {
+                force_full_render = true;
+            }
+            if preview_active && last_preview_active && overlay_mode != last_preview_mode {
+                force_full_render = true;
+            }
             last_panel_visible = panel_visible;
+            last_preview_active = preview_active;
+            if preview_active {
+                last_preview_mode = overlay_mode;
+            }
 
             let (snapshot, mask) = {
                 let mut guard = telemetry.lock().await;
@@ -1996,14 +2165,28 @@ async fn display_task(
                     .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
                     .unwrap_or(false);
                 guard.snapshot.set_control_overlay(
-                    active_preset_id,
+                    overlay_preset_id,
                     output_enabled,
-                    mode,
+                    overlay_mode,
                     uv_latched,
                 );
-                guard
-                    .snapshot
-                    .set_control_row(target_milli, target_unit, adjust_digit);
+                guard.snapshot.preset_preview_active = preview_active;
+                if let Some((target, v_lim, i_lim, p_lim)) = preview_panel {
+                    guard.snapshot.preset_preview_target_text = target;
+                    guard.snapshot.preset_preview_v_lim_text = v_lim;
+                    guard.snapshot.preset_preview_i_lim_text = i_lim;
+                    guard.snapshot.preset_preview_p_lim_text = p_lim;
+                } else {
+                    guard.snapshot.preset_preview_target_text.clear();
+                    guard.snapshot.preset_preview_v_lim_text.clear();
+                    guard.snapshot.preset_preview_i_lim_text.clear();
+                    guard.snapshot.preset_preview_p_lim_text.clear();
+                }
+                guard.snapshot.set_control_row(
+                    active_target_milli,
+                    active_target_unit,
+                    adjust_digit,
+                );
                 guard.diff_for_render()
             };
 

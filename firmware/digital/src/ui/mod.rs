@@ -71,6 +71,13 @@ pub enum ControlRowHit {
     TargetEntry,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct SetpointDigitPick {
+    pub digit: AdjustDigit,
+    pub attempted_left: bool,
+    pub attempted_right: bool,
+}
+
 pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
     // Slightly expand the touch hit box to tolerate touch calibration offsets.
     const HIT_PAD_X: i32 = 2;
@@ -91,6 +98,58 @@ pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
         Some(ControlRowHit::PresetEntry)
     } else {
         Some(ControlRowHit::TargetEntry)
+    }
+}
+
+pub fn pick_control_row_setpoint_digit(x: i32, unit: char) -> SetpointDigitPick {
+    // Mirror the `draw_control_row()` layout so hit-testing matches what is rendered:
+    // numeric "DD.ddd" is right-aligned inside the pill, followed by the unit in SmallFont.
+    let glyph_w = SETPOINT_FONT.width() as i32;
+    let num_w = glyph_w * 6;
+
+    let mut unit_buf = [0u8; 4];
+    let unit_s = unit.encode_utf8(&mut unit_buf);
+    let unit_w = small_text_width(unit_s, 0);
+
+    let unit_gap = 1;
+    let total_w = num_w + unit_gap + unit_w;
+
+    let right_pad = 3;
+    let value_right = CONTROL_VALUE_PILL_RIGHT - right_pad;
+    let num_left = (value_right - total_w).max(CONTROL_VALUE_PILL_LEFT);
+    let num_right = num_left + num_w;
+
+    let attempted_left = x < num_left + glyph_w;
+    let attempted_right = x >= num_right;
+
+    let rel = x - num_left;
+    let (cell_idx, cell_off) = if rel < 0 {
+        (0, 0)
+    } else if rel >= num_w {
+        (5, glyph_w.saturating_sub(1))
+    } else {
+        (rel / glyph_w, rel % glyph_w)
+    };
+
+    let digit = match cell_idx {
+        0 | 1 => AdjustDigit::Ones, // tens is non-selectable; snap to ones
+        2 => {
+            // Decimal point: snap to nearest adjacent selectable digit.
+            if cell_off < glyph_w / 2 {
+                AdjustDigit::Ones
+            } else {
+                AdjustDigit::Tenths
+            }
+        }
+        3 => AdjustDigit::Tenths,
+        4 => AdjustDigit::Hundredths,
+        _ => AdjustDigit::Thousandths,
+    };
+
+    SetpointDigitPick {
+        digit,
+        attempted_left,
+        attempted_right,
     }
 }
 
@@ -184,6 +243,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.remote_voltage_text.as_str(),
         data.local_voltage_text.as_str(),
     );
+    draw_preset_preview_panel(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
     render_wifi_status(&mut canvas, data.wifi_status);
@@ -283,6 +343,10 @@ pub fn render_partial(
         );
         draw_telemetry(&mut canvas, curr);
     }
+
+    // Preset preview info panel overlays part of the right-side info column; redraw it last so
+    // partial updates do not accidentally wipe it while the gesture is still held.
+    draw_preset_preview_panel(&mut canvas, curr);
 
     // Wi‑Fi 状态标记始终在最后绘制一层小覆盖，避免被右侧其它元素重绘时“擦掉”。
     render_wifi_status(&mut canvas, curr.wifi_status);
@@ -529,6 +593,160 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
             );
         }
     }
+}
+
+fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
+    if !data.preset_preview_active {
+        return;
+    }
+
+    // A1 preset preview info panel: mirror `tools/ui-mock/src/preset_preview_panel.rs`
+    // for pixel-perfect constants/layout (logical 320x240 coordinate space).
+    const PANEL_LEFT: i32 = 154;
+    const PANEL_RIGHT: i32 = 314;
+    const PANEL_TOP: i32 = 44;
+
+    const BORDER: i32 = 1;
+    const RADIUS: i32 = 6;
+    const PAD_X: i32 = 10;
+    const PAD_Y: i32 = 8;
+    const ROW_H: i32 = 24;
+    const UNIT_GAP: i32 = 1;
+
+    const COLOR_BG: u32 = 0x1c2638;
+    const COLOR_BORDER: u32 = 0x1c2a3f;
+    const COLOR_TEXT_LABEL: u32 = 0x9ab0d8;
+    const COLOR_TEXT_VALUE: u32 = 0xdfe7ff;
+    const COLOR_MODE_CV: u32 = 0xffb24a;
+    const COLOR_MODE_CC: u32 = 0xff5252;
+
+    let mode = match data.active_mode {
+        LoadMode::Cv => LoadMode::Cv,
+        _ => LoadMode::Cc,
+    };
+    let rows = match mode {
+        LoadMode::Cv => 6,
+        _ => 5,
+    };
+    let panel_h = BORDER * 2 + PAD_Y * 2 + rows * ROW_H;
+
+    let outer = Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_TOP + panel_h);
+    canvas.fill_round_rect(outer, RADIUS, rgb(COLOR_BORDER));
+
+    let inner = Rect::new(
+        PANEL_LEFT + BORDER,
+        PANEL_TOP + BORDER,
+        PANEL_RIGHT - BORDER,
+        PANEL_TOP + panel_h - BORDER,
+    );
+    canvas.fill_round_rect(inner, (RADIUS - BORDER).max(0), rgb(COLOR_BG));
+
+    let label_x = PANEL_LEFT + PAD_X;
+    let value_right = PANEL_RIGHT - PAD_X;
+    let small_h = SMALL_FONT.height() as i32;
+    let num_h = SETPOINT_FONT.height() as i32;
+
+    let label_color = rgb(COLOR_TEXT_LABEL);
+    let value_color = rgb(COLOR_TEXT_VALUE);
+
+    let mut row_idx = 0;
+    while row_idx < rows {
+        let row_top = PANEL_TOP + BORDER + PAD_Y + row_idx * ROW_H;
+        let row_bottom = row_top + ROW_H;
+
+        let label_y = row_top + (ROW_H - small_h).max(0) / 2;
+
+        match row_idx {
+            0 => {
+                draw_small_text(canvas, "PRESET", label_x, label_y, label_color, 0);
+
+                let mut preset_value = String::<3>::new();
+                let _ = preset_value.push('M');
+                if (1..=9).contains(&data.active_preset_id) {
+                    let _ = preset_value.push(char::from(b'0' + data.active_preset_id));
+                } else {
+                    let _ = preset_value.push('?');
+                }
+                let value_w = small_text_width(preset_value.as_str(), 0);
+                let value_x0 = (value_right - value_w).max(label_x);
+                draw_small_text(
+                    canvas,
+                    preset_value.as_str(),
+                    value_x0,
+                    label_y,
+                    value_color,
+                    0,
+                );
+            }
+            1 => {
+                draw_small_text(canvas, "MODE", label_x, label_y, label_color, 0);
+
+                let (mode_text, mode_color) = match mode {
+                    LoadMode::Cv => ("CV", rgb(COLOR_MODE_CV)),
+                    _ => ("CC", rgb(COLOR_MODE_CC)),
+                };
+                let value_w = small_text_width(mode_text, 0);
+                let value_x0 = (value_right - value_w).max(label_x);
+                draw_small_text(canvas, mode_text, value_x0, label_y, mode_color, 0);
+            }
+            _ => {
+                let (field_label, field_value) = match mode {
+                    LoadMode::Cv => match row_idx - 2 {
+                        0 => ("TARGET", data.preset_preview_target_text.as_str()),
+                        1 => ("I-LIM", data.preset_preview_i_lim_text.as_str()),
+                        2 => ("V-LIM", data.preset_preview_v_lim_text.as_str()),
+                        _ => ("P-LIM", data.preset_preview_p_lim_text.as_str()),
+                    },
+                    _ => match row_idx - 2 {
+                        0 => ("TARGET", data.preset_preview_target_text.as_str()),
+                        1 => ("V-LIM", data.preset_preview_v_lim_text.as_str()),
+                        _ => ("P-LIM", data.preset_preview_p_lim_text.as_str()),
+                    },
+                };
+
+                draw_small_text(canvas, field_label, label_x, label_y, label_color, 0);
+
+                let (num, unit) = split_unit(field_value);
+                let num_w = setpoint_text_width(num, 0);
+                let unit_w = small_text_width(unit, 0);
+                let total_w = num_w + UNIT_GAP + unit_w;
+                let value_x0 = (value_right - total_w).max(label_x);
+
+                let num_y = row_top + (ROW_H - num_h).max(0) / 2;
+                let unit_y = num_y + num_h - small_h;
+
+                draw_setpoint_text(canvas, num, value_x0, num_y, value_color, 0);
+                draw_small_text(
+                    canvas,
+                    unit,
+                    value_x0 + num_w + UNIT_GAP,
+                    unit_y,
+                    label_color,
+                    0,
+                );
+            }
+        }
+
+        row_idx += 1;
+        if row_idx < rows {
+            canvas.fill_rect(
+                Rect::new(
+                    PANEL_LEFT + BORDER,
+                    row_bottom,
+                    PANEL_RIGHT - BORDER,
+                    row_bottom + 1,
+                ),
+                rgb(COLOR_BORDER),
+            );
+        }
+    }
+}
+
+fn split_unit(value: &str) -> (&str, &str) {
+    if value.len() < 2 {
+        return ("", "");
+    }
+    value.split_at(value.len() - 1)
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -970,6 +1188,11 @@ pub struct UiSnapshot {
     pub output_enabled: bool,
     pub active_mode: LoadMode,
     pub uv_latched: bool,
+    pub preset_preview_active: bool,
+    pub preset_preview_target_text: String<8>,
+    pub preset_preview_v_lim_text: String<8>,
+    pub preset_preview_i_lim_text: String<8>,
+    pub preset_preview_p_lim_text: String<8>,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -1010,6 +1233,11 @@ impl UiSnapshot {
             output_enabled: false,
             active_mode: LoadMode::Cc,
             uv_latched: false,
+            preset_preview_active: false,
+            preset_preview_target_text: String::new(),
+            preset_preview_v_lim_text: String::new(),
+            preset_preview_i_lim_text: String::new(),
+            preset_preview_p_lim_text: String::new(),
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),

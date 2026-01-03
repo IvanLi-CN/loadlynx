@@ -8,6 +8,8 @@ use loadlynx_protocol::LoadMode;
 pub const DISPLAY_WIDTH: usize = 240;
 pub const DISPLAY_HEIGHT: usize = 320;
 
+mod preset_preview_panel;
+
 mod control {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum AdjustDigit {
@@ -50,6 +52,7 @@ fn render_snapshot(
     path: &Path,
     snapshot: &ui::UiSnapshot,
     preset_panel_vm: Option<&ui::preset_panel::PresetPanelVm>,
+    preset_preview_vm: Option<&preset_preview_panel::PresetPreviewPanelVm>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut snapshot = snapshot.clone();
     snapshot.update_strings();
@@ -60,6 +63,9 @@ fn render_snapshot(
     ui::render(&mut frame, &snapshot);
     if let Some(vm) = preset_panel_vm {
         ui::preset_panel::render_preset_panel(&mut frame, vm);
+    }
+    if let Some(vm) = preset_preview_vm {
+        preset_preview_panel::render_preset_preview_panel(&mut frame, vm);
     }
 
     // The UI renderer writes into the physical ST7789 buffer (240×320), while
@@ -94,8 +100,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut cc = ui::UiSnapshot::demo();
     cc.set_control_overlay(2, false, LoadMode::Cc, false);
     cc.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
-    render_snapshot(&out_dir.join("main-display-mock-cc.png"), &cc, None)?;
-    render_snapshot(&preset_dir.join("dashboard.png"), &cc, None)?;
+    render_snapshot(&out_dir.join("main-display-mock-cc.png"), &cc, None, None)?;
+    render_snapshot(&preset_dir.join("dashboard.png"), &cc, None, None)?;
 
     let vm_off = ui::preset_panel::PresetPanelVm {
         active_preset_id: 2,
@@ -114,6 +120,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &preset_dir.join("preset-panel-output-off.png"),
         &cc,
         Some(&vm_off),
+        None,
     )?;
 
     let vm_on = ui::preset_panel::PresetPanelVm {
@@ -124,6 +131,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &preset_dir.join("preset-panel-output-on.png"),
         &cc,
         Some(&vm_on),
+        None,
+    )?;
+
+    let preview_cc = preset_preview_panel::PresetPreviewPanelVm {
+        preset_id: 2,
+        mode: LoadMode::Cc,
+        target_text: ui::preset_panel::format_av_3dp(12_000, 'A'),
+        v_lim_text: ui::preset_panel::format_av_3dp(10_000, 'V'),
+        i_lim_text: ui::preset_panel::format_av_3dp(0, 'A'),
+        p_lim_text: ui::preset_panel::format_power_2dp(300_000),
+    };
+    render_snapshot(
+        &preset_dir.join("preset-preview-panel-cc.png"),
+        &cc,
+        None,
+        Some(&preview_cc),
     )?;
 
     let mut cv = ui::UiSnapshot::demo();
@@ -132,7 +155,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cv.local_voltage = 24.47;
     cv.set_control_overlay(2, false, LoadMode::Cv, false);
     cv.set_control_row(24_500, 'V', control::AdjustDigit::DEFAULT);
-    render_snapshot(&out_dir.join("main-display-mock-cv.png"), &cv, None)?;
+    render_snapshot(&out_dir.join("main-display-mock-cv.png"), &cv, None, None)?;
+
+    let preview_cv = preset_preview_panel::PresetPreviewPanelVm {
+        preset_id: 2,
+        mode: LoadMode::Cv,
+        target_text: ui::preset_panel::format_av_3dp(24_500, 'V'),
+        v_lim_text: ui::preset_panel::format_av_3dp(10_000, 'V'),
+        i_lim_text: ui::preset_panel::format_av_3dp(12_000, 'A'),
+        p_lim_text: ui::preset_panel::format_power_2dp(300_000),
+    };
+    render_snapshot(
+        &preset_dir.join("preset-preview-panel-cv.png"),
+        &cv,
+        None,
+        Some(&preview_cv),
+    )?;
 
     Ok(())
 }
