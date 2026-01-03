@@ -6,7 +6,8 @@
 
 相关资料（参考现有规格，不在本文重复展开）：
 
-- Preset 数据模型与安全语义基线：`docs/dev-notes/cv-mode-presets-v1.md`
+- Preset 数据模型与安全语义基线：`docs/dev-notes/cv-mode-presets.md`
+- Preset UI 保护字段命名与三线约束：`docs/dev-notes/preset-ui-protection-labels.md`
 - HTTP API（现有控制/预设接口）：`docs/interfaces/network-http-api.md`
 
 ## 目标
@@ -49,6 +50,16 @@ UI mock（320×240 PNG）：
 - 预设设置面板（LOAD=ON）
 
   ![Preset panel load on](../assets/on-device-preset-ui/preset-panel-output-on.png)
+
+#### UI mock 资产一致性（冻结）
+
+- 文档中的 UI mock PNG（`docs/assets/on-device-preset-ui/*.png`）必须与本文字段命名/顺序一致；当本文修改字段名或行数时，应同步更新对应 PNG。
+- 与 Preset “保护字段命名（UVLO/OCP/OPP）”相关的 PNG 清单：
+  - `docs/assets/on-device-preset-ui/preset-panel-output-off.png`
+  - `docs/assets/on-device-preset-ui/preset-panel-output-on.png`
+  - `docs/assets/on-device-preset-ui/preset-preview-panel-cc.png`
+  - `docs/assets/on-device-preset-ui/preset-preview-panel-cv.png`
+- 验收：上述 PNG 中字段标签必须显示为 `UVLO / OCP / OPP`，且字段顺序为 `TARGET → UVLO → OCP → OPP`。
 
 ### 1) 主界面（Main）
 
@@ -104,18 +115,18 @@ UI mock（320×240 PNG）：
 - 预设值信息面板：
   - 显示时机：仅在拖动手势期间显示；松手立即消失。
   - 位置：显示在按钮下方（不要求改变主布局，允许临时覆盖右侧信息区）。
-  - 内容：按“设置面板当前 mode 的字段集合”展示字段和值（见“字段集合（按 mode）”）；字段集合随预览 preset 的 mode 变化而变化。
+  - 内容：按统一字段集合展示字段和值（见“字段集合（按 mode）”）；`mode` 仅影响 `TARGET` 的单位（A/V）与 `MODE` 行的语义色。
   - 字体：字段“值”使用主界面 Setpoint 目标值的数字字体与字号；字段名可使用 SmallFont。
 
 ### A1. 预设预览信息面板（Preset preview info panel）
 
 > 生成 mock：`(cd tools/ui-mock && cargo run)`，输出为 `docs/assets/on-device-preset-ui/preset-preview-panel-{cc,cv}.png`。
 
-- CC 示例（`PRESET / MODE / TARGET / V-LIM / P-LIM`）：
+- CC 示例（`PRESET / MODE / TARGET / UVLO / OCP / OPP`）：
 
   ![Preset preview panel CC](../assets/on-device-preset-ui/preset-preview-panel-cc.png)
 
-- CV 示例（`PRESET / MODE / TARGET / I-LIM / V-LIM / P-LIM`）：
+- CV 示例（`PRESET / MODE / TARGET / UVLO / OCP / OPP`）：
 
   ![Preset preview panel CV](../assets/on-device-preset-ui/preset-preview-panel-cv.png)
 
@@ -123,14 +134,13 @@ UI mock（320×240 PNG）：
 
 - `row0`：`PRESET`（预览 preset 的编号），值为 `M#`（例如 `M2`）
 - `row1`：`MODE`（预览 preset 的模式），值为 `CC` / `CV`
-- `mode=CC`：`row2..row4` = `TARGET` → `V-LIM` → `P-LIM`
-- `mode=CV`：`row2..row5` = `TARGET` → `I-LIM` → `V-LIM` → `P-LIM`
+- `mode=CC|CV`：`row2..row5` = `TARGET` → `UVLO` → `OCP` → `OPP`
 
 #### 几何（冻结；逻辑坐标 320×240）
 
 - 外框（圆角矩形）：
   - `x=154, y=44, w=160`
-  - `h=138`（CC，5 行：含 PRESET/MODE）/ `h=162`（CV，6 行：含 PRESET/MODE）
+  - `h=162`（6 行：含 PRESET/MODE）
   - `radius=6`，`border=1 px`
   - 与主界面 control-row 的垂直关系：`control_row_bottom=38`，面板 `y=44`（间距 6px，严格位于按钮下方）
   - 对齐：面板右边缘 `x+w=314` 与主界面 Setpoint pill 右边缘对齐（允许覆盖右侧信息区）
@@ -153,7 +163,7 @@ UI mock（320×240 PNG）：
 
 #### 字体与对齐（冻结）
 
-- 字段名（含 `PRESET`/`MODE`/`TARGET`/`I-LIM`/`V-LIM`/`P-LIM`）：`SmallFont`（8×12），左对齐。
+- 字段名（含 `PRESET`/`MODE`/`TARGET`/`UVLO`/`OCP`/`OPP`）：`SmallFont`（8×12），左对齐。
 - `PRESET` 值（例如 `M2`）：`SmallFont`（8×12），右对齐。
 - `MODE` 值（`CC`/`CV`）：`SmallFont`（8×12），右对齐；使用上面的语义色。
 - 字段值：按固定宽度 7 字符值串（见“显示格式（冻结）”）拆分为：
@@ -213,19 +223,19 @@ UI mock（320×240 PNG）：
 
 ### 字段集合（按 mode）
 
-> `V-LIM` / `I-LIM` / `P-LIM` 对应 `docs/dev-notes/cv-mode-presets-v1.md` 的 limit 字段语义。
+> `UVLO` / `OCP` / `OPP` 对应 `docs/dev-notes/cv-mode-presets.md` 的字段语义；命名与约束详见 `docs/dev-notes/preset-ui-protection-labels.md`。
 
 - `mode`：`CC` / `CV`
 - mode=CC（恒流）字段：
   - `TARGET`：电流目标，显示 `DD.dddA`
-  - `V-LIM`：欠压阈值（`min_v_mv`），显示 `DD.dddV`
-  - `P-LIM`：功率上限（`max_p_mw`），显示 `DDD.ddW`
-  - 注：CC 模式不显示 `I-LIM` 行；`max_i_total` 仍作为内部安全上限存在（用于 clamp/保护），但不是 UI 字段。
+  - `UVLO`：欠压阈值（`min_v_mv`），显示 `DD.dddV`
+  - `OCP`：总电流上限（`max_i_ma_total`），显示 `DD.dddA`
+  - `OPP`：功率上限（`max_p_mw`），显示 `DDD.ddW`
 - mode=CV（电压钳位）字段：
   - `TARGET`：电压目标，显示 `DD.dddV`
-  - `I-LIM`：总电流上限（`max_i_ma_total`），显示 `DD.dddA`
-  - `V-LIM`：欠压阈值（`min_v_mv`），显示 `DD.dddV`
-  - `P-LIM`：功率上限（`max_p_mw`），显示 `DDD.ddW`
+  - `UVLO`：欠压阈值（`min_v_mv`），显示 `DD.dddV`
+  - `OCP`：总电流上限（`max_i_ma_total`），显示 `DD.dddA`
+  - `OPP`：功率上限（`max_p_mw`），显示 `DDD.ddW`
 
 ### 显示格式（冻结：固定长度对齐）
 

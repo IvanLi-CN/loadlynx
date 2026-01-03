@@ -1,11 +1,12 @@
-# CV 模式 + Preset（v1）需求与概要设计
+# CV 模式 + Preset 需求与概要设计
 
-本文件冻结“CV（电压钳位）模式 + 5 组预设 Preset + EEPROM 持久化”的 v1 需求基线，并给出跨 MCU（ESP32‑S3 ↔ STM32G431）实现边界与接口形状（不包含实现代码）。
+本文件冻结“CV（电压钳位）模式 + 5 组预设 Preset + EEPROM 持久化”的需求基线，并给出跨 MCU（ESP32‑S3 ↔ STM32G431）实现边界与接口形状（不包含实现代码）。
 
 相关文档：
 
 - 串口链路与消息集：`docs/interfaces/uart-link.md`
 - 网络 HTTP API：`docs/interfaces/network-http-api.md`
+- 本机 UI 保护字段命名（UVLO/OCP/OPP）：`docs/dev-notes/preset-ui-protection-labels.md`
 - CC 负载开关语义（enable/target/effective）：`docs/dev-notes/cc-load-switch-toggle.md`
 - 当前 firmware 行为梳理：`docs/dev-notes/software.md`
 
@@ -22,7 +23,7 @@
 
 但 CV 模式仍处于预留状态（协议常量存在，payload/执行逻辑未落地）。
 
-### 1.2 目标（v1）
+### 1.2 目标
 
 - 新增 **CV（电压钳位型电子负载）模式**：当电压高于目标时吸流拉回；低于目标时退流至 0。
 - 引入 **5 组 Preset**（编号 1..5，无名称）：每组包含 `mode + target + limits`，并 **持久化到 EEPROM**。
@@ -90,7 +91,7 @@
 
 ### 4.2 默认值（EEPROM 空/无效时）
 
-默认上限建议（v1 冻结）：
+默认上限建议：
 
 - `min_v_mv = 0`
 - `max_i_ma_total = 10_000`
@@ -130,7 +131,7 @@ CV 控制与 `min_v`/功率等保护约束，都统一使用：
 V_main_mv = max(V_local_mv, V_remote_mv)
 ```
 
-但为避免远端 Sense 线浮空/异常导致误控，`V_remote_mv` 必须通过“有效性判定”后才允许参与 max。有效性判定为实现细节，但 v1 设计要求：
+但为避免远端 Sense 线浮空/异常导致误控，`V_remote_mv` 必须通过“有效性判定”后才允许参与 max。有效性判定为实现细节，但设计要求：
 
 - 必须存在明确的 remote-valid 判定与降级路径（invalid → 只用 local）；
 - 必须具备可观测性（至少在 `FastStatus`/HTTP 上能看见当前电压来源/remote 是否有效）。
@@ -183,7 +184,7 @@ CV 外环必须在 G431 侧独立运行，不依赖 S3/HTTP/Web 的更新频率�
 
 ---
 
-## 9. 三限值联动（v1 必须真限）
+## 9. 三限值联动（必须真限）
 
 Preset 中三限值必须对 CC/CV 生效：
 
@@ -212,7 +213,7 @@ I_limit_ma    = min(max_i_ma_total, I_by_power_ma, system_i_max_ma)
 
 ### 10.1 UART：原子下发 Active Control（冻结）
 
-v1 冻结将 `MSG_SET_MODE (0x21)` 定义为“原子 Active Control”控制帧，以满足：
+冻结将 `MSG_SET_MODE (0x21)` 定义为“原子 Active Control”控制帧，以满足：
 
 - 一次下发：`preset_id + output_enabled + mode + target + limits`
 - 带 ACK_REQ/ACK，便于可靠传输与“关→开”边沿语义
@@ -236,7 +237,7 @@ Payload 形状（示意）：
 
 ### 10.2 FastStatus / 状态可观测性
 
-v1 需要补齐：
+需要补齐：
 
 - `mode`：必须真实反映 CC/CV
 - `target_value`：语义需与 mode 对齐（实现阶段决定：复用一个字段随 mode 变化，或新增字段）
@@ -254,7 +255,7 @@ Web/HTTP 必须覆盖：
 - 模式与目标值（CC: I、CV: V）
 - 关键状态展示：`uv_latched` 与当前受限原因（建议）
 
-v1 冻结使用统一端点与固定路径（详见 `docs/interfaces/network-http-api.md`）：
+使用统一端点与固定路径（详见 `docs/interfaces/network-http-api.md`）：
 
 - `GET /api/v1/presets` → `{ "presets": Preset[] }`（必须恰好 5 条）
 - `PUT /api/v1/presets` → 更新单个 Preset（请求体必须包含完整 Preset payload + `preset_id`），返回更新后的 Preset
@@ -264,7 +265,7 @@ v1 冻结使用统一端点与固定路径（详见 `docs/interfaces/network-htt
 
 ---
 
-## 11. EEPROM 持久化（v1 冻结）
+## 11. EEPROM 持久化（冻结）
 
 ### 11.1 目标
 
@@ -279,7 +280,7 @@ v1 冻结使用统一端点与固定路径（详见 `docs/interfaces/network-htt
 - base：`0x0000`
 - len：`1024` bytes（v3）
 
-v1 建议将 Preset blob 放在后续地址段（不重叠），例如：
+建议将 Preset blob 放在后续地址段（不重叠），例如：
 
 - `0x0400..0x04FF`（256 bytes）用于 presets（具体长度由实现阶段最终结构决定）
 
