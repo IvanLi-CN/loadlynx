@@ -91,7 +91,7 @@ UI mock（320×240 PNG）：
 ### A. 快速切换（主界面按住滑动，松手激活）
 
 - 手势：在主界面 **Preset/Mode** 区域（左侧 `M# / CC|CV` 按钮）**按住并左右滑动**。
-- 视觉：滑动时仅改变“预览 preset”（更新 `M# / CC|CV` 显示），并在按钮下方显示一个“预设值信息面板”（见下）。
+- 视觉：滑动时仅改变“预览 preset”（更新 `M# / CC|CV` 显示），并在按钮下方显示一个“预设值信息面板”（见 A1）。
 - 行为：
   - 滑动过程中仅“预览选择”，不改变激活 preset；
   - **松手（touch up）时**才提交：切换激活 preset 到最终选中项，并立刻生效；
@@ -106,6 +106,55 @@ UI mock（320×240 PNG）：
   - 位置：显示在按钮下方（不要求改变主布局，允许临时覆盖右侧信息区）。
   - 内容：按“设置面板当前 mode 的字段集合”展示字段和值（见“字段集合（按 mode）”）；字段集合随预览 preset 的 mode 变化而变化。
   - 字体：字段“值”使用主界面 Setpoint 目标值的数字字体与字号；字段名可使用 SmallFont。
+
+### A1. 预设预览信息面板（Preset preview info panel）
+
+> 生成 mock：`(cd tools/ui-mock && cargo run)`，输出为 `docs/assets/on-device-preset-ui/preset-preview-panel-{cc,cv}.png`。
+
+- CC 示例（`TARGET / V-LIM / P-LIM`）：
+
+  ![Preset preview panel CC](../assets/on-device-preset-ui/preset-preview-panel-cc.png)
+
+- CV 示例（`TARGET / I-LIM / V-LIM / P-LIM`）：
+
+  ![Preset preview panel CV](../assets/on-device-preset-ui/preset-preview-panel-cv.png)
+
+#### 字段与顺序（冻结）
+
+- `mode=CC`：`TARGET` → `V-LIM` → `P-LIM`
+- `mode=CV`：`TARGET` → `I-LIM` → `V-LIM` → `P-LIM`
+
+#### 几何（冻结；逻辑坐标 320×240）
+
+- 外框（圆角矩形）：
+  - `x=154, y=44, w=160`
+  - `h=90`（CC，3 行）/ `h=114`（CV，4 行）
+  - `radius=6`，`border=1 px`
+  - 与主界面 control-row 的垂直关系：`control_row_bottom=38`，面板 `y=44`（间距 6px，严格位于按钮下方）
+  - 对齐：面板右边缘 `x+w=314` 与主界面 Setpoint pill 右边缘对齐（允许覆盖右侧信息区）
+- 内容区：
+  - `pad_x=10`，`pad_y=8`
+  - `row_h=24`
+  - 行分隔线：每行底部 1px，`x=155..313`（即 `PANEL_LEFT+border .. PANEL_RIGHT-border`）
+- 逐行定位（第 `i` 行，从 0 开始）：
+  - `row_top = y + border + pad_y + i*row_h`
+  - `label_x = x + pad_x`
+  - `value_right = x + w - pad_x`（右对齐）
+
+#### 颜色（冻结）
+
+- 背景：`#1C2638`（与主界面 control-row pill 背景同色系）
+- 外框/分隔线：`#1C2A3F`（divider）
+- 字段名/单位：`#9AB0D8`
+- 数字：`#DFE7FF`
+
+#### 字体与对齐（冻结）
+
+- 字段名（`TARGET`/`I-LIM`/`V-LIM`/`P-LIM`）：`SmallFont`（8×12），左对齐。
+- 字段值：按固定宽度 7 字符值串（见“显示格式（冻结）”）拆分为：
+  - 数字部分（末尾单位前的 6 字符，例如 `24.500` / `300.00`）：使用主界面 Setpoint 的数字字体 `SetpointFont`（10×18）。
+  - 单位字符（末尾 1 字符，例如 `V/A/W`）：使用 `SmallFont`，与数字部分做**底边对齐**（参考主界面 Setpoint 的单位对齐方式）。
+  - 数字与单位之间 `unit_gap=1 px`；整体在 `value_right` 处右对齐。
 
 ### A2. 目标值设置（主界面 Setpoint 按钮）
 
