@@ -125,7 +125,9 @@ const UI_TICK_GAP_MS: u32 = 8;
 
 // UI ok/fail patterns.
 const UI_OK_MS: u32 = 25;
-const UI_FAIL_GAP_MS: u32 = 30;
+// Make "fail" clearly distinct from detent ticks (and from repeated ok beeps)
+// by using a longer single tone.
+const UI_FAIL_MS: u32 = 90;
 
 // Fault alarm cadence.
 const FAULT_ON_MS: u32 = 300;
@@ -153,20 +155,10 @@ const STEPS_UI_OK: &[Step] = &[Step {
     duration_ms: UI_OK_MS,
 }];
 
-const STEPS_UI_FAIL: &[Step] = &[
-    Step {
-        duty_pct: UI_DUTY_PCT,
-        duration_ms: UI_OK_MS,
-    },
-    Step {
-        duty_pct: 0,
-        duration_ms: UI_FAIL_GAP_MS,
-    },
-    Step {
-        duty_pct: UI_DUTY_PCT,
-        duration_ms: UI_OK_MS,
-    },
-];
+const STEPS_UI_FAIL: &[Step] = &[Step {
+    duty_pct: UI_DUTY_PCT,
+    duration_ms: UI_FAIL_MS,
+}];
 
 const STEPS_FAULT_ALARM: &[Step] = &[
     Step {
