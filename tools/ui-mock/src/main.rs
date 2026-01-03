@@ -135,6 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let preview_cc = preset_preview_panel::PresetPreviewPanelVm {
+        preset_id: 2,
         mode: LoadMode::Cc,
         target_text: ui::preset_panel::format_av_3dp(12_000, 'A'),
         v_lim_text: ui::preset_panel::format_av_3dp(10_000, 'V'),
@@ -157,6 +158,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     render_snapshot(&out_dir.join("main-display-mock-cv.png"), &cv, None, None)?;
 
     let preview_cv = preset_preview_panel::PresetPreviewPanelVm {
+        preset_id: 2,
         mode: LoadMode::Cv,
         target_text: ui::preset_panel::format_av_3dp(24_500, 'V'),
         v_lim_text: ui::preset_panel::format_av_3dp(10_000, 'V'),

@@ -27,9 +27,12 @@ const COLOR_BG: u32 = 0x1c2638;
 const COLOR_BORDER: u32 = 0x1c2a3f;
 const COLOR_TEXT_LABEL: u32 = 0x9ab0d8;
 const COLOR_TEXT_VALUE: u32 = 0xdfe7ff;
+const COLOR_MODE_CV: u32 = 0xffb24a;
+const COLOR_MODE_CC: u32 = 0xff5252;
 
 #[derive(Clone, Debug)]
 pub struct PresetPreviewPanelVm {
+    pub preset_id: u8,
     pub mode: LoadMode,
     pub target_text: String<8>,
     pub v_lim_text: String<8>,
@@ -43,8 +46,8 @@ pub fn render_preset_preview_panel(
 ) {
     let mode = normalize_mode(vm.mode);
     let rows = match mode {
-        LoadMode::Cv => 4,
-        _ => 3,
+        LoadMode::Cv => 6,
+        _ => 5,
     };
     let panel_h = BORDER * 2 + PAD_Y * 2 + rows * ROW_H;
 
@@ -71,48 +74,106 @@ pub fn render_preset_preview_panel(
     let value_color = rgb(COLOR_TEXT_VALUE);
 
     let mut row_idx = 0;
-    for (label, value) in fields(mode, vm).into_iter().take(rows as usize) {
+    while row_idx < rows {
         let row_top = PANEL_TOP + BORDER + PAD_Y + row_idx * ROW_H;
         let row_bottom = row_top + ROW_H;
 
         let label_y = row_top + (ROW_H - small_h).max(0) / 2;
-        draw_text(
-            &mut canvas,
-            &ui_fonts::SMALL_FONT,
-            label,
-            label_x,
-            label_y,
-            label_color,
-            0,
-        );
 
-        let (num, unit) = split_value(value);
-        let num_w = text_width(&ui_fonts::SETPOINT_FONT, num, 0);
-        let unit_w = text_width(&ui_fonts::SMALL_FONT, unit, 0);
-        let total_w = num_w + UNIT_GAP + unit_w;
-        let value_x0 = (value_right - total_w).max(label_x);
+        match row_idx {
+            0 => {
+                draw_text(
+                    &mut canvas,
+                    &ui_fonts::SMALL_FONT,
+                    "PRESET",
+                    label_x,
+                    label_y,
+                    label_color,
+                    0,
+                );
 
-        let num_y = row_top + (ROW_H - num_h).max(0) / 2;
-        let unit_y = num_y + num_h - small_h;
+                let preset_value = preset_id_text(vm.preset_id);
+                let value_w = text_width(&ui_fonts::SMALL_FONT, preset_value.as_str(), 0);
+                let value_x0 = (value_right - value_w).max(label_x);
+                draw_text(
+                    &mut canvas,
+                    &ui_fonts::SMALL_FONT,
+                    preset_value.as_str(),
+                    value_x0,
+                    label_y,
+                    value_color,
+                    0,
+                );
+            }
+            1 => {
+                draw_text(
+                    &mut canvas,
+                    &ui_fonts::SMALL_FONT,
+                    "MODE",
+                    label_x,
+                    label_y,
+                    label_color,
+                    0,
+                );
 
-        draw_text(
-            &mut canvas,
-            &ui_fonts::SETPOINT_FONT,
-            num,
-            value_x0,
-            num_y,
-            value_color,
-            0,
-        );
-        draw_text(
-            &mut canvas,
-            &ui_fonts::SMALL_FONT,
-            unit,
-            value_x0 + num_w + UNIT_GAP,
-            unit_y,
-            label_color,
-            0,
-        );
+                let (mode_text, mode_color) = match mode {
+                    LoadMode::Cv => ("CV", rgb(COLOR_MODE_CV)),
+                    _ => ("CC", rgb(COLOR_MODE_CC)),
+                };
+                let value_w = text_width(&ui_fonts::SMALL_FONT, mode_text, 0);
+                let value_x0 = (value_right - value_w).max(label_x);
+                draw_text(
+                    &mut canvas,
+                    &ui_fonts::SMALL_FONT,
+                    mode_text,
+                    value_x0,
+                    label_y,
+                    mode_color,
+                    0,
+                );
+            }
+            _ => {
+                let (field_label, field_value) = numeric_field_at(mode, vm, row_idx - 2);
+
+                draw_text(
+                    &mut canvas,
+                    &ui_fonts::SMALL_FONT,
+                    field_label,
+                    label_x,
+                    label_y,
+                    label_color,
+                    0,
+                );
+
+                let (num, unit) = split_value(field_value);
+                let num_w = text_width(&ui_fonts::SETPOINT_FONT, num, 0);
+                let unit_w = text_width(&ui_fonts::SMALL_FONT, unit, 0);
+                let total_w = num_w + UNIT_GAP + unit_w;
+                let value_x0 = (value_right - total_w).max(label_x);
+
+                let num_y = row_top + (ROW_H - num_h).max(0) / 2;
+                let unit_y = num_y + num_h - small_h;
+
+                draw_text(
+                    &mut canvas,
+                    &ui_fonts::SETPOINT_FONT,
+                    num,
+                    value_x0,
+                    num_y,
+                    value_color,
+                    0,
+                );
+                draw_text(
+                    &mut canvas,
+                    &ui_fonts::SMALL_FONT,
+                    unit,
+                    value_x0 + num_w + UNIT_GAP,
+                    unit_y,
+                    label_color,
+                    0,
+                );
+            }
+        }
 
         row_idx += 1;
         if row_idx < rows {
@@ -136,21 +197,35 @@ fn normalize_mode(mode: LoadMode) -> LoadMode {
     }
 }
 
-fn fields<'a>(mode: LoadMode, vm: &'a PresetPreviewPanelVm) -> [(&'static str, &'a str); 4] {
+fn numeric_field_at<'a>(
+    mode: LoadMode,
+    vm: &'a PresetPreviewPanelVm,
+    idx: i32,
+) -> (&'static str, &'a str) {
     match mode {
-        LoadMode::Cv => [
-            ("TARGET", vm.target_text.as_str()),
-            ("I-LIM", vm.i_lim_text.as_str()),
-            ("V-LIM", vm.v_lim_text.as_str()),
-            ("P-LIM", vm.p_lim_text.as_str()),
-        ],
-        _ => [
-            ("TARGET", vm.target_text.as_str()),
-            ("V-LIM", vm.v_lim_text.as_str()),
-            ("P-LIM", vm.p_lim_text.as_str()),
-            ("", ""),
-        ],
+        LoadMode::Cv => match idx {
+            0 => ("TARGET", vm.target_text.as_str()),
+            1 => ("I-LIM", vm.i_lim_text.as_str()),
+            2 => ("V-LIM", vm.v_lim_text.as_str()),
+            _ => ("P-LIM", vm.p_lim_text.as_str()),
+        },
+        _ => match idx {
+            0 => ("TARGET", vm.target_text.as_str()),
+            1 => ("V-LIM", vm.v_lim_text.as_str()),
+            _ => ("P-LIM", vm.p_lim_text.as_str()),
+        },
     }
+}
+
+fn preset_id_text(preset_id: u8) -> String<3> {
+    let mut out = String::<3>::new();
+    let _ = out.push('M');
+    if (1..=9).contains(&preset_id) {
+        let _ = out.push((b'0' + preset_id) as char);
+    } else {
+        let _ = out.push('?');
+    }
+    out
 }
 
 fn split_value(value: &str) -> (&str, &str) {
