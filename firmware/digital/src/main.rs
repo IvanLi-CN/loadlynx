@@ -785,6 +785,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             start_x: i32,
             unit: char,
             dragging: bool,
+            base_digit: control::AdjustDigit,
             last_digit: control::AdjustDigit,
             boundary_fail_fired: bool,
         },
@@ -801,6 +802,15 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             control::AdjustDigit::Tenths => 1,
             control::AdjustDigit::Hundredths => 2,
             control::AdjustDigit::Thousandths => 3,
+        }
+    }
+
+    fn digit_from_rank(rank: i32) -> control::AdjustDigit {
+        match rank {
+            0 => control::AdjustDigit::Ones,
+            1 => control::AdjustDigit::Tenths,
+            2 => control::AdjustDigit::Hundredths,
+            _ => control::AdjustDigit::Thousandths,
         }
     }
 
@@ -851,6 +861,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 start_x: marker.x,
                                 unit,
                                 dragging: false,
+                                base_digit: digit,
                                 last_digit: digit,
                                 boundary_fail_fired: false,
                             });
@@ -901,6 +912,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 start_x: marker.x,
                                 unit,
                                 dragging: false,
+                                base_digit: digit,
                                 last_digit: digit,
                                 boundary_fail_fired: false,
                             });
@@ -977,6 +989,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         start_x,
                         unit,
                         dragging,
+                        base_digit,
                         last_digit,
                         boundary_fail_fired,
                     } => {
@@ -987,7 +1000,15 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             continue;
                         }
 
-                        let pick = ui::pick_control_row_setpoint_digit(marker.x, unit);
+                        // For setpoint digit selection, use a left/right swipe gesture:
+                        // each swipe step moves exactly one digit. This avoids having to
+                        // precisely hit a specific character cell while dragging.
+                        let delta = dx / SWIPE_STEP_PX;
+                        let base_rank = digit_rank(base_digit);
+                        let raw_rank = base_rank + delta;
+                        let next_rank = raw_rank.clamp(0, 3);
+                        let pick_digit = digit_from_rank(next_rank);
+                        let attempted_oob = raw_rank < 0 || raw_rank > 3;
 
                         let mut next_boundary_fail_fired = boundary_fail_fired;
                         let mut next_digit = last_digit;
@@ -998,21 +1019,17 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             need_state_update = true;
                         }
 
-                        if pick.digit != last_digit {
+                        if pick_digit != last_digit {
                             let steps =
-                                (digit_rank(pick.digit) - digit_rank(last_digit)).abs() as u32;
+                                (digit_rank(pick_digit) - digit_rank(last_digit)).abs() as u32;
                             prompt_tone::enqueue_ticks(steps);
                             let mut guard = control.lock().await;
-                            guard.adjust_digit = pick.digit;
+                            guard.adjust_digit = pick_digit;
                             bump_control_rev();
-                            next_digit = pick.digit;
+                            next_digit = pick_digit;
                             need_state_update = true;
                         }
 
-                        let attempted_oob = (pick.attempted_left
-                            && pick.digit == control::AdjustDigit::Ones)
-                            || (pick.attempted_right
-                                && pick.digit == control::AdjustDigit::Thousandths);
                         if attempted_oob && !next_boundary_fail_fired {
                             prompt_tone::enqueue_ui_fail();
                             next_boundary_fail_fired = true;
@@ -1024,6 +1041,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 start_x,
                                 unit,
                                 dragging: true,
+                                base_digit,
                                 last_digit: next_digit,
                                 boundary_fail_fired: next_boundary_fail_fired,
                             });
