@@ -1651,7 +1651,8 @@ impl TelemetryModel {
                 mask.channel_currents = true;
             }
 
-            if prev.active_mode != current.active_mode
+            if prev.active_preset_id != current.active_preset_id
+                || prev.active_mode != current.active_mode
                 || prev.control_target_text != current.control_target_text
                 || prev.adjust_digit != current.adjust_digit
             {
@@ -2036,6 +2037,8 @@ async fn display_task(
     let mut fps_window_frames: u32 = 0;
     let mut last_fps: u32 = 0;
     let mut last_panel_visible: bool = false;
+    let mut last_preview_active: bool = false;
+    let mut last_preview_mode: LoadMode = LoadMode::Cc;
     loop {
         let now = timestamp_ms() as u32;
         let dt_ms = now.wrapping_sub(last_push_ms);
@@ -2054,11 +2057,11 @@ async fn display_task(
 
             let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
             let (
-                active_preset_id,
+                overlay_preset_id,
                 output_enabled,
-                mode,
-                target_milli,
-                target_unit,
+                overlay_mode,
+                active_target_milli,
+                active_target_unit,
                 adjust_digit,
                 preview_panel,
                 panel_visible,
@@ -2066,41 +2069,51 @@ async fn display_task(
             ) = {
                 let guard = control.lock().await;
                 let preview_active = (1..=(control::PRESET_COUNT as u8)).contains(&preview_id);
-                let active_preset_id = if preview_active {
+                let overlay_preset_id = if preview_active {
                     preview_id
                 } else {
                     guard.active_preset_id
                 };
-                let preset_idx = active_preset_id.saturating_sub(1) as usize;
-                let preset = if preset_idx < control::PRESET_COUNT {
-                    guard.presets[preset_idx]
+                let overlay_idx = overlay_preset_id.saturating_sub(1) as usize;
+                let overlay_preset = if overlay_idx < control::PRESET_COUNT {
+                    guard.presets[overlay_idx]
                 } else {
                     guard.active_preset()
                 };
-                let mode = match preset.mode {
+                let overlay_mode = match overlay_preset.mode {
                     LoadMode::Cv => LoadMode::Cv,
                     LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
                 };
-                let (target_milli, target_unit) = match mode {
-                    LoadMode::Cv => (preset.target_v_mv, 'V'),
-                    LoadMode::Cc | LoadMode::Reserved(_) => (preset.target_i_ma, 'A'),
+                let active_preset = guard.active_preset();
+                let active_mode = match active_preset.mode {
+                    LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+                };
+                let (active_target_milli, active_target_unit) = match active_mode {
+                    LoadMode::Cv => (active_preset.target_v_mv, 'V'),
+                    LoadMode::Cc | LoadMode::Reserved(_) => (active_preset.target_i_ma, 'A'),
                 };
                 let preview_panel = if preview_active {
                     use ui::preset_panel::{format_av_3dp, format_power_2dp};
+                    let (target_milli, target_unit) = match overlay_mode {
+                        LoadMode::Cv => (overlay_preset.target_v_mv, 'V'),
+                        _ => (overlay_preset.target_i_ma, 'A'),
+                    };
                     Some((
-                        format_av_3dp(preset.min_v_mv, 'V'),
-                        format_av_3dp(preset.max_i_ma_total, 'A'),
-                        format_power_2dp(preset.max_p_mw as i32),
+                        format_av_3dp(target_milli, target_unit),
+                        format_av_3dp(overlay_preset.min_v_mv, 'V'),
+                        format_av_3dp(overlay_preset.max_i_ma_total, 'A'),
+                        format_power_2dp(overlay_preset.max_p_mw as i32),
                     ))
                 } else {
                     None
                 };
                 (
-                    active_preset_id,
+                    overlay_preset_id,
                     guard.output_enabled,
-                    mode,
-                    target_milli,
-                    target_unit,
+                    overlay_mode,
+                    active_target_milli,
+                    active_target_unit,
                     guard.adjust_digit,
                     preview_panel,
                     preset_panel_visible(guard.ui_view),
@@ -2112,9 +2125,20 @@ async fn display_task(
                 )
             };
 
-            let force_full_render =
+            let preview_active = preview_panel.is_some();
+            let mut force_full_render =
                 panel_visible || (panel_visible != last_panel_visible) || frame_idx == 1;
+            if preview_active != last_preview_active {
+                force_full_render = true;
+            }
+            if preview_active && last_preview_active && overlay_mode != last_preview_mode {
+                force_full_render = true;
+            }
             last_panel_visible = panel_visible;
+            last_preview_active = preview_active;
+            if preview_active {
+                last_preview_mode = overlay_mode;
+            }
 
             let (snapshot, mask) = {
                 let mut guard = telemetry.lock().await;
@@ -2123,24 +2147,28 @@ async fn display_task(
                     .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
                     .unwrap_or(false);
                 guard.snapshot.set_control_overlay(
-                    active_preset_id,
+                    overlay_preset_id,
                     output_enabled,
-                    mode,
+                    overlay_mode,
                     uv_latched,
                 );
-                guard.snapshot.preset_preview_active = preview_panel.is_some();
-                if let Some((v_lim, i_lim, p_lim)) = preview_panel {
+                guard.snapshot.preset_preview_active = preview_active;
+                if let Some((target, v_lim, i_lim, p_lim)) = preview_panel {
+                    guard.snapshot.preset_preview_target_text = target;
                     guard.snapshot.preset_preview_v_lim_text = v_lim;
                     guard.snapshot.preset_preview_i_lim_text = i_lim;
                     guard.snapshot.preset_preview_p_lim_text = p_lim;
                 } else {
+                    guard.snapshot.preset_preview_target_text.clear();
                     guard.snapshot.preset_preview_v_lim_text.clear();
                     guard.snapshot.preset_preview_i_lim_text.clear();
                     guard.snapshot.preset_preview_p_lim_text.clear();
                 }
-                guard
-                    .snapshot
-                    .set_control_row(target_milli, target_unit, adjust_digit);
+                guard.snapshot.set_control_row(
+                    active_target_milli,
+                    active_target_unit,
+                    adjust_digit,
+                );
                 guard.diff_for_render()
             };
 
