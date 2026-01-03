@@ -71,6 +71,13 @@ pub enum ControlRowHit {
     TargetEntry,
 }
 
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub struct SetpointDigitPick {
+    pub digit: AdjustDigit,
+    pub attempted_left: bool,
+    pub attempted_right: bool,
+}
+
 pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
     // Slightly expand the touch hit box to tolerate touch calibration offsets.
     const HIT_PAD_X: i32 = 2;
@@ -91,6 +98,58 @@ pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
         Some(ControlRowHit::PresetEntry)
     } else {
         Some(ControlRowHit::TargetEntry)
+    }
+}
+
+pub fn pick_control_row_setpoint_digit(x: i32, unit: char) -> SetpointDigitPick {
+    // Mirror the `draw_control_row()` layout so hit-testing matches what is rendered:
+    // numeric "DD.ddd" is right-aligned inside the pill, followed by the unit in SmallFont.
+    let glyph_w = SETPOINT_FONT.width() as i32;
+    let num_w = glyph_w * 6;
+
+    let mut unit_buf = [0u8; 4];
+    let unit_s = unit.encode_utf8(&mut unit_buf);
+    let unit_w = small_text_width(unit_s, 0);
+
+    let unit_gap = 1;
+    let total_w = num_w + unit_gap + unit_w;
+
+    let right_pad = 3;
+    let value_right = CONTROL_VALUE_PILL_RIGHT - right_pad;
+    let num_left = (value_right - total_w).max(CONTROL_VALUE_PILL_LEFT);
+    let num_right = num_left + num_w;
+
+    let attempted_left = x < num_left + glyph_w;
+    let attempted_right = x >= num_right;
+
+    let rel = x - num_left;
+    let (cell_idx, cell_off) = if rel < 0 {
+        (0, 0)
+    } else if rel >= num_w {
+        (5, glyph_w.saturating_sub(1))
+    } else {
+        (rel / glyph_w, rel % glyph_w)
+    };
+
+    let digit = match cell_idx {
+        0 | 1 => AdjustDigit::Ones, // tens is non-selectable; snap to ones
+        2 => {
+            // Decimal point: snap to nearest adjacent selectable digit.
+            if cell_off < glyph_w / 2 {
+                AdjustDigit::Ones
+            } else {
+                AdjustDigit::Tenths
+            }
+        }
+        3 => AdjustDigit::Tenths,
+        4 => AdjustDigit::Hundredths,
+        _ => AdjustDigit::Thousandths,
+    };
+
+    SetpointDigitPick {
+        digit,
+        attempted_left,
+        attempted_right,
     }
 }
 

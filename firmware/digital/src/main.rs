@@ -781,13 +781,28 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             preview_id: u8,
             boundary_fail_fired: bool,
         },
-        TargetTap,
+        TargetSelect {
+            start_x: i32,
+            unit: char,
+            dragging: bool,
+            last_digit: control::AdjustDigit,
+            boundary_fail_fired: bool,
+        },
     }
     let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
     const DRAG_START_THRESHOLD_PX: i32 = 10;
     const SWIPE_STEP_PX: i32 = 24;
     const DOUBLE_TAP_WINDOW_MS: u32 = 350;
+
+    fn digit_rank(d: control::AdjustDigit) -> i32 {
+        match d {
+            control::AdjustDigit::Ones => 0,
+            control::AdjustDigit::Tenths => 1,
+            control::AdjustDigit::Hundredths => 2,
+            control::AdjustDigit::Thousandths => 3,
+        }
+    }
 
     loop {
         let seq = touch::touch_marker_seq();
@@ -823,7 +838,22 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
-                            quick_switch = Some(ControlRowTouch::TargetTap);
+                            let (unit, digit) = {
+                                let guard = control.lock().await;
+                                let preset = guard.active_preset();
+                                let unit = match preset.mode {
+                                    LoadMode::Cv => 'V',
+                                    LoadMode::Cc | LoadMode::Reserved(_) => 'A',
+                                };
+                                (unit, guard.adjust_digit)
+                            };
+                            quick_switch = Some(ControlRowTouch::TargetSelect {
+                                start_x: marker.x,
+                                unit,
+                                dragging: false,
+                                last_digit: digit,
+                                boundary_fail_fired: false,
+                            });
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                         None => {
@@ -858,71 +888,147 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
-                            quick_switch = Some(ControlRowTouch::TargetTap);
+                            let (unit, digit) = {
+                                let guard = control.lock().await;
+                                let preset = guard.active_preset();
+                                let unit = match preset.mode {
+                                    LoadMode::Cv => 'V',
+                                    LoadMode::Cc | LoadMode::Reserved(_) => 'A',
+                                };
+                                (unit, guard.adjust_digit)
+                            };
+                            quick_switch = Some(ControlRowTouch::TargetSelect {
+                                start_x: marker.x,
+                                unit,
+                                dragging: false,
+                                last_digit: digit,
+                                boundary_fail_fired: false,
+                            });
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                         None => {}
                     }
                 }
 
-                // Only support press-swipe preview in the main Dashboard view.
+                // Only support control-row drag gestures in the main Dashboard view.
                 if view != control::UiView::Main {
                     yield_now().await;
                     continue;
                 }
 
-                let Some(ControlRowTouch::PresetSwitch {
-                    start_x,
-                    base_id,
-                    dragging,
-                    preview_id: last_preview_id,
-                    boundary_fail_fired,
-                }) = quick_switch
-                else {
+                let Some(action) = quick_switch else {
                     yield_now().await;
                     continue;
                 };
-                let dx = marker.x - start_x;
-                let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
-                if !now_dragging {
-                    yield_now().await;
-                    continue;
-                }
 
-                let delta = dx / SWIPE_STEP_PX;
-                let raw_preview = base_id as i32 + delta;
-                let preview_id = (raw_preview.clamp(1, control::PRESET_COUNT as i32)) as u8;
-                let attempted_oob = raw_preview < 1 || raw_preview > control::PRESET_COUNT as i32;
-
-                let mut next_boundary_fail_fired = boundary_fail_fired;
-                let mut need_state_update = false;
-
-                if attempted_oob && !next_boundary_fail_fired {
-                    prompt_tone::enqueue_ui_fail();
-                    next_boundary_fail_fired = true;
-                    need_state_update = true;
-                }
-
-                if preview_id != last_preview_id {
-                    let steps = (preview_id as i32 - last_preview_id as i32).abs() as u32;
-                    prompt_tone::enqueue_ticks(steps);
-                    need_state_update = true;
-                }
-
-                if !dragging {
-                    // Entered drag state but preset index may not have moved yet.
-                    need_state_update = true;
-                }
-
-                if need_state_update {
-                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
-                    quick_switch = Some(ControlRowTouch::PresetSwitch {
+                match action {
+                    ControlRowTouch::PresetSwitch {
                         start_x,
                         base_id,
-                        dragging: true,
-                        preview_id,
-                        boundary_fail_fired: next_boundary_fail_fired,
-                    });
+                        dragging,
+                        preview_id: last_preview_id,
+                        boundary_fail_fired,
+                    } => {
+                        let dx = marker.x - start_x;
+                        let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
+                        if !now_dragging {
+                            yield_now().await;
+                            continue;
+                        }
+
+                        let delta = dx / SWIPE_STEP_PX;
+                        let raw_preview = base_id as i32 + delta;
+                        let preview_id = (raw_preview.clamp(1, control::PRESET_COUNT as i32)) as u8;
+                        let attempted_oob =
+                            raw_preview < 1 || raw_preview > control::PRESET_COUNT as i32;
+
+                        let mut next_boundary_fail_fired = boundary_fail_fired;
+                        let mut need_state_update = false;
+
+                        if attempted_oob && !next_boundary_fail_fired {
+                            prompt_tone::enqueue_ui_fail();
+                            next_boundary_fail_fired = true;
+                            need_state_update = true;
+                        }
+
+                        if preview_id != last_preview_id {
+                            let steps = (preview_id as i32 - last_preview_id as i32).abs() as u32;
+                            prompt_tone::enqueue_ticks(steps);
+                            need_state_update = true;
+                        }
+
+                        if !dragging {
+                            // Entered drag state but preset index may not have moved yet.
+                            need_state_update = true;
+                        }
+
+                        if need_state_update {
+                            PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                            quick_switch = Some(ControlRowTouch::PresetSwitch {
+                                start_x,
+                                base_id,
+                                dragging: true,
+                                preview_id,
+                                boundary_fail_fired: next_boundary_fail_fired,
+                            });
+                        }
+                    }
+                    ControlRowTouch::TargetSelect {
+                        start_x,
+                        unit,
+                        dragging,
+                        last_digit,
+                        boundary_fail_fired,
+                    } => {
+                        let dx = marker.x - start_x;
+                        let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
+                        if !now_dragging {
+                            yield_now().await;
+                            continue;
+                        }
+
+                        let pick = ui::pick_control_row_setpoint_digit(marker.x, unit);
+
+                        let mut next_boundary_fail_fired = boundary_fail_fired;
+                        let mut next_digit = last_digit;
+                        let mut need_state_update = false;
+
+                        if !dragging {
+                            // Entered drag state but digit may not have moved yet.
+                            need_state_update = true;
+                        }
+
+                        if pick.digit != last_digit {
+                            let steps =
+                                (digit_rank(pick.digit) - digit_rank(last_digit)).abs() as u32;
+                            prompt_tone::enqueue_ticks(steps);
+                            let mut guard = control.lock().await;
+                            guard.adjust_digit = pick.digit;
+                            bump_control_rev();
+                            next_digit = pick.digit;
+                            need_state_update = true;
+                        }
+
+                        let attempted_oob = (pick.attempted_left
+                            && pick.digit == control::AdjustDigit::Ones)
+                            || (pick.attempted_right
+                                && pick.digit == control::AdjustDigit::Thousandths);
+                        if attempted_oob && !next_boundary_fail_fired {
+                            prompt_tone::enqueue_ui_fail();
+                            next_boundary_fail_fired = true;
+                            need_state_update = true;
+                        }
+
+                        if need_state_update {
+                            quick_switch = Some(ControlRowTouch::TargetSelect {
+                                start_x,
+                                unit,
+                                dragging: true,
+                                last_digit: next_digit,
+                                boundary_fail_fired: next_boundary_fail_fired,
+                            });
+                        }
+                    }
                 }
             }
             // up
@@ -988,26 +1094,22 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 ui::ControlRowHit::TargetEntry => {
                                     if view == control::UiView::Main {
                                         let mut guard = control.lock().await;
-                                        guard.adjust_digit = match guard.adjust_digit {
-                                            control::AdjustDigit::Ones => {
-                                                control::AdjustDigit::Tenths
-                                            }
-                                            control::AdjustDigit::Tenths => {
-                                                control::AdjustDigit::Hundredths
-                                            }
-                                            control::AdjustDigit::Hundredths => {
-                                                control::AdjustDigit::Thousandths
-                                            }
-                                            control::AdjustDigit::Thousandths => {
-                                                control::AdjustDigit::Ones
-                                            }
+                                        let preset = guard.active_preset();
+                                        let unit = match preset.mode {
+                                            LoadMode::Cv => 'V',
+                                            LoadMode::Cc | LoadMode::Reserved(_) => 'A',
                                         };
-                                        bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
-                                        info!(
-                                            "touch: setpoint entry tap (fallback) -> cycle adjust_digit ({:?})",
-                                            guard.adjust_digit
-                                        );
+                                        let pick =
+                                            ui::pick_control_row_setpoint_digit(marker.x, unit);
+                                        if pick.digit != guard.adjust_digit {
+                                            guard.adjust_digit = pick.digit;
+                                            bump_control_rev();
+                                            prompt_tone::enqueue_ui_ok();
+                                            info!(
+                                                "touch: setpoint entry tap (fallback) -> select adjust_digit ({:?})",
+                                                guard.adjust_digit
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -1225,23 +1327,24 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             }
                         }
                     }
-                    ControlRowTouch::TargetTap => {
-                        if view == control::UiView::Main {
-                            let mut guard = control.lock().await;
-                            guard.adjust_digit = match guard.adjust_digit {
-                                control::AdjustDigit::Ones => control::AdjustDigit::Tenths,
-                                control::AdjustDigit::Tenths => control::AdjustDigit::Hundredths,
-                                control::AdjustDigit::Hundredths => {
-                                    control::AdjustDigit::Thousandths
-                                }
-                                control::AdjustDigit::Thousandths => control::AdjustDigit::Ones,
-                            };
-                            bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
-                            info!(
-                                "touch: setpoint entry tap -> cycle adjust_digit ({:?})",
-                                guard.adjust_digit
-                            );
+                    ControlRowTouch::TargetSelect {
+                        unit,
+                        dragging,
+                        last_digit,
+                        ..
+                    } => {
+                        if view == control::UiView::Main && !dragging {
+                            let pick = ui::pick_control_row_setpoint_digit(marker.x, unit);
+                            if pick.digit != last_digit {
+                                let mut guard = control.lock().await;
+                                guard.adjust_digit = pick.digit;
+                                bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
+                                info!(
+                                    "touch: setpoint entry tap -> select adjust_digit ({:?})",
+                                    guard.adjust_digit
+                                );
+                            }
                         }
                     }
                 }
