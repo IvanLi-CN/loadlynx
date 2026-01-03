@@ -932,9 +932,19 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
 
                         let delta = dx / SWIPE_STEP_PX;
                         let raw_preview = base_id as i32 + delta;
-                        let preview_id = (raw_preview.clamp(1, control::PRESET_COUNT as i32)) as u8;
-                        let attempted_oob =
-                            raw_preview < 1 || raw_preview > control::PRESET_COUNT as i32;
+                        let clamped_preview = raw_preview.clamp(1, control::PRESET_COUNT as i32);
+                        let preview_id = clamped_preview as u8;
+                        let attempted_oob = raw_preview != clamped_preview;
+
+                        // If the user keeps dragging past the boundary, re-anchor the gesture so
+                        // returning by one detent distance moves exactly one preset again.
+                        // Otherwise, the extra overscroll distance would "stack up" and require a
+                        // much larger movement to leave the boundary.
+                        let mut next_start_x = start_x;
+                        if attempted_oob {
+                            let clamped_delta = clamped_preview - base_id as i32;
+                            next_start_x = marker.x - clamped_delta * SWIPE_STEP_PX;
+                        }
 
                         let mut next_boundary_fail_fired = boundary_fail_fired;
                         let mut need_state_update = false;
@@ -942,6 +952,11 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         if attempted_oob && !next_boundary_fail_fired {
                             prompt_tone::enqueue_ui_fail();
                             next_boundary_fail_fired = true;
+                            need_state_update = true;
+                        }
+
+                        if attempted_oob {
+                            // Update the anchored start position even if fail has already fired.
                             need_state_update = true;
                         }
 
@@ -959,7 +974,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         if need_state_update {
                             PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
                             quick_switch = Some(ControlRowTouch::PresetSwitch {
-                                start_x,
+                                start_x: next_start_x,
                                 base_id,
                                 dragging: true,
                                 preview_id,
