@@ -779,6 +779,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             base_id: u8,
             dragging: bool,
             preview_id: u8,
+            boundary_fail_fired: bool,
         },
         TargetTap,
     }
@@ -787,12 +788,6 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
     const DRAG_START_THRESHOLD_PX: i32 = 10;
     const SWIPE_STEP_PX: i32 = 24;
     const DOUBLE_TAP_WINDOW_MS: u32 = 350;
-
-    fn wrap_preset_id(base: u8, delta: i32) -> u8 {
-        let base0 = (base.saturating_sub(1)) as i32;
-        let wrapped = (base0 + delta).rem_euclid(control::PRESET_COUNT as i32);
-        (wrapped as u8) + 1
-    }
 
     loop {
         let seq = touch::touch_marker_seq();
@@ -824,6 +819,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 base_id,
                                 dragging: false,
                                 preview_id: base_id,
+                                boundary_fail_fired: false,
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
@@ -858,6 +854,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 base_id,
                                 dragging: false,
                                 preview_id: base_id,
+                                boundary_fail_fired: false,
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
@@ -879,6 +876,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     base_id,
                     dragging,
                     preview_id: last_preview_id,
+                    boundary_fail_fired,
                 }) = quick_switch
                 else {
                     yield_now().await;
@@ -892,23 +890,38 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                 }
 
                 let delta = dx / SWIPE_STEP_PX;
-                let preview_id = wrap_preset_id(base_id, delta);
+                let raw_preview = base_id as i32 + delta;
+                let preview_id = (raw_preview.clamp(1, control::PRESET_COUNT as i32)) as u8;
+                let attempted_oob = raw_preview < 1 || raw_preview > control::PRESET_COUNT as i32;
+
+                let mut next_boundary_fail_fired = boundary_fail_fired;
+                let mut need_state_update = false;
+
+                if attempted_oob && !next_boundary_fail_fired {
+                    prompt_tone::enqueue_ui_fail();
+                    next_boundary_fail_fired = true;
+                    need_state_update = true;
+                }
+
                 if preview_id != last_preview_id {
+                    let steps = (preview_id as i32 - last_preview_id as i32).abs() as u32;
+                    prompt_tone::enqueue_ticks(steps);
+                    need_state_update = true;
+                }
+
+                if !dragging {
+                    // Entered drag state but preset index may not have moved yet.
+                    need_state_update = true;
+                }
+
+                if need_state_update {
                     PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
                     quick_switch = Some(ControlRowTouch::PresetSwitch {
                         start_x,
                         base_id,
                         dragging: true,
                         preview_id,
-                    });
-                } else if !dragging {
-                    // Entered drag state but preset index did not move yet.
-                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
-                    quick_switch = Some(ControlRowTouch::PresetSwitch {
-                        start_x,
-                        base_id,
-                        dragging: true,
-                        preview_id: last_preview_id,
+                        boundary_fail_fired: next_boundary_fail_fired,
                     });
                 }
             }
@@ -1176,7 +1189,6 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 let mut guard = control.lock().await;
                                 guard.activate_preset(preview_id);
                                 bump_control_rev();
-                                prompt_tone::enqueue_ui_ok();
                                 info!(
                                     "touch: quick switch preset {} -> {} (output forced OFF)",
                                     base_id, preview_id
@@ -1945,12 +1957,13 @@ async fn display_task(
                 target_milli,
                 target_unit,
                 adjust_digit,
+                preview_panel,
                 panel_visible,
                 panel_vm,
             ) = {
                 let guard = control.lock().await;
-                let active_preset_id = if (1..=(control::PRESET_COUNT as u8)).contains(&preview_id)
-                {
+                let preview_active = (1..=(control::PRESET_COUNT as u8)).contains(&preview_id);
+                let active_preset_id = if preview_active {
                     preview_id
                 } else {
                     guard.active_preset_id
@@ -1969,6 +1982,16 @@ async fn display_task(
                     LoadMode::Cv => (preset.target_v_mv, 'V'),
                     LoadMode::Cc | LoadMode::Reserved(_) => (preset.target_i_ma, 'A'),
                 };
+                let preview_panel = if preview_active {
+                    use ui::preset_panel::{format_av_3dp, format_power_2dp};
+                    Some((
+                        format_av_3dp(preset.min_v_mv, 'V'),
+                        format_av_3dp(preset.max_i_ma_total, 'A'),
+                        format_power_2dp(preset.max_p_mw as i32),
+                    ))
+                } else {
+                    None
+                };
                 (
                     active_preset_id,
                     guard.output_enabled,
@@ -1976,6 +1999,7 @@ async fn display_task(
                     target_milli,
                     target_unit,
                     guard.adjust_digit,
+                    preview_panel,
                     preset_panel_visible(guard.ui_view),
                     if preset_panel_visible(guard.ui_view) {
                         Some(build_preset_panel_vm(&guard))
@@ -2001,6 +2025,16 @@ async fn display_task(
                     mode,
                     uv_latched,
                 );
+                guard.snapshot.preset_preview_active = preview_panel.is_some();
+                if let Some((v_lim, i_lim, p_lim)) = preview_panel {
+                    guard.snapshot.preset_preview_v_lim_text = v_lim;
+                    guard.snapshot.preset_preview_i_lim_text = i_lim;
+                    guard.snapshot.preset_preview_p_lim_text = p_lim;
+                } else {
+                    guard.snapshot.preset_preview_v_lim_text.clear();
+                    guard.snapshot.preset_preview_i_lim_text.clear();
+                    guard.snapshot.preset_preview_p_lim_text.clear();
+                }
                 guard
                     .snapshot
                     .set_control_row(target_milli, target_unit, adjust_digit);

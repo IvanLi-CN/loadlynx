@@ -184,6 +184,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.remote_voltage_text.as_str(),
         data.local_voltage_text.as_str(),
     );
+    draw_preset_preview_panel(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
     render_wifi_status(&mut canvas, data.wifi_status);
@@ -283,6 +284,10 @@ pub fn render_partial(
         );
         draw_telemetry(&mut canvas, curr);
     }
+
+    // Preset preview info panel overlays part of the right-side info column; redraw it last so
+    // partial updates do not accidentally wipe it while the gesture is still held.
+    draw_preset_preview_panel(&mut canvas, curr);
 
     // Wi‑Fi 状态标记始终在最后绘制一层小覆盖，避免被右侧其它元素重绘时“擦掉”。
     render_wifi_status(&mut canvas, curr.wifi_status);
@@ -529,6 +534,87 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
             );
         }
     }
+}
+
+fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
+    if !data.preset_preview_active {
+        return;
+    }
+
+    const PANEL_LEFT: i32 = 192;
+    const PANEL_RIGHT: i32 = LOGICAL_WIDTH - 2;
+    const PANEL_TOP: i32 = CONTROL_ROW_BOTTOM + 4;
+    const PANEL_RADIUS_OUTER: i32 = 5;
+    const PANEL_RADIUS_INNER: i32 = 4;
+    const PAD_X: i32 = 6;
+    const PAD_Y: i32 = 6;
+
+    let digit_h = SETPOINT_FONT.height() as i32;
+    let small_h = SMALL_FONT.height() as i32;
+    let row_step = digit_h + 4;
+
+    let rows_cc: [(&str, &str); 3] = [
+        ("TARGET", data.control_target_text.as_str()),
+        ("V-LIM", data.preset_preview_v_lim_text.as_str()),
+        ("P-LIM", data.preset_preview_p_lim_text.as_str()),
+    ];
+    let rows_cv: [(&str, &str); 4] = [
+        ("TARGET", data.control_target_text.as_str()),
+        ("I-LIM", data.preset_preview_i_lim_text.as_str()),
+        ("V-LIM", data.preset_preview_v_lim_text.as_str()),
+        ("P-LIM", data.preset_preview_p_lim_text.as_str()),
+    ];
+
+    let rows: &[(&str, &str)] = match data.active_mode {
+        LoadMode::Cv => &rows_cv,
+        LoadMode::Cc | LoadMode::Reserved(_) => &rows_cc,
+    };
+
+    let row_count = rows.len() as i32;
+    let panel_bottom = PANEL_TOP + PAD_Y * 2 + row_step * row_count;
+
+    let outer = Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, panel_bottom);
+    canvas.fill_round_rect(outer, PANEL_RADIUS_OUTER, rgb(0x1c2a3f));
+    let inner = Rect::new(
+        PANEL_LEFT + 1,
+        PANEL_TOP + 1,
+        PANEL_RIGHT - 1,
+        panel_bottom - 1,
+    );
+    canvas.fill_round_rect(inner, PANEL_RADIUS_INNER, rgb(0x171f33));
+
+    let value_right = PANEL_RIGHT - PAD_X;
+    let label_x = PANEL_LEFT + PAD_X;
+    let label_y_offset = (digit_h - small_h).max(0);
+
+    for (idx, (label, value)) in rows.iter().enumerate() {
+        let y = PANEL_TOP + PAD_Y + idx as i32 * row_step;
+        draw_small_text(canvas, label, label_x, y + label_y_offset, rgb(0x9ab0d8), 0);
+        draw_setpoint_value(canvas, value, value_right, y);
+    }
+}
+
+fn draw_setpoint_value(canvas: &mut Canvas, value: &str, right_x: i32, top_y: i32) {
+    let (num, unit) = value.split_at(value.len().saturating_sub(1));
+
+    let num_w = setpoint_text_width(num, 0);
+    let unit_w = small_text_width(unit, 0);
+    let unit_gap = 1;
+    let total_w = num_w + unit_gap + unit_w;
+    let x0 = (right_x - total_w).max(0);
+
+    let num_h = SETPOINT_FONT.height() as i32;
+    let unit_y = top_y + num_h - (SMALL_FONT.height() as i32);
+
+    draw_setpoint_text(canvas, num, x0, top_y, rgb(0xdfe7ff), 0);
+    draw_small_text(
+        canvas,
+        unit,
+        x0 + num_w + unit_gap,
+        unit_y,
+        rgb(0x9ab0d8),
+        0,
+    );
 }
 
 fn draw_pair_header(canvas: &mut Canvas, left: (&str, &str), right: (&str, &str), top: i32) {
@@ -970,6 +1056,10 @@ pub struct UiSnapshot {
     pub output_enabled: bool,
     pub active_mode: LoadMode,
     pub uv_latched: bool,
+    pub preset_preview_active: bool,
+    pub preset_preview_v_lim_text: String<8>,
+    pub preset_preview_i_lim_text: String<8>,
+    pub preset_preview_p_lim_text: String<8>,
     // Preformatted strings for on-demand, character-aware updates.
     pub main_voltage_text: String<8>,
     pub main_current_text: String<8>,
@@ -1010,6 +1100,10 @@ impl UiSnapshot {
             output_enabled: false,
             active_mode: LoadMode::Cc,
             uv_latched: false,
+            preset_preview_active: false,
+            preset_preview_v_lim_text: String::new(),
+            preset_preview_i_lim_text: String::new(),
+            preset_preview_p_lim_text: String::new(),
             main_voltage_text: String::new(),
             main_current_text: String::new(),
             main_power_text: String::new(),
