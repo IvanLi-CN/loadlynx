@@ -13,7 +13,10 @@
 
 - `CC` 与 `CV` 的 Preset UI 都显示三条安全线（电压/电流/功率），并保持字段顺序一致。
 - UI 标签不再使用 `LIM`，改为 `UVLO / OCP / OPP`。
-- 交互上禁止出现“目标值突破安全上限”的状态：当用户调整上限低于当前目标时，目标应自动下调以保持不变式（A2）。
+- 交互上禁止出现“目标值突破安全上限”的状态：
+  - **安全线（UVLO/OCP/OPP）永远不自动调整**；
+  - 当用户调整安全线导致当前目标越界时，允许自动调整目标以恢复不变式（A2）；
+  - 当用户直接调整目标时，目标值必须被安全线钳制（不允许越界）。
 
 ## 非目标
 
@@ -52,15 +55,13 @@
 - 当用户编辑 `TARGET(I)` 时：`TARGET` 不能超过 `OCP`（越界即钳制到 `OCP`）。
 - 当用户编辑 `OCP` 且将其调到 `< 当前 TARGET` 时：系统必须自动执行 `TARGET := OCP`，以保持 `TARGET ≤ OCP`。
 
-### 2) CV：`UVLO ≤ TARGET_V`（提议；需确认）
+### 2) CV：`UVLO ≤ TARGET_V`（冻结）
 
-为避免“设置后立即触发欠压锁存”的反直觉情况，提议冻结以下不变式：
+为避免“设置后立即触发欠压锁存”的反直觉情况，冻结以下不变式：
 
 - `UVLO` 不得高于 `TARGET(V)`。
-- 当用户编辑 `UVLO` 且将其调到 `> 当前 TARGET`：钳制 `UVLO := TARGET`。
-- 当用户编辑 `TARGET(V)` 且将其调到 `< 当前 UVLO`：自动执行 `UVLO := TARGET`。
-
-> 若主人希望允许 `UVLO > TARGET`（并接受启用即锁存的行为），则应明确取消上述不变式，并在 UI 上提供强提示；本文默认推荐保持该不变式。
+- 当用户编辑 `TARGET(V)` 且将其调到 `< 当前 UVLO`：`TARGET` 被钳制为 `UVLO`（`UVLO` 不变）。
+- 当用户编辑 `UVLO` 且将其调到 `> 当前 TARGET`：系统必须自动执行 `TARGET := UVLO`（目标跟随上调；`UVLO` 不回退）。
 
 ### 3) OPP 与目标的关系
 
@@ -94,6 +95,16 @@
   When：用户尝试将 `TARGET` 上调到 `>2.500A`  
   Then：`TARGET` 被钳制为 `2.500A`。
 
+### A2 联动（CV）
+
+- Given：`mode=CV`，`TARGET=5.000V`，`UVLO=1.000V`  
+  When：用户将 `UVLO` 上调至 `6.000V`  
+  Then：`UVLO=6.000V` 且 `TARGET` 自动变为 `6.000V`（安全线不回退）。
+
+- Given：`mode=CV`，`TARGET=5.000V`，`UVLO=4.500V`  
+  When：用户尝试将 `TARGET` 下调到 `4.000V`  
+  Then：`TARGET` 被钳制为 `4.500V`（`UVLO` 不变）。
+
 ### 欠压锁存（UVLO）
 
 - Given：`output_enabled=true` 且 `UVLO=X>0`  
@@ -103,8 +114,3 @@
 - Given：`UVLO=0`  
   When：电压跌落  
   Then：不得因为 UVLO 阈值触发欠压锁存（等价禁用）。
-
-## 开放问题
-
-1. 是否确认冻结 `mode=CV` 的不变式：`UVLO ≤ TARGET(V)`，并采用上述 A2 联动规则？
-
