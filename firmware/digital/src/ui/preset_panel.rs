@@ -230,12 +230,11 @@ pub fn hit_test_preset_panel(x: i32, y: i32, vm: &PresetPanelVm) -> Option<Prese
     if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::Target, mode))) {
         return Some(PresetPanelHit::Target);
     }
-    if mode == LoadMode::Cv && hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::ILim, mode)))
-    {
-        return Some(PresetPanelHit::ILim);
-    }
     if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::VLim, mode))) {
         return Some(PresetPanelHit::VLim);
+    }
+    if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::ILim, mode))) {
+        return Some(PresetPanelHit::ILim);
     }
     if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::PLim, mode))) {
         return Some(PresetPanelHit::PLim);
@@ -331,23 +330,10 @@ fn draw_fields(canvas: &mut Canvas, vm: &PresetPanelVm) {
     );
 
     row += ROW_STEP_Y;
-    if mode == LoadMode::Cv {
-        draw_value_row(
-            canvas,
-            "I-LIM",
-            vm.i_lim_text.as_str(),
-            row,
-            vm.selected_field == PresetPanelField::ILim,
-            vm.selected_digit,
-            false,
-            value_color,
-        );
-        row += ROW_STEP_Y;
-    }
 
     draw_value_row(
         canvas,
-        "V-LIM",
+        "UVLO",
         vm.v_lim_text.as_str(),
         row,
         vm.selected_field == PresetPanelField::VLim,
@@ -359,7 +345,19 @@ fn draw_fields(canvas: &mut Canvas, vm: &PresetPanelVm) {
 
     draw_value_row(
         canvas,
-        "P-LIM",
+        "OCP",
+        vm.i_lim_text.as_str(),
+        row,
+        vm.selected_field == PresetPanelField::ILim,
+        vm.selected_digit,
+        false,
+        value_color,
+    );
+    row += ROW_STEP_Y;
+
+    draw_value_row(
+        canvas,
+        "OPP",
         vm.p_lim_text.as_str(),
         row,
         vm.selected_field == PresetPanelField::PLim,
@@ -613,25 +611,13 @@ fn digit_highlight_rect(cell_x: i32, y: i32) -> Rect {
     )
 }
 
-fn row_y(field: PresetPanelField, mode: LoadMode) -> i32 {
+fn row_y(field: PresetPanelField, _mode: LoadMode) -> i32 {
     let base = ROW0_Y + ROW_STEP_Y;
     match field {
         PresetPanelField::Target => base,
-        PresetPanelField::ILim => base + ROW_STEP_Y,
-        PresetPanelField::VLim => {
-            if mode == LoadMode::Cv {
-                base + ROW_STEP_Y * 2
-            } else {
-                base + ROW_STEP_Y
-            }
-        }
-        PresetPanelField::PLim => {
-            if mode == LoadMode::Cv {
-                base + ROW_STEP_Y * 3
-            } else {
-                base + ROW_STEP_Y * 2
-            }
-        }
+        PresetPanelField::VLim => base + ROW_STEP_Y,
+        PresetPanelField::ILim => base + ROW_STEP_Y * 2,
+        PresetPanelField::PLim => base + ROW_STEP_Y * 3,
         PresetPanelField::Mode => ROW0_Y,
     }
 }
