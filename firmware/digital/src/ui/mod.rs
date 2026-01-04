@@ -610,7 +610,9 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
     const RADIUS: i32 = 6;
     const PAD_X: i32 = 10;
     const PAD_Y: i32 = 8;
-    const ROW_H: i32 = 24;
+    // Keep the preview panel above the telemetry/status region (TELEMETRY_TOP=172).
+    // With 6 rows, ROW_H=18 yields panel bottom at y=170 (PANEL_TOP=44), avoiding overlap.
+    const ROW_H: i32 = 18;
     const UNIT_GAP: i32 = 1;
 
     const COLOR_BG: u32 = 0x1c2638;
@@ -624,10 +626,7 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
         LoadMode::Cv => LoadMode::Cv,
         _ => LoadMode::Cc,
     };
-    let rows = match mode {
-        LoadMode::Cv => 6,
-        _ => 5,
-    };
+    let rows = 6;
     let panel_h = BORDER * 2 + PAD_Y * 2 + rows * ROW_H;
 
     let outer = Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_TOP + panel_h);
@@ -690,18 +689,11 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
                 draw_small_text(canvas, mode_text, value_x0, label_y, mode_color, 0);
             }
             _ => {
-                let (field_label, field_value) = match mode {
-                    LoadMode::Cv => match row_idx - 2 {
-                        0 => ("TARGET", data.preset_preview_target_text.as_str()),
-                        1 => ("I-LIM", data.preset_preview_i_lim_text.as_str()),
-                        2 => ("V-LIM", data.preset_preview_v_lim_text.as_str()),
-                        _ => ("P-LIM", data.preset_preview_p_lim_text.as_str()),
-                    },
-                    _ => match row_idx - 2 {
-                        0 => ("TARGET", data.preset_preview_target_text.as_str()),
-                        1 => ("V-LIM", data.preset_preview_v_lim_text.as_str()),
-                        _ => ("P-LIM", data.preset_preview_p_lim_text.as_str()),
-                    },
+                let (field_label, field_value) = match row_idx - 2 {
+                    0 => ("TARGET", data.preset_preview_target_text.as_str()),
+                    1 => ("UVLO", data.preset_preview_v_lim_text.as_str()),
+                    2 => ("OCP", data.preset_preview_i_lim_text.as_str()),
+                    _ => ("OPP", data.preset_preview_p_lim_text.as_str()),
                 };
 
                 draw_small_text(canvas, field_label, label_x, label_y, label_color, 0);

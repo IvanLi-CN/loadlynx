@@ -648,14 +648,12 @@ async fn encoder_task(
                                 }
                             }
                             ui::preset_panel::PresetPanelField::ILim => {
-                                if mode == LoadMode::Cv {
-                                    let prev = preset.max_i_ma_total;
-                                    let next = (prev.saturating_add(step))
-                                        .clamp(0, control::HARD_MAX_I_MA_TOTAL);
-                                    if next != prev {
-                                        preset.max_i_ma_total = next;
-                                        changed = true;
-                                    }
+                                let prev = preset.max_i_ma_total;
+                                let next = (prev.saturating_add(step))
+                                    .clamp(0, control::HARD_MAX_I_MA_TOTAL);
+                                if next != prev {
+                                    preset.max_i_ma_total = next;
+                                    changed = true;
                                 }
                             }
                             ui::preset_panel::PresetPanelField::PLim => {
@@ -780,6 +778,8 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             dragging: bool,
             preview_id: u8,
             boundary_fail_fired: bool,
+            down_ms: u32,
+            hold_preview_shown: bool,
         },
         TargetSelect {
             start_x: i32,
@@ -797,8 +797,36 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
     // Use a smaller threshold than preset swiping so it works reliably.
     const SETPOINT_SWIPE_STEP_PX: i32 = 14;
     const DOUBLE_TAP_WINDOW_MS: u32 = 350;
+    const HOLD_PREVIEW_MS: u32 = 300;
 
     loop {
+        if let Some(ControlRowTouch::PresetSwitch {
+            start_x,
+            base_id,
+            dragging: false,
+            preview_id,
+            boundary_fail_fired,
+            down_ms,
+            hold_preview_shown: false,
+        }) = quick_switch
+        {
+            if now_ms32().wrapping_sub(down_ms) >= HOLD_PREVIEW_MS {
+                let view = { control.lock().await.ui_view };
+                if view == control::UiView::Main {
+                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                    quick_switch = Some(ControlRowTouch::PresetSwitch {
+                        start_x,
+                        base_id,
+                        dragging: false,
+                        preview_id,
+                        boundary_fail_fired,
+                        down_ms,
+                        hold_preview_shown: true,
+                    });
+                }
+            }
+        }
+
         let seq = touch::touch_marker_seq();
         if seq == last_seq {
             yield_now().await;
@@ -822,6 +850,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                 } else {
                     match ui::hit_test_control_row(marker.x, marker.y) {
                         Some(ui::ControlRowHit::PresetEntry) => {
+                            let now = now_ms32();
                             let base_id = { control.lock().await.active_preset_id };
                             quick_switch = Some(ControlRowTouch::PresetSwitch {
                                 start_x: marker.x,
@@ -829,6 +858,8 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 dragging: false,
                                 preview_id: base_id,
                                 boundary_fail_fired: false,
+                                down_ms: now,
+                                hold_preview_shown: false,
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
@@ -872,6 +903,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                 if quick_switch.is_none() {
                     match ui::hit_test_control_row(marker.x, marker.y) {
                         Some(ui::ControlRowHit::PresetEntry) => {
+                            let now = now_ms32();
                             let base_id = { control.lock().await.active_preset_id };
                             quick_switch = Some(ControlRowTouch::PresetSwitch {
                                 start_x: marker.x,
@@ -879,6 +911,8 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 dragging: false,
                                 preview_id: base_id,
                                 boundary_fail_fired: false,
+                                down_ms: now,
+                                hold_preview_shown: false,
                             });
                         }
                         Some(ui::ControlRowHit::TargetEntry) => {
@@ -922,6 +956,8 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         dragging,
                         preview_id: last_preview_id,
                         boundary_fail_fired,
+                        down_ms,
+                        hold_preview_shown,
                     } => {
                         let dx = marker.x - start_x;
                         let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
@@ -979,6 +1015,8 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 dragging: true,
                                 preview_id,
                                 boundary_fail_fired: next_boundary_fail_fired,
+                                down_ms,
+                                hold_preview_shown,
                             });
                         }
                     }
@@ -1302,6 +1340,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         base_id,
                         dragging,
                         preview_id,
+                        hold_preview_shown,
                         ..
                     } => {
                         if dragging {
@@ -1314,6 +1353,14 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                     base_id, preview_id
                                 );
                             }
+                        } else if view == control::UiView::Main
+                            && hold_preview_shown
+                            && preview_id == base_id
+                        {
+                            info!(
+                                "touch: preset entry hold-preview release -> noop (preset_id={})",
+                                base_id
+                            );
                         } else {
                             match view {
                                 control::UiView::Main => {
@@ -1385,14 +1432,10 @@ fn preset_panel_visible(view: control::UiView) -> bool {
 }
 
 fn coerce_panel_field_for_mode(
-    mode: LoadMode,
+    _mode: LoadMode,
     field: ui::preset_panel::PresetPanelField,
 ) -> ui::preset_panel::PresetPanelField {
-    if mode != LoadMode::Cv && field == ui::preset_panel::PresetPanelField::ILim {
-        ui::preset_panel::PresetPanelField::Target
-    } else {
-        field
-    }
+    field
 }
 
 fn coerce_panel_digit_for_field(
@@ -4219,6 +4262,9 @@ fn sanitize_setmode(mut cmd: SetMode) -> SetMode {
     cmd.max_i_ma_total = cmd.max_i_ma_total.max(0).min(control::HARD_MAX_I_MA_TOTAL);
     let hard_max_p = LIMIT_PROFILE_DEFAULT.max_p_mw;
     cmd.max_p_mw = cmd.max_p_mw.min(hard_max_p);
+    if cmd.mode == LoadMode::Cv && cmd.target_v_mv < cmd.min_v_mv {
+        cmd.target_v_mv = cmd.min_v_mv;
+    }
     if cmd.target_i_ma > cmd.max_i_ma_total {
         cmd.target_i_ma = cmd.max_i_ma_total;
     }
