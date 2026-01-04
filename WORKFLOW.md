@@ -2,7 +2,7 @@
 
 - 多目标（G431 + S3）统一在一个仓库内管理，固件分别存放于 `firmware/` 子目录。
 - 控制回路与安全相关逻辑优先落在 G431；S3 侧专注于人机与联网。
-- 构建/烧录通过 `scripts/` 与各自目录的工具链进行。
+- 构建在各自 crate 内完成；**烧录/复位/监视统一通过 `mcu-agentd`**（仓根 `mcu-agentd.toml`）。
 
 ## 分支与工作区
 - 建议使用 feature 分支进行新特性/模块开发。
@@ -14,8 +14,8 @@
   - `chore(digital): setup esp-hal display pipeline`
 
 ## 构建与验证
-- G431：Rust + Embassy，目标 `thumbv7em-none-eabihf`，使用 probe-rs 调试与烧录。
-- S3：Rust + esp-hal（可选集成 Embassy），使用 `cargo` + `espflash` 构建与烧录。
+- G431：Rust + Embassy，目标 `thumbv7em-none-eabihf`；由 `mcu-agentd` 调用 probe-rs 完成烧录/复位/监视。
+- S3：Rust + esp-hal（可选集成 Embassy）；由 `mcu-agentd` 调用 espflash 完成烧录/复位/监视。
 
 ## MCU 端口/探针缓存与 Agentd
 

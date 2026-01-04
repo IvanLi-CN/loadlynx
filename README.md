@@ -27,10 +27,10 @@
 ### 环境
 
 - Rust nightly（embedded） + `thumbv7em-none-eabihf` 目标
-- probe-rs 工具链（调试/烧录）
-- ESP32‑S3 Xtensa 工具链（`espup`）与 `espflash`（通过 `cargo +esp` 使用）
+- probe-rs（由 `mcu-agentd` 作为 STM32 后端调用）
+- ESP32‑S3 Xtensa 工具链（`espup`）与 `espflash`（由 `mcu-agentd` 作为 ESP32 后端调用）
 
-现在推荐用 `just` 作为统一入口：根目录 `Justfile` 一一包装了原有 `make` 目标，环境变量（如 PROFILE/PROBE/PORT/BAUD 等）直接在命令前导出即可；`Makefile` 保留以兼容已有脚本和习惯。
+推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；**烧录/复位/监视一律通过 `mcu-agentd`**（见下文 `MCU Agent`）。
 
 ### G431（analog）
 
@@ -40,14 +40,14 @@
 # 构建（默认 PROFILE=release）
 just a-build
 
-# 烧录 + 运行（需要先接好调试 probe）
-PROBE=0483:3748 just a-run              # 或使用你的 VID:PID[:SER]
+# 烧录（通过 mcu-agentd，需先接好调试 probe）
+just agentd flash analog
 
-# 或通过脚本封装（内部仍调用 make a-run）
-scripts/flash_g431.sh release PROBE=0483:3748
+# 监视（可选：复位后从头输出）
+just agentd monitor analog --reset
 ```
 
-备用：直接在子 crate 下构建（与 `make a-build` 等价）：
+备用：直接在子 crate 下构建：
 
 ```sh
 (cd firmware/analog && cargo build --release)
@@ -61,11 +61,11 @@ scripts/flash_g431.sh release PROBE=0483:3748
 # 构建（Rust + esp-hal，默认 PROFILE=release）
 just d-build
 
-# 烧录 + 串口监视（自动探测串口或指定端口）
-PORT=/dev/tty.usbserial-xxxx just d-run
+# 烧录（通过 mcu-agentd）
+just agentd flash digital
 
-# 或使用脚本封装（内部调用 make d-run）
-scripts/flash_s3.sh --release --port /dev/tty.usbserial-xxxx
+# 监视（可选：复位后从头输出）
+just agentd monitor digital --reset
 ```
 
 备用：直接在子 crate 下构建：
@@ -101,7 +101,7 @@ just agentd-get-port analog
 - `firmware/digital/` — S3 上运行的 Rust + esp‑hal 应用（本地 UI + UART 链路终端）
 - `libs/` — 共享驱动与协议约定（当前包含无分配的 MCU↔MCU 协议 crate `loadlynx-protocol`）
 - `docs/` — 控制环路 / 热设计 / 接口协议与板级文档
-- `scripts/` — 烧录与构建脚本（例如 `flash_g431.sh`, `flash_s3.sh`）
+- `scripts/` — 开发辅助脚本
 
 ## 片间通信建议
 

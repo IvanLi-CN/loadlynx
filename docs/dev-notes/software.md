@@ -40,8 +40,8 @@
 ## 3. 快速验证
 
 1. 构建：`(cd firmware/digital && cargo +esp build)`。
-2. 烧录：`scripts/flash_s3.sh`（按需带端口参数）。
-3. 观察串口日志：应依次看到系统上电、数字外设就绪、TPS82130 5 V 使能确认等信息。
+2. 烧录：`just agentd flash digital`。
+3. 观察日志：`just agentd monitor digital --reset`，应依次看到系统上电、数字外设就绪、TPS82130 5 V 使能确认等信息。
 4. 同时测量 FPC Pin 14/`ALG_EN`，确认延时后由 0 V 拉至 3.3 V，并验证模拟板 5 V 轨启动顺序。
 
 以上流程为当前 ESP32-S3 固件的权威初始化记录；若固件或硬件改版，请同步修订本笔记。

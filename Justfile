@@ -9,75 +9,66 @@ default:
 
 # Formatting
 fmt:
-  make fmt
+  cargo fmt --all || true
 
 # --- Analog (STM32G431) ----------------------------------------------------
 
-# Build analog firmware (PROFILE, DEFMT_LOG, PROBE, etc. passed via env)
+# Build analog firmware (PROFILE/DEFMT_LOG passed via env)
 a-build:
-  make a-build
-
-a-run:
-  make a-run
-
-a-run-force:
-  make a-run-force
-
-a-attach:
-  make a-attach
-
-a-reset:
-  make a-reset
-
-a-reset-attach:
-  make a-reset-attach
+  set -eu; \
+  PROFILE="${PROFILE:-release}"; \
+  DEFMT_LOG="${DEFMT_LOG:-info}"; \
+  if [ "$PROFILE" = "release" ]; then CARGO_FLAGS="--release"; else CARGO_FLAGS=""; fi; \
+  (cd firmware/analog && DEFMT_LOG="$DEFMT_LOG" cargo build $CARGO_FLAGS --target thumbv7em-none-eabihf)
 
 a-info:
-  make a-info
+  set -eu; \
+  PROFILE="${PROFILE:-release}"; \
+  ELF="firmware/analog/target/thumbv7em-none-eabihf/${PROFILE}/analog"; \
+  echo "elf=$ELF"; \
+  if [ -f "$ELF" ]; then \
+  (command -v shasum >/dev/null 2>&1 && shasum -a 256 "$ELF") || true; \
+  else \
+  echo "[info] ELF not built"; \
+  fi
 
 a-size:
-  make a-size
+  set -eu; \
+  PROFILE="${PROFILE:-release}"; \
+  if [ "$PROFILE" = "release" ]; then CARGO_FLAGS="--release"; else CARGO_FLAGS=""; fi; \
+  if cargo size --help >/dev/null 2>&1; then \
+  (cd firmware/analog && cargo size $CARGO_FLAGS --target thumbv7em-none-eabihf -- -A); \
+  else \
+  echo "[size] cargo-binutils (cargo size) not installed"; \
+  fi
 
 a-clean:
-  make a-clean
-
-a-probes:
-  make a-probes
-
-a-run-pick:
-  make a-run-pick
-
-select-probe:
-  make select-probe
+  set -eu; \
+  (cd firmware/analog && cargo clean --target thumbv7em-none-eabihf)
 
 # --- Digital (ESP32-S3) ----------------------------------------------------
 
 d-build:
-  make d-build
-
-d-run:
-  make d-run
-
-d-reset:
-  make d-reset
-
-d-reset-attach:
-  make d-reset-attach
-
-d-attach:
-  make d-attach
-
-d-monitor:
-  make d-monitor
-
-d-ports:
-  make d-ports
+  set -eu; \
+  PROFILE="${PROFILE:-release}"; \
+  FEATURES="${FEATURES:-}"; \
+  if [ "$PROFILE" = "release" ]; then CARGO_FLAGS="--release"; else CARGO_FLAGS=""; fi; \
+  if [ -n "$FEATURES" ]; then \
+  (cd firmware/digital && cargo +esp build $CARGO_FLAGS --features "$FEATURES"); \
+  else \
+  (cd firmware/digital && cargo +esp build $CARGO_FLAGS); \
+  fi
 
 d-env:
-  make d-env
+  set -eu; \
+  PROFILE="${PROFILE:-release}"; \
+  echo "profile=$PROFILE"; \
+  echo "elf=firmware/digital/target/xtensa-esp32s3-none-elf/${PROFILE}/digital"; \
+  if [ -n "${FEATURES:-}" ]; then echo "features=${FEATURES}"; fi
 
 d-clean:
-  make d-clean
+  set -eu; \
+  (cd firmware/digital && cargo clean)
 
 # --- Agent daemon passthrough (mcu-agentd) ---------------------------------
 
@@ -118,8 +109,6 @@ agentd-init path="":
     just _agentd-install path="{{path}}"; \
   fi
   @just agentd-start
-
-agnetd-init: agentd-init
 
 agentd-start:
   just agentd start

@@ -49,10 +49,13 @@ jobs:
           cargo install espup --locked
           espup install --targets esp32s3
 
+      - name: Install just
+        run: cargo install just --locked
+
       - name: Build digital firmware (no hardware)
         env:
           DIGITAL_WIFI_SSID: codex_dummy
           DIGITAL_WIFI_PSK: codex_dummy
         run: |
           . "$HOME/export-esp.sh"
-          make d-build
+          just d-build

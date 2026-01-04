@@ -6,20 +6,18 @@
 - `firmware/digital/` — ESP32‑S3 (Rust + esp‑hal) digital host firmware: local display, bridging, and UART link endpoint.
 - `libs/` — shared crates; currently includes `libs/protocol` (`loadlynx-protocol`, MCU↔MCU frame format/CBOR/SLIP/CRC).
 - `docs/` — hardware/firmware design notes (boards, interfaces, components, thermal, power, dev-notes, other-datasheets, etc.).
-- `scripts/` — flash/build helpers (probe selection and flashing scripts such as `flash_g431.sh`).
+- `scripts/` — developer helpers (format hooks, test helpers, etc.).
 
 ## Build, Test, and Development Commands
 
-- Analog firmware (STM32G431) — build: `make a-build` or `(cd firmware/analog && cargo build --release)` (defaults to `PROFILE=release`).
-- Analog firmware (STM32G431) — flash + run (defmt RTT): `make a-run PROBE=<VID:PID[:SER]>` or `scripts/flash_g431.sh [release|dev] [PROBE=...]`.
-- Digital firmware (ESP32‑S3) — build: `make d-build` or `(cd firmware/digital && cargo +esp build --release)` (defaults to `PROFILE=release`).
-- Digital firmware (ESP32‑S3) — flash + monitor: `make d-run [PORT=/dev/tty.*]`.
+- Analog firmware (STM32G431) — build: `just a-build` or `(cd firmware/analog && cargo build --release --target thumbv7em-none-eabihf)` (defaults to `PROFILE=release`).
+- Analog firmware (STM32G431) — flash: `just agentd flash analog` (build first).
+- Digital firmware (ESP32‑S3) — build: `just d-build` or `(cd firmware/digital && cargo +esp build --release)` (defaults to `PROFILE=release`).
+- Digital firmware (ESP32‑S3) — flash: `just agentd flash digital` (build first).
 
-> Analog and digital Makefiles default to `PROFILE=release`. Use `PROFILE=dev` only for short‑lived debugging; release images are recommended for hardware testing.
+- Format: `just fmt` or `cargo fmt --all`.
 
-- Format: `make fmt` or `cargo fmt --all`.
-
-Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for ESP32‑S3, `espup`/Xtensa toolchain and `espflash` used via `cargo +esp`.
+Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for ESP32‑S3, `espup`/Xtensa toolchain and `espflash` (both invoked by `mcu-agentd`).
 
 ## Coding Style & Naming Conventions
 
@@ -58,9 +56,9 @@ Hardware-in-the-loop verification is now driven by the external `mcu-agentd` dae
 - Monitor/attach: `just agentd monitor digital` or `just agentd monitor analog`; use `--from-start` and/or `--reset` as needed.
 - Log query: `just agentd logs all --tail 200 --sessions` aggregates meta + recent sessions. Logs live under `.mcu-agentd/` (see `../mcu-agentd/docs/design/config.md` for the layout).
 
-### Legacy scripts (fallback only)
+### Notes
 
-- `scripts/agent_verify_{analog,digital}.sh` and `scripts/agent_dual_monitor.sh` remain available but should only be used when the daemon is unavailable or special arguments are needed. Default to `mcu-agentd` for all routine work.
+- Flash/reset/monitor must go through `mcu-agentd` (`just agentd ...`).
 
 ### Expectations
 
@@ -97,7 +95,7 @@ These rules exist to prevent an Agent from silently switching the owner's connec
 
 ## Security & Configuration Tips
 
-- Chip/runners are configured via crate `.cargo/config.toml`; adjust only if board/chip changes.
+- Chip/targets are configured via crate `.cargo/config.toml`; adjust only if board/chip changes.
 - Do not commit secrets or machine‑specific paths; prefer flags/env (e.g., `--port /dev/tty.*`).
 - Probe‑RS chip may vary by package; verify `STM32G431CB` before flashing.
 
