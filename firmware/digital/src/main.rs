@@ -4219,6 +4219,9 @@ fn sanitize_setmode(mut cmd: SetMode) -> SetMode {
     cmd.max_i_ma_total = cmd.max_i_ma_total.max(0).min(control::HARD_MAX_I_MA_TOTAL);
     let hard_max_p = LIMIT_PROFILE_DEFAULT.max_p_mw;
     cmd.max_p_mw = cmd.max_p_mw.min(hard_max_p);
+    if cmd.mode == LoadMode::Cv && cmd.target_v_mv < cmd.min_v_mv {
+        cmd.target_v_mv = cmd.min_v_mv;
+    }
     if cmd.target_i_ma > cmd.max_i_ma_total {
         cmd.target_i_ma = cmd.max_i_ma_total;
     }

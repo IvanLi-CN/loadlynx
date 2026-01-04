@@ -58,7 +58,14 @@ impl Preset {
         let hard_max_p = crate::LIMIT_PROFILE_DEFAULT.max_p_mw;
         self.max_p_mw = self.max_p_mw.min(hard_max_p);
 
-        // Targets should never exceed the current/power caps.
+        // Frozen UI invariants:
+        // - CC:  TARGET_I <= OCP (max_i_ma_total)
+        // - CV:  UVLO (min_v_mv) <= TARGET_V (target_v_mv)
+        if self.mode == LoadMode::Cv {
+            self.target_v_mv = self.target_v_mv.max(self.min_v_mv);
+        }
+
+        // Targets should never exceed the current caps.
         self.target_i_ma = self.target_i_ma.min(self.max_i_ma_total);
         self
     }
