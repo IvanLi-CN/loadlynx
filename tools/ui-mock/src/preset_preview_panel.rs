@@ -45,10 +45,7 @@ pub fn render_preset_preview_panel(
     vm: &PresetPreviewPanelVm,
 ) {
     let mode = normalize_mode(vm.mode);
-    let rows = match mode {
-        LoadMode::Cv => 6,
-        _ => 5,
-    };
+    let rows = 6;
     let panel_h = BORDER * 2 + PAD_Y * 2 + rows * ROW_H;
 
     let bytes = frame.as_mut_bytes();
@@ -133,7 +130,7 @@ pub fn render_preset_preview_panel(
                 );
             }
             _ => {
-                let (field_label, field_value) = numeric_field_at(mode, vm, row_idx - 2);
+                let (field_label, field_value) = numeric_field_at(vm, row_idx - 2);
 
                 draw_text(
                     &mut canvas,
@@ -197,23 +194,12 @@ fn normalize_mode(mode: LoadMode) -> LoadMode {
     }
 }
 
-fn numeric_field_at<'a>(
-    mode: LoadMode,
-    vm: &'a PresetPreviewPanelVm,
-    idx: i32,
-) -> (&'static str, &'a str) {
-    match mode {
-        LoadMode::Cv => match idx {
-            0 => ("TARGET", vm.target_text.as_str()),
-            1 => ("I-LIM", vm.i_lim_text.as_str()),
-            2 => ("V-LIM", vm.v_lim_text.as_str()),
-            _ => ("P-LIM", vm.p_lim_text.as_str()),
-        },
-        _ => match idx {
-            0 => ("TARGET", vm.target_text.as_str()),
-            1 => ("V-LIM", vm.v_lim_text.as_str()),
-            _ => ("P-LIM", vm.p_lim_text.as_str()),
-        },
+fn numeric_field_at<'a>(vm: &'a PresetPreviewPanelVm, idx: i32) -> (&'static str, &'a str) {
+    match idx {
+        0 => ("TARGET", vm.target_text.as_str()),
+        1 => ("UVLO", vm.v_lim_text.as_str()),
+        2 => ("OCP", vm.i_lim_text.as_str()),
+        _ => ("OPP", vm.p_lim_text.as_str()),
     }
 }
 

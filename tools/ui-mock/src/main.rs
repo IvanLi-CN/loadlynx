@@ -111,9 +111,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         blocked_save: false,
         selected_field: ui::preset_panel::PresetPanelField::Target,
         selected_digit: ui::preset_panel::PresetPanelDigit::Tenths,
-        target_text: ui::preset_panel::format_av_3dp(1_200, 'A'),
-        v_lim_text: ui::preset_panel::format_av_3dp(24_500, 'V'),
-        i_lim_text: ui::preset_panel::format_av_3dp(0, 'A'),
+        target_text: ui::preset_panel::format_av_3dp(12_000, 'A'),
+        v_lim_text: ui::preset_panel::format_av_3dp(10_000, 'V'),
+        i_lim_text: ui::preset_panel::format_av_3dp(15_000, 'A'),
         p_lim_text: ui::preset_panel::format_power_2dp(300_000),
     };
     render_snapshot(
@@ -139,7 +139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mode: LoadMode::Cc,
         target_text: ui::preset_panel::format_av_3dp(12_000, 'A'),
         v_lim_text: ui::preset_panel::format_av_3dp(10_000, 'V'),
-        i_lim_text: ui::preset_panel::format_av_3dp(0, 'A'),
+        i_lim_text: ui::preset_panel::format_av_3dp(15_000, 'A'),
         p_lim_text: ui::preset_panel::format_power_2dp(300_000),
     };
     render_snapshot(
