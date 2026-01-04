@@ -648,14 +648,12 @@ async fn encoder_task(
                                 }
                             }
                             ui::preset_panel::PresetPanelField::ILim => {
-                                if mode == LoadMode::Cv {
-                                    let prev = preset.max_i_ma_total;
-                                    let next = (prev.saturating_add(step))
-                                        .clamp(0, control::HARD_MAX_I_MA_TOTAL);
-                                    if next != prev {
-                                        preset.max_i_ma_total = next;
-                                        changed = true;
-                                    }
+                                let prev = preset.max_i_ma_total;
+                                let next = (prev.saturating_add(step))
+                                    .clamp(0, control::HARD_MAX_I_MA_TOTAL);
+                                if next != prev {
+                                    preset.max_i_ma_total = next;
+                                    changed = true;
                                 }
                             }
                             ui::preset_panel::PresetPanelField::PLim => {
@@ -1385,14 +1383,10 @@ fn preset_panel_visible(view: control::UiView) -> bool {
 }
 
 fn coerce_panel_field_for_mode(
-    mode: LoadMode,
+    _mode: LoadMode,
     field: ui::preset_panel::PresetPanelField,
 ) -> ui::preset_panel::PresetPanelField {
-    if mode != LoadMode::Cv && field == ui::preset_panel::PresetPanelField::ILim {
-        ui::preset_panel::PresetPanelField::Target
-    } else {
-        field
-    }
+    field
 }
 
 fn coerce_panel_digit_for_field(
