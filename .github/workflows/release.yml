@@ -124,11 +124,11 @@ jobs:
             - `analog` - Main firmware (ELF with debug info)
 
             Flashing and Usage
-            - Recommended: `probe-rs` via Makefile / scripts
+            - Recommended: `mcu-agentd` (configured by `mcu-agentd.toml`)
             ```bash
             # From repo root
-            make a-run                      # flash + run analog firmware
-            scripts/flash_g431.sh release   # explicit release flash helper
+            just agentd flash analog
+            just agentd monitor analog --reset
             ```
           files: |
             firmware/analog/target/thumbv7em-none-eabihf/release/analog
@@ -136,4 +136,3 @@ jobs:
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-

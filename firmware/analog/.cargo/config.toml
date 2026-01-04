@@ -1,6 +1,5 @@
 [target.'cfg(all(target_arch = "arm", target_os = "none"))']
-runner = "probe-rs run --chip STM32G431CB"
-
+# Flash/reset/monitor must go through mcu-agentd (repo root `mcu-agentd.toml`).
 rustflags = [
   "-C", "link-arg=-Tlink.x",
   "-C", "link-arg=-Tdefmt.x",
@@ -12,4 +11,3 @@ target = "thumbv7em-none-eabihf"    # Cortex-M4F
 
 [env]
 DEFMT_LOG = "info"
-

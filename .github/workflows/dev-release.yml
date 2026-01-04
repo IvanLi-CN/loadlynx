@@ -64,12 +64,11 @@ jobs:
             Files
             - `analog` - ELF firmware (STM32G431, thumbv7em-none-eabihf)
 
-            How to Flash (local, probe-rs):
+            How to Flash (local, mcu-agentd):
             ```bash
             # From repo root
-            make a-run
-            # or attach with symbols
-            scripts/flash_g431.sh release
+            just agentd flash analog
+            just agentd monitor analog --reset
             ```
           files: |
             firmware/analog/target/thumbv7em-none-eabihf/release/analog
@@ -111,4 +110,3 @@ jobs:
                 }
               }
             }
-

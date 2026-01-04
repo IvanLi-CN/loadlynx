@@ -2,7 +2,7 @@
 target = "xtensa-esp32s3-none-elf"
 
 [target.'cfg(target_arch = "xtensa")']
-runner = "espflash flash --monitor --log-format defmt"
+# Flash/reset/monitor must go through mcu-agentd (repo root `mcu-agentd.toml`).
 rustflags = [
   "-C", "link-arg=-nostartfiles",
 ]

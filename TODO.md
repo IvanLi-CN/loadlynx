@@ -6,11 +6,11 @@
 - 状态使用 `[ ]` 未开始、`[-]` 进行中、`[x]` 已完成。
 
 - [x] 任务名：修复数字板启用 `mock_setpoint` 时启动 panic
-  - 描述/复现：`FEATURES=mock_setpoint scripts/agent_verify_digital.sh --timeout 20`（单板或 dual monitor）曾报错 “Clocks have not been initialized yet”。
+  - 描述/复现：`FEATURES=mock_setpoint just d-build && just agentd flash digital && just agentd monitor digital --reset`（观察约 20 秒；单板或双板同时 monitor）曾报错 “Clocks have not been initialized yet”。
   - 验收标准：启用 mock_setpoint 时数字固件能正常启动并运行 setpoint 发送任务，无 panic。
   - 实施建议：确认时钟初始化顺序，保持 mock_setpoint 代码路径与正常路径一致的时钟依赖；必要时在启动早期补充时钟 guard。
   - 进展/结果：完成。当前 HEAD=8254578 复测未再出现 panic，mock_setpoint 与 setpoint 任务均正常运行。
-  - 备注：旧 dual-monitor 日志的 panic 属早期版本，已消除。
+  - 备注：旧双板 monitor 日志的 panic 属早期版本，已消除。
 
 - [x] 任务名：确认 SetPoint/ACK 链路在修复后无丢包
   - 描述/复现：通过 mock_setpoint 或旋钮产生 setpoint，dual monitor 运行 40 秒。
