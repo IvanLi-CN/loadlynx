@@ -610,7 +610,9 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
     const RADIUS: i32 = 6;
     const PAD_X: i32 = 10;
     const PAD_Y: i32 = 8;
-    const ROW_H: i32 = 24;
+    // Keep the preview panel above the telemetry/status region (TELEMETRY_TOP=172).
+    // With 6 rows, ROW_H=18 yields panel bottom at y=170 (PANEL_TOP=44), avoiding overlap.
+    const ROW_H: i32 = 18;
     const UNIT_GAP: i32 = 1;
 
     const COLOR_BG: u32 = 0x1c2638;

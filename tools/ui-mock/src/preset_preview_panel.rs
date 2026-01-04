@@ -20,7 +20,7 @@ const BORDER: i32 = 1;
 const RADIUS: i32 = 6;
 const PAD_X: i32 = 10;
 const PAD_Y: i32 = 8;
-const ROW_H: i32 = 24;
+const ROW_H: i32 = 18;
 const UNIT_GAP: i32 = 1;
 
 const COLOR_BG: u32 = 0x1c2638;

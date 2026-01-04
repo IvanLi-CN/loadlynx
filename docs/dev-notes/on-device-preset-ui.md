@@ -140,13 +140,13 @@ UI mock（320×240 PNG）：
 
 - 外框（圆角矩形）：
   - `x=154, y=44, w=160`
-  - `h=162`（6 行：含 PRESET/MODE）
+  - `h=126`（6 行：含 PRESET/MODE；`row_h=18`）
   - `radius=6`，`border=1 px`
   - 与主界面 control-row 的垂直关系：`control_row_bottom=38`，面板 `y=44`（间距 6px，严格位于按钮下方）
   - 对齐：面板右边缘 `x+w=314` 与主界面 Setpoint pill 右边缘对齐（允许覆盖右侧信息区）
 - 内容区：
   - `pad_x=10`，`pad_y=8`
-  - `row_h=24`
+  - `row_h=18`（避免与右下角状态行区域重叠）
   - 行分隔线：每行底部 1px，`x=155..313`（即 `PANEL_LEFT+border .. PANEL_RIGHT-border`）
 - 逐行定位（第 `i` 行，从 0 开始）：
   - `row_top = y + border + pad_y + i*row_h`
