@@ -1,15 +1,18 @@
-//! Prompt tone manager (buzzer feedback + fault alarm).
+//! Prompt tone manager (buzzer feedback + alarm policy).
 //!
 //! This module owns the policy for when to emit:
 //! - low-volume UI feedback tones (touch / encoder detents / button actions)
-//! - continuous fault alarm tones driven by analog-side `fault_flags`
+//! - continuous alarm tones:
+//!   - Primary: protection-class (UV / analog fault flags)
+//!   - Secondary: link-drop-class (latched by `latch_link_alarm()`)
 //!
 //! Important semantics (frozen by requirements):
-//! - While `fault_flags != 0`: alarm MUST keep playing and suppress other tones.
-//! - After `fault_flags` becomes 0: alarm MUST keep playing until the *next*
-//!   local interaction (touch / detent / button). Remote actions do not count.
+//! - Primary overrides Secondary.
+//! - While any continuous alarm is active: it MUST keep playing and suppress other tones.
+//! - After an underlying alarm condition clears: that alarm MUST keep playing until
+//!   the *next* local interaction (touch / detent / button). Remote actions do not count.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use defmt::{info, warn};
 use embassy_futures::select::{Either, select};
@@ -31,6 +34,11 @@ static UI_SOUNDS: Channel<CriticalSectionRawMutex, UiSound, 8> = Channel::new();
 static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 static FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
+static UV_LATCHED_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+static LINK_UP: AtomicBool = AtomicBool::new(true);
+static LINK_ALARM_LATCHED: AtomicBool = AtomicBool::new(false);
+
 static LOCAL_ACTIVITY: AtomicU32 = AtomicU32::new(0);
 static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
 
@@ -40,6 +48,33 @@ static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
 /// local ack" policy.
 pub fn set_fault_flags(flags: u32) {
     FAULT_FLAGS.store(flags, Ordering::Relaxed);
+    WAKE.signal(());
+}
+
+/// Update the UV-latched state (protection-class).
+///
+/// Semantics:
+/// - false -> true: start Primary alarm immediately.
+/// - true -> false: keep Primary alarm until local ack, then stop (unless `fault_flags != 0`).
+pub fn set_uv_latched(active: bool) {
+    UV_LATCHED_ACTIVE.store(active, Ordering::Relaxed);
+    WAKE.signal(());
+}
+
+/// Update the local view of link-up state.
+///
+/// Used to decide when a latched Secondary alarm has "cleared".
+pub fn set_link_up(up: bool) {
+    LINK_UP.store(up, Ordering::Relaxed);
+    WAKE.signal(());
+}
+
+/// Latch the Secondary (link-drop-class) alarm.
+///
+/// Does not require link to be down at call time, but will only stop after
+/// link is up + local ack.
+pub fn latch_link_alarm() {
+    LINK_ALARM_LATCHED.store(true, Ordering::Relaxed);
     WAKE.signal(());
 }
 
@@ -119,7 +154,8 @@ pub const BUZZER_FREQ_HZ: u32 = 2_200;
 const UI_DUTY_PCT: u8 = 3;
 // Stronger duty for "fail" so it feels clearly negative/distinct.
 const UI_FAIL_DUTY_PCT: u8 = 6;
-const FAULT_DUTY_PCT: u8 = 6;
+const PRIMARY_ALARM_DUTY_PCT: u8 = 6;
+const SECONDARY_ALARM_DUTY_PCT: u8 = 6;
 
 // UI tick: keep short so normal rotation does not backlog.
 const UI_TICK_TONE_MS: u32 = 12;
@@ -134,9 +170,15 @@ const UI_FAIL_GAP_MS: u32 = 45;
 const UI_FAIL_ON2_MS: u32 = 160;
 const UI_FAIL_TAIL_MS: u32 = 120;
 
-// Fault alarm cadence.
-const FAULT_ON_MS: u32 = 300;
-const FAULT_OFF_MS: u32 = 700;
+// Primary alarm cadence (protection-class).
+const PRIMARY_ALARM_ON_MS: u32 = 300;
+const PRIMARY_ALARM_OFF_MS: u32 = 700;
+
+// Secondary alarm cadence (link-drop-class): double-pip, distinct from Primary.
+const SECONDARY_ALARM_ON1_MS: u32 = 120;
+const SECONDARY_ALARM_GAP_MS: u32 = 80;
+const SECONDARY_ALARM_ON2_MS: u32 = 120;
+const SECONDARY_ALARM_TAIL_MS: u32 = 680;
 
 #[derive(Clone, Copy, Debug)]
 struct Step {
@@ -179,14 +221,33 @@ const STEPS_UI_FAIL: &[Step] = &[
     },
 ];
 
-const STEPS_FAULT_ALARM: &[Step] = &[
+const STEPS_PRIMARY_ALARM: &[Step] = &[
     Step {
-        duty_pct: FAULT_DUTY_PCT,
-        duration_ms: FAULT_ON_MS,
+        duty_pct: PRIMARY_ALARM_DUTY_PCT,
+        duration_ms: PRIMARY_ALARM_ON_MS,
     },
     Step {
         duty_pct: 0,
-        duration_ms: FAULT_OFF_MS,
+        duration_ms: PRIMARY_ALARM_OFF_MS,
+    },
+];
+
+const STEPS_SECONDARY_ALARM: &[Step] = &[
+    Step {
+        duty_pct: SECONDARY_ALARM_DUTY_PCT,
+        duration_ms: SECONDARY_ALARM_ON1_MS,
+    },
+    Step {
+        duty_pct: 0,
+        duration_ms: SECONDARY_ALARM_GAP_MS,
+    },
+    Step {
+        duty_pct: SECONDARY_ALARM_DUTY_PCT,
+        duration_ms: SECONDARY_ALARM_ON2_MS,
+    },
+    Step {
+        duty_pct: 0,
+        duration_ms: SECONDARY_ALARM_TAIL_MS,
     },
 ];
 
@@ -195,7 +256,8 @@ enum ActiveSound {
     UiOk,
     UiFail,
     UiTick,
-    FaultAlarm,
+    PrimaryAlarm,
+    SecondaryAlarm,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -211,7 +273,8 @@ impl Player {
             ActiveSound::UiOk => STEPS_UI_OK,
             ActiveSound::UiFail => STEPS_UI_FAIL,
             ActiveSound::UiTick => STEPS_UI_TICK,
-            ActiveSound::FaultAlarm => STEPS_FAULT_ALARM,
+            ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
+            ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
         }
     }
 }
@@ -258,7 +321,8 @@ fn start_player(
         ActiveSound::UiOk => STEPS_UI_OK,
         ActiveSound::UiFail => STEPS_UI_FAIL,
         ActiveSound::UiTick => STEPS_UI_TICK,
-        ActiveSound::FaultAlarm => STEPS_FAULT_ALARM,
+        ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
+        ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
     };
     let step0 = steps[0];
     buzzer_apply(channel, step0.duty_pct);
@@ -303,15 +367,20 @@ pub async fn prompt_tone_task(
     buzzer_channel: &'static ledc_channel::Channel<'static, esp_hal::ledc::LowSpeed>,
 ) {
     info!(
-        "prompt_tone: starting (GPIO21=BUZZER, freq={}Hz, ui_duty={}%, fault_duty={}%)",
-        BUZZER_FREQ_HZ, UI_DUTY_PCT, FAULT_DUTY_PCT
+        "prompt_tone: starting (GPIO21=BUZZER, freq={}Hz, ui_duty={}%, primary_duty={}%, secondary_duty={}%)",
+        BUZZER_FREQ_HZ, UI_DUTY_PCT, PRIMARY_ALARM_DUTY_PCT, SECONDARY_ALARM_DUTY_PCT
     );
 
     // Ensure we start silent.
     buzzer_apply(buzzer_channel, 0);
 
     let mut last_fault_flags: u32 = 0;
-    let mut fault_cleared_wait_ack: bool = false;
+    let mut last_uv_latched: bool = false;
+
+    let mut primary_cleared_wait_ack: bool = false;
+
+    let mut last_link_latched: bool = false;
+    let mut secondary_cleared_wait_ack: bool = false;
 
     let mut pending_ok: u8 = 0;
     let mut pending_fail: u8 = 0;
@@ -320,70 +389,149 @@ pub async fn prompt_tone_task(
 
     loop {
         let fault_flags = FAULT_FLAGS.load(Ordering::Relaxed);
-        if fault_flags != last_fault_flags {
-            if last_fault_flags == 0 && fault_flags != 0 {
-                info!("prompt_tone: fault entered (flags=0x{:08x})", fault_flags);
-                fault_cleared_wait_ack = false;
+        let uv_latched = UV_LATCHED_ACTIVE.load(Ordering::Relaxed);
+        let link_latched = LINK_ALARM_LATCHED.load(Ordering::Relaxed);
+        let link_up = LINK_UP.load(Ordering::Relaxed);
+
+        let primary_condition_active = fault_flags != 0 || uv_latched;
+
+        // Edge bookkeeping for logging + ack gating.
+        if fault_flags != last_fault_flags || uv_latched != last_uv_latched {
+            let primary_was_active = last_fault_flags != 0 || last_uv_latched;
+
+            // Rising edge into Primary condition.
+            if !primary_was_active && primary_condition_active {
+                info!(
+                    "prompt_tone: primary alarm entered (fault_flags=0x{:08x}, uv_latched={})",
+                    fault_flags, uv_latched
+                );
+                primary_cleared_wait_ack = false;
                 pending_ok = 0;
                 pending_fail = 0;
                 LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
                 PENDING_TICKS.store(0, Ordering::Relaxed); // discard suppressed ticks
-                player = Some(start_player(ActiveSound::FaultAlarm, buzzer_channel));
-            } else if last_fault_flags != 0 && fault_flags == 0 {
-                info!("prompt_tone: fault cleared; waiting for local ack");
-                fault_cleared_wait_ack = true;
+                player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
+            }
+
+            // Falling edge out of Primary condition.
+            if primary_was_active && !primary_condition_active {
+                info!("prompt_tone: primary alarm cleared; waiting for local ack");
+                primary_cleared_wait_ack = true;
                 LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
-                // Keep alarm playing until we see a local interaction (sound or detent).
-                if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::FaultAlarm) {
-                    player = Some(start_player(ActiveSound::FaultAlarm, buzzer_channel));
+                if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::PrimaryAlarm)
+                {
+                    player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
                 }
             }
+
             last_fault_flags = fault_flags;
+            last_uv_latched = uv_latched;
         }
 
-        // While fault is active, suppress UI sounds and discard detent ticks.
-        if fault_flags != 0 {
+        // Secondary latch edge (for logging).
+        if link_latched != last_link_latched {
+            if !last_link_latched && link_latched {
+                info!("prompt_tone: secondary alarm latched (link_up={})", link_up);
+                secondary_cleared_wait_ack = false;
+            }
+            last_link_latched = link_latched;
+        }
+
+        // --- Primary alarm (highest priority) ---------------------------------
+
+        if primary_condition_active {
+            primary_cleared_wait_ack = false;
+
+            // While Primary is active, suppress UI sounds and discard detent ticks.
             drain_ui_sounds(&mut pending_ok, &mut pending_fail, true);
             PENDING_TICKS.store(0, Ordering::Relaxed);
 
-            if player.is_none() {
-                player = Some(start_player(ActiveSound::FaultAlarm, buzzer_channel));
+            if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::PrimaryAlarm) {
+                player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
             }
-            // Fault alarm repeats forever while fault is active.
             if let Some(p) = player {
                 player = advance_player(p, buzzer_channel, true);
             }
+        } else if primary_cleared_wait_ack {
+            // Primary is cleared; keep playing alarm until the first local interaction happens.
+            drain_ui_sounds(&mut pending_ok, &mut pending_fail, false);
+            let has_activity = LOCAL_ACTIVITY.load(Ordering::Relaxed) > 0;
+            let has_detent = PENDING_TICKS.load(Ordering::Relaxed) > 0;
+            let has_sound = pending_ok > 0 || pending_fail > 0;
+            if has_activity || has_detent || has_sound {
+                info!("prompt_tone: local ack observed; stopping primary alarm");
+                primary_cleared_wait_ack = false;
+                LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
+                buzzer_apply(buzzer_channel, 0);
+                player = None;
+            } else {
+                if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::PrimaryAlarm)
+                {
+                    player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
+                }
+                if let Some(p) = player {
+                    player = advance_player(p, buzzer_channel, true);
+                }
+            }
         } else {
-            // Fault is cleared; if we are waiting for local ack, we still play alarm until
-            // the first local interaction happens.
-            if fault_cleared_wait_ack {
-                drain_ui_sounds(&mut pending_ok, &mut pending_fail, false);
-                let has_activity = LOCAL_ACTIVITY.load(Ordering::Relaxed) > 0;
-                let has_detent = PENDING_TICKS.load(Ordering::Relaxed) > 0;
-                let has_sound = pending_ok > 0 || pending_fail > 0;
-                if has_activity || has_detent || has_sound {
-                    info!("prompt_tone: local ack observed; stopping fault alarm");
-                    fault_cleared_wait_ack = false;
-                    LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
-                    // Stop alarm immediately; next loop will play queued UI sounds / ticks.
-                    buzzer_apply(buzzer_channel, 0);
-                    player = None;
+            // --- Secondary alarm ------------------------------------------------
+            if link_latched {
+                if link_up {
+                    if !secondary_cleared_wait_ack {
+                        info!("prompt_tone: secondary alarm cleared; waiting for local ack");
+                        secondary_cleared_wait_ack = true;
+                        LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
+                    }
+
+                    drain_ui_sounds(&mut pending_ok, &mut pending_fail, false);
+                    let has_activity = LOCAL_ACTIVITY.load(Ordering::Relaxed) > 0;
+                    let has_detent = PENDING_TICKS.load(Ordering::Relaxed) > 0;
+                    let has_sound = pending_ok > 0 || pending_fail > 0;
+                    if has_activity || has_detent || has_sound {
+                        info!("prompt_tone: local ack observed; stopping secondary alarm");
+                        secondary_cleared_wait_ack = false;
+                        LINK_ALARM_LATCHED.store(false, Ordering::Relaxed);
+                        LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
+                        buzzer_apply(buzzer_channel, 0);
+                        player = None;
+                    } else {
+                        if player.is_none()
+                            || player.is_some_and(|p| p.sound != ActiveSound::SecondaryAlarm)
+                        {
+                            player =
+                                Some(start_player(ActiveSound::SecondaryAlarm, buzzer_channel));
+                        }
+                        if let Some(p) = player {
+                            player = advance_player(p, buzzer_channel, true);
+                        }
+                    }
                 } else {
-                    if player.is_none() {
-                        player = Some(start_player(ActiveSound::FaultAlarm, buzzer_channel));
+                    secondary_cleared_wait_ack = false;
+
+                    // While Secondary is active, suppress UI sounds and discard detent ticks.
+                    drain_ui_sounds(&mut pending_ok, &mut pending_fail, true);
+                    PENDING_TICKS.store(0, Ordering::Relaxed);
+
+                    if player.is_none()
+                        || player.is_some_and(|p| p.sound != ActiveSound::SecondaryAlarm)
+                    {
+                        player = Some(start_player(ActiveSound::SecondaryAlarm, buzzer_channel));
                     }
                     if let Some(p) = player {
                         player = advance_player(p, buzzer_channel, true);
                     }
                 }
-            }
+            } else {
+                // --- Normal UI mode ---------------------------------------------
 
-            // Normal mode: drain UI events and play them with priority.
-            if !fault_cleared_wait_ack {
+                secondary_cleared_wait_ack = false;
+
                 drain_ui_sounds(&mut pending_ok, &mut pending_fail, false);
 
-                // Preempt: if a fault alarm player somehow remained, stop it.
-                if player.is_some_and(|p| p.sound == ActiveSound::FaultAlarm) {
+                // Preempt: if an alarm player somehow remained, stop it.
+                if player.is_some_and(|p| {
+                    p.sound == ActiveSound::PrimaryAlarm || p.sound == ActiveSound::SecondaryAlarm
+                }) {
                     buzzer_apply(buzzer_channel, 0);
                     player = None;
                 }
