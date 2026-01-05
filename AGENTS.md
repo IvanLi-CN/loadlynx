@@ -98,6 +98,7 @@ These rules exist to prevent an Agent from silently switching the owner's connec
 - Chip/targets are configured via crate `.cargo/config.toml`; adjust only if board/chip changes.
 - Do not commit secrets or machine‑specific paths; prefer flags/env (e.g., `--port /dev/tty.*`).
 - Probe‑RS chip may vary by package; verify `STM32G431CB` before flashing.
+- Digital firmware Wi‑Fi credentials MUST come from the repo-root `.env` file (copy from `.env.example`); do not override `DIGITAL_WIFI_*` ad-hoc (e.g., `DIGITAL_WIFI_SSID=dummy`) unless the owner explicitly approves it.
 
 ## Documentation & Datasheet Localization
 
