@@ -80,10 +80,8 @@ pub enum PresetPanelHit {
     Tab(u8),
     ModeCv,
     ModeCc,
-    Target,
-    VLim,
-    ILim,
-    PLim,
+    FieldLabel(PresetPanelField),
+    FieldValue(PresetPanelField),
     LoadToggle,
     Save,
 }
@@ -162,20 +160,82 @@ pub fn hit_test_preset_panel(x: i32, y: i32, vm: &PresetPanelVm) -> Option<Prese
         return Some(PresetPanelHit::Save);
     }
 
-    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::Target)) {
-        return Some(PresetPanelHit::Target);
-    }
-    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::VLim)) {
-        return Some(PresetPanelHit::VLim);
-    }
-    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::ILim)) {
-        return Some(PresetPanelHit::ILim);
-    }
-    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::PLim)) {
-        return Some(PresetPanelHit::PLim);
+    for field in [
+        PresetPanelField::Target,
+        PresetPanelField::VLim,
+        PresetPanelField::ILim,
+        PresetPanelField::PLim,
+    ] {
+        if hit_in_rect(x, y, row_value_hit_rect(field)) {
+            return Some(PresetPanelHit::FieldValue(field));
+        }
+        if hit_in_rect(x, y, row_label_hit_rect(field)) {
+            return Some(PresetPanelHit::FieldLabel(field));
+        }
     }
 
     None
+}
+
+/// Pick a digit in a value row by x-position.
+///
+/// Mirrors the dashboard Setpoint rules:
+/// - Tap on '.' snaps to nearest adjacent selectable digit.
+/// - Tap on a non-selectable digit snaps to the nearest selectable digit.
+pub fn pick_value_digit(field: PresetPanelField, x: i32, unit: char) -> PresetPanelDigit {
+    let glyph_w = SETPOINT_FONT.width() as i32;
+    let num_w = glyph_w * 6;
+
+    let mut unit_buf = [0u8; 4];
+    let unit_s = unit.encode_utf8(&mut unit_buf);
+    let unit_w = small_text_width(unit_s, 0);
+
+    let total_w = num_w + UNIT_GAP + unit_w;
+    let row_top = row_top(field);
+    let pill = value_pill_rect(row_top);
+
+    let value_right = pill.right - 8;
+    let num_left = (value_right - total_w).max(pill.left + 6);
+    let rel = x - num_left;
+
+    let (cell_idx, cell_off) = if rel < 0 {
+        (0, 0)
+    } else if rel >= num_w {
+        (5, glyph_w.saturating_sub(1))
+    } else {
+        (rel / glyph_w, rel % glyph_w)
+    };
+
+    let is_power = matches!(field, PresetPanelField::PLim);
+    if is_power {
+        match cell_idx {
+            0 | 1 => PresetPanelDigit::Tens, // hundreds is non-selectable; snap to tens
+            2 => PresetPanelDigit::Ones,
+            3 => {
+                if cell_off < glyph_w / 2 {
+                    PresetPanelDigit::Ones
+                } else {
+                    PresetPanelDigit::Tenths
+                }
+            }
+            4 => PresetPanelDigit::Tenths,
+            _ => PresetPanelDigit::Hundredths,
+        }
+    } else {
+        match cell_idx {
+            0 | 1 => PresetPanelDigit::Ones, // tens is non-selectable; snap to ones
+            2 => {
+                if cell_off < glyph_w / 2 {
+                    PresetPanelDigit::Ones
+                } else {
+                    PresetPanelDigit::Tenths
+                }
+            }
+            3 => PresetPanelDigit::Tenths,
+            4 => PresetPanelDigit::Hundredths,
+            _ => PresetPanelDigit::Thousandths,
+        }
+    }
 }
 
 pub fn format_av_3dp(value_milli: i32, unit: char) -> String<8> {
@@ -645,9 +705,16 @@ fn row_top(field: PresetPanelField) -> i32 {
     fields_top() + idx * (ROW_H + ROW_GAP)
 }
 
-fn row_hit_rect(field: PresetPanelField) -> Rect {
+fn row_label_hit_rect(field: PresetPanelField) -> Rect {
     let top = row_top(field);
-    Rect::new(fields_left(), top, panel_inner_right(), top + ROW_H)
+    let value = value_pill_rect(top);
+    Rect::new(fields_left(), top, value.left, top + ROW_H)
+}
+
+fn row_value_hit_rect(field: PresetPanelField) -> Rect {
+    let top = row_top(field);
+    let value = value_pill_rect(top);
+    Rect::new(value.left, top, value.right, top + ROW_H)
 }
 
 fn normalize_mode(mode: LoadMode) -> LoadMode {
