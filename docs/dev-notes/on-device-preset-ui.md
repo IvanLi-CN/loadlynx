@@ -52,6 +52,11 @@ UI mock（320×240 PNG）：
 
   ![Preset panel load on](../assets/on-device-preset-ui/preset-panel-output-on.png)
 
+说明（示例状态，仅用于 mock 展示）：
+
+- `preset-panel-output-off.png`：`active_preset_id == editing_preset_id`（示例：`M2`）。
+- `preset-panel-output-on.png`：`active_preset_id != editing_preset_id`（示例：active=`M4`，editing=`M2`；用于展示 active 标记）。
+
 #### UI mock 资产一致性（冻结）
 
 - 文档中的 UI mock PNG（`docs/assets/on-device-preset-ui/*.png`）必须与本文字段命名/顺序一致；当本文修改布局/字段名/行数时，应在实现阶段同步更新对应 PNG（推荐以 `tools/ui-mock` 的生成结果为准）。
