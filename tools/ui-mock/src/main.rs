@@ -125,13 +125,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
     )?;
 
+    let mut cc_active_other = cc.clone();
+    cc_active_other.set_control_overlay(4, false, LoadMode::Cc, false);
+
     let vm_on = preset_panel_mock::PresetPanelVm {
+        active_preset_id: 4,
         load_enabled: true,
         ..vm_off
     };
     render_snapshot(
         &preset_dir.join("preset-panel-output-on.png"),
-        &cc,
+        &cc_active_other,
         Some(&vm_on),
         None,
     )?;
