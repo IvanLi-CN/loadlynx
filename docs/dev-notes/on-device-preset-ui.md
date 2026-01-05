@@ -86,9 +86,9 @@ UI mock（320×240 PNG）：
 
 #### Dashboard：LOAD 开关（主界面，必须）
 
-- 主界面（Dashboard）必须提供一个**可点击**的 `LOAD` 开关（不得出现 `OUTPUT` 文案），用于快速启用/关闭负载。
+- 主界面（Dashboard）必须提供一个**可点击**的 `LOAD` 开关（不得出现 `OUTPUT` 文案），用于快速启用/关闭负载；该控件在视觉上应接近“电源按钮（power button）”，作为重要状态指示更醒目。
 - 该开关与设置面板底部的 `LOAD` 滑动开关绑定到同一真值（`load_enabled`），两处 UI 必须同步显示。
-- 位置与外观以 UI mock 为准（见 `dashboard*.png`）；LOAD 行位于右侧 status block 中部：在电压能量条（REMOTE/LOCAL 下方的条形图）**下方**，并与能量条保持约“半个开关高度”的间隔；左侧为 `LOAD` 文本，右侧为滑动开关。
+- 位置与外观以 UI mock 为准（见 `dashboard*.png`）；LOAD 行位于右侧 status block 中部：在电压能量条（REMOTE/LOCAL 下方的条形图）**下方**，并与能量条保持明显间隔（约 ≥1 个按钮图标高度）；左侧为 `LOAD` 文本，右侧为电源按钮图标。
 
 #### Dashboard：为何无法启用（右下角状态行复用）
 
