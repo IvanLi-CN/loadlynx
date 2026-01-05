@@ -99,25 +99,29 @@ fn draw_panel_background(canvas: &mut Canvas) {
     );
     canvas.fill_rect(inner, rgb(COLOR_BG_BODY));
 
-    // Action row background + divider.
+    // Two-column layout: tabs column (left) + content column (right).
+    let divider_x = tabs_right() + 8;
+
+    // Tabs column background spans full panel height (including action row).
     canvas.fill_rect(
-        Rect::new(inner.left, ACTION_TOP, inner.right, inner.bottom),
+        Rect::new(inner.left, inner.top, divider_x, inner.bottom),
         rgb(COLOR_BG_HEADER),
     );
+
+    // Vertical divider between tabs and content spans full panel height.
+    canvas.fill_rect(
+        Rect::new(divider_x, inner.top, divider_x + 1, inner.bottom),
+        rgb(COLOR_DIVIDER),
+    );
+
+    // Divider between fields and action row should only live in the content column.
     canvas.fill_rect(
         Rect::new(
-            inner.left,
+            divider_x,
             ACTION_DIVIDER_Y,
             inner.right,
             ACTION_DIVIDER_Y + 1,
         ),
-        rgb(COLOR_DIVIDER),
-    );
-
-    // Vertical divider between tabs and fields.
-    let x = tabs_right() + 8;
-    canvas.fill_rect(
-        Rect::new(x, inner.top, x + 1, ACTION_DIVIDER_Y),
         rgb(COLOR_DIVIDER),
     );
 }
@@ -243,13 +247,9 @@ fn draw_fields(canvas: &mut Canvas, vm: &PresetPanelVm) {
         }
 
         if idx + 1 < rows.len() {
+            let divider_x = tabs_right() + 8;
             canvas.fill_rect(
-                Rect::new(
-                    panel_inner_left(),
-                    row_bottom,
-                    panel_inner_right(),
-                    row_bottom + 1,
-                ),
+                Rect::new(divider_x, row_bottom, panel_inner_right(), row_bottom + 1),
                 rgb(COLOR_DIVIDER),
             );
         }
