@@ -788,6 +788,12 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             last_digit: control::AdjustDigit,
             boundary_fail_fired: bool,
         },
+        PresetPanelValue {
+            start_x: i32,
+            field: ui::preset_panel::PresetPanelField,
+            dragging: bool,
+            boundary_fail_fired: bool,
+        },
     }
     let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
@@ -882,7 +888,26 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                         None => {
-                            quick_switch = None;
+                            if view == control::UiView::PresetPanel {
+                                let vm = {
+                                    let guard = control.lock().await;
+                                    build_preset_panel_vm(&guard)
+                                };
+                                if let Some(ui::preset_panel::PresetPanelHit::FieldValue(field)) =
+                                    ui::preset_panel::hit_test_preset_panel(marker.x, marker.y, &vm)
+                                {
+                                    quick_switch = Some(ControlRowTouch::PresetPanelValue {
+                                        start_x: marker.x,
+                                        field,
+                                        dragging: false,
+                                        boundary_fail_fired: false,
+                                    });
+                                } else {
+                                    quick_switch = None;
+                                }
+                            } else {
+                                quick_switch = None;
+                            }
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
                     }
@@ -934,14 +959,26 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             });
                             PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         }
-                        None => {}
+                        None => {
+                            if view == control::UiView::PresetPanel {
+                                let vm = {
+                                    let guard = control.lock().await;
+                                    build_preset_panel_vm(&guard)
+                                };
+                                if let Some(ui::preset_panel::PresetPanelHit::FieldValue(field)) =
+                                    ui::preset_panel::hit_test_preset_panel(marker.x, marker.y, &vm)
+                                {
+                                    quick_switch = Some(ControlRowTouch::PresetPanelValue {
+                                        start_x: marker.x,
+                                        field,
+                                        dragging: false,
+                                        boundary_fail_fired: false,
+                                    });
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                }
+                            }
+                        }
                     }
-                }
-
-                // Only support control-row drag gestures in the main Dashboard view.
-                if view != control::UiView::Main {
-                    yield_now().await;
-                    continue;
                 }
 
                 let Some(action) = quick_switch else {
@@ -959,6 +996,11 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         down_ms,
                         hold_preview_shown,
                     } => {
+                        // Only support control-row drag gestures in the main Dashboard view.
+                        if view != control::UiView::Main {
+                            yield_now().await;
+                            continue;
+                        }
                         let dx = marker.x - start_x;
                         let now_dragging = dragging || dx.abs() >= DRAG_START_THRESHOLD_PX;
                         if !now_dragging {
@@ -1027,6 +1069,11 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         last_digit,
                         boundary_fail_fired,
                     } => {
+                        // Only support control-row drag gestures in the main Dashboard view.
+                        if view != control::UiView::Main {
+                            yield_now().await;
+                            continue;
+                        }
                         let dx = marker.x - start_x;
                         let now_dragging = dragging || dx.abs() >= SETPOINT_SWIPE_STEP_PX;
                         if !now_dragging {
@@ -1084,6 +1131,69 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 boundary_fail_fired: next_boundary_fail_fired,
                             });
                         }
+                    }
+                    ControlRowTouch::PresetPanelValue {
+                        start_x,
+                        field,
+                        dragging,
+                        boundary_fail_fired,
+                    } => {
+                        if view != control::UiView::PresetPanel {
+                            yield_now().await;
+                            continue;
+                        }
+
+                        let dx = marker.x - start_x;
+                        let now_dragging = dragging || dx.abs() >= SETPOINT_SWIPE_STEP_PX;
+                        if !now_dragging {
+                            yield_now().await;
+                            continue;
+                        }
+
+                        let mut next_boundary_fail_fired = boundary_fail_fired;
+                        let mut state_changed = false;
+
+                        // Recognize a single left/right swipe per gesture.
+                        // Once consumed (dragging=true), ignore further motion until release.
+                        if !dragging {
+                            let dir = if dx > 0 { 1 } else { -1 };
+
+                            let mut guard = control.lock().await;
+                            let prev_field = guard.panel_selected_field;
+                            let prev_digit = guard.panel_selected_digit;
+
+                            guard.panel_selected_field = field;
+                            let cur_digit =
+                                coerce_panel_digit_for_field(field, guard.panel_selected_digit);
+                            guard.panel_selected_digit = cur_digit;
+                            if prev_field != field || prev_digit != cur_digit {
+                                state_changed = true;
+                            }
+
+                            let (next_digit, attempted_oob) =
+                                shift_panel_digit_once(field, cur_digit, dir);
+                            if attempted_oob {
+                                if !next_boundary_fail_fired {
+                                    prompt_tone::enqueue_ui_fail();
+                                    next_boundary_fail_fired = true;
+                                }
+                            } else if next_digit != cur_digit {
+                                prompt_tone::enqueue_ticks(1);
+                                guard.panel_selected_digit = next_digit;
+                                state_changed = true;
+                            }
+
+                            if state_changed {
+                                bump_control_rev();
+                            }
+                        }
+
+                        quick_switch = Some(ControlRowTouch::PresetPanelValue {
+                            start_x,
+                            field,
+                            dragging: true,
+                            boundary_fail_fired: next_boundary_fail_fired,
+                        });
                     }
                 }
             }
@@ -1268,48 +1378,61 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                     prompt_tone::enqueue_ui_ok();
                                     last_tab_tap = None;
                                 }
-                                Hit::Target => {
+                                Hit::FieldLabel(field) => {
                                     let mut guard = control.lock().await;
-                                    guard.panel_selected_field = Field::Target;
+                                    let prev_field = guard.panel_selected_field;
+                                    let prev_digit = guard.panel_selected_digit;
+                                    guard.panel_selected_field = field;
                                     guard.panel_selected_digit = coerce_panel_digit_for_field(
                                         guard.panel_selected_field,
                                         guard.panel_selected_digit,
                                     );
-                                    bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    let changed = guard.panel_selected_field != prev_field
+                                        || guard.panel_selected_digit != prev_digit;
+                                    if changed {
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                    }
                                     last_tab_tap = None;
                                 }
-                                Hit::VLim => {
+                                Hit::FieldValue(field) => {
                                     let mut guard = control.lock().await;
-                                    guard.panel_selected_field = Field::VLim;
-                                    guard.panel_selected_digit = coerce_panel_digit_for_field(
-                                        guard.panel_selected_field,
-                                        guard.panel_selected_digit,
-                                    );
-                                    bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
-                                    last_tab_tap = None;
-                                }
-                                Hit::ILim => {
-                                    let mut guard = control.lock().await;
-                                    guard.panel_selected_field = Field::ILim;
-                                    guard.panel_selected_digit = coerce_panel_digit_for_field(
-                                        guard.panel_selected_field,
-                                        guard.panel_selected_digit,
-                                    );
-                                    bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
-                                    last_tab_tap = None;
-                                }
-                                Hit::PLim => {
-                                    let mut guard = control.lock().await;
-                                    guard.panel_selected_field = Field::PLim;
-                                    guard.panel_selected_digit = coerce_panel_digit_for_field(
-                                        guard.panel_selected_field,
-                                        guard.panel_selected_digit,
-                                    );
-                                    bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    let prev_field = guard.panel_selected_field;
+                                    let prev_digit = guard.panel_selected_digit;
+
+                                    guard.panel_selected_field = field;
+                                    let unit = match field {
+                                        Field::Target => {
+                                            let idx =
+                                                guard.editing_preset_id.saturating_sub(1) as usize;
+                                            let mode = guard
+                                                .presets
+                                                .get(idx)
+                                                .map(|p| match p.mode {
+                                                    LoadMode::Cv => LoadMode::Cv,
+                                                    _ => LoadMode::Cc,
+                                                })
+                                                .unwrap_or(LoadMode::Cc);
+                                            match mode {
+                                                LoadMode::Cv => 'V',
+                                                _ => 'A',
+                                            }
+                                        }
+                                        Field::VLim => 'V',
+                                        Field::ILim => 'A',
+                                        Field::PLim => 'W',
+                                        Field::Mode => ' ',
+                                    };
+                                    let pick_digit =
+                                        ui::preset_panel::pick_value_digit(field, marker.x, unit);
+                                    guard.panel_selected_digit =
+                                        coerce_panel_digit_for_field(field, pick_digit);
+                                    let changed = guard.panel_selected_field != prev_field
+                                        || guard.panel_selected_digit != prev_digit;
+                                    if changed {
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                    }
                                     last_tab_tap = None;
                                 }
                                 Hit::LoadToggle => {
@@ -1321,11 +1444,22 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 }
                                 Hit::Save => {
                                     last_tab_tap = None;
-                                    let ok = save_editing_preset_to_eeprom(control, eeprom).await;
-                                    if ok {
-                                        prompt_tone::enqueue_ui_ok();
-                                    } else {
+                                    let dirty = {
+                                        let guard = control.lock().await;
+                                        let idx =
+                                            guard.editing_preset_id.saturating_sub(1) as usize;
+                                        guard.dirty.get(idx).copied().unwrap_or(false)
+                                    };
+                                    if !dirty {
                                         prompt_tone::enqueue_ui_fail();
+                                    } else {
+                                        let ok =
+                                            save_editing_preset_to_eeprom(control, eeprom).await;
+                                        if ok {
+                                            prompt_tone::enqueue_ui_ok();
+                                        } else {
+                                            prompt_tone::enqueue_ui_fail();
+                                        }
                                     }
                                 }
                             }
@@ -1412,6 +1546,50 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                             }
                         }
                     }
+                    ControlRowTouch::PresetPanelValue {
+                        field, dragging, ..
+                    } => {
+                        if view == control::UiView::PresetPanel && !dragging {
+                            use ui::preset_panel::PresetPanelField as Field;
+
+                            let mut guard = control.lock().await;
+                            let prev_field = guard.panel_selected_field;
+                            let prev_digit = guard.panel_selected_digit;
+
+                            guard.panel_selected_field = field;
+                            let unit = match field {
+                                Field::Target => {
+                                    let idx = guard.editing_preset_id.saturating_sub(1) as usize;
+                                    let mode = guard
+                                        .presets
+                                        .get(idx)
+                                        .map(|p| match p.mode {
+                                            LoadMode::Cv => LoadMode::Cv,
+                                            _ => LoadMode::Cc,
+                                        })
+                                        .unwrap_or(LoadMode::Cc);
+                                    match mode {
+                                        LoadMode::Cv => 'V',
+                                        _ => 'A',
+                                    }
+                                }
+                                Field::VLim => 'V',
+                                Field::ILim => 'A',
+                                Field::PLim => 'W',
+                                Field::Mode => ' ',
+                            };
+                            let pick_digit =
+                                ui::preset_panel::pick_value_digit(field, marker.x, unit);
+                            guard.panel_selected_digit =
+                                coerce_panel_digit_for_field(field, pick_digit);
+                            let changed = guard.panel_selected_field != prev_field
+                                || guard.panel_selected_digit != prev_digit;
+                            if changed {
+                                bump_control_rev();
+                                prompt_tone::enqueue_ui_ok();
+                            }
+                        }
+                    }
                 }
 
                 PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -1485,6 +1663,66 @@ fn cycle_panel_digit_right(
     }
 }
 
+fn shift_panel_digit_once(
+    field: ui::preset_panel::PresetPanelField,
+    digit: ui::preset_panel::PresetPanelDigit,
+    dir: i32,
+) -> (ui::preset_panel::PresetPanelDigit, bool) {
+    use ui::preset_panel::PresetPanelDigit as D;
+    use ui::preset_panel::PresetPanelField as F;
+
+    let dir = dir.signum();
+    if dir == 0 {
+        return (digit, false);
+    }
+
+    let digit = coerce_panel_digit_for_field(field, digit);
+    let (cur_rank, max_rank) = match field {
+        F::PLim => (
+            match digit {
+                D::Tens => 0,
+                D::Ones => 1,
+                D::Tenths => 2,
+                D::Hundredths => 3,
+                _ => 0,
+            },
+            3,
+        ),
+        _ => (
+            match digit {
+                D::Ones => 0,
+                D::Tenths => 1,
+                D::Hundredths => 2,
+                D::Thousandths => 3,
+                _ => 0,
+            },
+            3,
+        ),
+    };
+
+    let raw_rank = cur_rank + dir;
+    if raw_rank < 0 || raw_rank > max_rank {
+        return (digit, true);
+    }
+
+    let next = match field {
+        F::PLim => match raw_rank {
+            0 => D::Tens,
+            1 => D::Ones,
+            2 => D::Tenths,
+            _ => D::Hundredths,
+        },
+        _ => match raw_rank {
+            0 => D::Ones,
+            1 => D::Tenths,
+            2 => D::Hundredths,
+            _ => D::Thousandths,
+        },
+    };
+
+    (next, false)
+}
+
 fn panel_digit_step(
     field: ui::preset_panel::PresetPanelField,
     digit: ui::preset_panel::PresetPanelDigit,
@@ -1539,6 +1777,7 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
         editing_mode,
         load_enabled: state.output_enabled,
         blocked_save: state.ui_view == control::UiView::PresetPanelBlocked,
+        dirty: state.dirty.get(idx).copied().unwrap_or(false),
         selected_field,
         selected_digit,
         target_text: format_av_3dp(target_milli, target_unit),

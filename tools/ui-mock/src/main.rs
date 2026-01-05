@@ -8,6 +8,7 @@ use loadlynx_protocol::LoadMode;
 pub const DISPLAY_WIDTH: usize = 240;
 pub const DISPLAY_HEIGHT: usize = 320;
 
+mod preset_panel_mock;
 mod preset_preview_panel;
 
 mod control {
@@ -51,7 +52,7 @@ fn rgb565_to_rgb888(pixel: u16) -> [u8; 3] {
 fn render_snapshot(
     path: &Path,
     snapshot: &ui::UiSnapshot,
-    preset_panel_vm: Option<&ui::preset_panel::PresetPanelVm>,
+    preset_panel_vm: Option<&preset_panel_mock::PresetPanelVm>,
     preset_preview_vm: Option<&preset_preview_panel::PresetPreviewPanelVm>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut snapshot = snapshot.clone();
@@ -62,7 +63,7 @@ fn render_snapshot(
         RawFrameBuf::<Rgb565, _>::new(&mut framebuffer[..], DISPLAY_WIDTH, DISPLAY_HEIGHT);
     ui::render(&mut frame, &snapshot);
     if let Some(vm) = preset_panel_vm {
-        ui::preset_panel::render_preset_panel(&mut frame, vm);
+        preset_panel_mock::render_preset_panel(&mut frame, vm);
     }
     if let Some(vm) = preset_preview_vm {
         preset_preview_panel::render_preset_preview_panel(&mut frame, vm);
@@ -103,12 +104,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     render_snapshot(&out_dir.join("main-display-mock-cc.png"), &cc, None, None)?;
     render_snapshot(&preset_dir.join("dashboard.png"), &cc, None, None)?;
 
-    let vm_off = ui::preset_panel::PresetPanelVm {
+    let vm_off = preset_panel_mock::PresetPanelVm {
         active_preset_id: 2,
         editing_preset_id: 2,
         editing_mode: LoadMode::Cc,
         load_enabled: false,
         blocked_save: false,
+        dirty: false,
         selected_field: ui::preset_panel::PresetPanelField::Target,
         selected_digit: ui::preset_panel::PresetPanelDigit::Tenths,
         target_text: ui::preset_panel::format_av_3dp(12_000, 'A'),
@@ -123,13 +125,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
     )?;
 
-    let vm_on = ui::preset_panel::PresetPanelVm {
+    let mut cc_active_other = cc.clone();
+    cc_active_other.set_control_overlay(4, false, LoadMode::Cc, false);
+
+    let vm_on = preset_panel_mock::PresetPanelVm {
+        active_preset_id: 4,
         load_enabled: true,
         ..vm_off
     };
     render_snapshot(
         &preset_dir.join("preset-panel-output-on.png"),
-        &cc,
+        &cc_active_other,
         Some(&vm_on),
         None,
     )?;
