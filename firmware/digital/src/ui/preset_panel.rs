@@ -7,44 +7,33 @@ use loadlynx_protocol::LoadMode;
 
 use crate::{DISPLAY_HEIGHT, DISPLAY_WIDTH};
 
-use super::fonts::SMALL_FONT;
+use super::fonts::{SETPOINT_FONT, SMALL_FONT};
 use super::{Canvas, Rect, rgb, small_text_width};
 
+// Mirror `tools/ui-mock/src/preset_panel_mock.rs` for pixel-perfect layout.
 const PANEL_LEFT: i32 = 20;
 const PANEL_TOP: i32 = 40;
 const PANEL_RIGHT: i32 = 300;
 const PANEL_BOTTOM: i32 = 220;
 
-const BORDER_X: i32 = 3;
-const BORDER_Y: i32 = 2;
-const INNER_LEFT: i32 = PANEL_LEFT + BORDER_X;
-const INNER_RIGHT: i32 = PANEL_RIGHT - BORDER_X;
-const INNER_TOP: i32 = PANEL_TOP + BORDER_Y;
-const INNER_BOTTOM: i32 = PANEL_BOTTOM - BORDER_Y;
+const BORDER: i32 = 1;
+const PAD_X: i32 = 10;
+const PAD_Y: i32 = 10;
 
-const TOP_PAD_BOTTOM: i32 = 44;
-const TOP_DIVIDER_Y: i32 = 44;
-const TABS_TOP: i32 = 45;
-const TABS_BOTTOM: i32 = 63;
-const TABS_DIVIDER_Y: i32 = 63;
-const HEADER_TOP: i32 = 64;
-const HEADER_BOTTOM: i32 = 74;
-const BODY_TOP: i32 = 75;
 const ACTION_DIVIDER_Y: i32 = 185;
 const ACTION_TOP: i32 = 186;
 
-const TAB_STEP: i32 = 56;
-const TAB_WIDTH: i32 = 50;
-const TAB_LEFT: i32 = 23;
+const TAB_W: i32 = 34;
+const TAB_H: i32 = 20;
+const TAB_GAP: i32 = 6;
+const TAB_RADIUS: i32 = 6;
 
-const LABEL_X: i32 = PANEL_LEFT + 14;
-const ROW0_Y: i32 = 84;
-const ROW_STEP_Y: i32 = 12;
+const ROW_H: i32 = 26;
+const ROW_GAP: i32 = 0;
 
-const MODE_PILL_TOP_OFFSET: i32 = -2;
-const MODE_PILL_HEIGHT: i32 = 12;
+const VALUE_PILL_RADIUS: i32 = 8;
+const UNIT_GAP: i32 = 1;
 
-const VALUE_LEN: i32 = 7;
 const SAVE_TEXT: &str = "SAVE";
 
 const COLOR_BG_HEADER: u32 = 0x141d2f;
@@ -106,6 +95,7 @@ pub struct PresetPanelVm {
     pub editing_mode: LoadMode,
     pub load_enabled: bool,
     pub blocked_save: bool,
+    pub dirty: bool,
     pub selected_field: PresetPanelField,
     pub selected_digit: PresetPanelDigit,
     pub target_text: String<8>,
@@ -118,57 +108,7 @@ pub fn render_preset_panel(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, vm: &Pres
     let bytes = frame.as_mut_bytes();
     let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
 
-    canvas.fill_rect(
-        Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_BOTTOM),
-        rgb(COLOR_DIVIDER),
-    );
-
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, INNER_TOP, INNER_RIGHT, TOP_PAD_BOTTOM),
-        rgb(COLOR_BG_HEADER),
-    );
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, TOP_DIVIDER_Y, INNER_RIGHT, TOP_DIVIDER_Y + 1),
-        rgb(COLOR_DIVIDER),
-    );
-
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, TABS_TOP, INNER_RIGHT, TABS_BOTTOM),
-        rgb(COLOR_BG_HEADER),
-    );
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, TABS_DIVIDER_Y, INNER_RIGHT, TABS_DIVIDER_Y + 1),
-        rgb(COLOR_DIVIDER),
-    );
-
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, HEADER_TOP, INNER_RIGHT, HEADER_BOTTOM),
-        rgb(COLOR_BG_HEADER),
-    );
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, HEADER_BOTTOM, INNER_RIGHT, HEADER_BOTTOM + 1),
-        rgb(COLOR_DIVIDER),
-    );
-
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, BODY_TOP, INNER_RIGHT, ACTION_DIVIDER_Y),
-        rgb(COLOR_BG_BODY),
-    );
-    canvas.fill_rect(
-        Rect::new(
-            INNER_LEFT,
-            ACTION_DIVIDER_Y,
-            INNER_RIGHT,
-            ACTION_DIVIDER_Y + 1,
-        ),
-        rgb(COLOR_DIVIDER),
-    );
-
-    canvas.fill_rect(
-        Rect::new(INNER_LEFT, ACTION_TOP, INNER_RIGHT, INNER_BOTTOM),
-        rgb(COLOR_BG_HEADER),
-    );
-
+    draw_panel_background(&mut canvas);
     draw_tabs(&mut canvas, vm);
     draw_fields(&mut canvas, vm);
     draw_action_row(&mut canvas, vm);
@@ -190,28 +130,24 @@ pub fn hit_test_preset_panel(x: i32, y: i32, vm: &PresetPanelVm) -> Option<Prese
         return None;
     }
 
-    if y >= TABS_TOP && y < TABS_BOTTOM {
-        for preset_id in 1u8..=5u8 {
-            let rect = tab_rect(preset_id);
-            if hit_in_rect(x, y, rect) {
-                return Some(PresetPanelHit::Tab(preset_id));
-            }
+    for preset_id in 1u8..=5u8 {
+        if hit_in_rect(x, y, tab_rect(preset_id)) {
+            return Some(PresetPanelHit::Tab(preset_id));
         }
-        return None;
     }
 
     // Treat the whole MODE row as the hit target (not just the text),
     // so the segmented control remains easy to use on hardware.
-    let mode_row_y = row_y(PresetPanelField::Mode, normalize_mode(vm.editing_mode));
-    let mode_pill = mode_pill_rect_at(mode_row_y);
+    let mode_row_top = row_top(PresetPanelField::Mode);
+    let mode_pill = mode_pill_rect(mode_row_top);
     let mode_hit = Rect::new(
-        PANEL_LEFT + 10,
-        mode_pill.top - 2,
-        PANEL_RIGHT - 8,
-        mode_pill.bottom + 2,
+        fields_left() - 6,
+        mode_row_top,
+        panel_inner_right() - PAD_X + 6,
+        mode_row_top + ROW_H,
     );
     if hit_in_rect(x, y, mode_hit) {
-        let sep = mode_pill_separator_x();
+        let sep = mode_pill.left + (mode_pill.right - mode_pill.left) / 2;
         return if x < sep {
             Some(PresetPanelHit::ModeCv)
         } else {
@@ -226,17 +162,16 @@ pub fn hit_test_preset_panel(x: i32, y: i32, vm: &PresetPanelVm) -> Option<Prese
         return Some(PresetPanelHit::Save);
     }
 
-    let mode = normalize_mode(vm.editing_mode);
-    if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::Target, mode))) {
+    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::Target)) {
         return Some(PresetPanelHit::Target);
     }
-    if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::VLim, mode))) {
+    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::VLim)) {
         return Some(PresetPanelHit::VLim);
     }
-    if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::ILim, mode))) {
+    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::ILim)) {
         return Some(PresetPanelHit::ILim);
     }
-    if hit_in_rect(x, y, row_hit_rect(row_y(PresetPanelField::PLim, mode))) {
+    if hit_in_rect(x, y, row_hit_rect(PresetPanelField::PLim)) {
         return Some(PresetPanelHit::PLim);
     }
 
@@ -272,154 +207,190 @@ pub fn format_power_2dp(value_mw: i32) -> String<8> {
 }
 
 fn draw_tabs(canvas: &mut Canvas, vm: &PresetPanelVm) {
+    let tabs_h = TAB_H * 5 + TAB_GAP * 4;
+    let avail_h = (ACTION_DIVIDER_Y - panel_inner_top()).max(0);
+    let top_pad = ((avail_h - tabs_h) / 2).max(0);
+    let mut y = panel_inner_top() + top_pad;
+
     for preset_id in 1u8..=5u8 {
-        let rect = tab_rect(preset_id);
+        let rect = Rect::new(tabs_left(), y, tabs_right(), y + TAB_H);
         let selected = preset_id == vm.editing_preset_id;
         let fill = if selected { COLOR_THEME } else { COLOR_TAB_BG };
-        canvas.fill_rect(rect, rgb(fill));
+        canvas.fill_round_rect(rect, TAB_RADIUS, rgb(fill));
         draw_rect_outline(canvas, rect, rgb(COLOR_DIVIDER));
 
         if vm.active_preset_id == preset_id && vm.active_preset_id != vm.editing_preset_id {
-            let underline = Rect::new(
-                rect.left + 2,
-                rect.bottom - 3,
+            let marker = Rect::new(
+                rect.right - 6,
+                rect.top + 2,
                 rect.right - 2,
-                rect.bottom - 1,
+                rect.bottom - 2,
             );
-            canvas.fill_rect(underline, rgb(COLOR_THEME));
+            canvas.fill_round_rect(marker, 2, rgb(COLOR_THEME));
         }
 
         let mut label = String::<3>::new();
         let _ = label.push('M');
         let _ = label.push(char::from(b'0' + preset_id));
         let text_w = small_text_width(label.as_str(), 0);
-        let x = rect.left + ((rect.right - rect.left) - text_w) / 2;
-        let y = rect.top + 6;
+        let x = rect.left + ((rect.right - rect.left) - text_w).max(0) / 2;
+        let y_text = rect.top + ((TAB_H - SMALL_FONT.height() as i32).max(0)) / 2;
         let color = if selected {
             rgb(COLOR_TEXT_DARK)
         } else {
             rgb(COLOR_TEXT_VALUE)
         };
-        super::draw_small_text(canvas, label.as_str(), x, y, color, 0);
+        super::draw_small_text(canvas, label.as_str(), x, y_text, color, 0);
+
+        y += TAB_H + TAB_GAP;
     }
 }
 
 fn draw_fields(canvas: &mut Canvas, vm: &PresetPanelVm) {
-    let label_color = rgb(COLOR_TEXT_LABEL);
-    let value_color = rgb(COLOR_TEXT_VALUE);
     let mode = normalize_mode(vm.editing_mode);
+    let label_x = fields_left();
+    let rows = [
+        (PresetPanelField::Mode, "MODE"),
+        (PresetPanelField::Target, "TARGET"),
+        (PresetPanelField::VLim, "UVLO"),
+        (PresetPanelField::ILim, "OCP"),
+        (PresetPanelField::PLim, "OPP"),
+    ];
 
-    super::draw_small_text(canvas, "MODE", LABEL_X, ROW0_Y, label_color, 0);
-    draw_mode_segmented(
-        canvas,
-        ROW0_Y,
-        mode,
-        vm.selected_field == PresetPanelField::Mode,
-    );
+    let mut row_top = fields_top();
+    for (idx, (field, label)) in rows.iter().enumerate() {
+        let row_bottom = row_top + ROW_H;
+        let label_y = row_top + ((ROW_H - SMALL_FONT.height() as i32).max(0)) / 2;
+        super::draw_small_text(canvas, label, label_x, label_y, rgb(COLOR_TEXT_LABEL), 0);
 
-    let mut row = ROW0_Y + ROW_STEP_Y;
-    draw_value_row(
-        canvas,
-        "TARGET",
-        vm.target_text.as_str(),
-        row,
-        vm.selected_field == PresetPanelField::Target,
-        vm.selected_digit,
-        false,
-        value_color,
-    );
+        match *field {
+            PresetPanelField::Mode => {
+                draw_mode_segmented(canvas, row_top, mode, vm.selected_field == *field);
+            }
+            PresetPanelField::Target => {
+                draw_value_row(
+                    canvas,
+                    row_top,
+                    vm.target_text.as_str(),
+                    vm.selected_field == *field,
+                    vm.selected_digit,
+                    false,
+                );
+            }
+            PresetPanelField::VLim => {
+                draw_value_row(
+                    canvas,
+                    row_top,
+                    vm.v_lim_text.as_str(),
+                    vm.selected_field == *field,
+                    vm.selected_digit,
+                    false,
+                );
+            }
+            PresetPanelField::ILim => {
+                draw_value_row(
+                    canvas,
+                    row_top,
+                    vm.i_lim_text.as_str(),
+                    vm.selected_field == *field,
+                    vm.selected_digit,
+                    false,
+                );
+            }
+            PresetPanelField::PLim => {
+                draw_value_row(
+                    canvas,
+                    row_top,
+                    vm.p_lim_text.as_str(),
+                    vm.selected_field == *field,
+                    vm.selected_digit,
+                    true,
+                );
+            }
+        }
 
-    row += ROW_STEP_Y;
+        if idx + 1 < rows.len() {
+            let divider_x = tabs_right() + 8;
+            canvas.fill_rect(
+                Rect::new(divider_x, row_bottom, panel_inner_right(), row_bottom + 1),
+                rgb(COLOR_DIVIDER),
+            );
+        }
 
-    draw_value_row(
-        canvas,
-        "UVLO",
-        vm.v_lim_text.as_str(),
-        row,
-        vm.selected_field == PresetPanelField::VLim,
-        vm.selected_digit,
-        false,
-        value_color,
-    );
-    row += ROW_STEP_Y;
-
-    draw_value_row(
-        canvas,
-        "OCP",
-        vm.i_lim_text.as_str(),
-        row,
-        vm.selected_field == PresetPanelField::ILim,
-        vm.selected_digit,
-        false,
-        value_color,
-    );
-    row += ROW_STEP_Y;
-
-    draw_value_row(
-        canvas,
-        "OPP",
-        vm.p_lim_text.as_str(),
-        row,
-        vm.selected_field == PresetPanelField::PLim,
-        vm.selected_digit,
-        true,
-        value_color,
-    );
+        row_top = row_bottom + ROW_GAP;
+    }
 }
 
 fn draw_value_row(
     canvas: &mut Canvas,
-    label: &str,
+    row_top: i32,
     value: &str,
-    y: i32,
     selected: bool,
     digit: PresetPanelDigit,
     is_power: bool,
-    value_color: Rgb565,
 ) {
-    super::draw_small_text(canvas, label, LABEL_X, y, rgb(COLOR_TEXT_LABEL), 0);
-    let value_x = value_x();
-    let glyph = SMALL_FONT.width() as i32;
-
-    let highlight_idx = if selected {
-        selected_digit_index(digit, is_power)
-    } else {
-        None
-    };
-
-    if let Some(idx) = highlight_idx {
-        let cell_x = value_x + idx as i32 * glyph;
-        let highlight = digit_highlight_rect(cell_x, y);
-        canvas.fill_rect(highlight, rgb(COLOR_THEME));
+    let pill = value_pill_rect(row_top);
+    canvas.fill_round_rect(pill, VALUE_PILL_RADIUS, rgb(COLOR_PILL_BG));
+    draw_rect_outline(canvas, pill, rgb(COLOR_DIVIDER));
+    if selected {
+        draw_rect_outline(canvas, pill, rgb(COLOR_THEME));
     }
 
-    super::draw_small_text(canvas, value, value_x, y, value_color, 0);
+    let (num, unit) = split_value(value);
+    let num_w = super::setpoint_text_width(num, 0);
+    let unit_w = small_text_width(unit, 0);
+    let total_w = num_w + UNIT_GAP + unit_w;
 
-    if let Some(idx) = highlight_idx {
-        if let Some(ch) = value.chars().nth(idx) {
-            let cell_x = value_x + idx as i32 * glyph;
-            SMALL_FONT.draw_char(
-                ch,
-                |px, py| canvas.set_pixel(px + cell_x, py + y, rgb(COLOR_TEXT_DARK)),
-                0,
-                0,
+    let value_right = pill.right - 8;
+    let value_x0 = (value_right - total_w).max(pill.left + 6);
+
+    let num_h = SETPOINT_FONT.height() as i32;
+    let small_h = SMALL_FONT.height() as i32;
+    let num_y = row_top + ((ROW_H - num_h).max(0)) / 2;
+    let unit_y = num_y + num_h - small_h;
+
+    super::draw_setpoint_text(canvas, num, value_x0, num_y, rgb(COLOR_TEXT_VALUE), 0);
+    super::draw_small_text(
+        canvas,
+        unit,
+        value_x0 + num_w + UNIT_GAP,
+        unit_y,
+        rgb(COLOR_TEXT_LABEL),
+        0,
+    );
+
+    if selected {
+        if let Some(idx) = selected_digit_index(digit, is_power) {
+            let glyph_w = SETPOINT_FONT.width() as i32;
+            let cell_x = value_x0 + idx as i32 * glyph_w;
+            let underline_top = (num_y + num_h + 1).min(row_top + ROW_H - 3);
+            let underline_bottom = underline_top + 2;
+            canvas.fill_rect(
+                Rect::new(
+                    cell_x + 1,
+                    underline_top,
+                    cell_x + glyph_w - 1,
+                    underline_bottom,
+                ),
+                rgb(COLOR_THEME),
             );
         }
     }
 }
 
-fn draw_mode_segmented(canvas: &mut Canvas, y: i32, mode: LoadMode, selected: bool) {
-    let rect = mode_pill_rect_at(y);
-    canvas.fill_round_rect(rect, 6, rgb(COLOR_PILL_BG));
-    let rect_inner = Rect::new(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
-    canvas.fill_round_rect(rect_inner, 5, rgb(COLOR_PILL_BG));
-
-    let sep = mode_pill_separator_x_at(y);
-    canvas.draw_line(sep, rect.top + 1, sep, rect.bottom - 2, rgb(COLOR_DIVIDER));
-
+fn draw_mode_segmented(canvas: &mut Canvas, row_top: i32, mode: LoadMode, selected: bool) {
+    let rect = mode_pill_rect(row_top);
+    canvas.fill_round_rect(rect, VALUE_PILL_RADIUS, rgb(COLOR_PILL_BG));
+    draw_rect_outline(canvas, rect, rgb(COLOR_DIVIDER));
     if selected {
         draw_rect_outline(canvas, rect, rgb(COLOR_THEME));
     }
+
+    let sep = rect.left + (rect.right - rect.left) / 2;
+    canvas.fill_rect(
+        Rect::new(sep, rect.top + 2, sep + 1, rect.bottom - 2),
+        rgb(COLOR_DIVIDER),
+    );
 
     let (cv_color, cc_color) = match mode {
         LoadMode::Cv => (rgb(COLOR_MODE_CV), rgb(COLOR_MODE_OFF)),
@@ -429,39 +400,54 @@ fn draw_mode_segmented(canvas: &mut Canvas, y: i32, mode: LoadMode, selected: bo
 
     let cv_w = small_text_width("CV", 0);
     let cc_w = small_text_width("CC", 0);
+    let small_h = SMALL_FONT.height() as i32;
+    let text_y = rect.top + ((rect.bottom - rect.top) - small_h).max(0) / 2;
+
     let left_x0 = rect.left + 2;
     let left_x1 = sep - 2;
     let right_x0 = sep + 2;
     let right_x1 = rect.right - 2;
-    let cv_x = left_x0 + ((left_x1 - left_x0) - cv_w) / 2;
-    let cc_x = right_x0 + ((right_x1 - right_x0) - cc_w) / 2;
-    super::draw_small_text(canvas, "CV", cv_x, y, cv_color, 0);
-    super::draw_small_text(canvas, "CC", cc_x, y, cc_color, 0);
+    let cv_x = left_x0 + ((left_x1 - left_x0) - cv_w).max(0) / 2;
+    let cc_x = right_x0 + ((right_x1 - right_x0) - cc_w).max(0) / 2;
+    super::draw_small_text(canvas, "CV", cv_x, text_y, cv_color, 0);
+    super::draw_small_text(canvas, "CC", cc_x, text_y, cc_color, 0);
 }
 
 fn draw_action_row(canvas: &mut Canvas, vm: &PresetPanelVm) {
+    let label_x = fields_left();
+    let label_y = ACTION_TOP + 6;
     super::draw_small_text(
         canvas,
         LOAD_LABEL,
-        LABEL_X,
-        ACTION_TOP + 6,
+        label_x,
+        label_y,
         rgb(COLOR_TEXT_LABEL),
         0,
     );
-    draw_load_switch(canvas, vm.load_enabled);
+
+    draw_load_switch(canvas, vm.load_enabled, label_x + 44, ACTION_TOP + 8);
 
     let save = save_rect();
     canvas.fill_rect(save, rgb(COLOR_DIVIDER));
     let save_inner = Rect::new(save.left + 1, save.top + 1, save.right - 1, save.bottom - 1);
-    canvas.fill_rect(save_inner, rgb(COLOR_THEME));
-    let w = small_text_width(SAVE_TEXT, 0);
-    let x = save.left + ((save.right - save.left) - w) / 2;
-    let y = save.top + 7;
-    super::draw_small_text(canvas, SAVE_TEXT, x, y, rgb(COLOR_TEXT_DARK), 0);
+    let enabled = vm.dirty || vm.blocked_save;
+    if enabled {
+        canvas.fill_rect(save_inner, rgb(COLOR_THEME));
+        let w = small_text_width(SAVE_TEXT, 0);
+        let x = save.left + ((save.right - save.left) - w).max(0) / 2;
+        let y = save.top + 7;
+        super::draw_small_text(canvas, SAVE_TEXT, x, y, rgb(COLOR_TEXT_DARK), 0);
+    } else {
+        canvas.fill_rect(save_inner, rgb(COLOR_PILL_BG));
+        let w = small_text_width(SAVE_TEXT, 0);
+        let x = save.left + ((save.right - save.left) - w).max(0) / 2;
+        let y = save.top + 7;
+        super::draw_small_text(canvas, SAVE_TEXT, x, y, rgb(COLOR_TEXT_LABEL), 0);
+    }
 }
 
-fn draw_load_switch(canvas: &mut Canvas, enabled: bool) {
-    let rect = load_switch_rect();
+fn draw_load_switch(canvas: &mut Canvas, enabled: bool, x: i32, y: i32) {
+    let rect = Rect::new(x, y, x + 26, y + 12);
     canvas.fill_round_rect(rect, 6, rgb(COLOR_DIVIDER));
     let track_rect = Rect::new(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
     let track_color = if enabled {
@@ -520,10 +506,98 @@ fn draw_blocked_save_copy(canvas: &mut Canvas) {
     );
 }
 
+fn draw_panel_background(canvas: &mut Canvas) {
+    let outer = Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_BOTTOM);
+    canvas.fill_rect(outer, rgb(COLOR_DIVIDER));
+
+    let inner = Rect::new(
+        PANEL_LEFT + BORDER,
+        PANEL_TOP + BORDER,
+        PANEL_RIGHT - BORDER,
+        PANEL_BOTTOM - BORDER,
+    );
+    canvas.fill_rect(inner, rgb(COLOR_BG_BODY));
+
+    // Two-column layout: tabs column (left) + content column (right).
+    let divider_x = tabs_right() + 8;
+
+    // Tabs column background spans full panel height (including action row).
+    canvas.fill_rect(
+        Rect::new(inner.left, inner.top, divider_x, inner.bottom),
+        rgb(COLOR_BG_HEADER),
+    );
+
+    // Vertical divider between tabs and content spans full panel height.
+    canvas.fill_rect(
+        Rect::new(divider_x, inner.top, divider_x + 1, inner.bottom),
+        rgb(COLOR_DIVIDER),
+    );
+
+    // Divider between fields and action row should only live in the content column.
+    canvas.fill_rect(
+        Rect::new(
+            divider_x,
+            ACTION_DIVIDER_Y,
+            inner.right,
+            ACTION_DIVIDER_Y + 1,
+        ),
+        rgb(COLOR_DIVIDER),
+    );
+}
+
+fn panel_inner_left() -> i32 {
+    PANEL_LEFT + BORDER
+}
+
+fn panel_inner_right() -> i32 {
+    PANEL_RIGHT - BORDER
+}
+
+fn panel_inner_top() -> i32 {
+    PANEL_TOP + BORDER
+}
+
+fn tabs_left() -> i32 {
+    panel_inner_left() + 3
+}
+
+fn tabs_right() -> i32 {
+    tabs_left() + TAB_W
+}
+
+fn fields_left() -> i32 {
+    tabs_right() + 8 + 10
+}
+
+fn fields_top() -> i32 {
+    panel_inner_top() + PAD_Y
+}
+
 fn tab_rect(preset_id: u8) -> Rect {
+    let tabs_h = TAB_H * 5 + TAB_GAP * 4;
+    let avail_h = (ACTION_DIVIDER_Y - panel_inner_top()).max(0);
+    let top_pad = ((avail_h - tabs_h) / 2).max(0);
     let idx = preset_id.saturating_sub(1) as i32;
-    let left = TAB_LEFT + idx * TAB_STEP;
-    Rect::new(left, TABS_TOP, left + TAB_WIDTH, TABS_BOTTOM)
+    let top = panel_inner_top() + top_pad + idx * (TAB_H + TAB_GAP);
+    Rect::new(tabs_left(), top, tabs_right(), top + TAB_H)
+}
+
+fn mode_pill_rect(row_top: i32) -> Rect {
+    let rect = value_pill_rect(row_top);
+    Rect::new(rect.left, rect.top + 3, rect.right, rect.bottom - 3)
+}
+
+fn value_pill_rect(row_top: i32) -> Rect {
+    let top = row_top + 2;
+    let bottom = row_top + ROW_H - 2;
+    Rect::new(fields_left() + 70, top, panel_inner_right() - PAD_X, bottom)
+}
+
+fn split_value(value: &str) -> (&str, &str) {
+    if value.len() < 2 {
+        return ("", "");
+    }
+    value.split_at(value.len() - 1)
 }
 
 fn save_rect() -> Rect {
@@ -535,45 +609,9 @@ fn save_rect() -> Rect {
     )
 }
 
-fn load_switch_rect() -> Rect {
-    Rect::new(
-        PANEL_LEFT + 77,
-        ACTION_TOP + 8,
-        PANEL_LEFT + 103,
-        ACTION_TOP + 20,
-    )
-}
-
 fn load_hit_rect() -> Rect {
-    Rect::new(PANEL_LEFT + 30, ACTION_TOP, PANEL_LEFT + 140, INNER_BOTTOM)
-}
-
-fn mode_pill_rect() -> Rect {
-    mode_pill_rect_at(ROW0_Y)
-}
-
-fn mode_pill_rect_at(y: i32) -> Rect {
-    let top = y + MODE_PILL_TOP_OFFSET;
-    let left = value_x() - 5;
-    let right = value_right_x() - 2;
-    Rect::new(left, top, right, top + MODE_PILL_HEIGHT)
-}
-
-fn mode_pill_separator_x() -> i32 {
-    mode_pill_separator_x_at(ROW0_Y)
-}
-
-fn mode_pill_separator_x_at(y: i32) -> i32 {
-    let rect = mode_pill_rect_at(y);
-    rect.left + (rect.right - rect.left) / 2
-}
-
-fn value_x() -> i32 {
-    value_right_x() - (SMALL_FONT.width() as i32) * VALUE_LEN
-}
-
-fn value_right_x() -> i32 {
-    PANEL_RIGHT - 11
+    let label_x = fields_left();
+    Rect::new(label_x, ACTION_TOP, label_x + 110, PANEL_BOTTOM - BORDER)
 }
 
 fn selected_digit_index(digit: PresetPanelDigit, is_power: bool) -> Option<usize> {
@@ -596,39 +634,20 @@ fn selected_digit_index(digit: PresetPanelDigit, is_power: bool) -> Option<usize
     }
 }
 
-fn digit_highlight_rect(cell_x: i32, y: i32) -> Rect {
-    let digit_bbox_min_x = 0;
-    let digit_bbox_max_x = 4;
-    let digit_bbox_min_y = 2;
-    let digit_bbox_max_y = 9;
-    let pad_x = 1;
-    let pad_y = 2;
-    Rect::new(
-        cell_x + digit_bbox_min_x - pad_x,
-        y + digit_bbox_min_y - pad_y,
-        cell_x + digit_bbox_max_x + 1 + pad_x,
-        y + digit_bbox_max_y + 1 + pad_y,
-    )
+fn row_top(field: PresetPanelField) -> i32 {
+    let idx = match field {
+        PresetPanelField::Mode => 0,
+        PresetPanelField::Target => 1,
+        PresetPanelField::VLim => 2,
+        PresetPanelField::ILim => 3,
+        PresetPanelField::PLim => 4,
+    };
+    fields_top() + idx * (ROW_H + ROW_GAP)
 }
 
-fn row_y(field: PresetPanelField, _mode: LoadMode) -> i32 {
-    let base = ROW0_Y + ROW_STEP_Y;
-    match field {
-        PresetPanelField::Target => base,
-        PresetPanelField::VLim => base + ROW_STEP_Y,
-        PresetPanelField::ILim => base + ROW_STEP_Y * 2,
-        PresetPanelField::PLim => base + ROW_STEP_Y * 3,
-        PresetPanelField::Mode => ROW0_Y,
-    }
-}
-
-fn row_hit_rect(y: i32) -> Rect {
-    Rect::new(
-        PANEL_LEFT + 10,
-        y - 2,
-        PANEL_RIGHT - 8,
-        y + SMALL_FONT.height() as i32 + 2,
-    )
+fn row_hit_rect(field: PresetPanelField) -> Rect {
+    let top = row_top(field);
+    Rect::new(fields_left(), top, panel_inner_right(), top + ROW_H)
 }
 
 fn normalize_mode(mode: LoadMode) -> LoadMode {

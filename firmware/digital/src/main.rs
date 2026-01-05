@@ -1539,6 +1539,7 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
         editing_mode,
         load_enabled: state.output_enabled,
         blocked_save: state.ui_view == control::UiView::PresetPanelBlocked,
+        dirty: state.dirty.get(idx).copied().unwrap_or(false),
         selected_field,
         selected_digit,
         target_text: format_av_3dp(target_milli, target_unit),
