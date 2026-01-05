@@ -1444,11 +1444,22 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 }
                                 Hit::Save => {
                                     last_tab_tap = None;
-                                    let ok = save_editing_preset_to_eeprom(control, eeprom).await;
-                                    if ok {
-                                        prompt_tone::enqueue_ui_ok();
-                                    } else {
+                                    let dirty = {
+                                        let guard = control.lock().await;
+                                        let idx =
+                                            guard.editing_preset_id.saturating_sub(1) as usize;
+                                        guard.dirty.get(idx).copied().unwrap_or(false)
+                                    };
+                                    if !dirty {
                                         prompt_tone::enqueue_ui_fail();
+                                    } else {
+                                        let ok =
+                                            save_editing_preset_to_eeprom(control, eeprom).await;
+                                        if ok {
+                                            prompt_tone::enqueue_ui_ok();
+                                        } else {
+                                            prompt_tone::enqueue_ui_fail();
+                                        }
                                     }
                                 }
                             }
