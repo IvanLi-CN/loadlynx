@@ -16,7 +16,7 @@
   - 查看/编辑全部字段；
   - 保存到 EEPROM；
   - 明确激活并生效（禁止“静默激活”）。
-- 激活 preset、以及激活 preset 的 mode 变化时，强制执行“安全关断负载”（后续由负载开关颜色表达，不在本设计内确定开关位置）。
+- 激活 preset、以及激活 preset 的 mode 变化时，强制执行“安全关断负载”（LOAD 强制置为 OFF；见“主界面 LOAD 开关”）。
 - 低风险数值编辑：光标位可选范围受限，避免大步跳变。
 - 保存失败必须阻塞，直到保存成功（量产保留）。
 - 提升设置面板可操作性：tabs 左侧纵向排列、数值字号与主界面 Setpoint 一致、值区域支持触屏选位；无改动时禁止写 EEPROM 以保护寿命。
@@ -24,7 +24,6 @@
 ## 非目标（Out of scope）
 
 - 不做 Wi‑Fi/网络配置、校准、SoftReset 等非 preset 相关功能。
-- 不在本设计中确定 **主界面**“负载开关（LOAD）”UI 位置与交互。
 - 不扩展 preset 数量与字段（固定 5 组，字段集以现有协议/固件模型为准）。
 
 ## 术语
@@ -44,6 +43,14 @@ UI mock（320×240 PNG）：
 
   ![Dashboard](../assets/on-device-preset-ui/dashboard.png)
 
+- 主界面（Dashboard；blocked enable：LNK）
+
+  ![Dashboard blocked (LNK)](../assets/on-device-preset-ui/dashboard-blocked-lnk.png)
+
+- 主界面（Dashboard；forced OFF：UV）
+
+  ![Dashboard blocked (UV)](../assets/on-device-preset-ui/dashboard-blocked-uv.png)
+
 - 预设设置面板（LOAD=OFF）
 
   ![Preset panel load off](../assets/on-device-preset-ui/preset-panel-output-off.png)
@@ -56,6 +63,8 @@ UI mock（320×240 PNG）：
 
 - `preset-panel-output-off.png`：`active_preset_id == editing_preset_id`（示例：`M2`）。
 - `preset-panel-output-on.png`：`active_preset_id != editing_preset_id`（示例：active=`M4`，editing=`M2`；用于展示 active 标记）。
+- `dashboard-blocked-lnk.png`：链路已建立后掉线，LOAD 无法启用；右下角状态行显示 `LNK`。
+- `dashboard-blocked-uv.png`：欠压保护触发，LOAD 被强制关断；右下角状态行显示 `UV`。
 
 #### UI mock 资产一致性（冻结）
 
@@ -75,6 +84,37 @@ UI mock（320×240 PNG）：
 - 主界面上显示“当前激活 preset 编号 + 其 mode”，作为用户确认当前工作状态的唯一真值来源。
 - 主界面保持 Preset/Mode 与 Setpoint 为两个独立按钮（避免误触与死区）；但 Setpoint 按钮内部支持“按字符选编辑位 + 横向滑动选位（一次手势一位）”，用于直接选择旋钮调节的数字位（见 A2）。旋钮在主界面用于对 active preset 的 target 做小步进微调；完整字段编辑仍在设置面板完成。
 
+#### Dashboard：LOAD 开关（主界面，必须）
+
+- 主界面（Dashboard）必须提供一个**可点击**的 `LOAD` 开关（不得出现 `OUTPUT` 文案），用于快速启用/关闭负载。
+- 该开关与设置面板底部的 `LOAD` 滑动开关绑定到同一真值（`load_enabled`），两处 UI 必须同步显示。
+- 位置与外观以 UI mock 为准（见 `dashboard*.png`）；LOAD 行位于右侧 status block 的 control row 下方一行：左侧为 `LOAD` 文本，右侧为滑动开关。
+
+#### Dashboard：为何无法启用（右下角状态行复用）
+
+当 `LOAD` 不能被启用（或被保护强制关断）时，右下角 **status line #5（最后一行）**必须显示“原因缩写”，不新增任何 UI widget：
+
+- 缩写与优先级：`UV` > `FLT` > `LNK` > `OFF`（同一时刻只显示 1 个）。
+- 用户可见语义：
+  - `UV`：欠压保护触发（例如低于 `UVLO`）；LOAD 会被强制置为 OFF。
+  - `FLT`：模拟板故障（例如 `fault_flags != 0`）；LOAD 会被强制置为 OFF。
+  - `LNK`：链路曾经建立，但随后掉线（比 `OFF` 严重）。
+  - `OFF`：自上电以来**从未**建立链路（例如模拟板未连接/未上电）。
+
+> 说明：当原因消失后，status line #5 恢复显示常规状态文本（例如 `RDY/CAL/...`），不需要额外视觉“确认”控件。
+
+#### Dashboard：连续告警（蜂鸣器）策略
+
+- `UV`/`FLT`：触发 **主报警（primary）**连续告警。
+- `LNK`：触发 **次报警（secondary）**连续告警（与 primary **不同节奏**，便于盲听区分）。
+- `OFF`：**不触发**连续告警。
+- “消除后等待确认”（两种报警都适用）：当告警条件清除后，告警声仍持续，直到发生一次**本地确认**（任意触摸/旋钮/按键事件）后才停止；远程操作不计入确认。
+
+建议的节奏基线（实现可在 `docs/dev-notes/prompt-tone-manager.md` 的 `FaultAlarm` 基础上扩展；需实机试听后微调，但必须保证 primary/secondary 可区分）：
+
+- primary：`Tone(2200Hz, 6%, 300ms)` + `Silence(700ms)` 循环（与 `FaultAlarm` 一致）。
+- secondary：`Tone(2200Hz, 6%, 300ms)` + `Silence(1700ms)` 循环。
+
 ### 2) 预设设置面板（Preset Settings Panel）
 
 - 触发方式：点击主界面 `<PRESET><MODE>` 按钮打开；可关闭返回主界面。
@@ -91,7 +131,7 @@ UI mock（320×240 PNG）：
 - 视觉：延续主界面语义色：`CC` 红 `#FF5252`、`CV` 橙 `#FFB24A`；未选中项用灰 `#7A7F8C`。
 - 尺寸：分段控件高度建议 ≤ **12 px**（与 UI mock 一致），并与下一行选中高亮保持 ≥ **1 px** 间隙，避免视觉粘连。
 
-#### LOAD 滑动开关（视觉规范）
+#### LOAD 滑动开关（视觉规范；Dashboard 与 Preset Panel 通用）
 
 > 需要在 UI mock 与实现中保持一致：像素级渲染，避免缩放造成的模糊或形变。
 
@@ -101,6 +141,7 @@ UI mock（320×240 PNG）：
 - 颜色：
   - `OFF`：track 使用更暗的红色（例如 `#4A1824`），thumb 为灰色（`#555F75`）。
   - `ON`：track 使用更暗的绿色（例如 `#134B2D`），thumb 为主题色（`#4CC9F0`）。
+  - `DISABLED`：track 使用中性底色（推荐 `bar-track #1C2638`），thumb 使用灰色（`#555F75`）；交互应被拒绝并无状态变化。
 - 渲染：thumb 必须为严格正圆（在 320×240 的像素网格下可清晰辨认），不得用“类圆形位图”糊弄。
 
 ## 核心交互规范
