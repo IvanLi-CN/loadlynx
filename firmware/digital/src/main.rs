@@ -327,6 +327,8 @@ static SETMODE_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETMODE_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static SETMODE_ACK_PENDING: AtomicBool = AtomicBool::new(false);
 pub(crate) static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
+pub(crate) static LAST_FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
+pub(crate) static UV_LATCHED: AtomicBool = AtomicBool::new(false);
 pub(crate) static LINK_UP: AtomicBool = AtomicBool::new(false);
 pub(crate) static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
 pub(crate) static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
@@ -345,6 +347,23 @@ pub fn timestamp_ms() -> u64 {
 }
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
+
+fn current_load_block_abbrev() -> Option<&'static str> {
+    // Priority is frozen by docs/dev-notes/on-device-preset-ui.md.
+    if UV_LATCHED.load(Ordering::Relaxed) {
+        Some("UV")
+    } else if LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
+        Some("FLT")
+    } else if !LINK_UP.load(Ordering::Relaxed) {
+        if HELLO_SEEN.load(Ordering::Relaxed) {
+            Some("LNK")
+        } else {
+            Some("OFF")
+        }
+    } else {
+        None
+    }
+}
 
 fn log_wifi_config() {
     // These values are injected at compile time by firmware/digital/build.rs.
@@ -696,15 +715,29 @@ async fn encoder_task(
                         match guard.ui_view {
                             control::UiView::Main => {
                                 let prev = guard.output_enabled;
-                                guard.output_enabled = !prev;
-                                bump_control_rev();
-                                prompt_tone::enqueue_ui_ok();
-                                info!(
-                                    "encoder short-press: output_enabled {} -> {} (preset_id={})",
-                                    if prev { "ON" } else { "OFF" },
-                                    if !prev { "ON" } else { "OFF" },
-                                    guard.active_preset_id
-                                );
+                                if prev {
+                                    guard.output_enabled = false;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    info!(
+                                        "encoder short-press: LOAD ON -> OFF (preset_id={})",
+                                        guard.active_preset_id
+                                    );
+                                } else if let Some(reason) = current_load_block_abbrev() {
+                                    prompt_tone::enqueue_ui_fail();
+                                    info!(
+                                        "encoder short-press: LOAD enable blocked (reason={})",
+                                        reason
+                                    );
+                                } else {
+                                    guard.output_enabled = true;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    info!(
+                                        "encoder short-press: LOAD OFF -> ON (preset_id={})",
+                                        guard.active_preset_id
+                                    );
+                                }
                             }
                             control::UiView::PresetPanel => {
                                 let idx = guard.editing_preset_id.saturating_sub(1) as usize;
@@ -1287,6 +1320,28 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                         }
                     }
 
+                    if view == control::UiView::Main
+                        && ui::hit_test_dashboard_load_button(marker.x, marker.y)
+                    {
+                        let mut guard = control.lock().await;
+                        if guard.output_enabled {
+                            guard.output_enabled = false;
+                            bump_control_rev();
+                            prompt_tone::enqueue_ui_ok();
+                        } else if let Some(reason) = current_load_block_abbrev() {
+                            prompt_tone::enqueue_ui_fail();
+                            info!("touch: LOAD enable blocked (reason={})", reason);
+                        } else {
+                            guard.output_enabled = true;
+                            bump_control_rev();
+                            prompt_tone::enqueue_ui_ok();
+                        }
+                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        last_tab_tap = None;
+                        yield_now().await;
+                        continue;
+                    }
+
                     if view == control::UiView::PresetPanel {
                         let vm = {
                             let guard = control.lock().await;
@@ -1437,9 +1492,18 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                 }
                                 Hit::LoadToggle => {
                                     let mut guard = control.lock().await;
-                                    guard.output_enabled = !guard.output_enabled;
-                                    bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    if guard.output_enabled {
+                                        guard.output_enabled = false;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                    } else if let Some(reason) = current_load_block_abbrev() {
+                                        prompt_tone::enqueue_ui_fail();
+                                        info!("touch: LOAD enable blocked (reason={})", reason);
+                                    } else {
+                                        guard.output_enabled = true;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ui_ok();
+                                    }
                                     last_tab_tap = None;
                                 }
                                 Hit::Save => {
@@ -1776,6 +1840,7 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
         editing_preset_id: state.editing_preset_id,
         editing_mode,
         load_enabled: state.output_enabled,
+        load_toggle_disabled: current_load_block_abbrev().is_some() && !state.output_enabled,
         blocked_save: state.ui_view == control::UiView::PresetPanelBlocked,
         dirty: state.dirty.get(idx).copied().unwrap_or(false),
         selected_field,
@@ -1959,6 +2024,15 @@ impl TelemetryModel {
                 mask.control_row = true;
             }
 
+            if prev.output_enabled != current.output_enabled
+                || prev.uv_latched != current.uv_latched
+                || prev.fault_flags != current.fault_flags
+                || prev.link_up != current.link_up
+                || prev.hello_seen != current.hello_seen
+            {
+                mask.load_row = true;
+            }
+
             if prev.status_lines != current.status_lines {
                 mask.telemetry_lines = true;
             }
@@ -1972,6 +2046,7 @@ impl TelemetryModel {
             mask.voltage_pair = true;
             mask.channel_currents = true;
             mask.control_row = true;
+            mask.load_row = true;
             mask.telemetry_lines = true;
             mask.wifi_status = true;
             mask.touch_marker = true;
@@ -2131,7 +2206,11 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
 async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fault_flags = status.fault_flags;
+    LAST_FAULT_FLAGS.store(fault_flags, Ordering::Relaxed);
     prompt_tone::set_fault_flags(fault_flags);
+    let uv_latched = (status.state_flags & STATE_FLAG_UV_LATCHED) != 0;
+    UV_LATCHED.store(uv_latched, Ordering::Relaxed);
+    prompt_tone::set_uv_latched(uv_latched);
     let enabled = status.enable;
     let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
 
@@ -2446,11 +2525,15 @@ async fn display_task(
                     .last_status
                     .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
                     .unwrap_or(false);
+                let link_up = LINK_UP.load(Ordering::Relaxed);
+                let hello_seen = HELLO_SEEN.load(Ordering::Relaxed);
                 guard.snapshot.set_control_overlay(
                     overlay_preset_id,
                     output_enabled,
                     overlay_mode,
                     uv_latched,
+                    link_up,
+                    hello_seen,
                 );
                 guard.snapshot.preset_preview_active = preview_active;
                 if let Some((target, v_lim, i_lim, p_lim)) = preview_panel {
@@ -2819,6 +2902,7 @@ async fn feed_decoder(
                                 let first = !HELLO_SEEN.swap(true, Ordering::Relaxed);
                                 if first {
                                     LINK_UP.store(true, Ordering::Relaxed);
+                                    prompt_tone::set_link_up(true);
                                 }
                                 if first {
                                     info!(
@@ -3459,6 +3543,10 @@ async fn main(spawner: Spawner) {
     }
     info!("spawning stats task");
     spawner.spawn(stats_task()).expect("stats_task spawn");
+    info!("spawning load guard task");
+    spawner
+        .spawn(load_guard_task(control))
+        .expect("load_guard_task spawn");
     if let Some(uhci_tx) = uhci_tx_opt.take() {
         info!("spawning SetMode tx task (UHCI TX, active control)");
         spawner
@@ -3499,12 +3587,35 @@ async fn main(spawner: Spawner) {
 // 周期性聚合统计，启动后每 5 秒打印一次（便于 DMA 验证阶段观察计数）
 #[embassy_executor::task]
 async fn stats_task() {
-    let mut last_ms = timestamp_ms();
+    let mut last_stats_ms = timestamp_ms();
+    let mut prev_link_up = LINK_UP.load(Ordering::Relaxed);
     loop {
-        yield_now().await;
+        cooperative_delay_ms(100).await;
+
+        // Link health: derive LINK_UP from the age of the last successfully
+        // processed frame. A gap >300 ms is treated as link down.
+        let now_ms32 = now_ms32();
+        let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
+        let age_ms = now_ms32.wrapping_sub(last_good);
+        let link_now = last_good != 0 && age_ms <= 300;
+        if link_now != prev_link_up {
+            prev_link_up = link_now;
+            LINK_UP.store(link_now, Ordering::Relaxed);
+            prompt_tone::set_link_up(link_now);
+            if link_now {
+                info!("link up (last_good_frame_age={} ms)", age_ms);
+            } else {
+                warn!("link down (no frames for {} ms)", age_ms);
+                ANALOG_STATE.store(AnalogState::Offline as u8, Ordering::Relaxed);
+                if HELLO_SEEN.load(Ordering::Relaxed) {
+                    prompt_tone::latch_link_alarm();
+                }
+            }
+        }
+
         let now = timestamp_ms();
-        if now.saturating_sub(last_ms) >= 1_000 {
-            last_ms = now;
+        if now.saturating_sub(last_stats_ms) >= 1_000 {
+            last_stats_ms = now;
             let ok = FAST_STATUS_OK_COUNT.load(Ordering::Relaxed);
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
             let df = PROTO_FRAMING_DROPS.load(Ordering::Relaxed);
@@ -3530,24 +3641,23 @@ async fn stats_task() {
                 touch_i2c,
                 touch_parse_fail
             );
+        }
+    }
+}
 
-            // Link health: derive LINK_UP from the age of the last successfully
-            // processed frame. A gap >300 ms is treated as link down.
-            let now_ms32 = now_ms32();
-            let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
-            let age_ms = now_ms32.wrapping_sub(last_good);
-            let prev_up = LINK_UP.load(Ordering::Relaxed);
-            let link_now = last_good != 0 && age_ms <= 300;
-            if link_now != prev_up {
-                LINK_UP.store(link_now, Ordering::Relaxed);
-                if link_now {
-                    info!("link up (last_good_frame_age={} ms)", age_ms);
-                } else {
-                    warn!("link down (no frames for {} ms)", age_ms);
-                    ANALOG_STATE.store(AnalogState::Offline as u8, Ordering::Relaxed);
-                }
+#[embassy_executor::task]
+async fn load_guard_task(control: &'static ControlMutex) {
+    info!("load guard task starting (forces LOAD OFF on UV/FLT/LNK/OFF)");
+    loop {
+        if let Some(reason) = current_load_block_abbrev() {
+            let mut guard = control.lock().await;
+            if guard.output_enabled {
+                guard.output_enabled = false;
+                bump_control_rev();
+                info!("LOAD forced OFF (reason={})", reason);
             }
         }
+        cooperative_delay_ms(50).await;
     }
 }
 

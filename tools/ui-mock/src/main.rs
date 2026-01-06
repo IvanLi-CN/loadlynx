@@ -99,10 +99,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let preset_dir = repo_root.join("docs/assets/on-device-preset-ui");
 
     let mut cc = ui::UiSnapshot::demo();
-    cc.set_control_overlay(2, false, LoadMode::Cc, false);
+    cc.set_control_overlay(2, true, LoadMode::Cc, false, true, true);
     cc.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
     render_snapshot(&out_dir.join("main-display-mock-cc.png"), &cc, None, None)?;
     render_snapshot(&preset_dir.join("dashboard.png"), &cc, None, None)?;
+
+    let mut cc_blocked_lnk = cc.clone();
+    cc_blocked_lnk.set_control_overlay(2, false, LoadMode::Cc, false, false, true);
+    render_snapshot(
+        &preset_dir.join("dashboard-blocked-lnk.png"),
+        &cc_blocked_lnk,
+        None,
+        None,
+    )?;
+
+    let mut cc_blocked_uv = cc.clone();
+    cc_blocked_uv.set_control_overlay(2, false, LoadMode::Cc, true, true, true);
+    render_snapshot(
+        &preset_dir.join("dashboard-blocked-uv.png"),
+        &cc_blocked_uv,
+        None,
+        None,
+    )?;
 
     let vm_off = preset_panel_mock::PresetPanelVm {
         active_preset_id: 2,
@@ -126,7 +144,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let mut cc_active_other = cc.clone();
-    cc_active_other.set_control_overlay(4, false, LoadMode::Cc, false);
+    cc_active_other.set_control_overlay(4, false, LoadMode::Cc, false, true, true);
 
     let vm_on = preset_panel_mock::PresetPanelVm {
         active_preset_id: 4,
@@ -159,7 +177,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cv.main_voltage = 24.50;
     cv.remote_voltage = 24.52;
     cv.local_voltage = 24.47;
-    cv.set_control_overlay(2, false, LoadMode::Cv, false);
+    cv.set_control_overlay(2, false, LoadMode::Cv, false, true, true);
     cv.set_control_row(24_500, 'V', control::AdjustDigit::DEFAULT);
     render_snapshot(&out_dir.join("main-display-mock-cv.png"), &cv, None, None)?;
 

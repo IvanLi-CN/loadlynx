@@ -54,6 +54,7 @@ const CARD_BG_BOTTOM_OFFSET: i32 = 80;
 // Right-side layout (logical 320×240 coordinate space).
 const VOLTAGE_PAIR_TOP: i32 = 50;
 const VOLTAGE_PAIR_BOTTOM: i32 = 96;
+const LOAD_ROW_TOP: i32 = 118;
 const TELEMETRY_TOP: i32 = 172;
 
 // Control row layout: <M#><MODE> entry + fixed-width target summary.
@@ -161,11 +162,18 @@ pub enum WifiUiStatus {
     Error,
 }
 
+// Dashboard LOAD power-button (UI mock contract).
+const LOAD_BUTTON_SIZE: i32 = 21;
+const LOAD_BUTTON_RIGHT: i32 = CONTROL_VALUE_PILL_RIGHT;
+const LOAD_BUTTON_LEFT: i32 = LOAD_BUTTON_RIGHT - LOAD_BUTTON_SIZE;
+const LOAD_BUTTON_BOTTOM: i32 = LOAD_ROW_TOP + LOAD_BUTTON_SIZE;
+
 /// Bitmask describing which logical UI regions need to be updated for a frame.
 #[derive(Copy, Clone, Default)]
 pub struct UiChangeMask {
     pub main_metrics: bool,
     pub voltage_pair: bool,
+    pub load_row: bool,
     pub channel_currents: bool,
     pub control_row: bool,
     pub telemetry_lines: bool,
@@ -177,6 +185,7 @@ impl UiChangeMask {
     pub fn is_empty(&self) -> bool {
         !(self.main_metrics
             || self.voltage_pair
+            || self.load_row
             || self.channel_currents
             || self.control_row
             || self.telemetry_lines
@@ -243,6 +252,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.remote_voltage_text.as_str(),
         data.local_voltage_text.as_str(),
     );
+    draw_dashboard_load_row(&mut canvas, data);
     draw_preset_preview_panel(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
@@ -319,6 +329,15 @@ pub fn render_partial(
         let remote_text = curr.remote_voltage_text.as_str();
         let local_text = curr.local_voltage_text.as_str();
         draw_voltage_pair(&mut canvas, curr, remote_text, local_text);
+    }
+
+    if mask.load_row {
+        // Dashboard LOAD button row: wipe the middle info region and redraw the row.
+        canvas.fill_rect(
+            Rect::new(190, VOLTAGE_PAIR_BOTTOM, LOGICAL_WIDTH, TELEMETRY_TOP),
+            rgb(0x080f19),
+        );
+        draw_dashboard_load_row(&mut canvas, curr);
     }
 
     if mask.channel_currents {
@@ -787,6 +806,77 @@ fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
     }
 }
 
+pub fn hit_test_dashboard_load_button(x: i32, y: i32) -> bool {
+    x >= LOAD_BUTTON_LEFT && x < LOAD_BUTTON_RIGHT && y >= LOAD_ROW_TOP && y < LOAD_BUTTON_BOTTOM
+}
+
+fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
+    // Label aligned to the power button container.
+    let label_h = SMALL_FONT.height() as i32;
+    let label_y = LOAD_ROW_TOP + ((LOAD_BUTTON_SIZE - label_h).max(0) / 2);
+    draw_small_text(canvas, "LOAD", 198, label_y, rgb(0x6d7fa4), 0);
+
+    // State colors apply ONLY to the power symbol (not the button container).
+    let forced_off = data.uv_latched || data.fault_flags != 0;
+    let symbol_color = if forced_off {
+        rgb(0xff5252)
+    } else if data.output_enabled {
+        rgb(0x4cc9f0)
+    } else {
+        rgb(0x555f75)
+    };
+
+    draw_power_button(canvas, LOAD_BUTTON_LEFT, LOAD_ROW_TOP, symbol_color);
+}
+
+fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb565) {
+    // Match the pixel-art contract from docs/dev-notes/on-device-preset-ui.md (Task 001).
+    const TEMPLATE: [&str; 21] = [
+        ".......OOOOOOO.......",
+        ".....OO...I...OO.....",
+        "....O.IISSSSSII.O....",
+        "...O.ISSIIXIISSI.O...",
+        "..O.ISIIXIXIXIISI.O..",
+        ".O.ISIIXXIXIXXIISI.O.",
+        ".OISIIXXIIXIIXXIISIO.",
+        "O.ISIXXIIIXIIIXXISI.O",
+        "O.SIXXIIIIXIIIIXXIS.O",
+        "O.SIXXIIIIXIIIIXXIS.O",
+        "OISIXXIIIIXIIIIXXISIO",
+        "O.SIXXIIIIXIIIIXXIS.O",
+        "O.SIXXIIIIIIIIIXXIS.O",
+        "O.ISIXXIIIIIIIXXISI.O",
+        ".OISIIXXIIIIIXXIISIO.",
+        ".O.ISIIXXXXXXXIISI.O.",
+        "..O.ISIIXXXXXIISI.O..",
+        "...O.ISSIIIIISSI.O...",
+        "....O.IISSSSSII.O....",
+        ".....OO...I...OO.....",
+        ".......OOOOOOO.......",
+    ];
+
+    let border = rgb(0x1c2a3f);
+    let shadow = rgb(0x19243a);
+    let fill = rgb(0x1c2638);
+
+    for (y, row) in TEMPLATE.iter().enumerate() {
+        debug_assert_eq!(row.len(), LOAD_BUTTON_SIZE as usize);
+        for (x, &b) in row.as_bytes().iter().enumerate() {
+            let color = match b {
+                b'.' => None, // transparent: keep background
+                b'O' => Some(border),
+                b'S' => Some(shadow),
+                b'I' => Some(fill),
+                b'X' => Some(symbol_color),
+                _ => None,
+            };
+            if let Some(color) = color {
+                canvas.set_pixel(left + x as i32, top + y as i32, color);
+            }
+        }
+    }
+}
+
 fn draw_debug_overlay(canvas: &mut Canvas) {
     // Corner labels for orientation
     draw_small_text(canvas, "TOP", 4, 4, rgb(0xFFFFFF), 0);
@@ -999,22 +1089,6 @@ fn append_u32<const N: usize>(buf: &mut String<N>, mut value: u32) {
     }
 }
 
-fn append_u32_hex<const N: usize>(buf: &mut String<N>, mut value: u32) {
-    // Append a u32 as 8-digit uppercase hexadecimal (zero-padded).
-    let mut tmp = [b'0'; 8];
-    for i in (0..8).rev() {
-        let nibble = (value & 0xF) as u8;
-        tmp[i] = match nibble {
-            0..=9 => b'0' + nibble,
-            _ => b'A' + (nibble - 10),
-        };
-        value >>= 4;
-    }
-    for b in &tmp {
-        let _ = buf.push(*b as char);
-    }
-}
-
 fn append_frac<const N: usize>(buf: &mut String<N>, mut value: u32, digits: u8) {
     // 以固定位数输出小数部分，必要时左侧补零。
     let mut tmp = [b'0'; 4];
@@ -1180,6 +1254,8 @@ pub struct UiSnapshot {
     pub output_enabled: bool,
     pub active_mode: LoadMode,
     pub uv_latched: bool,
+    pub link_up: bool,
+    pub hello_seen: bool,
     pub preset_preview_active: bool,
     pub preset_preview_target_text: String<8>,
     pub preset_preview_v_lim_text: String<8>,
@@ -1225,6 +1301,8 @@ impl UiSnapshot {
             output_enabled: false,
             active_mode: LoadMode::Cc,
             uv_latched: false,
+            link_up: true,
+            hello_seen: true,
             preset_preview_active: false,
             preset_preview_target_text: String::new(),
             preset_preview_v_lim_text: String::new(),
@@ -1248,6 +1326,8 @@ impl UiSnapshot {
         output_enabled: bool,
         mode: LoadMode,
         uv_latched: bool,
+        link_up: bool,
+        hello_seen: bool,
     ) {
         self.active_preset_id = active_preset_id;
         self.output_enabled = output_enabled;
@@ -1257,6 +1337,8 @@ impl UiSnapshot {
             LoadMode::Reserved(_) => LoadMode::Cc,
         };
         self.uv_latched = uv_latched;
+        self.link_up = link_up;
+        self.hello_seen = hello_seen;
     }
 
     pub fn set_control_row(&mut self, target_milli: i32, unit: char, adjust_digit: AdjustDigit) {
@@ -1309,13 +1391,20 @@ impl UiSnapshot {
         let _ = mcu.push('C');
 
         let mut ctl = String::<20>::new();
-        if self.fault_flags != 0 {
-            // Max 15 chars @ x=198 with SmallFont (8px/char): keep it compact to avoid clipping.
-            // Example: "FLT 0x12345678"
-            let _ = ctl.push_str("FLT 0x");
-            append_u32_hex(&mut ctl, self.fault_flags);
+        // Dashboard reason line (frozen by docs):
+        // show "UV" > "FLT" > "LNK" > "OFF" when LOAD cannot be enabled / is forced OFF.
+        if self.uv_latched {
+            let _ = ctl.push_str("UV");
+        } else if self.fault_flags != 0 {
+            let _ = ctl.push_str("FLT");
+        } else if !self.link_up {
+            if self.hello_seen {
+                let _ = ctl.push_str("LNK");
+            } else {
+                let _ = ctl.push_str("OFF");
+            }
         } else {
-            // UI state line intentionally avoids debug-y bitfields like "P1 CC OUT0 UV0 ...",
+            // Normal status line avoids debug-y bitfields like "P1 CC OUT0 UV0 ...",
             // which are easy to misread on SmallFont (0/O) and exceed the visible width.
             match self.analog_state {
                 AnalogState::Offline => {

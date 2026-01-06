@@ -1760,6 +1760,21 @@ async fn handle_control_update(
 
     // Safety: enabling output requires a healthy link + ready analog.
     if parsed.output_enabled {
+        // Match the on-device LOAD gating semantics: UV/FLT always force output OFF.
+        if crate::UV_LATCHED.load(Ordering::Relaxed) {
+            write_error_body(body_out, "UV_LATCHED", "UV protection latched", true, None);
+            return Err("409 Conflict");
+        }
+        if crate::LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
+            write_error_body(
+                body_out,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            return Err("409 Conflict");
+        }
         if !LINK_UP.load(Ordering::Relaxed) {
             write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
             return Err("503 Service Unavailable");

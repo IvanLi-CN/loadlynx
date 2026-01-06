@@ -92,6 +92,7 @@ pub struct PresetPanelVm {
     pub editing_preset_id: u8,
     pub editing_mode: LoadMode,
     pub load_enabled: bool,
+    pub load_toggle_disabled: bool,
     pub blocked_save: bool,
     pub dirty: bool,
     pub selected_field: PresetPanelField,
@@ -485,7 +486,13 @@ fn draw_action_row(canvas: &mut Canvas, vm: &PresetPanelVm) {
         0,
     );
 
-    draw_load_switch(canvas, vm.load_enabled, label_x + 44, ACTION_TOP + 8);
+    draw_load_switch(
+        canvas,
+        vm.load_enabled,
+        vm.load_toggle_disabled,
+        label_x + 44,
+        ACTION_TOP + 8,
+    );
 
     let save = save_rect();
     canvas.fill_rect(save, rgb(COLOR_DIVIDER));
@@ -506,11 +513,14 @@ fn draw_action_row(canvas: &mut Canvas, vm: &PresetPanelVm) {
     }
 }
 
-fn draw_load_switch(canvas: &mut Canvas, enabled: bool, x: i32, y: i32) {
+fn draw_load_switch(canvas: &mut Canvas, enabled: bool, disabled: bool, x: i32, y: i32) {
     let rect = Rect::new(x, y, x + 26, y + 12);
     canvas.fill_round_rect(rect, 6, rgb(COLOR_DIVIDER));
     let track_rect = Rect::new(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
-    let track_color = if enabled {
+    let is_on = enabled && !disabled;
+    let track_color = if disabled {
+        rgb(COLOR_PILL_BG)
+    } else if is_on {
         rgb(COLOR_LOAD_TRACK_ON)
     } else {
         rgb(COLOR_LOAD_TRACK_OFF)
@@ -518,13 +528,13 @@ fn draw_load_switch(canvas: &mut Canvas, enabled: bool, x: i32, y: i32) {
     canvas.fill_round_rect(track_rect, 5, track_color);
 
     let r = 5;
-    let cx = if enabled {
+    let cx = if is_on {
         track_rect.right - 1 - r
     } else {
         track_rect.left + r
     };
     let cy = track_rect.top + r;
-    let thumb_color = if enabled {
+    let thumb_color = if is_on {
         rgb(COLOR_THEME)
     } else {
         rgb(COLOR_LOAD_THUMB_OFF)
