@@ -78,6 +78,14 @@ pub fn latch_link_alarm() {
     WAKE.signal(());
 }
 
+/// Return whether the Secondary (link-drop-class) alarm is currently latched.
+///
+/// Note: this stays `true` while the alarm is actively sounding *or* while it
+/// is waiting for the next local ack after the link has recovered.
+pub fn is_link_alarm_latched() -> bool {
+    LINK_ALARM_LATCHED.load(Ordering::Relaxed)
+}
+
 /// Enqueue a single "UI ok" feedback sound (low volume).
 pub fn enqueue_ui_ok() {
     let _ = UI_SOUNDS.try_send(UiSound::Ok);

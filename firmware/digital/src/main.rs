@@ -2526,6 +2526,7 @@ async fn display_task(
                     .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
                     .unwrap_or(false);
                 let link_up = LINK_UP.load(Ordering::Relaxed);
+                let link_alarm_latched = prompt_tone::is_link_alarm_latched();
                 let hello_seen = HELLO_SEEN.load(Ordering::Relaxed);
                 guard.snapshot.set_control_overlay(
                     overlay_preset_id,
@@ -2533,6 +2534,7 @@ async fn display_task(
                     overlay_mode,
                     uv_latched,
                     link_up,
+                    link_alarm_latched,
                     hello_seen,
                 );
                 guard.snapshot.preset_preview_active = preview_active;

@@ -1255,6 +1255,7 @@ pub struct UiSnapshot {
     pub active_mode: LoadMode,
     pub uv_latched: bool,
     pub link_up: bool,
+    pub link_alarm_latched: bool,
     pub hello_seen: bool,
     pub preset_preview_active: bool,
     pub preset_preview_target_text: String<8>,
@@ -1302,6 +1303,7 @@ impl UiSnapshot {
             active_mode: LoadMode::Cc,
             uv_latched: false,
             link_up: true,
+            link_alarm_latched: false,
             hello_seen: true,
             preset_preview_active: false,
             preset_preview_target_text: String::new(),
@@ -1327,6 +1329,7 @@ impl UiSnapshot {
         mode: LoadMode,
         uv_latched: bool,
         link_up: bool,
+        link_alarm_latched: bool,
         hello_seen: bool,
     ) {
         self.active_preset_id = active_preset_id;
@@ -1338,6 +1341,7 @@ impl UiSnapshot {
         };
         self.uv_latched = uv_latched;
         self.link_up = link_up;
+        self.link_alarm_latched = link_alarm_latched;
         self.hello_seen = hello_seen;
     }
 
@@ -1397,6 +1401,8 @@ impl UiSnapshot {
             let _ = ctl.push_str("UV");
         } else if self.fault_flags != 0 {
             let _ = ctl.push_str("FLT");
+        } else if self.link_alarm_latched {
+            let _ = ctl.push_str("LNK");
         } else if !self.link_up {
             if self.hello_seen {
                 let _ = ctl.push_str("LNK");
