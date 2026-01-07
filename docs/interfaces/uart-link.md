@@ -78,6 +78,7 @@
   - 0x24 `GetStatus`：S3→G431，请求立即返回一帧 FastStatus；协议 crate 中已有类型与编码函数，但固件尚未在运行路径中使用。
   - 0x25 `CalMode`：S3→G431，校准 Raw 遥测模式选择；仅在用户校准界面启用，用于指示模拟侧**按校准类型**附加 Raw ADC/DAC 字段（见 FastStatus 可选字段）。
   - 0x26 `SoftReset`：S3↔G431，软复位请求/确认；当前固件已实现 v0，使用同一 ID 配合 `FLAG_ACK_REQ/FLAG_IS_ACK` 区分请求与 ACK。
+  - 0x27 `PdSinkRequest`：S3→G431，USB‑PD Sink 目标电压请求（固定 5V/20V；PPS 预留）；规划中。
   - 0x30 `CalWrite`：S3→G431，标定写入；用于**多块**下发用户校准点/曲线，G431 收齐并校验后加载本地校准并置位 `CAL_READY`。
   - 0x31 `CalRead`：G431→S3，标定读回；尚未实现，未来用于上行 `CAL_CHUNK`/EEPROM 校验。
   - 0x40+ 调试/诊断（如 `ADC_CAPTURE`、FOTA 等）：尚未实现，仅在下文表格中用于容量评估。
@@ -160,6 +161,7 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 | `CONTROL_CMD` (0x20/0x24/0x25 等) | `SetEnable`、`ModeSwitch`、`GetStatus`、`FaultClear` 等短指令 | 8–12 B | 0–20 Hz（按键/脚本触发） | ≤160 B/s ≈ 1.3 kbps | 均带 ACK_REQ，失败可按 5/10/20 ms 退避重试；当前固件仅实际使用 `SetEnable(0x20)`，其余命令仍在规划中 |
 | `CAL_MODE` (0x25) | `kind`（0=off,1=voltage,2=current_ch1,3=current_ch2） | ≈10 B | 仅在进入/退出校准 Tab 或切换通道时发送（<1 Hz） | ≈10 B/s | 用于让模拟侧按校准类型附加 Raw ADC/DAC 字段；正常工作保持 off |
 | `SOFT_RESET` (0x26) | `reason`（u8，0=manual、1=fw_update、2=ui_recover、3=link_recover）、`timestamp_ms` | 6 B | 上电后一次；或 UI/脚本按需触发（<0.2 Hz） | ≈1.2 B/s | 数字侧通过 `SoftReset` 请求模拟侧软复位：G431 进入安全态并清空状态，然后以同 ID、带 `FLAG_IS_ACK` 的帧确认；当前固件已实现 v0 版本，数字侧在 ACK 缺失时给出警告但仍继续后续握手 |
+| `PD_SINK_REQUEST` (0x27) | `mode`（u8，0=fixed、1=pps 预留）、`target_mv` | ≈14–20 B | 0–2 Hz（按 UI 点击/Attach 触发） | ≤40 B/s ≈ 0.32 kbps | USB‑PD Sink 策略请求：数字侧下发目标电压（本轮 5V/20V），模拟侧记录策略并在 Attach 时自动应用；电流请求策略固定为 3A 上限且不超过 PDO 能力；请求带 ACK_REQ，ACK 仅表示“接收/记录成功”，协商成败由 `v_local_mv` 等遥测侧推断；规划中 |
 | `CAL_RW` (0x30/0x31) | `index`、`payload[32]`、`crc` | ≈48 B | 0.5 Hz（标定/量产） | ≤24 B/s ≈ 0.19 kbps | `CalWrite` 多块下发、`CalRead` 读回仍为预留；校准数据主存于 ESP EEPROM，模拟侧只缓存并执行校准 |
 | `PING/HEARTBEAT` (0x02) | `timestamp`、`nonce` | 6 B | 10 Hz | 60 B/s ≈ 0.48 kbps | 空闲期保持链路活跃，>300 ms 无回应即判为降级；当前固件未实现独立 `PING` 帧，心跳由 `FAST_STATUS` 与控制帧隐式承担 |
 | `RESERVED_FOTA` (0x50+) | （暂未定义——需后续 bootstub/升级协议落地） | 0 B | 0 Hz | 0 | 当前项目未实现固件块传输；仅保留 ID 以免未来扩展时与现有消息冲突 |
