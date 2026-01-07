@@ -7,7 +7,9 @@ use embedded_graphics::pixelcolor::{
 };
 use heapless::String;
 use lcd_async::raw_framebuf::RawFrameBuf;
-use loadlynx_protocol::LoadMode;
+use loadlynx_protocol::{
+    FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, LoadMode,
+};
 
 use crate::control::AdjustDigit;
 use crate::touch::TouchMarker;
@@ -54,6 +56,7 @@ const CARD_BG_BOTTOM_OFFSET: i32 = 80;
 // Right-side layout (logical 320×240 coordinate space).
 const VOLTAGE_PAIR_TOP: i32 = 50;
 const VOLTAGE_PAIR_BOTTOM: i32 = 96;
+const LOAD_ROW_TOP: i32 = 118;
 const TELEMETRY_TOP: i32 = 172;
 
 // Control row layout: <M#><MODE> entry + fixed-width target summary.
@@ -161,11 +164,19 @@ pub enum WifiUiStatus {
     Error,
 }
 
+// Dashboard LOAD power-button (UI mock contract).
+// Scaled up from the original 21px design to ~1.3× while keeping an odd diameter.
+const LOAD_BUTTON_SIZE: i32 = 27;
+const LOAD_BUTTON_RIGHT: i32 = CONTROL_VALUE_PILL_RIGHT;
+const LOAD_BUTTON_LEFT: i32 = LOAD_BUTTON_RIGHT - LOAD_BUTTON_SIZE;
+const LOAD_BUTTON_BOTTOM: i32 = LOAD_ROW_TOP + LOAD_BUTTON_SIZE;
+
 /// Bitmask describing which logical UI regions need to be updated for a frame.
 #[derive(Copy, Clone, Default)]
 pub struct UiChangeMask {
     pub main_metrics: bool,
     pub voltage_pair: bool,
+    pub load_row: bool,
     pub channel_currents: bool,
     pub control_row: bool,
     pub telemetry_lines: bool,
@@ -177,6 +188,7 @@ impl UiChangeMask {
     pub fn is_empty(&self) -> bool {
         !(self.main_metrics
             || self.voltage_pair
+            || self.load_row
             || self.channel_currents
             || self.control_row
             || self.telemetry_lines
@@ -243,6 +255,7 @@ pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
         data.remote_voltage_text.as_str(),
         data.local_voltage_text.as_str(),
     );
+    draw_dashboard_load_row(&mut canvas, data);
     draw_preset_preview_panel(&mut canvas, data);
     draw_telemetry(&mut canvas, data);
 
@@ -319,6 +332,15 @@ pub fn render_partial(
         let remote_text = curr.remote_voltage_text.as_str();
         let local_text = curr.local_voltage_text.as_str();
         draw_voltage_pair(&mut canvas, curr, remote_text, local_text);
+    }
+
+    if mask.load_row {
+        // Dashboard LOAD button row: wipe the middle info region and redraw the row.
+        canvas.fill_rect(
+            Rect::new(190, VOLTAGE_PAIR_BOTTOM, LOGICAL_WIDTH, TELEMETRY_TOP),
+            rgb(0x080f19),
+        );
+        draw_dashboard_load_row(&mut canvas, curr);
     }
 
     if mask.channel_currents {
@@ -781,10 +803,134 @@ fn draw_mirror_bar_in_bounds(
 fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
     let lines = data.status_lines();
     let mut baseline = TELEMETRY_TOP;
-    for line in lines.iter() {
-        draw_small_text(canvas, line.as_str(), 198, baseline, rgb(0xdfe7ff), 0);
+    for (idx, line) in lines.iter().enumerate() {
+        let mut color = rgb(0xdfe7ff);
+        if idx + 1 == lines.len() {
+            // Bottom-right "reason" line should blink on any abnormal condition.
+            let ctl_alert = data.fault_flags != 0
+                || data.link_alarm_latched
+                || data.trip_alarm_abbrev.is_some()
+                || data.blocked_enable_abbrev.is_some()
+                || data.uv_latched
+                || !data.link_up;
+            if ctl_alert && !line.is_empty() {
+                color = if data.blink_on {
+                    rgb(0xff5252)
+                } else {
+                    rgb(0xffffff)
+                };
+            }
+        }
+        draw_small_text(canvas, line.as_str(), 198, baseline, color, 0);
         baseline += 12;
     }
+}
+
+pub fn hit_test_dashboard_load_button(x: i32, y: i32) -> bool {
+    x >= LOAD_BUTTON_LEFT && x < LOAD_BUTTON_RIGHT && y >= LOAD_ROW_TOP && y < LOAD_BUTTON_BOTTOM
+}
+
+fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
+    // Label aligned to the power button container.
+    let label_h = SMALL_FONT.height() as i32;
+    let label_y = LOAD_ROW_TOP + ((LOAD_BUTTON_SIZE - label_h).max(0) / 2);
+    draw_small_text(canvas, "LOAD", 198, label_y, rgb(0x6d7fa4), 0);
+
+    // State colors apply ONLY to the power symbol (not the button container).
+    let forced_off = data.uv_latched
+        || data.trip_alarm_abbrev.is_some()
+        || data.fault_flags != 0
+        || data.link_alarm_latched;
+    let symbol_color = if forced_off {
+        rgb(0xff5252)
+    } else if data.output_enabled {
+        rgb(0x4cc9f0)
+    } else {
+        rgb(0x555f75)
+    };
+
+    draw_power_button(canvas, LOAD_BUTTON_LEFT, LOAD_ROW_TOP, symbol_color);
+}
+
+fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb565) {
+    // Pixel-perfect, non-resampled rendering. Kept intentionally simple so the icon stays crisp
+    // at different sizes (no bitmap scaling / no blur).
+    let border = rgb(0x1c2a3f);
+    let shadow = rgb(0x19243a);
+    let fill = rgb(0x1c2638);
+
+    let size = LOAD_BUTTON_SIZE;
+    let center = (size - 1) / 2;
+    let outer_r = center;
+
+    // Power symbol parameters (tuned by eye on 320×240 mocks).
+    let sym_r = (outer_r - 5).max(4);
+    let sym_gap_half_w = 2;
+    let sym_gap_depth = 2;
+    let sym_line_top = -(sym_r + 2);
+    let sym_line_bottom = -1;
+
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x - center;
+            let dy = y - center;
+            let d2 = dx * dx + dy * dy;
+            let d2_4 = d2 * 4;
+
+            // Button container: border ring + inner shadow ring + fill.
+            let mut px = None;
+            if in_circle_ring(d2_4, outer_r) {
+                px = Some(border);
+            } else if in_circle_ring(d2_4, outer_r - 1) {
+                px = Some(shadow);
+            } else if d2_4 <= circle_fill_limit_4(outer_r - 2) {
+                px = Some(fill);
+            }
+
+            // Power symbol overlay (ring + centered line). Kept away from the outer rings.
+            if d2_4 <= circle_fill_limit_4(sym_r + 2) {
+                // Ring thickness ≈ 2 px (sym_r and sym_r-1).
+                let mut in_sym_ring =
+                    in_circle_ring(d2_4, sym_r) || in_circle_ring(d2_4, sym_r - 1);
+                // Notch at the top center to "break" the ring.
+                if in_sym_ring
+                    && dy < 0
+                    && dy <= -(sym_r - sym_gap_depth)
+                    && dx >= -(sym_gap_half_w + 1)
+                    && dx <= sym_gap_half_w
+                {
+                    in_sym_ring = false;
+                }
+
+                let in_sym_line =
+                    (dx == -1 || dx == 0) && dy >= sym_line_top && dy <= sym_line_bottom;
+                if in_sym_ring || in_sym_line {
+                    px = Some(symbol_color);
+                }
+            }
+
+            if let Some(px) = px {
+                canvas.set_pixel(left + x, top + y, px);
+            }
+        }
+    }
+}
+
+fn in_circle_ring(d2_4: i32, r: i32) -> bool {
+    if r <= 0 {
+        return false;
+    }
+    // Distance-to-radius check using (2*dist)^2 to avoid floating point.
+    let lo = (2 * r - 1) * (2 * r - 1);
+    let hi = (2 * r + 1) * (2 * r + 1);
+    d2_4 >= lo && d2_4 <= hi
+}
+
+fn circle_fill_limit_4(r: i32) -> i32 {
+    if r <= 0 {
+        return 0;
+    }
+    (2 * r + 1) * (2 * r + 1)
 }
 
 fn draw_debug_overlay(canvas: &mut Canvas) {
@@ -999,22 +1145,6 @@ fn append_u32<const N: usize>(buf: &mut String<N>, mut value: u32) {
     }
 }
 
-fn append_u32_hex<const N: usize>(buf: &mut String<N>, mut value: u32) {
-    // Append a u32 as 8-digit uppercase hexadecimal (zero-padded).
-    let mut tmp = [b'0'; 8];
-    for i in (0..8).rev() {
-        let nibble = (value & 0xF) as u8;
-        tmp[i] = match nibble {
-            0..=9 => b'0' + nibble,
-            _ => b'A' + (nibble - 10),
-        };
-        value >>= 4;
-    }
-    for b in &tmp {
-        let _ = buf.push(*b as char);
-    }
-}
-
 fn append_frac<const N: usize>(buf: &mut String<N>, mut value: u32, digits: u8) {
     // 以固定位数输出小数部分，必要时左侧补零。
     let mut tmp = [b'0'; 4];
@@ -1180,6 +1310,12 @@ pub struct UiSnapshot {
     pub output_enabled: bool,
     pub active_mode: LoadMode,
     pub uv_latched: bool,
+    pub link_up: bool,
+    pub link_alarm_latched: bool,
+    pub hello_seen: bool,
+    pub trip_alarm_abbrev: Option<&'static str>,
+    pub blocked_enable_abbrev: Option<&'static str>,
+    pub blink_on: bool,
     pub preset_preview_active: bool,
     pub preset_preview_target_text: String<8>,
     pub preset_preview_v_lim_text: String<8>,
@@ -1195,6 +1331,18 @@ pub struct UiSnapshot {
     pub ch2_current_text: String<6>,
     pub control_target_text: String<7>,
     pub status_lines: [String<20>; 5],
+}
+
+fn fault_flags_abbrev(flags: u32) -> &'static str {
+    if flags & FAULT_OVERVOLTAGE != 0 {
+        "OVP"
+    } else if flags & (FAULT_MCU_OVER_TEMP | FAULT_SINK_OVER_TEMP) != 0 {
+        "OTP"
+    } else if flags & FAULT_OVERCURRENT != 0 {
+        "OCF"
+    } else {
+        "FLT"
+    }
 }
 
 impl UiSnapshot {
@@ -1225,6 +1373,12 @@ impl UiSnapshot {
             output_enabled: false,
             active_mode: LoadMode::Cc,
             uv_latched: false,
+            link_up: true,
+            link_alarm_latched: false,
+            hello_seen: true,
+            trip_alarm_abbrev: None,
+            blocked_enable_abbrev: None,
+            blink_on: false,
             preset_preview_active: false,
             preset_preview_target_text: String::new(),
             preset_preview_v_lim_text: String::new(),
@@ -1248,6 +1402,11 @@ impl UiSnapshot {
         output_enabled: bool,
         mode: LoadMode,
         uv_latched: bool,
+        link_up: bool,
+        link_alarm_latched: bool,
+        hello_seen: bool,
+        trip_alarm_abbrev: Option<&'static str>,
+        blocked_enable_abbrev: Option<&'static str>,
     ) {
         self.active_preset_id = active_preset_id;
         self.output_enabled = output_enabled;
@@ -1257,6 +1416,11 @@ impl UiSnapshot {
             LoadMode::Reserved(_) => LoadMode::Cc,
         };
         self.uv_latched = uv_latched;
+        self.link_up = link_up;
+        self.link_alarm_latched = link_alarm_latched;
+        self.hello_seen = hello_seen;
+        self.trip_alarm_abbrev = trip_alarm_abbrev;
+        self.blocked_enable_abbrev = blocked_enable_abbrev;
     }
 
     pub fn set_control_row(&mut self, target_milli: i32, unit: char, adjust_digit: AdjustDigit) {
@@ -1309,13 +1473,27 @@ impl UiSnapshot {
         let _ = mcu.push('C');
 
         let mut ctl = String::<20>::new();
+        // Dashboard reason line (frozen by docs):
+        // show fault > "LNK" (latched link-drop-class) > trip ("OCP/OPP") > "UVLO" > "OFF"
+        // when LOAD cannot be enabled / is forced OFF.
         if self.fault_flags != 0 {
-            // Max 15 chars @ x=198 with SmallFont (8px/char): keep it compact to avoid clipping.
-            // Example: "FLT 0x12345678"
-            let _ = ctl.push_str("FLT 0x");
-            append_u32_hex(&mut ctl, self.fault_flags);
+            let _ = ctl.push_str(fault_flags_abbrev(self.fault_flags));
+        } else if self.link_alarm_latched {
+            let _ = ctl.push_str("LNK");
+        } else if let Some(trip) = self.trip_alarm_abbrev {
+            let _ = ctl.push_str(trip);
+        } else if self.uv_latched {
+            let _ = ctl.push_str("UVLO");
+        } else if let Some(blocked) = self.blocked_enable_abbrev {
+            let _ = ctl.push_str(blocked);
+        } else if !self.link_up {
+            if self.hello_seen {
+                let _ = ctl.push_str("LNK");
+            } else {
+                let _ = ctl.push_str("OFF");
+            }
         } else {
-            // UI state line intentionally avoids debug-y bitfields like "P1 CC OUT0 UV0 ...",
+            // Normal status line avoids debug-y bitfields like "P1 CC OUT0 UV0 ...",
             // which are easy to misread on SmallFont (0/O) and exceed the visible width.
             match self.analog_state {
                 AnalogState::Offline => {

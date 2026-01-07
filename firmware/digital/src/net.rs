@@ -1279,11 +1279,16 @@ async fn render_status_json_inner(
         return Err("503 Service Unavailable");
     }
 
-    let (status, analog_state) = {
+    let (status, analog_state, ui_reason, ui_reason_blink) = {
         let guard = telemetry.lock().await;
         let status = guard.last_status.unwrap_or(FastStatus::default());
         let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
-        (status, analog_state)
+        (
+            status,
+            analog_state,
+            guard.snapshot.status_lines[4].clone(),
+            guard.snapshot.blink_on,
+        )
     };
 
     let hello_seen = HELLO_SEEN.load(Ordering::Relaxed);
@@ -1312,6 +1317,13 @@ async fn render_status_json_inner(
     };
     write_json_string_escaped(buf, analog_state_str);
     buf.push_str("\",");
+
+    // ui_reason (status line #5) + blink phase (debug aid for UX validation).
+    buf.push_str("\"ui_reason\":\"");
+    write_json_string_escaped(buf, ui_reason.as_str());
+    buf.push_str("\",\"ui_reason_blink\":");
+    buf.push_str(if ui_reason_blink { "true" } else { "false" });
+    buf.push_str(",");
 
     // fault_flags_decoded
     buf.push_str("\"fault_flags_decoded\":[");
@@ -1760,6 +1772,19 @@ async fn handle_control_update(
 
     // Safety: enabling output requires a healthy link + ready analog.
     if parsed.output_enabled {
+        // Match the on-device LOAD gating semantics:
+        // - fault_flags / link down => block enable
+        // - UVLO latch does NOT block enable (it is cleared on an OFF->ON edge analog-side)
+        if crate::LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
+            write_error_body(
+                body_out,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            return Err("409 Conflict");
+        }
         if !LINK_UP.load(Ordering::Relaxed) {
             write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
             return Err("503 Service Unavailable");
@@ -1790,6 +1815,24 @@ async fn handle_control_update(
                 return Err("503 Service Unavailable");
             }
             AnalogState::Ready => {}
+        }
+
+        // Pre-check UVLO inhibit (V_main <= min_v) and refuse enabling so we don't
+        // trigger an analog-side UVLO latch when the system is already undervoltage
+        // before the enable attempt.
+        let min_v_mv = { control.lock().await.active_preset().min_v_mv };
+        if min_v_mv > 0 && crate::LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
+            let v_main_mv = crate::LAST_V_MAIN_MV.load(Ordering::Relaxed);
+            if v_main_mv <= min_v_mv.max(0) {
+                write_error_body(
+                    body_out,
+                    "UVLO",
+                    "v_main below min_v; refusing enable",
+                    true,
+                    None,
+                );
+                return Err("409 Conflict");
+            }
         }
     }
 
