@@ -1421,9 +1421,17 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
-                        let mut guard = control.lock().await;
-                        if guard.pd.toggle_target() {
-                            bump_control_rev();
+                        let (changed, cfg) = {
+                            let mut guard = control.lock().await;
+                            let changed = guard.pd.toggle_target();
+                            let cfg = guard.pd;
+                            if changed {
+                                bump_control_rev();
+                            }
+                            (changed, cfg)
+                        };
+                        if changed {
+                            let _ = save_pd_config_to_eeprom(cfg, eeprom).await;
                         }
                         prompt_tone::enqueue_ui_ok();
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -2003,6 +2011,30 @@ async fn save_editing_preset_to_eeprom(control: &ControlMutex, eeprom: &EepromMu
             warn!(
                 "touch: SAVE failed (preset_id={}, err={:?})",
                 preset_id, err
+            );
+            false
+        }
+    }
+}
+
+async fn save_pd_config_to_eeprom(cfg: control::PdConfig, eeprom: &EepromMutex) -> bool {
+    let blob = control::encode_pd_blob(&cfg);
+    let res = {
+        let mut guard = eeprom.lock().await;
+        guard.write_pd_blob(&blob).await
+    };
+    match res {
+        Ok(()) => {
+            info!(
+                "touch: PD SAVE ok (mode={:?}, target_mv={})",
+                cfg.mode, cfg.target_mv
+            );
+            true
+        }
+        Err(err) => {
+            warn!(
+                "touch: PD SAVE failed (mode={:?}, target_mv={}, err={:?})",
+                cfg.mode, cfg.target_mv, err
             );
             false
         }
@@ -3434,6 +3466,42 @@ async fn main(spawner: Spawner) {
         }
     };
 
+    // Load PD config from EEPROM (non-overlapping with presets).
+    // On invalid blob (version/CRC), fall back to firmware defaults (5V Fixed).
+    let initial_pd = {
+        let mut guard = eeprom.lock().await;
+        match guard.read_pd_blob().await {
+            Ok(blob) => match control::decode_pd_blob(&blob) {
+                Ok(cfg) => {
+                    info!(
+                        "EEPROM PD config loaded (mode={:?}, target_mv={})",
+                        cfg.mode, cfg.target_mv
+                    );
+                    cfg
+                }
+                Err(err) => {
+                    let kind = match err {
+                        control::PdBlobError::InvalidMagic => "magic",
+                        control::PdBlobError::UnsupportedVersion(_) => "version",
+                        control::PdBlobError::InvalidMode(_) => "mode",
+                        control::PdBlobError::InvalidTarget(_) => "target_mv",
+                        control::PdBlobError::CrcMismatch { .. } => "crc32",
+                        control::PdBlobError::InvalidLayout => "layout",
+                    };
+                    warn!("EEPROM PD config invalid; using defaults (err={})", kind);
+                    control::PdConfig::default()
+                }
+            },
+            Err(err) => {
+                warn!(
+                    "EEPROM PD config read failed; using defaults (err={:?})",
+                    err
+                );
+                control::PdConfig::default()
+            }
+        }
+    };
+
     // SPI2 provides the high-speed channel for the TFT.
     let spi_peripheral = peripherals.SPI2;
     let sck = peripherals.GPIO12;
@@ -3563,10 +3631,7 @@ async fn main(spawner: Spawner) {
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
     let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
-    let control = CONTROL.init(Mutex::new(ControlState::new(
-        initial_presets,
-        control::PdConfig::default(),
-    )));
+    let control = CONTROL.init(Mutex::new(ControlState::new(initial_presets, initial_pd)));
     CONTROL_REV.store(1, Ordering::Relaxed);
 
     let touch_input_cfg = InputConfig::default().with_pull(Pull::Up);

@@ -138,6 +138,14 @@ pub enum PdMode {
 
 impl PdMode {
     pub const DEFAULT: Self = Self::Fixed;
+
+    pub fn from_u8(v: u8) -> Option<Self> {
+        match v {
+            0 => Some(Self::Fixed),
+            1 => Some(Self::Pps),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
@@ -445,4 +453,67 @@ pub fn decode_presets_blob(
     }
 
     Ok(out)
+}
+
+// ---- EEPROM PD config blob -------------------------------------------------
+
+const PD_MAGIC: [u8; 4] = *b"LLPD";
+const PD_FMT_VERSION: u8 = 1;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PdBlobError {
+    InvalidMagic,
+    UnsupportedVersion(u8),
+    InvalidMode(u8),
+    InvalidTarget(u32),
+    CrcMismatch { stored: u32, computed: u32 },
+    InvalidLayout,
+}
+
+pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
+    let mut out = [0u8; crate::eeprom::EEPROM_PD_LEN];
+    out[0..4].copy_from_slice(&PD_MAGIC);
+    out[4] = PD_FMT_VERSION;
+    out[5] = cfg.mode as u8;
+    out[6] = 0;
+    out[7] = 0;
+    put_u32_le(&mut out, 8, cfg.target_mv);
+    // out[12..28] reserved = 0
+
+    let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
+    let crc = calfmt::crc32_ieee(&out[..crc_offset]);
+    put_u32_le(&mut out, crc_offset, crc);
+    out
+}
+
+pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdConfig, PdBlobError> {
+    if bytes[0..4] != PD_MAGIC {
+        return Err(PdBlobError::InvalidMagic);
+    }
+    let ver = bytes[4];
+    if ver != PD_FMT_VERSION {
+        return Err(PdBlobError::UnsupportedVersion(ver));
+    }
+
+    let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
+    if crc_offset < 12 {
+        return Err(PdBlobError::InvalidLayout);
+    }
+    let stored_crc = get_u32_le(bytes, crc_offset);
+    let computed_crc = calfmt::crc32_ieee(&bytes[..crc_offset]);
+    if stored_crc != computed_crc {
+        return Err(PdBlobError::CrcMismatch {
+            stored: stored_crc,
+            computed: computed_crc,
+        });
+    }
+
+    let mode_raw = bytes[5];
+    let mode = PdMode::from_u8(mode_raw).ok_or(PdBlobError::InvalidMode(mode_raw))?;
+    let target_mv = get_u32_le(bytes, 8);
+    if target_mv != 5_000 && target_mv != 20_000 {
+        return Err(PdBlobError::InvalidTarget(target_mv));
+    }
+
+    Ok(PdConfig { mode, target_mv })
 }
