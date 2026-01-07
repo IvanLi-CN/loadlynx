@@ -71,6 +71,7 @@
   - 0x10 `FAST_STATUS`：G431→S3 周期遥测；当前固件已实现 v0，字段与 `loadlynx_protocol::FastStatus` 结构一致（见下文表格）。
   - 0x11 `FAULT_EVENT`：G431→S3 故障事件帧；当前版本尚未启用此帧，故障状态通过 `FAST_STATUS.fault_flags` 传输，ID 预留。
   - 0x12 `SLOW_HOUSEKEEPING`：慢速供电/诊断帧；尚未实现，仅用于容量规划。
+  - 0x13 `PdStatus`：G431→S3，USB‑PD 状态与能力摘要（Attach、合同电压/电流、可用 Fixed/PPS 档位及其最大电流）；规划中。
   - 0x20 `SetEnable`：S3→G431，布尔使能；当前固件已实现 v0，用于配合 `CAL_READY` 与 `FAULT_FLAGS` 做出力 gating。
   - 0x21 `SetMode`：S3→G431，**原子 Active Control（v1 冻结）**：一次下发 `preset_id + output_enabled + mode + target + limits`（见下文 “SetMode（0x21）原子控制帧”）。
   - 0x22 `SetPoint`：S3→G431，恒流设定值（mA，带 ACK）；当前固件已实现 v0 版本，将 `target_i_ma` 视为**两通道合计目标电流**，由 G431 在本地按“<2 A 单通道、≥2 A 双通道近似均分”的策略在 CH1/CH2 间拆分电流，由 `setpoint_tx_task` 实现 ACK 等待与退避重传。
@@ -144,6 +145,7 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 | --- | --- | --- | --- | --- | --- |
 | `FAST_STATUS` (0x10) | 物理量字段：`uptime_ms`、`mode`、`state_flags`、`enable`、`target_value`、`i_local_ma`、`i_remote_ma`、`v_local_mv`、`v_remote_mv`、`calc_p_mw`、`dac_headroom_mv`、`loop_error`、`sink_core_temp_mc`、`sink_exhaust_temp_mc`、`mcu_temp_mc`、`fault_flags`；**校准模式下额外可选 Raw 字段**：`cal_kind`、`raw_v_nr_100uv`、`raw_v_rmt_100uv`（电压校准）、`raw_cur_100uv`、`raw_dac_code`（电流校准单通道） | ≈46 B（正常）/≈54–58 B（校准） | 当前固件：20 Hz；规划：UI 刷新 <60 Hz 时可提升到 50–60 Hz | 正常 2.8 kB/s；校准时增加 ≤0.5 kB/s | 高速遥测：正常工作仅发送物理量；当收到 `CalMode` 且进入校准时，模拟侧按类型只附加必要 Raw 数据以降低带宽 |
 | `SLOW_HOUSEKEEPING` (0x12) | `vin_mv`、`vref_mv`、`board_temp`、`cal_state`、`diag_counters`、预留 | ≈16 B | 5 Hz | 80 B/s ≈ 0.64 kbps | 提供供电、校准、累计计数等慢变化信息；当前固件尚未实现，仅用于协议规划与带宽估算 |
+| `PD_STATUS` (0x13) | `attached`、`contract_mv`、`contract_ma`、`fixed_pdos[[mv,max_ma]...]`、`pps_pdos[[min_mv,max_mv,max_ma]...]` | ≈32–120 B（按 PDO 数） | 0–2 Hz（按 Attach/协商事件触发） | ≤240 B/s ≈ 1.92 kbps | USB‑PD 状态与能力摘要：用于 UI 展示“可选档位/最大电流/当前合同”；协商成功与否仍可用 `v_local_mv` 做冗余验证；规划中 |
 | `FAULT_EVENT` (0x11) | `timestamp_ms`、`fault_bits`、`fault_code`、`latched`、`extra` | ≈12 B | 按事件触发（预计 <5 Hz 峰值） | ≤60 B/s ≈ 0.48 kbps | 故障瞬时上报，附带锁存状态与附加参数；当前版本尚未启用独立 `FAULT_EVENT` 帧，故障状态通过 `FAST_STATUS.fault_flags` 传输 |
 | `CAL_CHUNK` (0x30) | `offset_index`、`payload[32]`、`crc` | ≈48 B | 0.5–1 Hz，仅在标定模式 | ≤48 B/s ≈ 0.38 kbps | 标定阶段使用多块 `CalWrite` 下发校准点（见 `docs/dev-notes/user-calibration.md`）；上行 `CAL_CHUNK` 仍为预留 |
 | `ADC_CAPTURE` (0x40) | `sample_rate`、`count`、`samples[128×u16]`、`checksum` | ≈260 B | ≤5 Hz（诊断时短时开启） | ≤1.3 kB/s ≈ 10.4 kbps | 供调试/上位机抓波使用，默认不发；当前固件尚未实现该数据块，保留作为诊断扩展 |

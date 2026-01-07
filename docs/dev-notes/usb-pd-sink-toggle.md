@@ -20,6 +20,7 @@
   - 将目标档位持久化到外置 EEPROM（M24C64）。
 - 数字↔模拟板协议：
   - 新增 `PD_SINK_REQUEST (0x27)` 控制消息（带 ACK_REQ，返回 ACK/NACK）。
+  - 新增 `PD_STATUS (0x13)` 遥测消息：模拟板上报 **Attach/合同电压电流** 与 **可用档位（Fixed/PPS 能力摘要）**。
   - ACK 仅表示“请求被接收并记录”，不代表 PD 协商成功。
 - 模拟板（STM32G431）：
   - 基于 UCPD 实现 PD Sink 的固定 PDO 请求：在 5V 与 20V 间切换。
@@ -28,7 +29,7 @@
 ### 2.2 非目标（Out of scope）
 
 - PPS 的完整协商与 UI 详情面板（本轮只预留协议字段与 UI 文案扩展点）。
-- 新增 PD 专用遥测帧（attach/contract/失败码等）；本轮 UI 只用 `v_local_mv` 推断状态。
+- 不要求 UI **依赖** `PD_STATUS` 做“是否已达目标”的验收判定：本轮仍以 `v_local_mv` 阈值为准（`PD_STATUS` 用于可选档位展示与后续扩展）。
 - 协商期间强制关闭负载（明确不做）。
 
 ## 3. 术语
@@ -54,8 +55,9 @@ UI mock（320×240，示意：用 PD 两行按钮替换 LOAD 文本标签，右�
 
 建议按钮区域（以现有布局常量为基准）：
 
-- PD 按钮容器：`x = 198 .. (LOAD_BUTTON_LEFT - 2)`；`y = LOAD_ROW_TOP .. (LOAD_ROW_TOP + LOAD_BUTTON_SIZE)`  
-  - 宽度约 87 px，高度 27 px，可容纳两行 SmallFont（12 px 高）+ 3 px 间距。
+- PD 按钮容器：`x = 198 .. (LOAD_BUTTON_LEFT - 10)`；`y = LOAD_ROW_TOP .. (LOAD_ROW_TOP + LOAD_BUTTON_SIZE)`  
+  - 目标：与右侧电源开关图标 **至少留出约 10px 间距**，避免贴边。
+  - 宽度约 75–80 px，高度 27 px，可容纳两行 SmallFont（12 px 高）+ 3 px 间距。
 - 外观：圆角矩形（半径建议 6px），颜色沿用主界面 control row / bar-track 风格。
 
 ### 4.2 文案（两行）
@@ -106,7 +108,7 @@ UI mock（320×240，示意：用 PD 两行按钮替换 LOAD 文本标签，右�
 - `v_local_mv` 来自模拟板遥测 `FastStatus.v_local_mv`，仅以本地测量为准。
 - 本阈值用于 UI 判定与“Attach 上升沿”检测；不是 PD 协议层的严格判据。
 
-## 5. 板间协议扩展：`PD_SINK_REQUEST (0x27)`
+## 5. 板间协议扩展（USB‑PD）
 
 ### 5.1 消息与可靠性
 
@@ -131,7 +133,49 @@ UI mock（320×240，示意：用 PD 两行按钮替换 LOAD 文本标签，右�
   - 记录 `{mode,target_mv}` 作为当前策略；
   - 若已 Attach：尝试立即发起 PD Request 切换合同；
   - 若未 Attach：延后到 Attach 事件发生后自动应用。
+- 电流请求策略不由数字侧配置：模拟侧固定使用 **3A 上限**，并对每个 PDO 做夹紧：`I_req_ma = min(3000, pdo_max_ma)`。
 - 协商失败不回 NACK：由 UI 通过 `v_local_mv` 的超时/阈值判定显示 Error。
+
+### 5.4 `PD_STATUS (0x13)`：Attach/合同与可选档位上报
+
+该消息用于让数字板获取“模拟板观察到的可选档位（Source Capabilities 摘要）”与“当前合同电压/电流”，从而：
+
+- 在 UI 上区分“20V 可用 / 不可用”（仍允许点击切换目标，但可提示不可用）。
+- 为后续 PD/PPS 设置面板提供数据基础。
+
+#### 5.4.1 消息与节奏
+
+- 方向：STM32G431 → ESP32‑S3
+- 消息：`PD_STATUS`（建议 ID：`0x13`）
+- 可靠性：遥测帧默认不要求 ACK；建议按事件触发并限频（例如 ≤2 Hz）。
+- 发送时机（建议）：
+  - Detach：发送 `attached=false`，清空合同与档位列表
+  - 收到 Source Capabilities 并完成解析：发送一次（填充 `fixed_pdos`/`pps_pdos`）
+  - 合同变化（5V↔20V）或重新协商完成：发送一次（更新 `contract_*`）
+
+#### 5.4.2 Payload（CBOR map）
+
+字段编号建议（用于 `loadlynx-protocol`）：
+
+| 字段号 | 名称 | 类型 | 语义 |
+| --- | --- | --- | --- |
+| `0` | `attached` | `bool` | 是否已 Attach |
+| `1` | `contract_mv` | `u32` | 当前合同电压（未知时为 `0`） |
+| `2` | `contract_ma` | `u32` | 当前合同电流（未知时为 `0`） |
+| `3` | `fixed_pdos` | array | Fixed PDO 列表：每项为 `[mv, max_ma]` |
+| `4` | `pps_pdos` | array | PPS APDO 列表（预留）：每项为 `[min_mv, max_mv, max_ma]` |
+
+说明：
+
+- `fixed_pdos` / `pps_pdos` 可以为空数组；当 `attached=false` 时应为空。
+- `contract_ma` 推荐填“已生效合同对应的电流值”；若底层实现只能提供“请求值”，可先填请求值（实现阶段再统一口径）。
+
+#### 5.4.3 数字板使用方式（UI）
+
+- 判断 20V 是否“可选”：在 `fixed_pdos` 中查找 `mv==20000`。
+  - 不存在：UI 可显示“不可用/将失败”的灰化或 Error 样式（仍允许点击切换目标，满足“未 Attach 也可点”的交互要求）。
+  - 存在：后续可在详情页展示该档位 `max_ma`（例如 `20V @ 1500mA`）。
+- 本轮“达标判定”仍以 `v_local_mv` 为准；`PD_STATUS` 用于能力/合同信息展示与后续扩展。
 
 ## 6. 持久化：数字板 EEPROM（M24C64）
 
@@ -222,6 +266,9 @@ UI mock（320×240，示意：用 PD 两行按钮替换 LOAD 文本标签，右�
     - Then `2s` 内 `v_local_mv >= 18000mV`，UI 显示 Active(20V)；否则显示 Error。
   - When 目标切到 5V  
     - Then `2s` 内 `v_local_mv <= 7000mV`，UI 显示 Active(5V)。
+- Given 已 Attach 且模拟板已解析 Source Capabilities  
+  - When 模拟板上报 `PD_STATUS (0x13)`  
+    - Then `fixed_pdos` 至少包含 `5000`；若 Source 支持 20V，则包含 `20000` 且提供对应 `max_ma`；数字板据此显示“20V 可用/不可用”。
 - Given 20V 协商失败（Source 不支持或被拒绝）  
   - When 超时后仍未达到 20V 阈值  
     - Then UI 显示 Error，且系统不自动切回 5V（等待用户手动切回）。
