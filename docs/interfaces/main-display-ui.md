@@ -60,14 +60,27 @@
 | Control row | 主界面 Preset 概览与入口：左侧两行 `M#` / `CC|CV`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更） | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；分别用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；交互语义详见 `docs/dev-notes/on-device-preset-ui.md`。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
-| Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `FLT 0x12345678`） | SmallFont | `#DFE7FF` | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
+| Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `LNK` / `UVLO` / `OCF` / `OVP` / `OTP` / `FLT 0x12345678`） | SmallFont | 默认 `#DFE7FF`；**Status line #5 在异常时闪烁（`#FF5252` ⇄ `#FFFFFF`）** | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
 
-### Status line #5：状态文案（禁止 debug 噪声）
+### Status line #5：状态文案（对外缩写，禁止 debug 噪声）
 
 - 正常就绪：`RDY`
-- 模拟板离线：`OFF`
+- 模拟板离线（从未建链）：`OFF`
 - 校准缺失：`CAL`
-- 故障：`FLT`（仅状态）或 `FLT 0x12345678`（fault_flags 非 0）
+- 当显示“原因缩写”（`OFF/LNK/UVLO/OCP/OPP/OCF/OVP/OTP/FLT`）时，需要闪烁（文本双色切换），用于提示“异常/无法启用/强制关断”。
+- 最高级别故障（Critical）：
+  - 链路持续故障：`LNK`（曾经建链后连续掉线；短暂掉线仅屏幕提示；持续掉线达到阈值后进入 Critical，默认：连续无有效帧 `≥3s`）
+  - 模拟板故障（`fault_flags != 0`）：优先显示更具体的缩写（若可判定）：
+    - `OCF`：过流故障（Over‑Current Fault）
+    - `OVP`：过压故障（Over‑Voltage Protection）
+    - `OTP`：过温故障（Over‑Temperature Protection）
+  - 无法判定/多故障并存：`FLT` 或 `FLT 0x12345678`（保留位域便于排查）
+- 预设保护触发（Protection Trip，等待用户确认）：
+  - `UVLO`：欠压锁存触发（Undervoltage Lockout）
+  - `OCP`：过流保护触发（相对预设阈值，Over‑Current Protection）
+  - `OPP`：过功率保护触发（相对预设阈值，Over‑Power Protection）
+- UX 约束：
+  - 在用户**未尝试启用负载**之前，UI 不应主动显示 `UVLO/OCP/OPP` 这类“负载输入相关”的缩写（启用前未连接被测设备是常见情况）；启用失败后可短暂显示原因缩写用于解释。
 - **禁止显示**：`P1..P5`、`CC/CV`、`OUT0/OUT1`、`UV0/UV1` 等调试位域（易误读且会被裁切）
 
 > Mirror bars：中心刻度标注 `0`，左半对应该对数据中的左值，右半对应右值。左/右填充长度 = `min(value / limit, 1.0) * half_width`，其中电压上限 40 V，电流上限 5 A。

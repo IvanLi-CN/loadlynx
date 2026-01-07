@@ -47,9 +47,9 @@ UI mock（320×240 PNG）：
 
   ![Dashboard blocked (LNK)](../assets/on-device-preset-ui/dashboard-blocked-lnk.png)
 
-- 主界面（Dashboard；forced OFF：UV）
+- 主界面（Dashboard；forced OFF：UVLO）
 
-  ![Dashboard blocked (UV)](../assets/on-device-preset-ui/dashboard-blocked-uv.png)
+  ![Dashboard blocked (UVLO)](../assets/on-device-preset-ui/dashboard-blocked-uv.png)
 
 - 预设设置面板（LOAD=OFF）
 
@@ -64,7 +64,7 @@ UI mock（320×240 PNG）：
 - `preset-panel-output-off.png`：`active_preset_id == editing_preset_id`（示例：`M2`）。
 - `preset-panel-output-on.png`：`active_preset_id != editing_preset_id`（示例：active=`M4`，editing=`M2`；用于展示 active 标记）。
 - `dashboard-blocked-lnk.png`：链路已建立后掉线，LOAD 无法启用；右下角状态行显示 `LNK`。
-- `dashboard-blocked-uv.png`：欠压保护触发，LOAD 被强制关断；右下角状态行显示 `UV`。
+- `dashboard-blocked-uv.png`：欠压保护触发（`UVLO`），LOAD 被强制关断；右下角状态行显示 `UVLO`。
 
 #### UI mock 资产一致性（冻结）
 
@@ -95,35 +95,61 @@ UI mock（320×240 PNG）：
 - Dashboard `LOAD` 按钮的状态颜色只落在**电源 symbol 本身**上（不对按钮外圈/背景做状态染色），避免 UI 上出现额外状态色干扰：
   - `ON`：symbol 使用主题青蓝（`#4CC9F0`）。
   - `OFF`：symbol 使用灰色（`#555F75`）。
-  - `forced OFF`（例如 `UV/FLT`）：symbol 使用红色（`#FF5252`）。
+  - `forced OFF`（例如 `UVLO/OVP/LNK`）：symbol 使用红色（`#FF5252`）。
   - `disabled`：symbol 仍使用灰色（`#555F75`）。
 - 该开关与设置面板底部的 `LOAD` 滑动开关绑定到同一真值（`load_enabled`），两处 UI 必须同步显示。
 - 位置与外观以 UI mock 为准（见 `dashboard*.png`）；LOAD 行位于右侧 status block 中部：在电压能量条（REMOTE/LOCAL 下方的条形图）**下方**，并与能量条保持明显间隔（约 ≥1 个按钮图标高度）；左侧为 `LOAD` 文本，右侧为电源按钮图标。
 
-#### Dashboard：为何无法启用（右下角状态行复用）
+#### Dashboard：为何无法启用 / 强制关断（右下角状态行复用）
 
-当 `LOAD` 不能被启用（或被保护强制关断）时，右下角 **status line #5（最后一行）**必须显示“原因缩写”，不新增任何 UI widget：
+当 `LOAD` 不能被启用（或在运行期间被保护强制关断）时，右下角 **status line #5（最后一行）**必须显示“原因缩写”，不新增任何 UI widget：
 
-- 缩写与优先级：`UV` > `FLT` > `LNK` > `OFF`（同一时刻只显示 1 个）。
-- 用户可见语义：
-  - `UV`：欠压保护触发（例如低于 `UVLO`）；LOAD 会被强制置为 OFF。
-  - `FLT`：模拟板故障（例如 `fault_flags != 0`）；LOAD 会被强制置为 OFF。
-  - `LNK`：链路曾经建立，但随后掉线（比 `OFF` 严重）。
-  - `OFF`：自上电以来**从未**建立链路（例如模拟板未连接/未上电）。
+- 缩写与优先级（同一时刻只显示 1 个；**Critical 永远压过 Trip**）：
+  - (`OVP`/`OTP`/`OCF`/`FLT`) > `LNK` > (`OCP`/`OPP`/`UVLO`) > `OFF`
+- 显示形态：
+  - 该缩写必须**闪烁**（文本双色切换），用于快速提示“异常/无法启用/强制关断”。
+- 用户可见语义（对外缩写）：
+  - `UVLO`：欠压（阈值为当前预设的 `min_v_mv`）：
+    - **Enable 预检拒绝**（启动前就欠压）：当用户尝试启用 `LOAD` 且 `V_main ≤ min_v_mv`，拒绝启用（播放一次 `UI fail` 失败音），**不进入连续告警**；右下角短暂显示 `UVLO`（闪烁，用于解释无法启用；例如持续 ~3s）。
+      - 在用户**未尝试启用负载**之前，UI 不应主动显示 `UVLO/OCP/OPP` 这类“负载输入相关”的故障缩写（启用前未连接被测设备是常见情况）。
+      - 若用户希望“先打开 LOAD 再接入被测设备”，可将 `UVLO(min_v_mv)` 设为 `0` 以禁用该预检（见 `docs/dev-notes/preset-ui-protection-labels.md`）。
+    - **运行期间 Trip**（欠压导致停机）：当 `LOAD` 为 ON 且 `V_main ≤ min_v_mv`，触发欠压锁存并强制关断；进入 Trip 告警音，持续到用户一次**本地确认**；在确认前必须显示 `UVLO`；确认后若锁存仍在，缩写仍可继续显示（用于解释无法启用/为何强制关断）。
+  - `OCP`：过流保护触发（相对预设阈值），负载被强制置为 OFF；告警音持续到用户一次**本地确认**；在确认前必须显示缩写。
+  - `OPP`：过功率保护触发（相对预设阈值），负载被强制置为 OFF；告警音持续到用户一次**本地确认**；在确认前必须显示缩写。
+  - `OVP`：负载输入过压（模拟板硬故障）；负载被强制置为 OFF；故障未消失前不提供消音。
+  - `OTP`：温度超过极限（模拟板硬故障，含 MCU/散热器温度）；负载被强制置为 OFF；故障未消失前不提供消音。
+  - `OCF`：硬过流故障（模拟板硬故障）；负载被强制置为 OFF；故障未消失前不提供消音。
+  - `FLT`：模拟板硬故障（`fault_flags != 0` 的兜底缩写；当多故障并存/无法判定时使用）；负载被强制置为 OFF；故障未消失前不提供消音。
+  - `LNK`：链路掉线（链路曾经建立，但随后掉线）：
+    - 短暂掉线：仅用于屏幕提示（不触发停机/连续告警）。
+    - 持续掉线达到阈值（默认：连续无有效帧 `≥3s`）：进入最高级别（Critical）链路故障，负载被强制置为 OFF 且持续告警音（故障未消失前不提供消音）。
+  - `OFF`：自上电以来**从未**建立链路（例如模拟板未连接/未上电）；不触发连续告警，仅用于解释无法启用。
 
-> 说明：当原因消失后，status line #5 恢复显示常规状态文本（例如 `RDY/CAL/...`），不需要额外视觉“确认”控件。
+> 说明：
+>
+> - `UVLO/OCP/OPP` 属于“预设保护触发（已保护性停机）”：即使停机后物理量恢复正常，缩写与告警音也必须持续，直到用户发生一次**本地确认**（任意触摸/旋钮/按键事件）。
+>   - 其中 `UVLO` 是锁存类状态：本地确认只负责“已读/消音”，不等于“已恢复”；若锁存仍在，缩写可继续用于解释无法启用。
+> - `FLT/LNK` 属于“最高级别故障”：故障未消失前不提供消音；故障消失后仍需一次本地确认才停止告警音。
+> - 当上述条件均不存在时，status line #5 恢复显示常规状态文本（例如 `RDY/CAL/...`），不需要额外视觉“确认”控件。
 
-#### Dashboard：连续告警（蜂鸣器）策略
+#### Dashboard：连续告警（蜂鸣器）策略（按告警分级冻结）
 
-- `UV`/`FLT`：触发 **主报警（primary）**连续告警。
-- `LNK`：触发 **次报警（secondary）**连续告警（与 primary **不同节奏**，便于盲听区分）。
-- `OFF`：**不触发**连续告警。
-- “消除后等待确认”（两种报警都适用）：当告警条件清除后，告警声仍持续，直到发生一次**本地确认**（任意触摸/旋钮/按键事件）后才停止；远程操作不计入确认。
+- 最高级别（Critical）：
+  - `LNK`：链路持续故障（持续掉线达到阈值，默认：连续无有效帧 `≥3s`）
+  - `OVP`/`OTP`/`OCF`/`FLT`：模拟板硬故障（`fault_flags != 0`）
+  - 行为：进入停机态并持续告警音 + 屏幕告警；相关异常未消失前**不提供消音**；异常消失后，仍需一次**本地确认**后才停止告警音。
+- 次高级别（Protection Trip，运行期间触发、已保护性停机）：
+  - `UVLO` / `OCP` / `OPP`
+  - 行为：负载立即停机；告警音持续，直到发生一次**本地确认**后才停止；在确认前，右下角必须持续显示触发原因缩写（即使停机后物理量已恢复正常）。
+- 其他：
+  - `OFF`：不触发连续告警（正常解释状态）。
+  - `CAL` 或其它“无法启用”类状态：仅在用户尝试 enable 时播放一次 `UI fail`（失败音），不主动连续告警。
 
 建议的节奏基线（实现可在 `docs/dev-notes/prompt-tone-manager.md` 的 `FaultAlarm` 基础上扩展；需实机试听后微调，但必须保证 primary/secondary 可区分）：
 
-- primary：`Tone(2200Hz, 6%, 300ms)` + `Silence(700ms)` 循环（与 `FaultAlarm` 一致）。
-- secondary：`Tone(2200Hz, 6%, 300ms)` + `Silence(1700ms)` 循环。
+- Critical（默认，`FLT` 等）：`Tone(2200Hz, 6%, 300ms)` + `Silence(700ms)` 循环。
+- Critical（链路，`LNK`）：双短鸣（与默认 Critical 可盲听区分）。
+- Trip（`UVLO/OCP/OPP`）：短鸣节奏（与 `LNK`/`FLT` 均可盲听区分），持续到本地确认。
 
 ### 2) 预设设置面板（Preset Settings Panel）
 

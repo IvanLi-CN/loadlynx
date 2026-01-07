@@ -6,7 +6,7 @@ LoadLynx 控制板（ESP32‑S3）已集成无源蜂鸣器，但当前固件缺�
 
 - **提示音管理器**：以事件驱动、非阻塞播放、可扩展的“提示音表”与调度策略。
 - **操作反馈音**：所有本地交互（触摸、旋钮 detent、按键）都要有声音反馈，且音量偏小（靠占空比控制）。
-- **故障报警音**：模拟板故障（`fault_flags!=0`）时持续报警，直到故障消除且用户进行一次本地确认交互后才停止。
+- **告警音**：按“告警分级”策略持续/一次性提示，并与 UI 的右下角状态缩写保持一致（见 `docs/dev-notes/on-device-preset-ui.md`）。
 
 本设计只覆盖控制板本地蜂鸣器（GPIO21）提示音，不涉及 UI 视觉提示或远程接口反馈。
 
@@ -15,10 +15,12 @@ LoadLynx 控制板（ESP32‑S3）已集成无源蜂鸣器，但当前固件缺�
 - 提供两层架构：
   - `buzzer`：蜂鸣器硬件 PWM 驱动（LEDC），提供最小、非阻塞控制接口。
   - `prompt_tone`：提示音管理器（事件 → 音型 → 调度），无堆分配。
-- **故障报警**（最高优先级）：
-  - `fault_flags != 0`：循环报警，抑制其它提示音；
-  - `fault_flags == 0`：仍继续报警，直到用户发生一次**本地交互**（触摸/旋钮/按键）后停止。
-  - 远程操作（Wi‑Fi/HTTP 等）不计入“确认交互”。
+- **告警分级（冻结）**：
+  - **最高级别（Critical）**：`fault_flags != 0` 或链路持续故障（`LNK`）。
+    - 行为：持续告警并抑制其它提示音；相关异常未消失前不提供消音；异常消失后仍需一次**本地交互**才停止。
+  - **次高级别（Protection Trip）**：`UVLO/OCP/OPP` 等“运行期间触发、已保护性停机”的预设保护。
+    - 行为：持续告警直到一次**本地交互**确认（即使停机后物理量已恢复正常也一样）；确认后消音并清除“待确认”状态。
+  - **其它**：不主动持续告警（例如 `OFF/CAL/...`），仅在用户尝试 enable 但被拒绝时播放一次失败音（`UiFail`）。
 - **操作反馈**（低音量）：
   - 触摸：每次 touch-down 有声；
   - 旋钮：每个 detent 有声；若极快旋转导致播放跟不上，需要排队；
@@ -51,12 +53,18 @@ LoadLynx 控制板（ESP32‑S3）已集成无源蜂鸣器，但当前固件缺�
 - 触摸屏幕（touch-down）：播放 `UiOk`（短促低音量）。
 - 编码器按键短按/长按：播放 `UiOk` 或 `UiFail`（仅业务拒绝触发 `UiFail`）。
 
-2) **进入故障**
-- 接收到 `fault_flags` 从 `0 → 非0`：立即进入 `FaultAlarm` 循环，抑制其它音。
+2) **进入最高级别故障（Critical）**
+- 接收到 `fault_flags` 从 `0 → 非0`：立即进入 Critical 告警循环，抑制其它音。
+- 链路从 up→down：短暂掉线仅用于屏幕提示，不触发连续告警；当掉线持续达到“持续故障”阈值（默认：连续无有效帧 `≥3s`，且已收到过一次 `HELLO`）时，进入 `LNK` Critical 告警循环（与 `fault_flags` 不同节奏，便于盲听区分）。
 
-3) **故障消除但需要人工确认**
-- `fault_flags` 从 `非0 → 0`：继续 `FaultAlarm` 循环（不立刻停）。
-- 下一次本地交互（触摸/旋钮/按键）发生后：停止 `FaultAlarm`，并正常播放该次交互的提示音。
+3) **Critical：故障消除但需要人工确认**
+- 故障条件从 active→cleared：继续告警循环（不立刻停）。
+- 下一次本地交互（触摸/旋钮/按键）发生后：停止告警，并正常播放该次交互的提示音。
+
+4) **预设保护触发（Protection Trip）**
+- 运行期间触发 `UVLO/OCP/OPP` 任一：负载被强制置为 OFF；进入 Trip 告警循环（节奏需与 Critical/LNK 区分）。
+- 即使停机后物理量恢复正常：Trip 告警也必须持续，直到发生一次本地交互后停止。
+- **启用前预检拒绝（不触发 Trip）**：例如 `UVLO`（`V_main ≤ min_v_mv`）在启动前就已存在时，拒绝启用负载，仅播放一次 `UiFail`（失败音），不进入 Trip 告警循环。
 
 ## 模块边界与接口形状（概要）
 
@@ -81,17 +89,20 @@ trait BuzzerControl {
 - 定义音效 ID（`SoundId`）与默认音型表（静态步骤序列）。
 - 接收事件（本地交互、故障变化），按策略排队/抢占，驱动蜂鸣器播放。
 
-关键状态：
-- `fault_active`：`fault_flags != 0`。
-- `fault_cleared_wait_ack`：`fault_flags == 0`，但尚未收到一次本地交互确认，因此继续报警。
+关键状态（概念）：
+- `critical_active`：最高级别故障存在（例如 `fault_flags != 0` 或链路持续故障）。
+- `critical_cleared_wait_ack`：最高级别故障已清除，但尚未收到一次本地交互确认，因此继续报警。
+- `trip_wait_ack`：预设保护触发后等待用户确认（与 `critical_active` 无关；Trip 可在物理量恢复后继续存在）。
 - `pending_ticks`：旋钮 detent 的待播放计数（允许累积/排队）。
 
 事件形状（示意）：
 
 ```text
 SoundEvent:
-  - FaultEnter(flags: u32)
-  - FaultCleared
+  - CriticalEnter(kind)
+  - CriticalCleared(kind)
+  - TripLatch(reason)
+  - TripAck
   - LocalInteraction   // 任何本地交互：touch-down / detent / 按键
   - UiTick(count: u16) // 每个 detent 计数
   - UiOk
@@ -113,28 +124,37 @@ SoundEvent:
 - 每个 detent 产生一次 `UiTick`；若播放赶不上，累积到 `pending_ticks`。
 - 设计目标：正常旋转速度下不应形成可感知 backlog；极快旋转允许 backlog。
 
-### 故障消除后的“确认停止”
+### 故障/Trip 的“确认停止”
 
-- 当 `fault_flags` 清零后进入 `fault_cleared_wait_ack=true`：
-  - 继续播放 `FaultAlarm`；
-  - 等待第一次本地交互（`LocalInteraction`）到来后：停止报警并清除此状态。
-- 远程操作不产生 `LocalInteraction`。
+- Critical：
+  - 当 Critical 条件清除后进入 `critical_cleared_wait_ack=true`：
+    - 继续播放 Critical 告警；
+    - 等待第一次本地交互到来后：停止告警并清除此状态。
+- Trip：
+  - 当 Trip 被 latch 后进入 `trip_wait_ack=true`（不要求底层物理条件仍存在）：
+    - 持续播放 Trip 告警；
+    - 等待第一次本地交互到来后：停止告警并清除此状态。
+- 远程操作不计入本地确认。
 
 ## 默认音型与参数建议（需实机试听后微调）
 
 基准频率建议：`~2200Hz`（低于 2.7kHz 共振点，听感更柔和）。  
 占空比建议：操作音更小、故障音可略高但仍保守（最终以实机风险与听感为准）。
 
-建议的音型（示意）：
+建议的音型（示意；需保证三类可盲听区分）：
 
 - `UiTick`：`Tone(2200Hz, 3%, 12ms)` + `Silence(8ms)`（总 20ms/ detent）
 - `UiOk`：`Tone(2200Hz, 3%, 25ms)`
 - `UiFail`：`Tone(2200Hz, 3%, 25ms)` + `Silence(30ms)` + `Tone(2200Hz, 3%, 25ms)`
-- `FaultAlarm`：`Tone(2200Hz, 6%, 300ms)` + `Silence(700ms)` 循环
+- `CriticalAlarm`（默认）：`Tone(2200Hz, 6%, 300ms)` + `Silence(700ms)` 循环
+- `LinkAlarm`（`LNK`）：双短鸣循环（区别于 `CriticalAlarm`）
+- `TripAlarm`（`UVLO/OCP/OPP`）：短鸣节奏循环（区别于 `LinkAlarm/CriticalAlarm`）
 
 ## 集成点（仅定义入口，不定义实现细节）
 
-- `fault_flags` 变化检测：在数字侧消费 `FastStatus` 的位置检测 `0↔非0` 边沿，并向 `prompt_tone` 上报 `FaultEnter/FaultCleared`。
+- `fault_flags` 变化检测：在数字侧消费 `FastStatus` 的位置检测 `0↔非0` 边沿，并向 `prompt_tone` 上报 Critical enter/cleared。
+- 链路掉线检测：在数字侧检测 link up/down 与 “曾经建立” 状态，并向 `prompt_tone` 上报 `LNK` latch/cleared。
+- Trip 检测：在数字侧检测 `UVLO`（以及 OCP/OPP 等预设保护）触发边沿，并向 `prompt_tone` 上报 `TripLatch(reason)`。
 - 本地交互事件：
   - 旋钮：每个 detent 上报 `LocalInteraction + UiTick(1)`。
   - 编码器按键：按下/释放上报 `LocalInteraction + UiOk/UiFail`。
@@ -155,7 +175,9 @@ SoundEvent:
 
 ## 验收标准
 
-- `fault_flags!=0` 时：持续 `FaultAlarm` 循环，且抑制其它音。
-- `fault_flags` 清零后：报警仍持续；直到发生一次本地交互后停止；该交互仍会发出对应操作音。
+- Critical：
+  - `fault_flags!=0` 或 `LNK` active 时：持续告警循环，且抑制其它音。
+  - Critical 清除后：告警仍持续；直到发生一次本地交互后停止；该交互仍会发出对应操作音。
+- Trip：
+  - `UVLO/OCP/OPP` 任一触发后：告警持续；直到发生一次本地交互后停止（即使停机后物理量已恢复正常）。
 - 旋钮每个 detent 都有声；极快旋转时允许排队但不丢失计数。
-
