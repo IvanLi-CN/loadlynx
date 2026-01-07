@@ -867,16 +867,6 @@ fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
     draw_power_button(canvas, LOAD_BUTTON_LEFT, LOAD_ROW_TOP, symbol_color);
 }
 
-fn small_text_width(text: &str, spacing: i32) -> i32 {
-    let w = SMALL_FONT.width() as i32;
-    let len = text.chars().count() as i32;
-    if len == 0 {
-        0
-    } else {
-        len * w + (len - 1) * spacing
-    }
-}
-
 fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
     let rect = Rect::new(
         PD_BUTTON_LEFT,

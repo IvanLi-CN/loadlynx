@@ -4285,19 +4285,6 @@ async fn setpoint_tx_task(
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
 
-    #[derive(Clone, Copy)]
-    struct PdPending {
-        seq: u8,
-        target_mv: u32,
-        ack_total_at_send: u32,
-        deadline_ms: u32,
-    }
-
-    let mut pd_pending: Option<PdPending> = None;
-    let mut pd_last_sent_target_mv: Option<u32> = None;
-    let mut pd_force_send: bool = false;
-    let mut prev_attached: bool = false;
-
     // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
     let soft_reset_seq: u8 = 0;
     let soft_reset_acked =
@@ -4843,6 +4830,19 @@ async fn setmode_tx_task(
 
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
+
+    #[derive(Clone, Copy)]
+    struct PdPending {
+        seq: u8,
+        target_mv: u32,
+        ack_total_at_send: u32,
+        deadline_ms: u32,
+    }
+
+    let mut pd_pending: Option<PdPending> = None;
+    let mut pd_last_sent_target_mv: Option<u32> = None;
+    let mut pd_force_send: bool = false;
+    let mut prev_attached: bool = false;
 
     // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
     let soft_reset_seq: u8 = 0;
