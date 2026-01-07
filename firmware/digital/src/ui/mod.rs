@@ -165,7 +165,8 @@ pub enum WifiUiStatus {
 }
 
 // Dashboard LOAD power-button (UI mock contract).
-const LOAD_BUTTON_SIZE: i32 = 21;
+// Scaled up from the original 21px design to ~1.3× while keeping an odd diameter.
+const LOAD_BUTTON_SIZE: i32 = 27;
 const LOAD_BUTTON_RIGHT: i32 = CONTROL_VALUE_PILL_RIGHT;
 const LOAD_BUTTON_LEFT: i32 = LOAD_BUTTON_RIGHT - LOAD_BUTTON_SIZE;
 const LOAD_BUTTON_BOTTOM: i32 = LOAD_ROW_TOP + LOAD_BUTTON_SIZE;
@@ -852,51 +853,84 @@ fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
 }
 
 fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb565) {
-    // Match the pixel-art contract from docs/dev-notes/on-device-preset-ui.md (Task 001).
-    const TEMPLATE: [&str; 21] = [
-        ".......OOOOOOO.......",
-        ".....OO...I...OO.....",
-        "....O.IISSSSSII.O....",
-        "...O.ISSIIXIISSI.O...",
-        "..O.ISIIXIXIXIISI.O..",
-        ".O.ISIIXXIXIXXIISI.O.",
-        ".OISIIXXIIXIIXXIISIO.",
-        "O.ISIXXIIIXIIIXXISI.O",
-        "O.SIXXIIIIXIIIIXXIS.O",
-        "O.SIXXIIIIXIIIIXXIS.O",
-        "OISIXXIIIIXIIIIXXISIO",
-        "O.SIXXIIIIXIIIIXXIS.O",
-        "O.SIXXIIIIIIIIIXXIS.O",
-        "O.ISIXXIIIIIIIXXISI.O",
-        ".OISIIXXIIIIIXXIISIO.",
-        ".O.ISIIXXXXXXXIISI.O.",
-        "..O.ISIIXXXXXIISI.O..",
-        "...O.ISSIIIIISSI.O...",
-        "....O.IISSSSSII.O....",
-        ".....OO...I...OO.....",
-        ".......OOOOOOO.......",
-    ];
-
+    // Pixel-perfect, non-resampled rendering. Kept intentionally simple so the icon stays crisp
+    // at different sizes (no bitmap scaling / no blur).
     let border = rgb(0x1c2a3f);
     let shadow = rgb(0x19243a);
     let fill = rgb(0x1c2638);
 
-    for (y, row) in TEMPLATE.iter().enumerate() {
-        debug_assert_eq!(row.len(), LOAD_BUTTON_SIZE as usize);
-        for (x, &b) in row.as_bytes().iter().enumerate() {
-            let color = match b {
-                b'.' => None, // transparent: keep background
-                b'O' => Some(border),
-                b'S' => Some(shadow),
-                b'I' => Some(fill),
-                b'X' => Some(symbol_color),
-                _ => None,
-            };
-            if let Some(color) = color {
-                canvas.set_pixel(left + x as i32, top + y as i32, color);
+    let size = LOAD_BUTTON_SIZE;
+    let center = (size - 1) / 2;
+    let outer_r = center;
+
+    // Power symbol parameters (tuned by eye on 320×240 mocks).
+    let sym_r = (outer_r - 5).max(4);
+    let sym_gap_half_w = 2;
+    let sym_gap_depth = 2;
+    let sym_line_top = -(sym_r + 2);
+    let sym_line_bottom = -1;
+
+    for y in 0..size {
+        for x in 0..size {
+            let dx = x - center;
+            let dy = y - center;
+            let d2 = dx * dx + dy * dy;
+            let d2_4 = d2 * 4;
+
+            // Button container: border ring + inner shadow ring + fill.
+            let mut px = None;
+            if in_circle_ring(d2_4, outer_r) {
+                px = Some(border);
+            } else if in_circle_ring(d2_4, outer_r - 1) {
+                px = Some(shadow);
+            } else if d2_4 <= circle_fill_limit_4(outer_r - 2) {
+                px = Some(fill);
+            }
+
+            // Power symbol overlay (ring + centered line). Kept away from the outer rings.
+            if d2_4 <= circle_fill_limit_4(sym_r + 2) {
+                // Ring thickness ≈ 2 px (sym_r and sym_r-1).
+                let mut in_sym_ring =
+                    in_circle_ring(d2_4, sym_r) || in_circle_ring(d2_4, sym_r - 1);
+                // Notch at the top center to "break" the ring.
+                if in_sym_ring
+                    && dy < 0
+                    && dy <= -(sym_r - sym_gap_depth)
+                    && dx >= -(sym_gap_half_w + 1)
+                    && dx <= sym_gap_half_w
+                {
+                    in_sym_ring = false;
+                }
+
+                let in_sym_line =
+                    (dx == -1 || dx == 0) && dy >= sym_line_top && dy <= sym_line_bottom;
+                if in_sym_ring || in_sym_line {
+                    px = Some(symbol_color);
+                }
+            }
+
+            if let Some(px) = px {
+                canvas.set_pixel(left + x, top + y, px);
             }
         }
     }
+}
+
+fn in_circle_ring(d2_4: i32, r: i32) -> bool {
+    if r <= 0 {
+        return false;
+    }
+    // Distance-to-radius check using (2*dist)^2 to avoid floating point.
+    let lo = (2 * r - 1) * (2 * r - 1);
+    let hi = (2 * r + 1) * (2 * r + 1);
+    d2_4 >= lo && d2_4 <= hi
+}
+
+fn circle_fill_limit_4(r: i32) -> i32 {
+    if r <= 0 {
+        return 0;
+    }
+    (2 * r + 1) * (2 * r + 1)
 }
 
 fn draw_debug_overlay(canvas: &mut Canvas) {
