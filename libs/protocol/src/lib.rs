@@ -1635,6 +1635,65 @@ mod tests {
     }
 
     #[test]
+    fn pd_sink_request_roundtrip_and_ack_req() {
+        let req = PdSinkRequest {
+            mode: PdSinkMode::Fixed,
+            target_mv: 20_000,
+        };
+
+        let mut raw = [0u8; 64];
+        let len = encode_pd_sink_request_frame(7, &req, &mut raw).unwrap();
+        let (hdr, decoded) = decode_pd_sink_request_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.msg, MSG_PD_SINK_REQUEST);
+        assert_eq!(hdr.seq, 7);
+        assert_eq!(hdr.flags & FLAG_ACK_REQ, FLAG_ACK_REQ);
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn pd_status_roundtrip_and_lists() {
+        let mut fixed_pdos = FixedPdoList::new();
+        fixed_pdos
+            .push(FixedPdo {
+                mv: 5_000,
+                max_ma: 3_000,
+            })
+            .unwrap();
+        fixed_pdos
+            .push(FixedPdo {
+                mv: 20_000,
+                max_ma: 1_500,
+            })
+            .unwrap();
+
+        let mut pps_pdos = PpsPdoList::new();
+        pps_pdos
+            .push(PpsPdo {
+                min_mv: 3_300,
+                max_mv: 11_000,
+                max_ma: 3_000,
+            })
+            .unwrap();
+
+        let status = PdStatus {
+            attached: true,
+            contract_mv: 20_000,
+            contract_ma: 1_500,
+            fixed_pdos,
+            pps_pdos,
+        };
+
+        let mut raw = [0u8; 128];
+        let len = encode_pd_status_frame(9, &status, &mut raw).unwrap();
+        let (hdr, decoded) = decode_pd_status_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.msg, MSG_PD_STATUS);
+        assert_eq!(hdr.seq, 9);
+        assert_eq!(decoded, status);
+        assert_eq!(decoded.fixed_pdos.len(), 2);
+        assert_eq!(decoded.fixed_pdos[1].mv, 20_000);
+    }
+
+    #[test]
     fn set_mode_decode_rejects_wrong_msg_id() {
         let cmd = SetMode {
             preset_id: 1,
