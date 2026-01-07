@@ -43,6 +43,11 @@ use esp_hal::{
 };
 
 use esp_hal::gpio::{Input, InputConfig, Pull};
+use heapless::Vec;
+use minicbor::data::Type as CborType;
+use minicbor::decode::{Decode as CborDecode, Decoder as CborDecoder};
+use minicbor::encode::write::{Cursor as CborCursor, EndOfSlice as CborEndOfSlice};
+use minicbor::encode::{Encoder as CborEncoder, Error as CborEncodeError};
 
 #[cfg(not(feature = "mock_setpoint"))]
 use esp_hal::pcnt::{self, Pcnt, channel};
@@ -54,14 +59,14 @@ use lcd_async::{
 };
 use loadlynx_protocol::{
     CRC_LEN, CalKind, CalMode, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
-    FAULT_SINK_OVER_TEMP, FLAG_ACK_REQ, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN,
-    LimitProfile, LoadMode, MSG_CAL_MODE, MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO,
-    MSG_LIMIT_PROFILE, MSG_SET_MODE, MSG_SET_POINT, MSG_SOFT_RESET, STATE_FLAG_UV_LATCHED,
-    SetEnable, SetMode, SetPoint, SlipDecoder, SoftReset, SoftResetReason, decode_cal_mode_frame,
-    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_soft_reset_frame,
-    encode_cal_mode_frame, encode_cal_write_frame, encode_limit_profile_frame,
-    encode_set_enable_frame, encode_set_mode_frame, encode_set_point_frame,
-    encode_soft_reset_frame, slip_encode,
+    FAULT_SINK_OVER_TEMP, FLAG_ACK_REQ, FLAG_IS_ACK, FLAG_IS_NACK, FastStatus, FrameHeader,
+    HEADER_LEN, LimitProfile, LoadMode, MSG_CAL_MODE, MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO,
+    MSG_LIMIT_PROFILE, MSG_SET_MODE, MSG_SET_POINT, MSG_SOFT_RESET, PROTOCOL_VERSION,
+    STATE_FLAG_UV_LATCHED, SetEnable, SetMode, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
+    crc16_ccitt_false, decode_cal_mode_frame, decode_fast_status_frame, decode_frame,
+    decode_hello_frame, decode_soft_reset_frame, encode_cal_mode_frame, encode_cal_write_frame,
+    encode_limit_profile_frame, encode_set_enable_frame, encode_set_mode_frame,
+    encode_set_point_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -69,6 +74,10 @@ use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over
 pub(crate) const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
+
+const MSG_PD_STATUS: u8 = 0x13;
+const MSG_PD_SINK_REQUEST: u8 = 0x27;
+const PD_T_PD_MS: u32 = 2_000;
 
 mod control;
 use control::{ControlState, PresetsBlobError};
@@ -313,6 +322,14 @@ pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
 static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_V_LOCAL_MV: AtomicI32 = AtomicI32::new(0);
+static PD_STATUS_ATTACHED: AtomicBool = AtomicBool::new(false);
+static PD_REQ_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
+static PD_REQ_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
+static PD_REQ_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
+static PD_REQ_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
+static PD_REQ_LAST_ACK_FLAGS: AtomicU8 = AtomicU8::new(0);
+static PD_REQ_ACK_PENDING: AtomicBool = AtomicBool::new(false);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -2041,6 +2058,162 @@ async fn save_pd_config_to_eeprom(cfg: control::PdConfig, eeprom: &EepromMutex) 
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PdFixedPdo {
+    mv: u32,
+    max_ma: u32,
+}
+
+impl<'b, C> CborDecode<'b, C> for PdFixedPdo {
+    fn decode(d: &mut CborDecoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let len = d.array()?;
+        if matches!(len, Some(n) if n < 2) {
+            return Err(minicbor::decode::Error::message("fixed_pdo: short array"));
+        }
+        let mv = d.u32()?;
+        let max_ma = d.u32()?;
+        match len {
+            Some(n) => {
+                for _ in 2..n {
+                    d.skip()?;
+                }
+            }
+            None => {
+                while d.datatype()? != CborType::Break {
+                    d.skip()?;
+                }
+                d.skip()?; // consume break
+            }
+        }
+        Ok(Self { mv, max_ma })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PdPpsApdo {
+    min_mv: u32,
+    max_mv: u32,
+    max_ma: u32,
+}
+
+impl<'b, C> CborDecode<'b, C> for PdPpsApdo {
+    fn decode(d: &mut CborDecoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let len = d.array()?;
+        if matches!(len, Some(n) if n < 3) {
+            return Err(minicbor::decode::Error::message("pps_apdo: short array"));
+        }
+        let min_mv = d.u32()?;
+        let max_mv = d.u32()?;
+        let max_ma = d.u32()?;
+        match len {
+            Some(n) => {
+                for _ in 3..n {
+                    d.skip()?;
+                }
+            }
+            None => {
+                while d.datatype()? != CborType::Break {
+                    d.skip()?;
+                }
+                d.skip()?; // consume break
+            }
+        }
+        Ok(Self {
+            min_mv,
+            max_mv,
+            max_ma,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+struct PdStatus {
+    attached: bool,
+    contract_mv: u32,
+    contract_ma: u32,
+    fixed_pdos: Vec<PdFixedPdo, 8>,
+    pps_pdos: Vec<PdPpsApdo, 4>,
+}
+
+impl PdStatus {
+    fn has_fixed_mv(&self, mv: u32) -> bool {
+        self.fixed_pdos.iter().any(|p| p.mv == mv)
+    }
+}
+
+fn decode_pd_status_payload(payload: &[u8]) -> Result<PdStatus, minicbor::decode::Error> {
+    let mut d = CborDecoder::new(payload);
+    let len = d.map()?;
+
+    let mut attached = false;
+    let mut contract_mv = 0u32;
+    let mut contract_ma = 0u32;
+    let mut fixed_pdos: Vec<PdFixedPdo, 8> = Vec::new();
+    let mut pps_pdos: Vec<PdPpsApdo, 4> = Vec::new();
+
+    let mut handle_entry =
+        |key: u8, d: &mut CborDecoder<'_>| -> Result<(), minicbor::decode::Error> {
+            match key {
+                0 => attached = d.bool()?,
+                1 => contract_mv = d.u32()?,
+                2 => contract_ma = d.u32()?,
+                3 => {
+                    fixed_pdos.clear();
+                    let mut iter = d.array_iter::<PdFixedPdo>()?;
+                    while let Some(item) = iter.next() {
+                        let pdo = item?;
+                        fixed_pdos
+                            .push(pdo)
+                            .map_err(|_| minicbor::decode::Error::message("fixed_pdos overflow"))?;
+                    }
+                }
+                4 => {
+                    pps_pdos.clear();
+                    let mut iter = d.array_iter::<PdPpsApdo>()?;
+                    while let Some(item) = iter.next() {
+                        let pdo = item?;
+                        pps_pdos
+                            .push(pdo)
+                            .map_err(|_| minicbor::decode::Error::message("pps_pdos overflow"))?;
+                    }
+                }
+                _ => d.skip()?,
+            }
+            Ok(())
+        };
+
+    match len {
+        Some(n) => {
+            for _ in 0..n {
+                let key = d.u8()?;
+                handle_entry(key, &mut d)?;
+            }
+        }
+        None => loop {
+            if d.datatype()? == CborType::Break {
+                d.skip()?; // consume break
+                break;
+            }
+            let key = d.u8()?;
+            handle_entry(key, &mut d)?;
+        },
+    }
+
+    Ok(PdStatus {
+        attached,
+        contract_mv,
+        contract_ma,
+        fixed_pdos,
+        pps_pdos,
+    })
+}
+
+async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
+    PD_STATUS_ATTACHED.store(status.attached, Ordering::Relaxed);
+    let mut guard = telemetry.lock().await;
+    guard.last_pd_status = Some(status);
+}
+
 struct DisplayResources {
     spi: Option<SpiDmaBus<'static, Async>>,
     cs: Option<Output<'static>>,
@@ -2059,6 +2232,7 @@ pub struct TelemetryModel {
     /// Last raw FastStatus frame observed from the analog side. This is used
     /// by the optional HTTP API to expose a structured status view.
     pub last_status: Option<FastStatus>,
+    pub last_pd_status: Option<PdStatus>,
     last_touch_marker_seq: u32,
 }
 
@@ -2069,6 +2243,7 @@ impl TelemetryModel {
             last_uptime_ms: None,
             last_rendered: None,
             last_status: None,
+            last_pd_status: None,
             last_touch_marker_seq: 0,
         }
     }
@@ -2380,6 +2555,7 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
         status.v_local_mv
     };
     LAST_V_MAIN_MV.store(v_main_mv, Ordering::Relaxed);
+    LAST_V_LOCAL_MV.store(status.v_local_mv, Ordering::Relaxed);
     LAST_I_TOTAL_MA.store(
         status.i_local_ma.saturating_add(status.i_remote_ma),
         Ordering::Relaxed,
@@ -2720,14 +2896,23 @@ async fn display_task(
                     recent_enable_block_abbrev(now)
                 };
                 guard.snapshot.pd_desired_mv = pd_desired_mv;
-                // PD status parsing is wired elsewhere; default to "available" so
-                // the UI can be exercised even without PD_STATUS traffic.
-                guard.snapshot.pd_20v_available = true;
+                let pd_20v_available = guard
+                    .last_pd_status
+                    .as_ref()
+                    .map(|s| s.has_fixed_mv(20_000))
+                    .unwrap_or(true);
+                guard.snapshot.pd_20v_available = pd_20v_available;
 
+                let pd_attached = guard
+                    .last_pd_status
+                    .as_ref()
+                    .map(|s| s.attached)
+                    .unwrap_or(false);
                 let attached = guard
                     .last_status
                     .map(|s| s.v_local_mv >= 2_000)
-                    .unwrap_or(false);
+                    .unwrap_or(false)
+                    || pd_attached;
                 let reached = guard
                     .last_status
                     .map(|s| s.v_local_mv)
@@ -2740,7 +2925,7 @@ async fn display_task(
                     })
                     .unwrap_or(false);
                 let last_apply_ms = PD_LAST_APPLY_MS.load(Ordering::Relaxed);
-                let in_window = last_apply_ms != 0 && now.wrapping_sub(last_apply_ms) <= 2_000;
+                let in_window = last_apply_ms != 0 && now.wrapping_sub(last_apply_ms) <= PD_T_PD_MS;
                 guard.snapshot.pd_state = if !link_up || !attached {
                     ui::PdButtonState::Standby
                 } else if reached {
@@ -3224,6 +3409,28 @@ async fn feed_decoder(
                                 decoder.reset();
                             }
                         },
+                        MSG_PD_STATUS => match decode_pd_status_payload(_payload) {
+                            Ok(status) => {
+                                record_link_activity();
+                                apply_pd_status(telemetry, status).await;
+                            }
+                            Err(err) => {
+                                PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
+                                warn!("PD_STATUS decode error: {:?}", defmt::Debug2Format(&err));
+                                decoder.reset();
+                            }
+                        },
+                        MSG_PD_SINK_REQUEST => {
+                            if header.flags & (FLAG_IS_ACK | FLAG_IS_NACK) != 0 {
+                                record_link_activity();
+                                handle_pd_sink_request_ack(&header);
+                            } else {
+                                rate_limited_proto_warn(
+                                    "unexpected PD_SINK_REQUEST frame (not ack/nack)",
+                                    Some(frame.as_slice()),
+                                );
+                            }
+                        }
                         MSG_CAL_MODE => match decode_cal_mode_frame(&frame) {
                             Ok((hdr, mode)) => {
                                 record_link_activity();
@@ -3295,6 +3502,24 @@ fn handle_setmode_ack(header: &FrameHeader) {
         "setmode ack received: seq={} flags=0x{:02x} len={} (ack_total={})",
         header.seq, header.flags, header.len, total
     );
+}
+
+fn handle_pd_sink_request_ack(header: &FrameHeader) {
+    PD_REQ_LAST_ACK_SEQ.store(header.seq, Ordering::Relaxed);
+    PD_REQ_LAST_ACK_FLAGS.store(header.flags, Ordering::Relaxed);
+    PD_REQ_ACK_PENDING.store(false, Ordering::Release);
+    let total = PD_REQ_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    if header.flags & FLAG_IS_NACK != 0 {
+        warn!(
+            "pd_sink_request NACK received: seq={} flags=0x{:02x} len={} (ack_total={})",
+            header.seq, header.flags, header.len, total
+        );
+    } else {
+        info!(
+            "pd_sink_request ACK received: seq={} flags=0x{:02x} len={} (ack_total={})",
+            header.seq, header.flags, header.len, total
+        );
+    }
 }
 
 fn handle_soft_reset_frame(header: &FrameHeader, reset: &SoftReset) {
@@ -4060,6 +4285,19 @@ async fn setpoint_tx_task(
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
 
+    #[derive(Clone, Copy)]
+    struct PdPending {
+        seq: u8,
+        target_mv: u32,
+        ack_total_at_send: u32,
+        deadline_ms: u32,
+    }
+
+    let mut pd_pending: Option<PdPending> = None;
+    let mut pd_last_sent_target_mv: Option<u32> = None;
+    let mut pd_force_send: bool = false;
+    let mut prev_attached: bool = false;
+
     // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
     let soft_reset_seq: u8 = 0;
     let soft_reset_acked =
@@ -4789,12 +5027,13 @@ async fn setmode_tx_task(
             )
             .await;
             force_send = true;
+            pd_force_send = true;
         } else if !link_up_now && prev_link_up {
             prev_link_up = false;
         }
 
         let now = now_ms32();
-        let (rev_now, desired_cmd) = {
+        let (rev_now, desired_cmd, mut pd_cfg) = {
             let guard = control.lock().await;
             let p = guard.active_preset();
             let cmd = SetMode {
@@ -4811,8 +5050,68 @@ async fn setmode_tx_task(
                 max_i_ma_total: p.max_i_ma_total,
                 max_p_mw: p.max_p_mw,
             };
-            (CONTROL_REV.load(Ordering::Relaxed), sanitize_setmode(cmd))
+            (
+                CONTROL_REV.load(Ordering::Relaxed),
+                sanitize_setmode(cmd),
+                guard.pd,
+            )
         };
+        if pd_cfg.target_mv != 5_000 && pd_cfg.target_mv != 20_000 {
+            pd_cfg.target_mv = 5_000;
+        }
+
+        // PD auto-apply: attach rising edge triggers a re-send of the persisted policy.
+        let attached_now = LAST_V_LOCAL_MV.load(Ordering::Relaxed) >= 2_000
+            || PD_STATUS_ATTACHED.load(Ordering::Relaxed);
+        if attached_now && !prev_attached {
+            pd_force_send = true;
+        }
+        prev_attached = attached_now;
+
+        // PD ACK / timeout / preemption handling.
+        if let Some(p) = pd_pending.as_ref() {
+            let ack_total = PD_REQ_ACK_TOTAL.load(Ordering::Relaxed);
+            let ack_seq = PD_REQ_LAST_ACK_SEQ.load(Ordering::Relaxed);
+            let ack_hit = ack_total != p.ack_total_at_send && ack_seq == p.seq;
+            if ack_hit {
+                pd_pending = None;
+                PD_REQ_ACK_PENDING.store(false, Ordering::Release);
+            } else if now >= p.deadline_ms {
+                PD_REQ_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+                warn!(
+                    "pd_sink_request ack timeout (seq={}, target_mv={})",
+                    p.seq, p.target_mv
+                );
+                pd_pending = None;
+                PD_REQ_ACK_PENDING.store(false, Ordering::Release);
+            } else if p.target_mv != pd_cfg.target_mv {
+                pd_pending = None;
+                PD_REQ_ACK_PENDING.store(false, Ordering::Release);
+            }
+        }
+
+        // Send PD policy when forced (attach/link edge) or when the target changes.
+        if LINK_UP.load(Ordering::Relaxed)
+            && pd_pending.is_none()
+            && (pd_force_send || pd_last_sent_target_mv != Some(pd_cfg.target_mv))
+        {
+            const PD_ACK_TIMEOUT_MS: u32 = 300;
+            let seq_now = seq;
+            seq = seq.wrapping_add(1);
+            let ack_baseline = PD_REQ_ACK_TOTAL.load(Ordering::Relaxed);
+            if send_pd_sink_request_frame(&mut uhci_tx, seq_now, &pd_cfg, &mut raw, &mut slip).await
+            {
+                PD_LAST_APPLY_MS.store(now, Ordering::Relaxed);
+                pd_last_sent_target_mv = Some(pd_cfg.target_mv);
+                pd_force_send = false;
+                pd_pending = Some(PdPending {
+                    seq: seq_now,
+                    target_mv: pd_cfg.target_mv,
+                    ack_total_at_send: ack_baseline,
+                    deadline_ms: now.saturating_add(PD_ACK_TIMEOUT_MS),
+                });
+            }
+        }
 
         // ACK arrival check for the current pending seq.
         let ack_hit = if let Some(p) = pending.as_ref() {
@@ -5041,6 +5340,117 @@ async fn send_setmode_frame(
             warn!(
                 "{}: uart write error for setmode seq={}: {:?}",
                 ctx, seq, err
+            );
+            false
+        }
+    }
+}
+
+fn map_pd_encode_err(err: CborEncodeError<CborEndOfSlice>) -> loadlynx_protocol::Error {
+    if err.is_write() {
+        loadlynx_protocol::Error::BufferTooSmall
+    } else {
+        loadlynx_protocol::Error::CborEncode
+    }
+}
+
+fn encode_pd_sink_request_frame(
+    seq: u8,
+    cfg: &control::PdConfig,
+    out: &mut [u8; 64],
+) -> Result<usize, loadlynx_protocol::Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(loadlynx_protocol::Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = FLAG_ACK_REQ;
+    out[2] = seq;
+    out[3] = MSG_PD_SINK_REQUEST;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = CborCursor::new(payload_slice);
+        let mut enc = CborEncoder::new(&mut cursor);
+        // CBOR map: { 0: mode, 1: target_mv }
+        enc.map(2).map_err(map_pd_encode_err)?;
+        enc.u8(0).map_err(map_pd_encode_err)?;
+        enc.u8(cfg.mode as u8).map_err(map_pd_encode_err)?;
+        enc.u8(1).map_err(map_pd_encode_err)?;
+        enc.u32(cfg.target_mv).map_err(map_pd_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(loadlynx_protocol::Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(loadlynx_protocol::Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
+async fn send_pd_sink_request_frame(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    cfg: &control::PdConfig,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+) -> bool {
+    let frame_len = match encode_pd_sink_request_frame(seq, cfg, raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("pd_sink_request: encode error: {:?}", err);
+            return false;
+        }
+    };
+
+    let slip_len = match slip_encode(&raw[..frame_len], slip) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("pd_sink_request: slip_encode error: {:?}", err);
+            return false;
+        }
+    };
+
+    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+        Ok(written) if written == slip_len => {
+            let _ = uhci_tx.uart_tx.flush_async().await;
+            PD_REQ_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
+            PD_REQ_ACK_PENDING.store(true, Ordering::Release);
+            info!(
+                "pd_sink_request sent (msg=0x{:02x}, flags=0x{:02x}): seq={} mode={:?} target_mv={} len={} slip_len={}",
+                MSG_PD_SINK_REQUEST,
+                FLAG_ACK_REQ,
+                seq,
+                cfg.mode,
+                cfg.target_mv,
+                frame_len,
+                slip_len
+            );
+            true
+        }
+        Ok(written) => {
+            warn!(
+                "pd_sink_request short write {} < {} (seq={})",
+                written, slip_len, seq
+            );
+            false
+        }
+        Err(err) => {
+            warn!(
+                "pd_sink_request uart write error for seq={}: {:?}",
+                seq, err
             );
             false
         }
