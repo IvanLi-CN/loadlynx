@@ -15,6 +15,7 @@ use embassy_stm32::bind_interrupts;
 use embassy_stm32::dac::{Dac, Mode as DacMode, Value as DacValue};
 use embassy_stm32::gpio::{Level, Output, Speed};
 use embassy_stm32::mode::Async as UartAsync;
+use embassy_stm32::ucpd::{CcSel as UcpdCcSel, Config as UcpdConfig, Ucpd};
 use embassy_stm32::usart::{
     Config as UartConfig, DataBits as UartDataBits, Parity as UartParity, RingBufferedUartRx,
     StopBits as UartStopBits, Uart, UartRx, UartTx,
@@ -28,7 +29,7 @@ use loadlynx_protocol::{
     FastStatus, FrameHeader, HEADER_LEN, Hello, LoadMode, MSG_CAL_MODE, MSG_SET_MODE,
     MSG_SET_POINT, STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD,
     STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE, STATE_FLAG_UV_LATCHED, SlipDecoder,
-    SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame,
+    SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame, decode_frame,
     decode_limit_profile_frame, decode_set_enable_frame, decode_set_mode_frame,
     decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
     encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame, slip_encode,
@@ -36,6 +37,7 @@ use loadlynx_protocol::{
 use static_cell::StaticCell;
 
 mod calibration;
+mod pd;
 use calibration::{
     CalibrationState, CurveKind, inverse_piecewise, mv_to_raw_100uv, piecewise_linear,
     raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
@@ -47,6 +49,7 @@ const VREFBUF_CSR_ADDR: *mut u32 = VREFBUF_BASE as *mut u32;
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
+    UCPD1 => stm32::ucpd::InterruptHandler<stm32::peripherals::UCPD1>;
 });
 
 // 模拟板 FAST_STATUS 发送周期：20 Hz → 1000/20 ms = 50 ms
@@ -516,6 +519,13 @@ async fn main(_spawner: Spawner) -> ! {
     // 启动独立任务接收 SetPoint 控制消息。
     if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring, uart_tx_shared)) {
         warn!("failed to spawn uart_setpoint_rx_task: {:?}", e);
+    }
+
+    // UCPD1: USB-PD sink core (runs independently from the control loop).
+    let ucpd = Ucpd::new(p.UCPD1, Irqs, p.PB6, p.PB4, UcpdConfig::default());
+    let (cc_phy, pd_phy) = ucpd.split_pd_phy(p.DMA1_CH3, p.DMA1_CH4, UcpdCcSel::CC1);
+    if let Err(e) = _spawner.spawn(pd::pd_task(cc_phy, pd_phy, uart_tx_shared)) {
+        warn!("failed to spawn pd_task: {:?}", e);
     }
 
     // ADC1/ADC2：阻塞读取即可满足 30Hz 遥测。
@@ -1888,6 +1898,121 @@ async fn uart_setpoint_rx_task(
                                                         Err(ProtocolError::UnsupportedMessage(
                                                             _,
                                                         )) => {
+                                                            if let Ok((hdr, payload)) =
+                                                                decode_frame(&frame)
+                                                            {
+                                                                if hdr.msg
+                                                                    == pd::MSG_PD_SINK_REQUEST
+                                                                {
+                                                                    if hdr.flags & FLAG_IS_ACK != 0
+                                                                    {
+                                                                        info!(
+                                                                            "PD_SINK_REQUEST ACK received on analog side (ignored) seq={}",
+                                                                            hdr.seq
+                                                                        );
+                                                                        continue;
+                                                                    }
+
+                                                                    let (is_nack, reason) =
+                                                                        match pd::decode_pd_sink_request_payload(
+                                                                            payload,
+                                                                        ) {
+                                                                            Ok(req) => {
+                                                                                if req.mode
+                                                                                    != pd::PD_MODE_FIXED
+                                                                                {
+                                                                                    (true, "unsupported mode")
+                                                                                } else if req.target_mv
+                                                                                    != pd::PD_TARGET_5V_MV
+                                                                                    && req.target_mv
+                                                                                        != pd::PD_TARGET_20V_MV
+                                                                                {
+                                                                                    (
+                                                                                        true,
+                                                                                        "unsupported target_mv",
+                                                                                    )
+                                                                                } else {
+                                                                                    pd::PD_DESIRED_TARGET_MV.store(
+                                                                                        req.target_mv,
+                                                                                        Ordering::Relaxed,
+                                                                                    );
+                                                                                    pd::PD_RENEGOTIATE_SIGNAL.signal(());
+                                                                                    info!(
+                                                                                        "PD_SINK_REQUEST received: mode={} target_mv={} seq={}",
+                                                                                        req.mode,
+                                                                                        req.target_mv,
+                                                                                        hdr.seq
+                                                                                    );
+                                                                                    (false, "")
+                                                                                }
+                                                                            }
+                                                                            Err(_err) => {
+                                                                                (true, "CBOR decode error")
+                                                                            }
+                                                                        };
+
+                                                                    if is_nack {
+                                                                        warn!(
+                                                                            "PD_SINK_REQUEST rejected ({}): seq={}",
+                                                                            reason, hdr.seq
+                                                                        );
+                                                                    }
+
+                                                                    LAST_RX_GOOD_MS.store(
+                                                                        timestamp_ms() as u32,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                    LINK_EVER_GOOD.store(
+                                                                        true,
+                                                                        Ordering::Relaxed,
+                                                                    );
+
+                                                                    let ack_len =
+                                                                        match encode_ack_only_frame(
+                                                                            hdr.seq,
+                                                                            pd::MSG_PD_SINK_REQUEST,
+                                                                            is_nack,
+                                                                            &mut ack_raw,
+                                                                        ) {
+                                                                            Ok(len) => len,
+                                                                            Err(err) => {
+                                                                                warn!(
+                                                                                    "PD_SINK_REQUEST ack encode error: {:?}",
+                                                                                    err
+                                                                                );
+                                                                                continue;
+                                                                            }
+                                                                        };
+                                                                    let slip_len = match slip_encode(
+                                                                        &ack_raw[..ack_len],
+                                                                        &mut ack_slip,
+                                                                    ) {
+                                                                        Ok(len) => len,
+                                                                        Err(err) => {
+                                                                            warn!(
+                                                                                "PD_SINK_REQUEST ack slip encode error: {:?}",
+                                                                                err
+                                                                            );
+                                                                            continue;
+                                                                        }
+                                                                    };
+                                                                    let mut tx =
+                                                                        uart_tx.lock().await;
+                                                                    if let Err(err) = tx
+                                                                        .write(
+                                                                            &ack_slip[..slip_len],
+                                                                        )
+                                                                        .await
+                                                                    {
+                                                                        warn!(
+                                                                            "PD_SINK_REQUEST ack write error: {:?}",
+                                                                            err
+                                                                        );
+                                                                    }
+
+                                                                    continue;
+                                                                }
+                                                            }
                                                             match decode_limit_profile_frame(&frame) {
                                                         Ok((_hdr, profile)) => {
                                                             {
