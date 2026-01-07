@@ -1033,6 +1033,7 @@ async fn main(_spawner: Spawner) -> ! {
         let mut uv_latched = active_mode_seen && ctrl_snapshot.uv_latched;
         if active_mode_seen
             && ctrl_snapshot.output_enabled
+            && ctrl_snapshot.min_v_mv > 0
             && v_main_mv <= ctrl_snapshot.min_v_mv
             && !uv_latched
         {

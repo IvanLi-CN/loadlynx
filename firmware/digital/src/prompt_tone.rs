@@ -3,8 +3,9 @@
 //! This module owns the policy for when to emit:
 //! - low-volume UI feedback tones (touch / encoder detents / button actions)
 //! - continuous alarm tones:
-//!   - Primary: protection-class (UV / analog fault flags)
-//!   - Secondary: link-drop-class (latched by `latch_link_alarm()`)
+//!   - Primary: critical-class (analog `fault_flags`)
+//!   - Secondary: critical link-drop-class (latched by `latch_link_alarm()`)
+//!   - Trip: preset-protection trip (UVLO/OCP/OPP; latched by `latch_trip_alarm()`)
 //!
 //! Important semantics (frozen by requirements):
 //! - Primary overrides Secondary.
@@ -36,11 +37,48 @@ static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 static FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
 static UV_LATCHED_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-static LINK_UP: AtomicBool = AtomicBool::new(true);
+static LINK_UP: AtomicBool = AtomicBool::new(false);
 static LINK_ALARM_LATCHED: AtomicBool = AtomicBool::new(false);
+
+static TRIP_ALARM_LATCHED: AtomicBool = AtomicBool::new(false);
+static TRIP_REASON: AtomicU32 = AtomicU32::new(0);
 
 static LOCAL_ACTIVITY: AtomicU32 = AtomicU32::new(0);
 static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TripReason {
+    Uvlo,
+    Ocp,
+    Opp,
+}
+
+impl TripReason {
+    fn to_u32(self) -> u32 {
+        match self {
+            TripReason::Uvlo => 1,
+            TripReason::Ocp => 2,
+            TripReason::Opp => 3,
+        }
+    }
+
+    fn from_u32(raw: u32) -> Option<Self> {
+        match raw {
+            1 => Some(TripReason::Uvlo),
+            2 => Some(TripReason::Ocp),
+            3 => Some(TripReason::Opp),
+            _ => None,
+        }
+    }
+
+    pub fn abbrev(self) -> &'static str {
+        match self {
+            TripReason::Uvlo => "UVLO",
+            TripReason::Ocp => "OCP",
+            TripReason::Opp => "OPP",
+        }
+    }
+}
 
 /// Update the latest analog-side `fault_flags` snapshot.
 ///
@@ -54,8 +92,8 @@ pub fn set_fault_flags(flags: u32) {
 /// Update the UV-latched state (protection-class).
 ///
 /// Semantics:
-/// - false -> true: start Primary alarm immediately.
-/// - true -> false: keep Primary alarm until local ack, then stop (unless `fault_flags != 0`).
+/// - informational snapshot only; alarm policy is driven by `fault_flags`,
+///   link alarms, and explicit trip latches.
 pub fn set_uv_latched(active: bool) {
     UV_LATCHED_ACTIVE.store(active, Ordering::Relaxed);
     WAKE.signal(());
@@ -84,6 +122,31 @@ pub fn latch_link_alarm() {
 /// is waiting for the next local ack after the link has recovered.
 pub fn is_link_alarm_latched() -> bool {
     LINK_ALARM_LATCHED.load(Ordering::Relaxed)
+}
+
+/// Latch a "preset protection trip" alarm (UVLO/OCP/OPP).
+///
+/// Semantics:
+/// - The alarm keeps playing until the next local interaction (touch/detent/button),
+///   regardless of whether the underlying physical condition has already cleared.
+pub fn latch_trip_alarm(reason: TripReason) {
+    TRIP_REASON.store(reason.to_u32(), Ordering::Relaxed);
+    TRIP_ALARM_LATCHED.store(true, Ordering::Relaxed);
+    // Require an interaction *after* the latch to stop it.
+    LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
+    PENDING_TICKS.store(0, Ordering::Relaxed);
+    WAKE.signal(());
+}
+
+pub fn is_trip_alarm_latched() -> bool {
+    TRIP_ALARM_LATCHED.load(Ordering::Relaxed)
+}
+
+pub fn trip_alarm_reason() -> Option<TripReason> {
+    if !is_trip_alarm_latched() {
+        return None;
+    }
+    TripReason::from_u32(TRIP_REASON.load(Ordering::Relaxed))
 }
 
 /// Enqueue a single "UI ok" feedback sound (low volume).
@@ -188,6 +251,14 @@ const SECONDARY_ALARM_GAP_MS: u32 = 80;
 const SECONDARY_ALARM_ON2_MS: u32 = 120;
 const SECONDARY_ALARM_TAIL_MS: u32 = 680;
 
+// Trip alarm cadence (preset-protection trip): triple-pip, distinct from Primary/Secondary.
+const TRIP_ALARM_ON1_MS: u32 = 100;
+const TRIP_ALARM_GAP1_MS: u32 = 80;
+const TRIP_ALARM_ON2_MS: u32 = 100;
+const TRIP_ALARM_GAP2_MS: u32 = 80;
+const TRIP_ALARM_ON3_MS: u32 = 220;
+const TRIP_ALARM_TAIL_MS: u32 = 400;
+
 #[derive(Clone, Copy, Debug)]
 struct Step {
     duty_pct: u8, // 0 == silence
@@ -259,6 +330,33 @@ const STEPS_SECONDARY_ALARM: &[Step] = &[
     },
 ];
 
+const STEPS_TRIP_ALARM: &[Step] = &[
+    Step {
+        duty_pct: SECONDARY_ALARM_DUTY_PCT,
+        duration_ms: TRIP_ALARM_ON1_MS,
+    },
+    Step {
+        duty_pct: 0,
+        duration_ms: TRIP_ALARM_GAP1_MS,
+    },
+    Step {
+        duty_pct: SECONDARY_ALARM_DUTY_PCT,
+        duration_ms: TRIP_ALARM_ON2_MS,
+    },
+    Step {
+        duty_pct: 0,
+        duration_ms: TRIP_ALARM_GAP2_MS,
+    },
+    Step {
+        duty_pct: SECONDARY_ALARM_DUTY_PCT,
+        duration_ms: TRIP_ALARM_ON3_MS,
+    },
+    Step {
+        duty_pct: 0,
+        duration_ms: TRIP_ALARM_TAIL_MS,
+    },
+];
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveSound {
     UiOk,
@@ -266,6 +364,7 @@ enum ActiveSound {
     UiTick,
     PrimaryAlarm,
     SecondaryAlarm,
+    TripAlarm,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -283,6 +382,7 @@ impl Player {
             ActiveSound::UiTick => STEPS_UI_TICK,
             ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
             ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
+            ActiveSound::TripAlarm => STEPS_TRIP_ALARM,
         }
     }
 }
@@ -331,6 +431,7 @@ fn start_player(
         ActiveSound::UiTick => STEPS_UI_TICK,
         ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
         ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
+        ActiveSound::TripAlarm => STEPS_TRIP_ALARM,
     };
     let step0 = steps[0];
     buzzer_apply(channel, step0.duty_pct);
@@ -383,7 +484,6 @@ pub async fn prompt_tone_task(
     buzzer_apply(buzzer_channel, 0);
 
     let mut last_fault_flags: u32 = 0;
-    let mut last_uv_latched: bool = false;
 
     let mut primary_cleared_wait_ack: bool = false;
 
@@ -397,21 +497,21 @@ pub async fn prompt_tone_task(
 
     loop {
         let fault_flags = FAULT_FLAGS.load(Ordering::Relaxed);
-        let uv_latched = UV_LATCHED_ACTIVE.load(Ordering::Relaxed);
         let link_latched = LINK_ALARM_LATCHED.load(Ordering::Relaxed);
         let link_up = LINK_UP.load(Ordering::Relaxed);
+        let trip_latched = TRIP_ALARM_LATCHED.load(Ordering::Relaxed);
 
-        let primary_condition_active = fault_flags != 0 || uv_latched;
+        let primary_condition_active = fault_flags != 0;
 
         // Edge bookkeeping for logging + ack gating.
-        if fault_flags != last_fault_flags || uv_latched != last_uv_latched {
-            let primary_was_active = last_fault_flags != 0 || last_uv_latched;
+        if fault_flags != last_fault_flags {
+            let primary_was_active = last_fault_flags != 0;
 
             // Rising edge into Primary condition.
             if !primary_was_active && primary_condition_active {
                 info!(
-                    "prompt_tone: primary alarm entered (fault_flags=0x{:08x}, uv_latched={})",
-                    fault_flags, uv_latched
+                    "prompt_tone: primary alarm entered (fault_flags=0x{:08x})",
+                    fault_flags
                 );
                 primary_cleared_wait_ack = false;
                 pending_ok = 0;
@@ -433,7 +533,6 @@ pub async fn prompt_tone_task(
             }
 
             last_fault_flags = fault_flags;
-            last_uv_latched = uv_latched;
         }
 
         // Secondary latch edge (for logging).
@@ -529,6 +628,39 @@ pub async fn prompt_tone_task(
                         player = advance_player(p, buzzer_channel, true);
                     }
                 }
+            } else if trip_latched {
+                // --- Trip alarm -------------------------------------------------
+                // Keep UI sounds queued so the ack interaction can still produce feedback
+                // immediately after the alarm stops.
+                drain_ui_sounds(&mut pending_ok, &mut pending_fail, false);
+
+                // Drop ticks to avoid audible backlog once the trip is acknowledged.
+                PENDING_TICKS.store(0, Ordering::Relaxed);
+
+                let has_activity = LOCAL_ACTIVITY.load(Ordering::Relaxed) > 0;
+                if has_activity {
+                    if let Some(reason) = trip_alarm_reason() {
+                        info!(
+                            "prompt_tone: trip ack observed; stopping trip alarm (reason={})",
+                            reason.abbrev()
+                        );
+                    } else {
+                        info!("prompt_tone: trip ack observed; stopping trip alarm");
+                    }
+                    TRIP_ALARM_LATCHED.store(false, Ordering::Relaxed);
+                    TRIP_REASON.store(0, Ordering::Relaxed);
+                    LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
+                    buzzer_apply(buzzer_channel, 0);
+                    player = None;
+                } else {
+                    if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::TripAlarm)
+                    {
+                        player = Some(start_player(ActiveSound::TripAlarm, buzzer_channel));
+                    }
+                    if let Some(p) = player {
+                        player = advance_player(p, buzzer_channel, true);
+                    }
+                }
             } else {
                 // --- Normal UI mode ---------------------------------------------
 
@@ -538,7 +670,9 @@ pub async fn prompt_tone_task(
 
                 // Preempt: if an alarm player somehow remained, stop it.
                 if player.is_some_and(|p| {
-                    p.sound == ActiveSound::PrimaryAlarm || p.sound == ActiveSound::SecondaryAlarm
+                    p.sound == ActiveSound::PrimaryAlarm
+                        || p.sound == ActiveSound::SecondaryAlarm
+                        || p.sound == ActiveSound::TripAlarm
                 }) {
                     buzzer_apply(buzzer_channel, 0);
                     player = None;

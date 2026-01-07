@@ -7,7 +7,9 @@ use embedded_graphics::pixelcolor::{
 };
 use heapless::String;
 use lcd_async::raw_framebuf::RawFrameBuf;
-use loadlynx_protocol::LoadMode;
+use loadlynx_protocol::{
+    FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, LoadMode,
+};
 
 use crate::control::AdjustDigit;
 use crate::touch::TouchMarker;
@@ -800,8 +802,25 @@ fn draw_mirror_bar_in_bounds(
 fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
     let lines = data.status_lines();
     let mut baseline = TELEMETRY_TOP;
-    for line in lines.iter() {
-        draw_small_text(canvas, line.as_str(), 198, baseline, rgb(0xdfe7ff), 0);
+    for (idx, line) in lines.iter().enumerate() {
+        let mut color = rgb(0xdfe7ff);
+        if idx + 1 == lines.len() {
+            // Bottom-right "reason" line should blink on any abnormal condition.
+            let ctl_alert = data.fault_flags != 0
+                || data.link_alarm_latched
+                || data.trip_alarm_abbrev.is_some()
+                || data.blocked_enable_abbrev.is_some()
+                || data.uv_latched
+                || !data.link_up;
+            if ctl_alert && !line.is_empty() {
+                color = if data.blink_on {
+                    rgb(0xff5252)
+                } else {
+                    rgb(0xffffff)
+                };
+            }
+        }
+        draw_small_text(canvas, line.as_str(), 198, baseline, color, 0);
         baseline += 12;
     }
 }
@@ -817,7 +836,10 @@ fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
     draw_small_text(canvas, "LOAD", 198, label_y, rgb(0x6d7fa4), 0);
 
     // State colors apply ONLY to the power symbol (not the button container).
-    let forced_off = data.uv_latched || data.fault_flags != 0;
+    let forced_off = data.uv_latched
+        || data.trip_alarm_abbrev.is_some()
+        || data.fault_flags != 0
+        || data.link_alarm_latched;
     let symbol_color = if forced_off {
         rgb(0xff5252)
     } else if data.output_enabled {
@@ -1257,6 +1279,9 @@ pub struct UiSnapshot {
     pub link_up: bool,
     pub link_alarm_latched: bool,
     pub hello_seen: bool,
+    pub trip_alarm_abbrev: Option<&'static str>,
+    pub blocked_enable_abbrev: Option<&'static str>,
+    pub blink_on: bool,
     pub preset_preview_active: bool,
     pub preset_preview_target_text: String<8>,
     pub preset_preview_v_lim_text: String<8>,
@@ -1272,6 +1297,18 @@ pub struct UiSnapshot {
     pub ch2_current_text: String<6>,
     pub control_target_text: String<7>,
     pub status_lines: [String<20>; 5],
+}
+
+fn fault_flags_abbrev(flags: u32) -> &'static str {
+    if flags & FAULT_OVERVOLTAGE != 0 {
+        "OVP"
+    } else if flags & (FAULT_MCU_OVER_TEMP | FAULT_SINK_OVER_TEMP) != 0 {
+        "OTP"
+    } else if flags & FAULT_OVERCURRENT != 0 {
+        "OCF"
+    } else {
+        "FLT"
+    }
 }
 
 impl UiSnapshot {
@@ -1305,6 +1342,9 @@ impl UiSnapshot {
             link_up: true,
             link_alarm_latched: false,
             hello_seen: true,
+            trip_alarm_abbrev: None,
+            blocked_enable_abbrev: None,
+            blink_on: false,
             preset_preview_active: false,
             preset_preview_target_text: String::new(),
             preset_preview_v_lim_text: String::new(),
@@ -1331,6 +1371,8 @@ impl UiSnapshot {
         link_up: bool,
         link_alarm_latched: bool,
         hello_seen: bool,
+        trip_alarm_abbrev: Option<&'static str>,
+        blocked_enable_abbrev: Option<&'static str>,
     ) {
         self.active_preset_id = active_preset_id;
         self.output_enabled = output_enabled;
@@ -1343,6 +1385,8 @@ impl UiSnapshot {
         self.link_up = link_up;
         self.link_alarm_latched = link_alarm_latched;
         self.hello_seen = hello_seen;
+        self.trip_alarm_abbrev = trip_alarm_abbrev;
+        self.blocked_enable_abbrev = blocked_enable_abbrev;
     }
 
     pub fn set_control_row(&mut self, target_milli: i32, unit: char, adjust_digit: AdjustDigit) {
@@ -1396,13 +1440,18 @@ impl UiSnapshot {
 
         let mut ctl = String::<20>::new();
         // Dashboard reason line (frozen by docs):
-        // show "UV" > "FLT" > "LNK" > "OFF" when LOAD cannot be enabled / is forced OFF.
-        if self.uv_latched {
-            let _ = ctl.push_str("UV");
-        } else if self.fault_flags != 0 {
-            let _ = ctl.push_str("FLT");
+        // show fault > "LNK" (latched link-drop-class) > trip ("OCP/OPP") > "UVLO" > "OFF"
+        // when LOAD cannot be enabled / is forced OFF.
+        if self.fault_flags != 0 {
+            let _ = ctl.push_str(fault_flags_abbrev(self.fault_flags));
         } else if self.link_alarm_latched {
             let _ = ctl.push_str("LNK");
+        } else if let Some(trip) = self.trip_alarm_abbrev {
+            let _ = ctl.push_str(trip);
+        } else if self.uv_latched {
+            let _ = ctl.push_str("UVLO");
+        } else if let Some(blocked) = self.blocked_enable_abbrev {
+            let _ = ctl.push_str(blocked);
         } else if !self.link_up {
             if self.hello_seen {
                 let _ = ctl.push_str("LNK");
