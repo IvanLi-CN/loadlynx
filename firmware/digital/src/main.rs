@@ -312,6 +312,7 @@ static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
+static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -1418,6 +1419,20 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     }
 
                     if view == control::UiView::Main
+                        && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
+                    {
+                        let mut guard = control.lock().await;
+                        if guard.pd.toggle_target() {
+                            bump_control_rev();
+                        }
+                        prompt_tone::enqueue_ui_ok();
+                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        last_tab_tap = None;
+                        yield_now().await;
+                        continue;
+                    }
+
+                    if view == control::UiView::Main
                         && ui::hit_test_dashboard_load_button(marker.x, marker.y)
                     {
                         let mut guard = control.lock().await;
@@ -2135,6 +2150,9 @@ impl TelemetryModel {
                 || prev.hello_seen != current.hello_seen
                 || prev.trip_alarm_abbrev != current.trip_alarm_abbrev
                 || prev.blocked_enable_abbrev != current.blocked_enable_abbrev
+                || prev.pd_state != current.pd_state
+                || prev.pd_desired_mv != current.pd_desired_mv
+                || prev.pd_20v_available != current.pd_20v_available
             {
                 mask.load_row = true;
             }
@@ -2572,6 +2590,7 @@ async fn display_task(
                 active_target_milli,
                 active_target_unit,
                 adjust_digit,
+                pd_desired_mv,
                 preview_panel,
                 panel_visible,
                 panel_vm,
@@ -2624,6 +2643,7 @@ async fn display_task(
                     active_target_milli,
                     active_target_unit,
                     guard.adjust_digit,
+                    guard.pd.target_mv,
                     preview_panel,
                     preset_panel_visible(guard.ui_view),
                     if preset_panel_visible(guard.ui_view) {
@@ -2666,6 +2686,37 @@ async fn display_task(
                     None
                 } else {
                     recent_enable_block_abbrev(now)
+                };
+                guard.snapshot.pd_desired_mv = pd_desired_mv;
+                // PD status parsing is wired elsewhere; default to "available" so
+                // the UI can be exercised even without PD_STATUS traffic.
+                guard.snapshot.pd_20v_available = true;
+
+                let attached = guard
+                    .last_status
+                    .map(|s| s.v_local_mv >= 2_000)
+                    .unwrap_or(false);
+                let reached = guard
+                    .last_status
+                    .map(|s| s.v_local_mv)
+                    .map(|v| {
+                        if pd_desired_mv >= 15_000 {
+                            v >= 18_000
+                        } else {
+                            v <= 7_000
+                        }
+                    })
+                    .unwrap_or(false);
+                let last_apply_ms = PD_LAST_APPLY_MS.load(Ordering::Relaxed);
+                let in_window = last_apply_ms != 0 && now.wrapping_sub(last_apply_ms) <= 2_000;
+                guard.snapshot.pd_state = if !link_up || !attached {
+                    ui::PdButtonState::Standby
+                } else if reached {
+                    ui::PdButtonState::Active
+                } else if in_window || last_apply_ms == 0 {
+                    ui::PdButtonState::Negotiating
+                } else {
+                    ui::PdButtonState::Error
                 };
                 guard.snapshot.set_control_overlay(
                     overlay_preset_id,
@@ -3512,7 +3563,10 @@ async fn main(spawner: Spawner) {
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
     let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
-    let control = CONTROL.init(Mutex::new(ControlState::new(initial_presets)));
+    let control = CONTROL.init(Mutex::new(ControlState::new(
+        initial_presets,
+        control::PdConfig::default(),
+    )));
     CONTROL_REV.store(1, Ordering::Relaxed);
 
     let touch_input_cfg = InputConfig::default().with_pull(Pull::Up);

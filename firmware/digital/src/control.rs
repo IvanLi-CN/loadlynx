@@ -130,6 +130,47 @@ pub enum UiView {
     PresetPanelBlocked,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
+pub enum PdMode {
+    Fixed = 0,
+    Pps = 1,
+}
+
+impl PdMode {
+    pub const DEFAULT: Self = Self::Fixed;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
+pub struct PdConfig {
+    pub mode: PdMode,
+    pub target_mv: u32,
+}
+
+impl PdConfig {
+    pub const DEFAULT_TARGET_MV: u32 = 5_000;
+
+    pub const fn default() -> Self {
+        Self {
+            mode: PdMode::DEFAULT,
+            target_mv: Self::DEFAULT_TARGET_MV,
+        }
+    }
+
+    pub fn toggle_target(&mut self) -> bool {
+        let next = if self.target_mv == 20_000 {
+            5_000
+        } else {
+            20_000
+        };
+        if next == self.target_mv {
+            false
+        } else {
+            self.target_mv = next;
+            true
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ControlState {
     /// Mutable in-RAM working presets.
@@ -145,10 +186,11 @@ pub struct ControlState {
     pub ui_view: UiView,
     pub panel_selected_field: PresetPanelField,
     pub panel_selected_digit: PresetPanelDigit,
+    pub pd: PdConfig,
 }
 
 impl ControlState {
-    pub fn new(presets: [Preset; PRESET_COUNT]) -> Self {
+    pub fn new(presets: [Preset; PRESET_COUNT], pd: PdConfig) -> Self {
         Self {
             presets,
             saved: presets,
@@ -160,6 +202,7 @@ impl ControlState {
             ui_view: UiView::Main,
             panel_selected_field: PresetPanelField::Target,
             panel_selected_digit: PresetPanelDigit::Tenths,
+            pd,
         }
     }
 
