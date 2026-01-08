@@ -54,6 +54,7 @@ fn render_snapshot(
     snapshot: &ui::UiSnapshot,
     preset_panel_vm: Option<&preset_panel_mock::PresetPanelVm>,
     preset_preview_vm: Option<&preset_preview_panel::PresetPreviewPanelVm>,
+    fps_overlay: Option<u32>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut snapshot = snapshot.clone();
     snapshot.update_strings();
@@ -67,6 +68,9 @@ fn render_snapshot(
     }
     if let Some(vm) = preset_preview_vm {
         preset_preview_panel::render_preset_preview_panel(&mut frame, vm);
+    }
+    if let Some(fps) = fps_overlay {
+        ui::render_fps_overlay(&mut frame, fps);
     }
 
     // The UI renderer writes into the physical ST7789 buffer (240×320), while
@@ -91,18 +95,70 @@ fn render_snapshot(
     Ok(())
 }
 
+fn render_pd_toggle_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let out_dir = repo_root.join("docs/assets/usb-pd-sink-toggle");
+
+    let mut base = ui::UiSnapshot::demo();
+    base.main_voltage = 20.07;
+    base.main_current = 0.09;
+    base.main_power = 1.9;
+    base.remote_voltage = 20.08;
+    base.local_voltage = 20.09;
+    base.set_control_overlay(2, false, LoadMode::Cc, false, true, false, true, None, None);
+    base.set_control_row(3_000, 'A', control::AdjustDigit::DEFAULT);
+    base.run_time.clear();
+    let _ = base.run_time.push_str("01:03:48");
+    base.sink_core_temp = 18.0;
+    base.sink_exhaust_temp = 17.8;
+    base.mcu_temp = 35.0;
+    base.pd_desired_mv = 20_000;
+    base.pd_20v_available = true;
+
+    let mut standby = base.clone();
+    standby.pd_state = ui::PdButtonState::Standby;
+    render_snapshot(
+        &out_dir.join("dashboard-pd-standby-20v.png"),
+        &standby,
+        None,
+        None,
+        Some(7),
+    )?;
+
+    let mut active = base;
+    active.pd_state = ui::PdButtonState::Active;
+    render_snapshot(
+        &out_dir.join("dashboard-pd-active-20v.png"),
+        &active,
+        None,
+        None,
+        Some(7),
+    )?;
+
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..");
+    let mode = std::env::args().nth(1);
+    if mode.as_deref() == Some("pd") {
+        return render_pd_toggle_mocks(&repo_root);
+    }
     let out_dir = repo_root.join("docs/assets/main-display");
     let preset_dir = repo_root.join("docs/assets/on-device-preset-ui");
 
     let mut cc = ui::UiSnapshot::demo();
     cc.set_control_overlay(2, true, LoadMode::Cc, false, true, false, true, None, None);
     cc.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
-    render_snapshot(&out_dir.join("main-display-mock-cc.png"), &cc, None, None)?;
-    render_snapshot(&preset_dir.join("dashboard.png"), &cc, None, None)?;
+    render_snapshot(
+        &out_dir.join("main-display-mock-cc.png"),
+        &cc,
+        None,
+        None,
+        None,
+    )?;
+    render_snapshot(&preset_dir.join("dashboard.png"), &cc, None, None, None)?;
 
     let mut cc_blocked_lnk = cc.clone();
     cc_blocked_lnk.set_control_overlay(
@@ -119,6 +175,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     render_snapshot(
         &preset_dir.join("dashboard-blocked-lnk.png"),
         &cc_blocked_lnk,
+        None,
         None,
         None,
     )?;
@@ -138,6 +195,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     render_snapshot(
         &preset_dir.join("dashboard-blocked-uv.png"),
         &cc_blocked_uv,
+        None,
         None,
         None,
     )?;
@@ -160,6 +218,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &preset_dir.join("preset-panel-output-off.png"),
         &cc,
         Some(&vm_off),
+        None,
         None,
     )?;
 
@@ -186,6 +245,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cc_active_other,
         Some(&vm_on),
         None,
+        None,
     )?;
 
     let preview_cc = preset_preview_panel::PresetPreviewPanelVm {
@@ -201,6 +261,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cc,
         None,
         Some(&preview_cc),
+        None,
     )?;
 
     let mut cv = ui::UiSnapshot::demo();
@@ -209,7 +270,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cv.local_voltage = 24.47;
     cv.set_control_overlay(2, false, LoadMode::Cv, false, true, false, true, None, None);
     cv.set_control_row(24_500, 'V', control::AdjustDigit::DEFAULT);
-    render_snapshot(&out_dir.join("main-display-mock-cv.png"), &cv, None, None)?;
+    render_snapshot(
+        &out_dir.join("main-display-mock-cv.png"),
+        &cv,
+        None,
+        None,
+        None,
+    )?;
 
     let preview_cv = preset_preview_panel::PresetPreviewPanelVm {
         preset_id: 2,
@@ -224,6 +291,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &cv,
         None,
         Some(&preview_cv),
+        None,
     )?;
 
     Ok(())

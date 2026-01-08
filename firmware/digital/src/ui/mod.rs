@@ -170,6 +170,20 @@ const LOAD_BUTTON_SIZE: i32 = 27;
 const LOAD_BUTTON_RIGHT: i32 = CONTROL_VALUE_PILL_RIGHT;
 const LOAD_BUTTON_LEFT: i32 = LOAD_BUTTON_RIGHT - LOAD_BUTTON_SIZE;
 const LOAD_BUTTON_BOTTOM: i32 = LOAD_ROW_TOP + LOAD_BUTTON_SIZE;
+// Dashboard PD button (replaces the old "LOAD" label).
+const PD_BUTTON_LEFT: i32 = 198;
+const PD_BUTTON_GAP_TO_POWER: i32 = 10;
+const PD_BUTTON_RIGHT: i32 = LOAD_BUTTON_LEFT - PD_BUTTON_GAP_TO_POWER;
+const PD_BUTTON_BOTTOM: i32 = LOAD_BUTTON_BOTTOM;
+const PD_BUTTON_RADIUS: i32 = 6;
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum PdButtonState {
+    Standby,
+    Negotiating,
+    Active,
+    Error,
+}
 
 /// Bitmask describing which logical UI regions need to be updated for a frame.
 #[derive(Copy, Clone, Default)]
@@ -830,11 +844,12 @@ pub fn hit_test_dashboard_load_button(x: i32, y: i32) -> bool {
     x >= LOAD_BUTTON_LEFT && x < LOAD_BUTTON_RIGHT && y >= LOAD_ROW_TOP && y < LOAD_BUTTON_BOTTOM
 }
 
+pub fn hit_test_dashboard_pd_button(x: i32, y: i32) -> bool {
+    x >= PD_BUTTON_LEFT && x < PD_BUTTON_RIGHT && y >= LOAD_ROW_TOP && y < PD_BUTTON_BOTTOM
+}
+
 fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
-    // Label aligned to the power button container.
-    let label_h = SMALL_FONT.height() as i32;
-    let label_y = LOAD_ROW_TOP + ((LOAD_BUTTON_SIZE - label_h).max(0) / 2);
-    draw_small_text(canvas, "LOAD", 198, label_y, rgb(0x6d7fa4), 0);
+    draw_dashboard_pd_button(canvas, data);
 
     // State colors apply ONLY to the power symbol (not the button container).
     let forced_off = data.uv_latched
@@ -850,6 +865,62 @@ fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
     };
 
     draw_power_button(canvas, LOAD_BUTTON_LEFT, LOAD_ROW_TOP, symbol_color);
+}
+
+fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
+    let rect = Rect::new(
+        PD_BUTTON_LEFT,
+        LOAD_ROW_TOP,
+        PD_BUTTON_RIGHT,
+        PD_BUTTON_BOTTOM,
+    );
+
+    let base_fill = rgb(0x1c2638);
+    let base_border = rgb(0x1c2a3f);
+
+    let accent = match data.pd_state {
+        PdButtonState::Standby => rgb(0x555f75),
+        PdButtonState::Negotiating => rgb(0xffb347),
+        PdButtonState::Active => rgb(0x4cc9f0),
+        PdButtonState::Error => rgb(0xff5252),
+    };
+
+    let border = if matches!(data.pd_state, PdButtonState::Standby) {
+        base_border
+    } else {
+        accent
+    };
+
+    canvas.fill_round_rect(rect, PD_BUTTON_RADIUS, border);
+    let inner = Rect::new(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
+    canvas.fill_round_rect(inner, (PD_BUTTON_RADIUS - 1).max(0), base_fill);
+
+    let target = if data.pd_desired_mv >= 15_000 {
+        "20V"
+    } else {
+        "5V"
+    };
+    let target_color = if target == "20V" && !data.pd_20v_available {
+        rgb(0x555f75)
+    } else {
+        accent
+    };
+
+    // Two-line layout: `SMALL_FONT` is 12px tall but has internal blank rows (no ascenders/descenders
+    // for "PD"/"20V"). Use a slight overlap so the *visual* gap becomes ~2–3px.
+    let pad_top = 3;
+    let line1_y = rect.top + pad_top;
+    let line2_y = line1_y + 11;
+
+    let spacing = 0;
+    let line1 = "PD";
+    let line1_w = small_text_width(line1, spacing);
+    let line1_x = rect.left + ((rect.right - rect.left - line1_w).max(0) / 2);
+    draw_small_text(canvas, line1, line1_x, line1_y, accent, spacing);
+
+    let line2_w = small_text_width(target, spacing);
+    let line2_x = rect.left + ((rect.right - rect.left - line2_w).max(0) / 2);
+    draw_small_text(canvas, target, line2_x, line2_y, target_color, spacing);
 }
 
 fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb565) {
@@ -1316,6 +1387,9 @@ pub struct UiSnapshot {
     pub trip_alarm_abbrev: Option<&'static str>,
     pub blocked_enable_abbrev: Option<&'static str>,
     pub blink_on: bool,
+    pub pd_state: PdButtonState,
+    pub pd_desired_mv: u32,
+    pub pd_20v_available: bool,
     pub preset_preview_active: bool,
     pub preset_preview_target_text: String<8>,
     pub preset_preview_v_lim_text: String<8>,
@@ -1379,6 +1453,9 @@ impl UiSnapshot {
             trip_alarm_abbrev: None,
             blocked_enable_abbrev: None,
             blink_on: false,
+            pd_state: PdButtonState::Standby,
+            pd_desired_mv: 5_000,
+            pd_20v_available: true,
             preset_preview_active: false,
             preset_preview_target_text: String::new(),
             preset_preview_v_lim_text: String::new(),

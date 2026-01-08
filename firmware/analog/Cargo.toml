@@ -14,7 +14,9 @@ static_cell = "2.1.0"
 
 # Embassy (crates.io)
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-time = { version = "0.5", features = ["defmt", "tick-hz-1_000"] }
+# Match the reference PD sink bring-up (pd-sink-stm32g431cbu6-rs): higher tick rate avoids
+# timer prescaler overflow and improves scheduling granularity at 170MHz SYSCLK.
+embassy-time = { version = "0.5", features = ["defmt", "tick-hz-32_768"] }
 embassy-stm32 = { version = "0.4", features = [
   "defmt",
   "time-driver-any",
@@ -28,6 +30,11 @@ embassy-futures = { version = "0.1" }
 loadlynx-protocol = { path = "../../libs/protocol", features = ["defmt"] }
 stm32-metapac = { version = "18.0.0", features = ["stm32g431cb"] }
 libm = "0.2.8"
+heapless = { version = "0.8", default-features = false }
+minicbor = { version = "0.24", default-features = false, features = ["derive"] }
+usbpd = { version = "1.1.3", features = ["defmt"] }
+usbpd-traits = { version = "1.1.0" }
+uom = { version = "0.36.0", default-features = false, features = ["si", "u32"] }
 
 [profile.dev]
 codegen-units = 1

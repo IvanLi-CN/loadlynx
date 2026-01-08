@@ -19,6 +19,7 @@ embedded-hal-nb = "1.0"
 nb = "1.1"
 heapless = "0.8"
 embassy-sync = { version = "0.5" }
+minicbor = { version = "0.24", default-features = false }
 loadlynx-protocol = { path = "../../libs/protocol", features = ["defmt"] }
 loadlynx-calibration-format = { path = "../../libs/calibration-format" }
 

@@ -12,6 +12,8 @@ use crate::i2c0::I2c0Bus;
 // Presets are stored in the next non-overlapping region.
 pub const EEPROM_PRESETS_BASE_ADDR: u16 = EEPROM_PROFILE_BASE_ADDR + (EEPROM_PROFILE_LEN as u16);
 pub const EEPROM_PRESETS_LEN: usize = 256;
+pub const EEPROM_PD_BASE_ADDR: u16 = EEPROM_PRESETS_BASE_ADDR + (EEPROM_PRESETS_LEN as u16);
+pub const EEPROM_PD_LEN: usize = 32;
 
 #[derive(Debug, Clone, Copy, defmt::Format)]
 pub enum EepromError {
@@ -168,6 +170,23 @@ impl SharedM24c64 {
         // to firmware defaults on next boot.
         let buf = [0xFFu8; EEPROM_PRESETS_LEN];
         self.write_presets_blob(&buf).await
+    }
+
+    pub async fn write_pd_blob(&mut self, blob: &[u8; EEPROM_PD_LEN]) -> Result<(), EepromError> {
+        self.write(EEPROM_PD_BASE_ADDR, blob).await
+    }
+
+    pub async fn read_pd_blob(&mut self) -> Result<[u8; EEPROM_PD_LEN], EepromError> {
+        let mut buf = [0u8; EEPROM_PD_LEN];
+        self.read(EEPROM_PD_BASE_ADDR, &mut buf).await?;
+        Ok(buf)
+    }
+
+    pub async fn clear_pd_blob(&mut self) -> Result<(), EepromError> {
+        // Invalidate by filling with 0xFF; CRC will fail and we will fall back
+        // to firmware defaults on next boot.
+        let buf = [0xFFu8; EEPROM_PD_LEN];
+        self.write_pd_blob(&buf).await
     }
 
     async fn wait_ready(&mut self, probe_addr: u16) -> Result<(), EepromError> {

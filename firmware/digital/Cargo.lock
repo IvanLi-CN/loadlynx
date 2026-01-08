@@ -285,6 +285,7 @@ dependencies = [
  "lcd-async",
  "loadlynx-calibration-format",
  "loadlynx-protocol",
+ "minicbor",
  "nb 1.1.0",
  "smoltcp",
  "static_cell",

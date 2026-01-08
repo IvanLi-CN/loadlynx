@@ -13,7 +13,7 @@ use embassy_stm32::adc::{
 };
 use embassy_stm32::bind_interrupts;
 use embassy_stm32::dac::{Dac, Mode as DacMode, Value as DacValue};
-use embassy_stm32::gpio::{Level, Output, Speed};
+use embassy_stm32::gpio::{Flex, Level, Output, Speed};
 use embassy_stm32::mode::Async as UartAsync;
 use embassy_stm32::usart::{
     Config as UartConfig, DataBits as UartDataBits, Parity as UartParity, RingBufferedUartRx,
@@ -28,7 +28,7 @@ use loadlynx_protocol::{
     FastStatus, FrameHeader, HEADER_LEN, Hello, LoadMode, MSG_CAL_MODE, MSG_SET_MODE,
     MSG_SET_POINT, STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD,
     STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE, STATE_FLAG_UV_LATCHED, SlipDecoder,
-    SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame,
+    SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame, decode_frame,
     decode_limit_profile_frame, decode_set_enable_frame, decode_set_mode_frame,
     decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
     encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame, slip_encode,
@@ -36,6 +36,7 @@ use loadlynx_protocol::{
 use static_cell::StaticCell;
 
 mod calibration;
+mod pd;
 use calibration::{
     CalibrationState, CurveKind, inverse_piecewise, mv_to_raw_100uv, piecewise_linear,
     raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
@@ -47,6 +48,7 @@ const VREFBUF_CSR_ADDR: *mut u32 = VREFBUF_BASE as *mut u32;
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
+    UCPD1 => stm32::ucpd::InterruptHandler<stm32::peripherals::UCPD1>;
 });
 
 // 模拟板 FAST_STATUS 发送周期：20 Hz → 1000/20 ms = 50 ms
@@ -106,8 +108,8 @@ const ADC_SAT_MARGIN: u16 = 32;
 const SENSE_GAIN_NUM: u32 = 124;
 const SENSE_GAIN_DEN: u32 = 10;
 
-// 默认恒流目标（mA）：1.0 A，用于未接收到任何远端 SetPoint 时的启动值。
-const DEFAULT_TARGET_I_LOCAL_MA: i32 = 1_000;
+// 默认恒流目标（mA）：启动时先保持 0 mA，等待数字板下发 SetPoint 再开始带载。
+const DEFAULT_TARGET_I_LOCAL_MA: i32 = 0;
 // 可接受的目标电流范围（mA），用于防止异常指令导致过流。
 const TARGET_I_MIN_MA: i32 = 0;
 const TARGET_I_MAX_MA: i32 = 10_000;
@@ -163,7 +165,8 @@ const CV_G_STEP_DN_MAX_FP: i32 = (CV_G_STEP_DN_MAX_UA_PER_MV * CV_G_FP_SCALE)
 //   - I_total < 2 A：仅驱动通道 1（CH1），CH2 目标为 0；
 //   - I_total ≥ 2 A：CH1/CH2 近似均分（奇数 mA 由 CH1 多承担 1 mA）。
 static TARGET_I_LOCAL_MA: AtomicI32 = AtomicI32::new(DEFAULT_TARGET_I_LOCAL_MA);
-static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(true);
+// 启动时默认不使能输出：由数字板在握手完成后显式下发 SetEnable。
+static ENABLE_REQUESTED: AtomicBool = AtomicBool::new(false);
 
 #[derive(Copy, Clone)]
 struct WindowAvg<const N: usize> {
@@ -451,15 +454,46 @@ fn g4_internal_mcu_temp_to_mc(adc_code: u16) -> i32 {
 
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) -> ! {
-    // 为 ADC1/ADC2 选择稳定的时钟源，避免后续 ADC 初始化触发时钟相关异常。
+    // Clock config:
+    // Align with the reference PD sink bring-up (pd-sink-stm32g431cbu6-rs):
+    // - SYSCLK = 170MHz (PLL1_R)
+    // - CLK48 = HSI48 (for UCPD)
     let mut config = stm32::Config::default();
     {
         use embassy_stm32::rcc::mux;
+        use embassy_stm32::rcc::*;
+
+        config.rcc.hsi48 = Some(Hsi48Config {
+            sync_from_usb: true,
+        });
+        config.rcc.mux.clk48sel = mux::Clk48sel::HSI48;
         config.rcc.mux.adc12sel = mux::Adcsel::SYS;
+
+        config.rcc.pll = Some(Pll {
+            source: PllSource::HSI,
+            prediv: PllPreDiv::DIV4,
+            mul: PllMul::MUL85,
+            divp: None,
+            divq: None,
+            divr: Some(PllRDiv::DIV2),
+        });
+        config.rcc.sys = Sysclk::PLL1_R;
+
+        config.enable_ucpd1_dead_battery = true;
     }
     let p = stm32::init(config);
 
     info!("LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)");
+
+    // Ensure the DBCC pins don't load/distort the CC lines.
+    // On this board they may be tied to the USB-C CC nets for dead-battery behavior.
+    {
+        let mut dbcc1 = Flex::new(p.PA9);
+        let mut dbcc2 = Flex::new(p.PA10);
+        dbcc1.set_as_analog();
+        dbcc2.set_as_analog();
+        let _ = (dbcc1, dbcc2);
+    }
 
     // VREFBUF：仿照 pd-sink-stm32g431cbu6-rs，直接写 CSR=0x0000_0021
     // ENVR=1（bit0），HIZ=0（bit1，VREF+ 连接缓冲输出），VRS=0b10（bits5:4，约 2.9V 档位）。
@@ -469,13 +503,14 @@ async fn main(_spawner: Spawner) -> ! {
         info!("VREFBUF CSR after write: 0x{:08x}", csr);
     }
 
-    // 暂时直接闭合 TPS22810 负载开关：PB13=LOAD_EN_CTL，PB14=LOAD_EN_TS。
-    // 逻辑：LOAD_EN = LOAD_EN_CTL AND LOAD_EN_TS。上电后两路都拉高，由固件
-    // 根据目标电流决定是“仅通道 1”还是“两通道并联”（见 I_SHARE_THRESHOLD_MA）。
-    let mut load_en_ctl = Output::new(p.PB13, Level::High, Speed::Low);
-    let mut load_en_ts = Output::new(p.PB14, Level::High, Speed::Low);
-    load_en_ctl.set_high();
-    load_en_ts.set_high();
+    // TPS22810 负载开关：PB13=LOAD_EN_CTL，PB14=LOAD_EN_TS。
+    // 逻辑：LOAD_EN = LOAD_EN_CTL AND LOAD_EN_TS。
+    //
+    // 启动时默认保持关断（尤其是 USB-PD 协商阶段），由数字板显式下发 SetEnable 后再打开。
+    let mut load_en_ctl = Output::new(p.PB13, Level::Low, Speed::Low);
+    let mut load_en_ts = Output::new(p.PB14, Level::Low, Speed::Low);
+    load_en_ctl.set_low();
+    load_en_ts.set_low();
 
     // 板载状态 LED1：PB3 对应 LEDK1（阴极），低电平点亮、默认熄灭。
     let mut led1 = Output::new(p.PB3, Level::High, Speed::Low);
@@ -516,6 +551,19 @@ async fn main(_spawner: Spawner) -> ! {
     // 启动独立任务接收 SetPoint 控制消息。
     if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring, uart_tx_shared)) {
         warn!("failed to spawn uart_setpoint_rx_task: {:?}", e);
+    }
+
+    // UCPD1: USB-PD sink core (runs independently from the control loop).
+    // The PD task owns UCPD and handles attach/detach/orientation.
+    if let Err(e) = _spawner.spawn(pd::pd_task(
+        p.UCPD1,
+        p.PB6,
+        p.PB4,
+        p.DMA2_CH4,
+        p.DMA2_CH5,
+        uart_tx_shared,
+    )) {
+        warn!("failed to spawn pd_task: {:?}", e);
     }
 
     // ADC1/ADC2：阻塞读取即可满足 30Hz 遥测。
@@ -659,10 +707,20 @@ async fn main(_spawner: Spawner) -> ! {
 
     // FastStatus cadence divider: control loop runs faster than status TX.
     let mut status_div: u32 = 0;
+    // Throttle verbose telemetry logs to reduce RTT load during time-sensitive operations (e.g. USB-PD).
+    // CONTROL_TICKS_PER_STATUS yields 20 Hz; we log every 20 status ticks => ~1 Hz.
+    let mut telemetry_log_div: u8 = 0;
 
     loop {
         let is_status_tick = status_div == 0;
-        if is_status_tick {
+        let is_telemetry_log_tick = if is_status_tick {
+            let tick = telemetry_log_div == 0;
+            telemetry_log_div = (telemetry_log_div + 1) % 20;
+            tick
+        } else {
+            false
+        };
+        if is_telemetry_log_tick {
             info!("main loop top");
         }
         if SOFT_RESET_PENDING.swap(false, Ordering::SeqCst) {
@@ -834,7 +892,7 @@ async fn main(_spawner: Spawner) -> ! {
         let ts1_mv = adc_to_mv(ts1_code);
         let ts2_mv = adc_to_mv(ts2_code);
 
-        if is_status_tick {
+        if is_telemetry_log_tick {
             info!(
                 "raw_adc: vrefint={} v_rmt_sns={} v_nr_sns={} cur1_sns={} cur2_sns={} sns_5v={} ts1={} ts2={}",
                 vrefint_raw,
@@ -1059,6 +1117,15 @@ async fn main(_spawner: Spawner) -> ! {
         } else {
             enable_requested && cal_ready && !has_fault
         };
+
+        // Physically gate the TPS22810 load switch based on the effective enable state.
+        if effective_output_enable {
+            load_en_ctl.set_high();
+            load_en_ts.set_high();
+        } else {
+            load_en_ctl.set_low();
+            load_en_ts.set_low();
+        }
 
         let status_mode: u8 = if active_mode_seen && ctrl_snapshot.mode == LoadMode::Cv {
             FAST_STATUS_MODE_CV
@@ -1382,21 +1449,23 @@ async fn main(_spawner: Spawner) -> ! {
                 target_i_total_ma - status_i_total_ma
             };
 
-            info!(
-                "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_ch1={}mA i_ch2={}mA i_total={}mA target_total={}mA ch1_target={}mA ch2_target={}mA dac1={} dac2={} loop_err={}",
-                v_local_mv,
-                v_remote_mv,
-                v_5v_mv,
-                i_ch1_ma,
-                i_ch2_ma,
-                i_total_ma,
-                target_i_total_ma,
-                target_ch1_ma,
-                target_ch2_ma,
-                dac_code_ch1,
-                dac_code_ch2,
-                loop_error
-            );
+            if is_telemetry_log_tick {
+                info!(
+                    "sense: v_loc={}mV v_rmt={}mV v_5v={}mV i_ch1={}mA i_ch2={}mA i_total={}mA target_total={}mA ch1_target={}mA ch2_target={}mA dac1={} dac2={} loop_err={}",
+                    v_local_mv,
+                    v_remote_mv,
+                    v_5v_mv,
+                    i_ch1_ma,
+                    i_ch2_ma,
+                    i_total_ma,
+                    target_i_total_ma,
+                    target_ch1_ma,
+                    target_ch2_ma,
+                    dac_code_ch1,
+                    dac_code_ch2,
+                    loop_error
+                );
+            }
 
             // 将物理量打包为 FastStatus 帧，由数字板 UI 展示。
             let mut state_flags = 0u32;
@@ -1530,16 +1599,13 @@ async fn apply_soft_reset_safing(
 
     Timer::after_millis(5).await;
 
-    load_en_ctl.set_high();
-    load_en_ts.set_high();
-
     // Clear any latched protection faults; digital side is expected to re-arm
     // the load explicitly after observing a clean state.
     FAULT_FLAGS.store(0, Ordering::Relaxed);
     info!("fault flags cleared on soft reset");
 
     info!(
-        "soft reset applied: reason={:?}, total target set to {} mA (DAC1={} DAC2={}), load re-enabled",
+        "soft reset applied: reason={:?}, total target set to {} mA (DAC1={} DAC2={}), load disabled",
         reason, reset_target_total, reset_dac_code_ch1, reset_dac_code_ch2
     );
 }
@@ -1677,7 +1743,6 @@ async fn uart_setpoint_rx_task(
     let mut decoder: SlipDecoder<128> = SlipDecoder::new();
     decoder.reset(); // ensure clean state on startup
     let mut buf = [0u8; 32];
-    let mut byte_count: u32 = 0;
     let mut ack_raw = [0u8; 64];
     let mut ack_slip = [0u8; 96];
 
@@ -1700,10 +1765,6 @@ async fn uart_setpoint_rx_task(
         match uart_rx.read(&mut buf).await {
             Ok(n) if n > 0 => {
                 for &b in &buf[..n] {
-                    byte_count = byte_count.wrapping_add(1);
-                    if byte_count <= 32 {
-                        info!("SetPoint RX: byte[{}]=0x{:02x}", byte_count, b);
-                    }
                     match decoder.push(b) {
                         Ok(Some(frame)) => {
                             if frame.len() < HEADER_LEN + CRC_LEN {
@@ -1888,6 +1949,113 @@ async fn uart_setpoint_rx_task(
                                                         Err(ProtocolError::UnsupportedMessage(
                                                             _,
                                                         )) => {
+                                                            if let Ok((hdr, payload)) =
+                                                                decode_frame(&frame)
+                                                                && hdr.msg
+                                                                    == pd::MSG_PD_SINK_REQUEST
+                                                            {
+                                                                if hdr.flags & FLAG_IS_ACK != 0 {
+                                                                    info!(
+                                                                        "PD_SINK_REQUEST ACK received on analog side (ignored) seq={}",
+                                                                        hdr.seq
+                                                                    );
+                                                                    continue;
+                                                                }
+
+                                                                let (is_nack, reason) =
+                                                                        match pd::decode_pd_sink_request_payload(
+                                                                            payload,
+                                                                        ) {
+                                                                            Ok(req) => {
+                                                                                if req.mode
+                                                                                    != pd::PD_MODE_FIXED
+                                                                                {
+                                                                                    (true, "unsupported mode")
+                                                                                } else if req.target_mv
+                                                                                    != pd::PD_TARGET_5V_MV
+                                                                                    && req.target_mv
+                                                                                        != pd::PD_TARGET_20V_MV
+                                                                                {
+                                                                                    (
+                                                                                        true,
+                                                                                        "unsupported target_mv",
+                                                                                    )
+                                                                                } else {
+                                                                                    pd::PD_DESIRED_TARGET_MV.store(
+                                                                                        req.target_mv,
+                                                                                        Ordering::Relaxed,
+                                                                                    );
+                                                                                    pd::PD_RENEGOTIATE_SIGNAL.signal(());
+                                                                                    info!(
+                                                                                        "PD_SINK_REQUEST received: mode={} target_mv={} seq={}",
+                                                                                        req.mode,
+                                                                                        req.target_mv,
+                                                                                        hdr.seq
+                                                                                    );
+                                                                                    (false, "")
+                                                                                }
+                                                                            }
+                                                                            Err(_err) => {
+                                                                                (true, "CBOR decode error")
+                                                                            }
+                                                                        };
+
+                                                                if is_nack {
+                                                                    warn!(
+                                                                        "PD_SINK_REQUEST rejected ({}): seq={}",
+                                                                        reason, hdr.seq
+                                                                    );
+                                                                }
+
+                                                                LAST_RX_GOOD_MS.store(
+                                                                    timestamp_ms() as u32,
+                                                                    Ordering::Relaxed,
+                                                                );
+                                                                LINK_EVER_GOOD
+                                                                    .store(true, Ordering::Relaxed);
+
+                                                                let ack_len =
+                                                                    match encode_ack_only_frame(
+                                                                        hdr.seq,
+                                                                        pd::MSG_PD_SINK_REQUEST,
+                                                                        is_nack,
+                                                                        &mut ack_raw,
+                                                                    ) {
+                                                                        Ok(len) => len,
+                                                                        Err(err) => {
+                                                                            warn!(
+                                                                                "PD_SINK_REQUEST ack encode error: {:?}",
+                                                                                err
+                                                                            );
+                                                                            continue;
+                                                                        }
+                                                                    };
+                                                                let slip_len = match slip_encode(
+                                                                    &ack_raw[..ack_len],
+                                                                    &mut ack_slip,
+                                                                ) {
+                                                                    Ok(len) => len,
+                                                                    Err(err) => {
+                                                                        warn!(
+                                                                            "PD_SINK_REQUEST ack slip encode error: {:?}",
+                                                                            err
+                                                                        );
+                                                                        continue;
+                                                                    }
+                                                                };
+                                                                let mut tx = uart_tx.lock().await;
+                                                                if let Err(err) = tx
+                                                                    .write(&ack_slip[..slip_len])
+                                                                    .await
+                                                                {
+                                                                    warn!(
+                                                                        "PD_SINK_REQUEST ack write error: {:?}",
+                                                                        err
+                                                                    );
+                                                                }
+
+                                                                continue;
+                                                            }
                                                             match decode_limit_profile_frame(&frame) {
                                                         Ok((_hdr, profile)) => {
                                                             {

@@ -20,6 +20,7 @@ pub const FLAG_IS_RESP: u8 = 0x08;
 pub const MSG_HELLO: u8 = 0x01;
 pub const MSG_FAST_STATUS: u8 = 0x10;
 pub const MSG_FAULT: u8 = 0x11;
+pub const MSG_PD_STATUS: u8 = 0x13;
 /// SetPoint message: S3 (digital) → G431 (analog)
 ///
 /// This is a minimal control message used to steer the analog board's
@@ -43,10 +44,14 @@ pub const MSG_CAL_MODE: u8 = 0x25;
 /// Soft-reset request/ack handshake initiated by the digital side to reset
 /// analog-side state without power-cycling.
 pub const MSG_SOFT_RESET: u8 = 0x26;
+pub const MSG_PD_SINK_REQUEST: u8 = 0x27;
 /// Calibration write message: S3 (digital) → G431 (analog).
 pub const MSG_CAL_WRITE: u8 = 0x30;
 /// Reserved for future calibration readback support.
 pub const MSG_CAL_READ: u8 = 0x31;
+
+pub const PD_MAX_FIXED_PDOS: usize = 8;
+pub const PD_MAX_PPS_PDOS: usize = 4;
 
 /// Wire-level load mode mapping shared between control messages and telemetry.
 ///
@@ -371,6 +376,194 @@ pub struct SetEnable {
     pub enable: bool,
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdSinkMode {
+    Fixed,
+    Pps,
+    Unknown(u8),
+}
+
+impl From<u8> for PdSinkMode {
+    fn from(value: u8) -> Self {
+        match value {
+            0 => PdSinkMode::Fixed,
+            1 => PdSinkMode::Pps,
+            other => PdSinkMode::Unknown(other),
+        }
+    }
+}
+
+impl From<PdSinkMode> for u8 {
+    fn from(value: PdSinkMode) -> Self {
+        match value {
+            PdSinkMode::Fixed => 0,
+            PdSinkMode::Pps => 1,
+            PdSinkMode::Unknown(raw) => raw,
+        }
+    }
+}
+
+impl Default for PdSinkMode {
+    fn default() -> Self {
+        PdSinkMode::Fixed
+    }
+}
+
+impl<C> Encode<C> for PdSinkMode {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.u8((*self).into())?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for PdSinkMode {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let raw = d.u8()?;
+        Ok(raw.into())
+    }
+}
+
+/// Digital → analog PD target request, persisted by the analog side.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
+#[cbor(map)]
+pub struct PdSinkRequest {
+    #[n(0)]
+    pub mode: PdSinkMode,
+    /// Desired target VBUS in millivolts (mV), e.g. 5000 or 20000.
+    #[n(1)]
+    pub target_mv: u32,
+}
+
+/// Source-provided fixed PDO capability summary: `[mv, max_ma]`.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
+#[cbor(array)]
+pub struct FixedPdo {
+    #[n(0)]
+    pub mv: u32,
+    #[n(1)]
+    pub max_ma: u32,
+}
+
+/// Source-provided PPS APDO capability summary: `[min_mv, max_mv, max_ma]`.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
+#[cbor(array)]
+pub struct PpsPdo {
+    #[n(0)]
+    pub min_mv: u32,
+    #[n(1)]
+    pub max_mv: u32,
+    #[n(2)]
+    pub max_ma: u32,
+}
+
+pub type FixedPdoList = Vec<FixedPdo, PD_MAX_FIXED_PDOS>;
+pub type PpsPdoList = Vec<PpsPdo, PD_MAX_PPS_PDOS>;
+
+/// Analog → digital PD status report (attach/contract + capability summary).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PdStatus {
+    pub attached: bool,
+    pub contract_mv: u32,
+    pub contract_ma: u32,
+    pub fixed_pdos: FixedPdoList,
+    pub pps_pdos: PpsPdoList,
+}
+
+impl<C> Encode<C> for PdStatus {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.map(5)?;
+        e.u8(0)?;
+        e.bool(self.attached)?;
+        e.u8(1)?;
+        e.u32(self.contract_mv)?;
+        e.u8(2)?;
+        e.u32(self.contract_ma)?;
+        e.u8(3)?;
+        e.array(self.fixed_pdos.len() as u64)?;
+        for pdo in self.fixed_pdos.iter() {
+            e.encode_with(*pdo, ctx)?;
+        }
+        e.u8(4)?;
+        e.array(self.pps_pdos.len() as u64)?;
+        for pdo in self.pps_pdos.iter() {
+            e.encode_with(*pdo, ctx)?;
+        }
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for PdStatus {
+    fn decode(d: &mut Decoder<'b>, ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let Some(entries) = d.map()? else {
+            return Err(minicbor::decode::Error::message(
+                "indefinite maps not supported",
+            ));
+        };
+
+        let mut status = PdStatus::default();
+        for _ in 0..entries {
+            let key = d.u8()?;
+            match key {
+                0 => status.attached = d.bool()?,
+                1 => status.contract_mv = d.u32()?,
+                2 => status.contract_ma = d.u32()?,
+                3 => status.fixed_pdos = decode_fixed_pdo_list(d, ctx)?,
+                4 => status.pps_pdos = decode_pps_pdo_list(d, ctx)?,
+                _ => d.skip()?,
+            }
+        }
+        Ok(status)
+    }
+}
+
+fn decode_fixed_pdo_list<'b, C>(
+    d: &mut Decoder<'b>,
+    ctx: &mut C,
+) -> Result<FixedPdoList, minicbor::decode::Error> {
+    let Some(len) = d.array()? else {
+        return Err(minicbor::decode::Error::message(
+            "indefinite arrays not supported",
+        ));
+    };
+
+    let mut out = FixedPdoList::new();
+    for _ in 0..len {
+        let pdo: FixedPdo = d.decode_with(ctx)?;
+        let _ = out.push(pdo);
+    }
+    Ok(out)
+}
+
+fn decode_pps_pdo_list<'b, C>(
+    d: &mut Decoder<'b>,
+    ctx: &mut C,
+) -> Result<PpsPdoList, minicbor::decode::Error> {
+    let Some(len) = d.array()? else {
+        return Err(minicbor::decode::Error::message(
+            "indefinite arrays not supported",
+        ));
+    };
+
+    let mut out = PpsPdoList::new();
+    for _ in 0..len {
+        let pdo: PpsPdo = d.decode_with(ctx)?;
+        let _ = out.push(pdo);
+    }
+    Ok(out)
+}
+
 /// Calibration raw telemetry selection.
 ///
 /// Unknown kinds received over the wire are mapped to `Off` to keep decoding
@@ -507,6 +700,44 @@ pub fn encode_fast_status_frame(
     out[1] = 0;
     out[2] = seq;
     out[3] = MSG_FAST_STATUS;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(status).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
+/// Encode a PD_STATUS frame reporting attach/contract + capability summary.
+pub fn encode_pd_status_frame(seq: u8, status: &PdStatus, out: &mut [u8]) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = 0;
+    out[2] = seq;
+    out[3] = MSG_PD_STATUS;
 
     let payload_len = {
         let payload_slice = &mut out[HEADER_LEN..];
@@ -926,6 +1157,48 @@ pub fn encode_soft_reset_frame(
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
+/// Encode a PD_SINK_REQUEST control frame from the digital side.
+pub fn encode_pd_sink_request_frame(
+    seq: u8,
+    req: &PdSinkRequest,
+    out: &mut [u8],
+) -> Result<usize, Error> {
+    if out.len() < HEADER_LEN + CRC_LEN {
+        return Err(Error::BufferTooSmall);
+    }
+
+    out[0] = PROTOCOL_VERSION;
+    out[1] = FLAG_ACK_REQ;
+    out[2] = seq;
+    out[3] = MSG_PD_SINK_REQUEST;
+
+    let payload_len = {
+        let payload_slice = &mut out[HEADER_LEN..];
+        let mut cursor = Cursor::new(payload_slice);
+        let mut encoder = minicbor::Encoder::new(&mut cursor);
+        encoder.encode(req).map_err(map_encode_err)?;
+        cursor.position()
+    };
+    if payload_len > u16::MAX as usize {
+        return Err(Error::PayloadTooLarge);
+    }
+
+    let len_bytes = (payload_len as u16).to_le_bytes();
+    out[4] = len_bytes[0];
+    out[5] = len_bytes[1];
+
+    let frame_len_without_crc = HEADER_LEN + payload_len;
+    if frame_len_without_crc + CRC_LEN > out.len() {
+        return Err(Error::BufferTooSmall);
+    }
+
+    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
+    let crc_bytes = crc.to_le_bytes();
+    out[frame_len_without_crc] = crc_bytes[0];
+    out[frame_len_without_crc + 1] = crc_bytes[1];
+    Ok(frame_len_without_crc + CRC_LEN)
+}
+
 pub fn decode_fast_status_frame(frame: &[u8]) -> Result<(FrameHeader, FastStatus), Error> {
     let (header, payload) = decode_frame(frame)?;
     if header.msg != MSG_FAST_STATUS {
@@ -933,6 +1206,16 @@ pub fn decode_fast_status_frame(frame: &[u8]) -> Result<(FrameHeader, FastStatus
     }
     let mut decoder = minicbor::Decoder::new(payload);
     let status: FastStatus = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, status))
+}
+
+pub fn decode_pd_status_frame(frame: &[u8]) -> Result<(FrameHeader, PdStatus), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_PD_STATUS {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let status: PdStatus = decoder.decode().map_err(map_decode_err)?;
     Ok((header, status))
 }
 
@@ -1038,6 +1321,16 @@ pub fn decode_soft_reset_frame(frame: &[u8]) -> Result<(FrameHeader, SoftReset),
     let mut decoder = minicbor::Decoder::new(payload);
     let reset: SoftReset = decoder.decode().map_err(map_decode_err)?;
     Ok((header, reset))
+}
+
+pub fn decode_pd_sink_request_frame(frame: &[u8]) -> Result<(FrameHeader, PdSinkRequest), Error> {
+    let (header, payload) = decode_frame(frame)?;
+    if header.msg != MSG_PD_SINK_REQUEST {
+        return Err(Error::UnsupportedMessage(header.msg));
+    }
+    let mut decoder = minicbor::Decoder::new(payload);
+    let req: PdSinkRequest = decoder.decode().map_err(map_decode_err)?;
+    Ok((header, req))
 }
 
 pub fn decode_frame(buf: &[u8]) -> Result<(FrameHeader, &[u8]), Error> {
@@ -1339,6 +1632,65 @@ mod tests {
         let (_hdr, decoded) = decode_set_mode_frame(&raw[..len]).unwrap();
         assert_eq!(decoded.mode, LoadMode::Cv);
         assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn pd_sink_request_roundtrip_and_ack_req() {
+        let req = PdSinkRequest {
+            mode: PdSinkMode::Fixed,
+            target_mv: 20_000,
+        };
+
+        let mut raw = [0u8; 64];
+        let len = encode_pd_sink_request_frame(7, &req, &mut raw).unwrap();
+        let (hdr, decoded) = decode_pd_sink_request_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.msg, MSG_PD_SINK_REQUEST);
+        assert_eq!(hdr.seq, 7);
+        assert_eq!(hdr.flags & FLAG_ACK_REQ, FLAG_ACK_REQ);
+        assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn pd_status_roundtrip_and_lists() {
+        let mut fixed_pdos = FixedPdoList::new();
+        fixed_pdos
+            .push(FixedPdo {
+                mv: 5_000,
+                max_ma: 3_000,
+            })
+            .unwrap();
+        fixed_pdos
+            .push(FixedPdo {
+                mv: 20_000,
+                max_ma: 1_500,
+            })
+            .unwrap();
+
+        let mut pps_pdos = PpsPdoList::new();
+        pps_pdos
+            .push(PpsPdo {
+                min_mv: 3_300,
+                max_mv: 11_000,
+                max_ma: 3_000,
+            })
+            .unwrap();
+
+        let status = PdStatus {
+            attached: true,
+            contract_mv: 20_000,
+            contract_ma: 1_500,
+            fixed_pdos,
+            pps_pdos,
+        };
+
+        let mut raw = [0u8; 128];
+        let len = encode_pd_status_frame(9, &status, &mut raw).unwrap();
+        let (hdr, decoded) = decode_pd_status_frame(&raw[..len]).unwrap();
+        assert_eq!(hdr.msg, MSG_PD_STATUS);
+        assert_eq!(hdr.seq, 9);
+        assert_eq!(decoded, status);
+        assert_eq!(decoded.fixed_pdos.len(), 2);
+        assert_eq!(decoded.fixed_pdos[1].mv, 20_000);
     }
 
     #[test]
