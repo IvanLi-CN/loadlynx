@@ -906,10 +906,11 @@ fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
         accent
     };
 
-    // Two-line layout: 12px font height + ~2px gap → total ~26px (fits in 27px button).
+    // Two-line layout: `SMALL_FONT` is 12px tall but has internal blank rows (no ascenders/descenders
+    // for "PD"/"20V"). Use a slight overlap so the *visual* gap becomes ~2–3px.
     let pad_top = 1;
     let line1_y = rect.top + pad_top;
-    let line2_y = line1_y + 12 + 2;
+    let line2_y = line1_y + 11;
 
     let spacing = 0;
     let line1 = "PD";
