@@ -1951,20 +1951,18 @@ async fn uart_setpoint_rx_task(
                                                         )) => {
                                                             if let Ok((hdr, payload)) =
                                                                 decode_frame(&frame)
-                                                            {
-                                                                if hdr.msg
+                                                                && hdr.msg
                                                                     == pd::MSG_PD_SINK_REQUEST
-                                                                {
-                                                                    if hdr.flags & FLAG_IS_ACK != 0
-                                                                    {
-                                                                        info!(
-                                                                            "PD_SINK_REQUEST ACK received on analog side (ignored) seq={}",
-                                                                            hdr.seq
-                                                                        );
-                                                                        continue;
-                                                                    }
+                                                            {
+                                                                if hdr.flags & FLAG_IS_ACK != 0 {
+                                                                    info!(
+                                                                        "PD_SINK_REQUEST ACK received on analog side (ignored) seq={}",
+                                                                        hdr.seq
+                                                                    );
+                                                                    continue;
+                                                                }
 
-                                                                    let (is_nack, reason) =
+                                                                let (is_nack, reason) =
                                                                         match pd::decode_pd_sink_request_payload(
                                                                             payload,
                                                                         ) {
@@ -2002,67 +2000,61 @@ async fn uart_setpoint_rx_task(
                                                                             }
                                                                         };
 
-                                                                    if is_nack {
-                                                                        warn!(
-                                                                            "PD_SINK_REQUEST rejected ({}): seq={}",
-                                                                            reason, hdr.seq
-                                                                        );
-                                                                    }
-
-                                                                    LAST_RX_GOOD_MS.store(
-                                                                        timestamp_ms() as u32,
-                                                                        Ordering::Relaxed,
+                                                                if is_nack {
+                                                                    warn!(
+                                                                        "PD_SINK_REQUEST rejected ({}): seq={}",
+                                                                        reason, hdr.seq
                                                                     );
-                                                                    LINK_EVER_GOOD.store(
-                                                                        true,
-                                                                        Ordering::Relaxed,
-                                                                    );
+                                                                }
 
-                                                                    let ack_len =
-                                                                        match encode_ack_only_frame(
-                                                                            hdr.seq,
-                                                                            pd::MSG_PD_SINK_REQUEST,
-                                                                            is_nack,
-                                                                            &mut ack_raw,
-                                                                        ) {
-                                                                            Ok(len) => len,
-                                                                            Err(err) => {
-                                                                                warn!(
-                                                                                    "PD_SINK_REQUEST ack encode error: {:?}",
-                                                                                    err
-                                                                                );
-                                                                                continue;
-                                                                            }
-                                                                        };
-                                                                    let slip_len = match slip_encode(
-                                                                        &ack_raw[..ack_len],
-                                                                        &mut ack_slip,
+                                                                LAST_RX_GOOD_MS.store(
+                                                                    timestamp_ms() as u32,
+                                                                    Ordering::Relaxed,
+                                                                );
+                                                                LINK_EVER_GOOD
+                                                                    .store(true, Ordering::Relaxed);
+
+                                                                let ack_len =
+                                                                    match encode_ack_only_frame(
+                                                                        hdr.seq,
+                                                                        pd::MSG_PD_SINK_REQUEST,
+                                                                        is_nack,
+                                                                        &mut ack_raw,
                                                                     ) {
                                                                         Ok(len) => len,
                                                                         Err(err) => {
                                                                             warn!(
-                                                                                "PD_SINK_REQUEST ack slip encode error: {:?}",
+                                                                                "PD_SINK_REQUEST ack encode error: {:?}",
                                                                                 err
                                                                             );
                                                                             continue;
                                                                         }
                                                                     };
-                                                                    let mut tx =
-                                                                        uart_tx.lock().await;
-                                                                    if let Err(err) = tx
-                                                                        .write(
-                                                                            &ack_slip[..slip_len],
-                                                                        )
-                                                                        .await
-                                                                    {
+                                                                let slip_len = match slip_encode(
+                                                                    &ack_raw[..ack_len],
+                                                                    &mut ack_slip,
+                                                                ) {
+                                                                    Ok(len) => len,
+                                                                    Err(err) => {
                                                                         warn!(
-                                                                            "PD_SINK_REQUEST ack write error: {:?}",
+                                                                            "PD_SINK_REQUEST ack slip encode error: {:?}",
                                                                             err
                                                                         );
+                                                                        continue;
                                                                     }
-
-                                                                    continue;
+                                                                };
+                                                                let mut tx = uart_tx.lock().await;
+                                                                if let Err(err) = tx
+                                                                    .write(&ack_slip[..slip_len])
+                                                                    .await
+                                                                {
+                                                                    warn!(
+                                                                        "PD_SINK_REQUEST ack write error: {:?}",
+                                                                        err
+                                                                    );
                                                                 }
+
+                                                                continue;
                                                             }
                                                             match decode_limit_profile_frame(&frame) {
                                                         Ok((_hdr, profile)) => {

@@ -130,108 +130,92 @@ struct UcpdDriver<'d> {
 }
 
 impl<'d> Driver for UcpdDriver<'d> {
-    fn wait_for_vbus(&self) -> impl core::future::Future<Output = ()> {
-        async {}
-    }
+    async fn wait_for_vbus(&self) {}
 
-    fn receive(
-        &mut self,
-        buffer: &mut [u8],
-    ) -> impl core::future::Future<Output = Result<usize, DriverRxError>> {
-        async move {
-            if !self.rx_wait_logged {
-                self.rx_wait_logged = true;
-                info!("PD RX waiting...");
-            }
-            match self.phy.receive(buffer).await {
-                Ok(size) => {
-                    self.rx_seen.store(true, Ordering::Relaxed);
-                    if self.rx_log_budget > 0 {
-                        self.rx_log_budget -= 1;
-                        if size >= 2 {
-                            info!(
-                                "PD RX {}B hdr=[0x{:02x},0x{:02x}]",
-                                size, buffer[0], buffer[1]
-                            );
-                        } else {
-                            info!("PD RX {}B", size);
-                        }
+    async fn receive(&mut self, buffer: &mut [u8]) -> Result<usize, DriverRxError> {
+        if !self.rx_wait_logged {
+            self.rx_wait_logged = true;
+            info!("PD RX waiting...");
+        }
+        match self.phy.receive(buffer).await {
+            Ok(size) => {
+                self.rx_seen.store(true, Ordering::Relaxed);
+                if self.rx_log_budget > 0 {
+                    self.rx_log_budget -= 1;
+                    if size >= 2 {
+                        info!(
+                            "PD RX {}B hdr=[0x{:02x},0x{:02x}]",
+                            size, buffer[0], buffer[1]
+                        );
+                    } else {
+                        info!("PD RX {}B", size);
                     }
-                    Ok(size)
                 }
-                Err(err) => {
-                    self.rx_seen.store(true, Ordering::Relaxed);
-                    if self.rx_log_budget > 0 {
-                        self.rx_log_budget -= 1;
-                        warn!("PD RX err: {:?}", err);
-                    }
-                    match err {
-                        UcpdRxError::HardReset => Err(DriverRxError::HardReset),
-                        UcpdRxError::Crc | UcpdRxError::Overrun => Err(DriverRxError::Discarded),
-                    }
+                Ok(size)
+            }
+            Err(err) => {
+                self.rx_seen.store(true, Ordering::Relaxed);
+                if self.rx_log_budget > 0 {
+                    self.rx_log_budget -= 1;
+                    warn!("PD RX err: {:?}", err);
+                }
+                match err {
+                    UcpdRxError::HardReset => Err(DriverRxError::HardReset),
+                    UcpdRxError::Crc | UcpdRxError::Overrun => Err(DriverRxError::Discarded),
                 }
             }
         }
     }
 
-    fn transmit(
-        &mut self,
-        data: &[u8],
-    ) -> impl core::future::Future<Output = Result<(), DriverTxError>> {
-        async move {
-            if self.tx_log_budget > 0 {
-                self.tx_log_budget -= 1;
-                if data.len() >= 2 {
-                    info!(
-                        "PD TX {}B hdr=[0x{:02x},0x{:02x}]",
-                        data.len(),
-                        data[0],
-                        data[1]
-                    );
-                } else {
-                    info!("PD TX {}B", data.len());
+    async fn transmit(&mut self, data: &[u8]) -> Result<(), DriverTxError> {
+        if self.tx_log_budget > 0 {
+            self.tx_log_budget -= 1;
+            if data.len() >= 2 {
+                info!(
+                    "PD TX {}B hdr=[0x{:02x},0x{:02x}]",
+                    data.len(),
+                    data[0],
+                    data[1]
+                );
+            } else {
+                info!("PD TX {}B", data.len());
+            }
+        }
+        // Log the first fixed-supply Request (2B header + 4B RDO) per attach session.
+        if !self.req_log_done && data.len() == 6 {
+            self.req_log_done = true;
+            info!("PD TX request bytes={=[u8]:#04x}", data);
+        }
+        match self.phy.transmit(data).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if self.tx_log_budget > 0 {
+                    self.tx_log_budget -= 1;
+                    warn!("PD TX err: {:?}", err);
                 }
-            }
-            // Log the first fixed-supply Request (2B header + 4B RDO) per attach session.
-            if !self.req_log_done && data.len() == 6 {
-                self.req_log_done = true;
-                info!("PD TX request bytes={=[u8]:#04x}", data);
-            }
-            match self.phy.transmit(data).await {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    if self.tx_log_budget > 0 {
-                        self.tx_log_budget -= 1;
-                        warn!("PD TX err: {:?}", err);
-                    }
-                    match err {
-                        UcpdTxError::HardReset => Err(DriverTxError::HardReset),
-                        UcpdTxError::Discarded => Err(DriverTxError::Discarded),
-                    }
+                match err {
+                    UcpdTxError::HardReset => Err(DriverTxError::HardReset),
+                    UcpdTxError::Discarded => Err(DriverTxError::Discarded),
                 }
             }
         }
     }
 
-    fn transmit_hard_reset(
-        &mut self,
-    ) -> impl core::future::Future<Output = Result<(), DriverTxError>> {
-        async move {
-            if self.tx_log_budget > 0 {
-                self.tx_log_budget -= 1;
-                info!("PD TX hardreset");
-            }
-            match self.phy.transmit_hardreset().await {
-                Ok(()) => Ok(()),
-                Err(err) => {
-                    if self.tx_log_budget > 0 {
-                        self.tx_log_budget -= 1;
-                        warn!("PD TX hardreset err: {:?}", err);
-                    }
-                    match err {
-                        UcpdTxError::HardReset => Err(DriverTxError::HardReset),
-                        UcpdTxError::Discarded => Err(DriverTxError::Discarded),
-                    }
+    async fn transmit_hard_reset(&mut self) -> Result<(), DriverTxError> {
+        if self.tx_log_budget > 0 {
+            self.tx_log_budget -= 1;
+            info!("PD TX hardreset");
+        }
+        match self.phy.transmit_hardreset().await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                if self.tx_log_budget > 0 {
+                    self.tx_log_budget -= 1;
+                    warn!("PD TX hardreset err: {:?}", err);
+                }
+                match err {
+                    UcpdTxError::HardReset => Err(DriverTxError::HardReset),
+                    UcpdTxError::Discarded => Err(DriverTxError::Discarded),
                 }
             }
         }
@@ -406,60 +390,48 @@ impl AnalogDpm {
 }
 
 impl DevicePolicyManager for AnalogDpm {
-    fn request(
+    async fn request(
         &mut self,
         source_capabilities: &pdo::SourceCapabilities,
-    ) -> impl core::future::Future<Output = request::PowerSource> {
-        async move {
-            self.update_fixed_pdos(source_capabilities);
-            // Emit PD_STATUS as soon as capabilities are known.
+    ) -> request::PowerSource {
+        self.update_fixed_pdos(source_capabilities);
+        // Emit PD_STATUS as soon as capabilities are known.
+        self.send_pd_status(true).await;
+
+        // Some sources are picky when requesting a higher voltage immediately on first contract.
+        // Stage the negotiation: establish an explicit Safe5V contract first, then request the
+        // desired target (e.g. 20V) from `get_event()` once the policy engine enters Ready.
+        let desired_mv = PD_DESIRED_TARGET_MV.load(Ordering::Relaxed);
+        if desired_mv == PD_TARGET_20V_MV {
+            self.followup_desired_request = true;
+            self.build_safe5v_request(source_capabilities)
+        } else {
+            self.build_request(source_capabilities)
+        }
+    }
+
+    async fn transition_power(&mut self, _accepted: &request::PowerSource) {
+        let new_mv = self.pending_contract_mv;
+        let new_ma = self.pending_contract_ma;
+
+        let changed = new_mv != self.contract_mv || new_ma != self.contract_ma;
+        self.contract_mv = new_mv;
+        self.contract_ma = new_ma;
+
+        if changed {
             self.send_pd_status(true).await;
-
-            // Some sources are picky when requesting a higher voltage immediately on first contract.
-            // Stage the negotiation: establish an explicit Safe5V contract first, then request the
-            // desired target (e.g. 20V) from `get_event()` once the policy engine enters Ready.
-            let desired_mv = PD_DESIRED_TARGET_MV.load(Ordering::Relaxed);
-            if desired_mv == PD_TARGET_20V_MV {
-                self.followup_desired_request = true;
-                self.build_safe5v_request(source_capabilities)
-            } else {
-                self.build_request(source_capabilities)
-            }
         }
     }
 
-    fn transition_power(
-        &mut self,
-        _accepted: &request::PowerSource,
-    ) -> impl core::future::Future<Output = ()> {
-        async move {
-            let new_mv = self.pending_contract_mv;
-            let new_ma = self.pending_contract_ma;
-
-            let changed = new_mv != self.contract_mv || new_ma != self.contract_ma;
-            self.contract_mv = new_mv;
-            self.contract_ma = new_ma;
-
-            if changed {
-                self.send_pd_status(true).await;
-            }
+    async fn get_event(&mut self, source_capabilities: &pdo::SourceCapabilities) -> Event {
+        if self.followup_desired_request {
+            self.followup_desired_request = false;
+            info!("PD request: stage=followup desired");
+            return Event::RequestPower(self.build_request(source_capabilities));
         }
-    }
 
-    fn get_event(
-        &mut self,
-        source_capabilities: &pdo::SourceCapabilities,
-    ) -> impl core::future::Future<Output = Event> {
-        async move {
-            if self.followup_desired_request {
-                self.followup_desired_request = false;
-                info!("PD request: stage=followup desired");
-                return Event::RequestPower(self.build_request(source_capabilities));
-            }
-
-            PD_RENEGOTIATE_SIGNAL.wait().await;
-            Event::RequestPower(self.build_request(source_capabilities))
-        }
+        PD_RENEGOTIATE_SIGNAL.wait().await;
+        Event::RequestPower(self.build_request(source_capabilities))
     }
 }
 
