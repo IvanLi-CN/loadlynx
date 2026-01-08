@@ -14,7 +14,9 @@ static_cell = "2.1.0"
 
 # Embassy (crates.io)
 embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }
-embassy-time = { version = "0.5", features = ["defmt", "tick-hz-1_000"] }
+# Match the reference PD sink bring-up (pd-sink-stm32g431cbu6-rs): higher tick rate avoids
+# timer prescaler overflow and improves scheduling granularity at 170MHz SYSCLK.
+embassy-time = { version = "0.5", features = ["defmt", "tick-hz-32_768"] }
 embassy-stm32 = { version = "0.4", features = [
   "defmt",
   "time-driver-any",

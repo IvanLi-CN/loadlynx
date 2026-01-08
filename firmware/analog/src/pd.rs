@@ -4,10 +4,11 @@ use defmt::*;
 use embassy_futures::select::{Either, select};
 use embassy_stm32 as stm32;
 use embassy_stm32::ucpd::{
-    CcPhy, CcPull, CcSel, CcVState, PdPhy, RxError as UcpdRxError, TxError as UcpdTxError,
+    CcPhy, CcPull, CcSel, CcVState, Config as UcpdConfig, PdPhy, RxError as UcpdRxError,
+    TxError as UcpdTxError, Ucpd,
 };
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal};
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer, with_timeout};
 use heapless::Vec;
 use loadlynx_protocol::{CRC_LEN, HEADER_LEN, PROTOCOL_VERSION, crc16_ccitt_false, slip_encode};
 use minicbor::encode::write::Cursor;
@@ -53,17 +54,61 @@ pub struct PdSinkRequestPayload {
     pub target_mv: u32,
 }
 
-fn is_cc_attached(v: CcVState) -> bool {
-    // For a sink (Rd), a connected source (Rp) should present as HIGH/HIGHEST on the active CC pin.
-    matches!(v, CcVState::HIGH | CcVState::HIGHEST)
+fn is_detached(cc1: CcVState, cc2: CcVState) -> bool {
+    cc1 == CcVState::LOWEST && cc2 == CcVState::LOWEST
 }
 
-fn select_cc(cc1: CcVState, cc2: CcVState) -> Option<CcSel> {
-    match (is_cc_attached(cc1), is_cc_attached(cc2)) {
-        (true, false) => Some(CcSel::CC1),
-        (false, true) => Some(CcSel::CC2),
-        (true, true) => Some(CcSel::CC1),
-        (false, false) => None,
+fn cc_vstate_to_u8(v: CcVState) -> u8 {
+    match v {
+        CcVState::LOWEST => 0,
+        CcVState::LOW => 1,
+        CcVState::HIGH => 2,
+        CcVState::HIGHEST => 3,
+    }
+}
+
+async fn wait_for_attach(cc_phy: &CcPhy<'_, stm32::peripherals::UCPD1>) -> CcSel {
+    loop {
+        let (cc1, cc2) = cc_phy.vstate();
+        if is_detached(cc1, cc2) {
+            let _ = cc_phy.wait_for_vstate_change().await;
+            continue;
+        }
+
+        // Align to the reference example: ensure CC is stable for (at least) tCCDebounce.
+        // This avoids picking the wrong CC line due to transient states right after plug-in.
+        if with_timeout(Duration::from_millis(100), cc_phy.wait_for_vstate_change())
+            .await
+            .is_ok()
+        {
+            continue;
+        };
+
+        let (cc1, cc2) = cc_phy.vstate();
+        if is_detached(cc1, cc2) {
+            continue;
+        }
+
+        info!(
+            "PD attach detected (stable): cc1={} cc2={}",
+            cc_vstate_to_u8(cc1),
+            cc_vstate_to_u8(cc2)
+        );
+        return match (cc1, cc2) {
+            (_, CcVState::LOWEST) => CcSel::CC1,
+            (CcVState::LOWEST, _) => CcSel::CC2,
+            _ => CcSel::CC1, // debug accessory mode / unexpected
+        };
+    }
+}
+
+async fn wait_for_detach(cc_phy: &CcPhy<'_, stm32::peripherals::UCPD1>) {
+    loop {
+        let (cc1, cc2) = cc_phy.vstate();
+        if is_detached(cc1, cc2) {
+            return;
+        }
+        cc_phy.wait_for_vstate_change().await;
     }
 }
 
@@ -75,11 +120,16 @@ impl UsbPdTimer for EmbassyTimer {
     }
 }
 
-struct UcpdDriver<'a> {
-    phy: &'a mut PdPhy<'static, stm32::peripherals::UCPD1>,
+struct UcpdDriver<'d> {
+    phy: PdPhy<'d, stm32::peripherals::UCPD1>,
+    rx_seen: &'d core::sync::atomic::AtomicBool,
+    rx_log_budget: u8,
+    tx_log_budget: u8,
+    req_log_done: bool,
+    rx_wait_logged: bool,
 }
 
-impl<'a> Driver for UcpdDriver<'a> {
+impl<'d> Driver for UcpdDriver<'d> {
     fn wait_for_vbus(&self) -> impl core::future::Future<Output = ()> {
         async {}
     }
@@ -89,10 +139,37 @@ impl<'a> Driver for UcpdDriver<'a> {
         buffer: &mut [u8],
     ) -> impl core::future::Future<Output = Result<usize, DriverRxError>> {
         async move {
+            if !self.rx_wait_logged {
+                self.rx_wait_logged = true;
+                info!("PD RX waiting...");
+            }
             match self.phy.receive(buffer).await {
-                Ok(size) => Ok(size),
-                Err(UcpdRxError::HardReset) => Err(DriverRxError::HardReset),
-                Err(UcpdRxError::Crc | UcpdRxError::Overrun) => Err(DriverRxError::Discarded),
+                Ok(size) => {
+                    self.rx_seen.store(true, Ordering::Relaxed);
+                    if self.rx_log_budget > 0 {
+                        self.rx_log_budget -= 1;
+                        if size >= 2 {
+                            info!(
+                                "PD RX {}B hdr=[0x{:02x},0x{:02x}]",
+                                size, buffer[0], buffer[1]
+                            );
+                        } else {
+                            info!("PD RX {}B", size);
+                        }
+                    }
+                    Ok(size)
+                }
+                Err(err) => {
+                    self.rx_seen.store(true, Ordering::Relaxed);
+                    if self.rx_log_budget > 0 {
+                        self.rx_log_budget -= 1;
+                        warn!("PD RX err: {:?}", err);
+                    }
+                    match err {
+                        UcpdRxError::HardReset => Err(DriverRxError::HardReset),
+                        UcpdRxError::Crc | UcpdRxError::Overrun => Err(DriverRxError::Discarded),
+                    }
+                }
             }
         }
     }
@@ -102,10 +179,36 @@ impl<'a> Driver for UcpdDriver<'a> {
         data: &[u8],
     ) -> impl core::future::Future<Output = Result<(), DriverTxError>> {
         async move {
+            if self.tx_log_budget > 0 {
+                self.tx_log_budget -= 1;
+                if data.len() >= 2 {
+                    info!(
+                        "PD TX {}B hdr=[0x{:02x},0x{:02x}]",
+                        data.len(),
+                        data[0],
+                        data[1]
+                    );
+                } else {
+                    info!("PD TX {}B", data.len());
+                }
+            }
+            // Log the first fixed-supply Request (2B header + 4B RDO) per attach session.
+            if !self.req_log_done && data.len() == 6 {
+                self.req_log_done = true;
+                info!("PD TX request bytes={=[u8]:#04x}", data);
+            }
             match self.phy.transmit(data).await {
                 Ok(()) => Ok(()),
-                Err(UcpdTxError::HardReset) => Err(DriverTxError::HardReset),
-                Err(UcpdTxError::Discarded) => Err(DriverTxError::Discarded),
+                Err(err) => {
+                    if self.tx_log_budget > 0 {
+                        self.tx_log_budget -= 1;
+                        warn!("PD TX err: {:?}", err);
+                    }
+                    match err {
+                        UcpdTxError::HardReset => Err(DriverTxError::HardReset),
+                        UcpdTxError::Discarded => Err(DriverTxError::Discarded),
+                    }
+                }
             }
         }
     }
@@ -114,10 +217,22 @@ impl<'a> Driver for UcpdDriver<'a> {
         &mut self,
     ) -> impl core::future::Future<Output = Result<(), DriverTxError>> {
         async move {
+            if self.tx_log_budget > 0 {
+                self.tx_log_budget -= 1;
+                info!("PD TX hardreset");
+            }
             match self.phy.transmit_hardreset().await {
                 Ok(()) => Ok(()),
-                Err(UcpdTxError::HardReset) => Err(DriverTxError::HardReset),
-                Err(UcpdTxError::Discarded) => Err(DriverTxError::Discarded),
+                Err(err) => {
+                    if self.tx_log_budget > 0 {
+                        self.tx_log_budget -= 1;
+                        warn!("PD TX hardreset err: {:?}", err);
+                    }
+                    match err {
+                        UcpdTxError::HardReset => Err(DriverTxError::HardReset),
+                        UcpdTxError::Discarded => Err(DriverTxError::Discarded),
+                    }
+                }
             }
         }
     }
@@ -130,6 +245,8 @@ struct AnalogDpm {
     contract_ma: u32,
     pending_contract_mv: u32,
     pending_contract_ma: u32,
+    followup_desired_request: bool,
+    caps_logged: bool,
 }
 
 impl AnalogDpm {
@@ -141,6 +258,8 @@ impl AnalogDpm {
             contract_ma: 0,
             pending_contract_mv: 0,
             pending_contract_ma: 0,
+            followup_desired_request: false,
+            caps_logged: false,
         }
     }
 
@@ -152,6 +271,26 @@ impl AnalogDpm {
                 let max_ma = fixed.max_current().get::<uom_milliampere>();
                 let _ = self.fixed_pdos.push(FixedPdo { mv, max_ma });
             }
+        }
+
+        if !self.caps_logged {
+            self.caps_logged = true;
+            let mut has_20v = false;
+            let mut v5_max_ma = 0u32;
+            for p in self.fixed_pdos.iter() {
+                if p.mv == PD_TARGET_20V_MV {
+                    has_20v = true;
+                }
+                if p.mv == PD_TARGET_5V_MV {
+                    v5_max_ma = p.max_ma;
+                }
+            }
+            info!(
+                "PD caps: fixed_pdos={} has_20v={} v5_max_ma={}mA",
+                self.fixed_pdos.len(),
+                has_20v,
+                v5_max_ma
+            );
         }
     }
 
@@ -196,6 +335,27 @@ impl AnalogDpm {
         )
         .unwrap();
 
+        self.pending_contract_mv = vsafe.voltage().get::<uom_millivolt>();
+        self.pending_contract_ma = i_req_ma;
+        req
+    }
+
+    fn build_safe5v_request(&mut self, caps: &pdo::SourceCapabilities) -> request::PowerSource {
+        let vsafe = caps.vsafe_5v().unwrap();
+        let max_ma = vsafe.max_current().get::<uom_milliampere>();
+        let i_req_ma = core::cmp::min(3_000, max_ma);
+        let i_req = ElectricCurrent::new::<uom_milliampere>(i_req_ma);
+        let req = request::PowerSource::new_fixed(
+            request::CurrentRequest::Specific(i_req),
+            request::VoltageRequest::Safe5V,
+            caps,
+        )
+        .unwrap();
+
+        info!(
+            "PD request: stage=safe5v i_req={}mA (max={}mA)",
+            i_req_ma, max_ma
+        );
         self.pending_contract_mv = vsafe.voltage().get::<uom_millivolt>();
         self.pending_contract_ma = i_req_ma;
         req
@@ -254,7 +414,17 @@ impl DevicePolicyManager for AnalogDpm {
             self.update_fixed_pdos(source_capabilities);
             // Emit PD_STATUS as soon as capabilities are known.
             self.send_pd_status(true).await;
-            self.build_request(source_capabilities)
+
+            // Some sources are picky when requesting a higher voltage immediately on first contract.
+            // Stage the negotiation: establish an explicit Safe5V contract first, then request the
+            // desired target (e.g. 20V) from `get_event()` once the policy engine enters Ready.
+            let desired_mv = PD_DESIRED_TARGET_MV.load(Ordering::Relaxed);
+            if desired_mv == PD_TARGET_20V_MV {
+                self.followup_desired_request = true;
+                self.build_safe5v_request(source_capabilities)
+            } else {
+                self.build_request(source_capabilities)
+            }
         }
     }
 
@@ -281,6 +451,12 @@ impl DevicePolicyManager for AnalogDpm {
         source_capabilities: &pdo::SourceCapabilities,
     ) -> impl core::future::Future<Output = Event> {
         async move {
+            if self.followup_desired_request {
+                self.followup_desired_request = false;
+                info!("PD request: stage=followup desired");
+                return Event::RequestPower(self.build_request(source_capabilities));
+            }
+
             PD_RENEGOTIATE_SIGNAL.wait().await;
             Event::RequestPower(self.build_request(source_capabilities))
         }
@@ -348,24 +524,16 @@ fn encode_pd_status_frame(
     Ok(frame_len_without_crc + CRC_LEN)
 }
 
-async fn wait_for_detach(cc_phy: &CcPhy<'static, stm32::peripherals::UCPD1>) {
-    loop {
-        let (cc1, cc2) = cc_phy.wait_for_vstate_change().await;
-        if select_cc(cc1, cc2).is_none() {
-            return;
-        }
-    }
-}
-
 #[embassy_executor::task]
 pub async fn pd_task(
-    mut cc_phy: CcPhy<'static, stm32::peripherals::UCPD1>,
-    mut pd_phy: PdPhy<'static, stm32::peripherals::UCPD1>,
+    mut peri: stm32::Peri<'static, stm32::peripherals::UCPD1>,
+    mut cc1: stm32::Peri<'static, stm32::peripherals::PB6>,
+    mut cc2: stm32::Peri<'static, stm32::peripherals::PB4>,
+    mut rx_dma: stm32::Peri<'static, stm32::peripherals::DMA2_CH4>,
+    mut tx_dma: stm32::Peri<'static, stm32::peripherals::DMA2_CH5>,
     uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
 ) -> ! {
     info!("PD task starting (UCPD sink)");
-
-    cc_phy.set_pull(CcPull::Sink);
 
     // Start in detached state.
     {
@@ -374,30 +542,89 @@ pub async fn pd_task(
     }
 
     loop {
-        // Wait for attach.
-        let cc_sel = loop {
-            let (cc1, cc2) = cc_phy.vstate();
-            if let Some(sel) = select_cc(cc1, cc2) {
-                break sel;
+        // Phase 1: detect attach + "preferred" CC selection.
+        let detected_cc_sel = {
+            let mut ucpd = Ucpd::new(
+                peri.reborrow(),
+                super::Irqs,
+                cc1.reborrow(),
+                cc2.reborrow(),
+                UcpdConfig::default(),
+            );
+            ucpd.cc_phy().set_pull(CcPull::Sink);
+
+            info!("Waiting for USB-PD attach...");
+            let sel = wait_for_attach(ucpd.cc_phy()).await;
+            match sel {
+                CcSel::CC1 => info!("PD attached (detected) on CC1"),
+                CcSel::CC2 => info!("PD attached (detected) on CC2"),
             }
-            let _ = cc_phy.wait_for_vstate_change().await;
+            sel
         };
 
-        // Apply active CC selection for PD reception.
-        stm32_metapac::UCPD1.cr().modify(|w| w.set_phyccsel(cc_sel));
-        info!("PD attached on {:?}", cc_sel);
-
-        // Run a new policy engine instance while attached. Drop it on detach to release the PD PHY borrow.
+        // Phase 2: run a PD session. If we see PortPartnerUnresponsive with *no RX at all*, try
+        // the opposite CC once without requiring physical re-plugging.
+        let mut attempt: u8 = 0;
         loop {
-            let driver = UcpdDriver { phy: &mut pd_phy };
-            let dpm = AnalogDpm::new(uart_tx);
-            let mut sink: Sink<UcpdDriver<'_>, EmbassyTimer, AnalogDpm> = Sink::new(driver, dpm);
+            let cc_sel = if attempt == 0 {
+                detected_cc_sel
+            } else {
+                match detected_cc_sel {
+                    CcSel::CC1 => CcSel::CC2,
+                    CcSel::CC2 => CcSel::CC1,
+                }
+            };
 
-            match select(sink.run(), wait_for_detach(&cc_phy)).await {
+            let mut ucpd = Ucpd::new(
+                peri.reborrow(),
+                super::Irqs,
+                cc1.reborrow(),
+                cc2.reborrow(),
+                UcpdConfig::default(),
+            );
+            ucpd.cc_phy().set_pull(CcPull::Sink);
+            // Re-sync attach state after re-initializing UCPD (needed for retry attempt).
+            let _ = wait_for_attach(ucpd.cc_phy()).await;
+
+            info!(
+                "PD starting session on {:?} (attempt {})",
+                cc_sel,
+                attempt + 1
+            );
+            let rx_seen = core::sync::atomic::AtomicBool::new(false);
+
+            // Run the sink while watching for detach. Keep the CC phy alive only within this scope,
+            // so we can safely re-initialize UCPD for a retry attempt.
+            let run_res = {
+                let (cc_phy, pd_phy) =
+                    ucpd.split_pd_phy(rx_dma.reborrow(), tx_dma.reborrow(), cc_sel);
+                let driver = UcpdDriver {
+                    phy: pd_phy,
+                    rx_seen: &rx_seen,
+                    rx_log_budget: 32,
+                    tx_log_budget: 32,
+                    req_log_done: false,
+                    rx_wait_logged: false,
+                };
+                let dpm = AnalogDpm::new(uart_tx);
+                let mut sink: Sink<UcpdDriver<'_>, EmbassyTimer, AnalogDpm> =
+                    Sink::new(driver, dpm);
+                select(sink.run(), wait_for_detach(&cc_phy)).await
+            };
+
+            match run_res {
                 Either::First(res) => {
-                    warn!("PD sink stopped unexpectedly: {:?}", res);
-                    // If still attached, retry after a short delay.
+                    let saw_rx = rx_seen.load(Ordering::Relaxed);
+                    warn!("PD sink loop ended: {:?} (rx_seen={})", res, saw_rx);
+
+                    if !saw_rx && attempt == 0 {
+                        attempt = 1;
+                        Timer::after_millis(50).await;
+                        continue;
+                    }
+
                     Timer::after_millis(100).await;
+                    break;
                 }
                 Either::Second(()) => {
                     info!("PD detached");
