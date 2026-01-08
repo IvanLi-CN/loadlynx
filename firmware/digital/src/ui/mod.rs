@@ -906,10 +906,10 @@ fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
         accent
     };
 
-    // Two-line layout: 12px font height + 3px gap → total 27px.
+    // Two-line layout: 12px font height + ~2px gap → total ~26px (fits in 27px button).
     let pad_top = 1;
     let line1_y = rect.top + pad_top;
-    let line2_y = line1_y + 12 + 3;
+    let line2_y = line1_y + 12 + 2;
 
     let spacing = 0;
     let line1 = "PD";
