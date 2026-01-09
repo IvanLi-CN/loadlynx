@@ -6,7 +6,7 @@
 
 > Mock is rendered at 320×240 px, matching the landscape frame buffer of the P024C128-CTP module (`docs/other-datasheets/p024c128-ctp.md`).
 >
-> NOTE: The main-screen control row interaction is defined by `docs/dev-notes/on-device-preset-ui.md` and replaces the legacy “tap CC/CV + encoder digit adjust” behavior previously described here.
+> NOTE: The main-screen control row interaction is defined by `docs/plan/0005:on-device-preset-ui/PLAN.md` and replaces the legacy “tap CC/CV + encoder digit adjust” behavior previously described here.
 
 ## 需求说明
 
@@ -57,7 +57,7 @@
 
 | Pair | Payload | Font | Color | Placement |
 | --- | --- | --- | --- | --- |
-| Control row | 主界面 Preset 概览与入口：左侧两行 `M#` / `CC|CV`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更） | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；分别用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；交互语义详见 `docs/dev-notes/on-device-preset-ui.md`。 |
+| Control row | 主界面 Preset 概览与入口：左侧两行 `M#` / `CC|CV`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更） | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；分别用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；交互语义详见 `docs/plan/0005:on-device-preset-ui/PLAN.md`。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
 | Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `LNK` / `UVLO` / `OCF` / `OVP` / `OTP` / `FLT 0x12345678`） | SmallFont | 默认 `#DFE7FF`；**Status line #5 在异常时闪烁（`#FF5252` ⇄ `#FFFFFF`）** | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
@@ -139,7 +139,7 @@
 ### Preset entry + quick switch
 
 - Tap the Preset/Mode pill (`M# / CC|CV`) to open the Preset Panel.
-- Press-and-swipe within the Preset/Mode pill performs a quick preset preview; releasing commits activation (and forces load OFF). Exact behavior and safety rules are defined in `docs/dev-notes/on-device-preset-ui.md`.
+- Press-and-swipe within the Preset/Mode pill performs a quick preset preview; releasing commits activation (and forces load OFF). Exact behavior and safety rules are defined in `docs/plan/0005:on-device-preset-ui/PLAN.md`.
 - Tap the Setpoint pill (`DD.dddU`) to cycle encoder step size for the active preset (1.000 → 0.100 → 0.010 → 0.001 → …).
 
 ### Operator quick guide

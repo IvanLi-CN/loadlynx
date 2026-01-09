@@ -1,4 +1,11 @@
-# Web：Responsive Drawer Sidebar（ConsoleLayout 导航）
+# Web：Responsive Drawer Sidebar（ConsoleLayout 导航）（#0012）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-12-25
+- Last: 2025-12-26
+- Source: migrated from `web-responsive-drawer-sidebar.md` (removed)
 
 ## 背景
 

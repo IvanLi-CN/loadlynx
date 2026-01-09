@@ -1,4 +1,11 @@
-# USB‑PD Sink：5V/20V 两态切换（STM32G431 UCPD）
+# USB‑PD Sink：5V/20V 两态切换（STM32G431 UCPD）（#0010）
+
+## 状态
+
+- Status: 已完成
+- Created: 2026-01-07
+- Last: 2026-01-07
+- Source: migrated from `usb-pd-sink-toggle.md` (removed)
 
 本文档定义：数字板（ESP32‑S3）主界面 PD 按钮、数字↔模拟板协议扩展、以及模拟板（STM32G431）USB‑PD Sink 的最小实现范围，用于快速验证 **5V/20V 切换**。
 
@@ -42,9 +49,9 @@
 
 UI mock（320×240，示意：用 PD 两行按钮替换 LOAD 文本标签，右侧保留电源图标按钮）：
 
-![Dashboard PD standby 20V](../assets/usb-pd-sink-toggle/dashboard-pd-standby-20v.png)
+![Dashboard PD standby 20V](../../assets/usb-pd-sink-toggle/dashboard-pd-standby-20v.png)
 
-![Dashboard PD active 20V](../assets/usb-pd-sink-toggle/dashboard-pd-active-20v.png)
+![Dashboard PD active 20V](../../assets/usb-pd-sink-toggle/dashboard-pd-active-20v.png)
 
 ### 4.1 布局（替换 LOAD 标签为 PD 按钮）
 

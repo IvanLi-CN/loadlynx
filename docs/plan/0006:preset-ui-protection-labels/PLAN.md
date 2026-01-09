@@ -1,4 +1,11 @@
-# Preset UI：UVLO / OCP / OPP 命名与三线约束（需求与概要设计）
+# Preset UI：UVLO / OCP / OPP 命名与三线约束（需求与概要设计）（#0006）
+
+## 状态
+
+- Status: 已完成
+- Created: 2026-01-03
+- Last: 2026-01-07
+- Source: migrated from `preset-ui-protection-labels.md` (removed)
 
 ## 背景
 
@@ -31,8 +38,8 @@
 | UI 标签 | 中文含义 | 内部字段 | 单位 | 关键语义 |
 |---|---|---|---|---|
 | `UVLO` | 欠压锁存阈值 | `min_v_mv` | V | 当 `output_enabled=true` 且 `V_main ≤ UVLO` 时触发 `uv_latched`，退流到 0，并仅在用户“关→开”后解除。`UVLO=0` 表示禁用该阈值。 |
-| `OCP` | 总电流上限（预设保护阈值） | `max_i_ma_total` | A | 作为“预设保护阈值”参与运行期安全策略：正常情况下用于限制总电流目标（叠加系统硬上限）；若运行期间检测到**实测电流**明显超过该阈值，则必须触发保护停机并在 UI 中以 `OCP` 作为“Protection Trip”原因提示，等待用户本地确认后才消音/清除提示（见 `docs/dev-notes/on-device-preset-ui.md`）。注意：此处 `OCP` 不等同于硬件/系统 `fault_flags` 的过流故障。 |
-| `OPP` | 总功率上限（预设保护阈值） | `max_p_mw` | W | 作为“预设保护阈值”参与运行期安全策略：正常情况下基于 `V_main` 推导允许的最大电流并限制，确保功率不超过上限；若运行期间检测到**实测功率**明显超过该阈值，则必须触发保护停机并在 UI 中以 `OPP` 作为“Protection Trip”原因提示，等待用户本地确认后才消音/清除提示（见 `docs/dev-notes/on-device-preset-ui.md`）。注意：此处 `OPP` 不等同于系统 `fault_flags` 的故障。 |
+| `OCP` | 总电流上限（预设保护阈值） | `max_i_ma_total` | A | 作为“预设保护阈值”参与运行期安全策略：正常情况下用于限制总电流目标（叠加系统硬上限）；若运行期间检测到**实测电流**明显超过该阈值，则必须触发保护停机并在 UI 中以 `OCP` 作为“Protection Trip”原因提示，等待用户本地确认后才消音/清除提示（见 `docs/plan/0005:on-device-preset-ui/PLAN.md`）。注意：此处 `OCP` 不等同于硬件/系统 `fault_flags` 的过流故障。 |
+| `OPP` | 总功率上限（预设保护阈值） | `max_p_mw` | W | 作为“预设保护阈值”参与运行期安全策略：正常情况下基于 `V_main` 推导允许的最大电流并限制，确保功率不超过上限；若运行期间检测到**实测功率**明显超过该阈值，则必须触发保护停机并在 UI 中以 `OPP` 作为“Protection Trip”原因提示，等待用户本地确认后才消音/清除提示（见 `docs/plan/0005:on-device-preset-ui/PLAN.md`）。注意：此处 `OPP` 不等同于系统 `fault_flags` 的故障。 |
 
 ## UI 字段集合与顺序（冻结）
 

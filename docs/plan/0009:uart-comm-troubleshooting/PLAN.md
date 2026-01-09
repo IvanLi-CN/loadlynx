@@ -1,4 +1,11 @@
-# MCU↔MCU 串口通信问题说明与排查方案（记录规范 & 实测数据）
+# MCU↔MCU 串口通信问题说明与排查方案（记录规范 & 实测数据）（#0009）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-11-16
+- Last: 2026-01-05
+- Source: migrated from `uart-comm-troubleshooting.md` (removed)
 
 ## 背景
 

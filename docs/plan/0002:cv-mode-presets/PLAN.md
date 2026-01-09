@@ -1,4 +1,11 @@
-# CV 模式 + Preset 需求与概要设计
+# CV 模式 + Preset 需求与概要设计（#0002）
+
+## 状态
+
+- Status: 已完成
+- Created: 2026-01-03
+- Last: 2026-01-03
+- Source: migrated from `cv-mode-presets.md` (removed)
 
 本文件冻结“CV（电压钳位）模式 + 5 组预设 Preset + EEPROM 持久化”的需求基线，并给出跨 MCU（ESP32‑S3 ↔ STM32G431）实现边界与接口形状（不包含实现代码）。
 
@@ -6,8 +13,8 @@
 
 - 串口链路与消息集：`docs/interfaces/uart-link.md`
 - 网络 HTTP API：`docs/interfaces/network-http-api.md`
-- 本机 UI 保护字段命名（UVLO/OCP/OPP）：`docs/dev-notes/preset-ui-protection-labels.md`
-- CC 负载开关语义（enable/target/effective）：`docs/dev-notes/cc-load-switch-toggle.md`
+- 本机 UI 保护字段命名（UVLO/OCP/OPP）：`docs/plan/0006:preset-ui-protection-labels/PLAN.md`
+- CC 负载开关语义（enable/target/effective）：`docs/plan/0001:cc-load-switch-toggle/PLAN.md`
 - 当前 firmware 行为梳理：`docs/dev-notes/software.md`
 
 ---

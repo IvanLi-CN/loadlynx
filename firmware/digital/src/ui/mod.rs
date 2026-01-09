@@ -1176,7 +1176,7 @@ fn format_pair_value(value: f32, unit: char) -> String<6> {
 
 fn format_setpoint_milli(value_milli: i32, unit: char) -> String<7> {
     // Fixed-width numeric text for the control row: always "DD.dddU" (7 chars).
-    // Matches `docs/dev-notes/on-device-preset-ui.md`.
+    // Matches `docs/plan/0005:on-device-preset-ui/PLAN.md`.
     let mut s = String::<7>::new();
     let v = value_milli.max(0) as u32;
 
