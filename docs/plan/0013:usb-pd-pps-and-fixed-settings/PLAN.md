@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待设计
+- Status: 待实现
 - Created: 2026-01-09
 - Last: 2026-01-09
 
@@ -41,6 +41,7 @@
 ### In scope
 
 - 数字板 UI：新增 USB‑PD 设置面板（Fixed/PPS + 选择/编辑/应用）。
+- UI 入口（已决策）：主界面 PD 按钮 **短按** 进入 USB‑PD 设置；在该面板内完成 Fixed/PPS 选择与 Apply；`Back` 返回主界面。
 - UART 协议：
   - `PD_STATUS`：能力摘要 + 当前合同信息（增强以支持“用户选 PDO/APDO”）。
   - `PD_SINK_REQUEST`：承载“用户选择的 PDO/APDO + 目标电压/电流”并要求 ACK。
@@ -59,6 +60,8 @@
 
 ### MUST
 
+- **入口（已决策）**：
+  - 主界面 PD 按钮短按进入 USB‑PD 设置面板；`Back` 返回主界面。
 - **全量展示能力**：
   - Fixed PDO：显示全部固定电压档（按 Source Capabilities 解析结果渲染）。
   - PPS APDO：显示全部 APDO（显示 min/max 电压与 Imax）。
@@ -66,7 +69,7 @@
   - Fixed：用户选择目标 PDO（以 object position 标识）。
   - PPS：用户选择目标 APDO（以 object position 标识）。
 - **可配置 Ireq**：
-  - Fixed/PPS：均提供 Ireq 设定入口（默认值与上限见“方案概述”）。
+  - Fixed/PPS：均提供 Ireq 设定入口；默认值为**上次保存值**（EEPROM 持久化）；上限为 Imax（UI 越界阻止、HTTP 越界返回 `422 LIMIT_VIOLATION`）。
 - **越界防护**：
   - UI：阻止把电压/电流设到超出选中 PDO/APDO 的能力范围（步进到边界即停止）。
   - HTTP：越界请求返回 `422 LIMIT_VIOLATION`（不夹紧、不自动改值）。
@@ -212,13 +215,9 @@ UI mock（320×240 PNG）：
 
 ## 风险与开放问题（Risks & Open Questions）
 
-- 风险：不同 PD Source 对 PPS/请求电流的容忍差异很大；需要通过矩阵测试收敛“默认 Ireq”与错误呈现策略。
+- 风险：不同 PD Source 对 PPS/请求电流的容忍差异很大；需要通过矩阵测试收敛“推荐 Ireq”与错误呈现策略。
 - 风险：若能力列表不携带 object position，将无法可靠实现“用户选 APDO”的跨板协议；该点必须优先冻结。
-- 开放问题（需要决策）：
-  - UI 入口：从主界面 PD 按钮如何进入该面板？
-    - 选项 A：短按进入 USB‑PD 设置；在面板内完成 Fixed/PPS 选择与 Apply（主界面不再承担“快速切换 5V/20V”）。
-    - 选项 B：短按保持“快速切换”（兼容 #0010）；长按进入 USB‑PD 设置面板。
-  - 默认 Ireq：初次进入或切换 PDO/APDO 时，Ireq 默认值策略是什么？（例如 `min(Imax, 3000mA)` / 记忆上次值 / 固定安全值）
+- 开放问题：无（已决策：UI 入口选 A；Ireq 默认值为上次保存值）。
 
 ## 参考（References）
 
