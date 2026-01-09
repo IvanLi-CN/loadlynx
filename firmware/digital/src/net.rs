@@ -25,7 +25,8 @@ use static_cell::StaticCell;
 
 use loadlynx_protocol::{
     CalKind, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP,
-    FastStatus, LimitProfile, LoadMode, PROTOCOL_VERSION, STATE_FLAG_UV_LATCHED, SoftResetReason,
+    FastStatus, LimitProfile, LoadMode, PROTOCOL_VERSION, PdStatus, STATE_FLAG_UV_LATCHED,
+    SoftResetReason,
 };
 
 use crate::mdns::MdnsConfig;
@@ -944,6 +945,24 @@ async fn handle_http_connection(
                 write_http_response(socket, version, err, &body, cors_origin).await?;
             }
         },
+        ("GET", "/api/v1/pd") => match render_pd_view_json(&mut body, control, telemetry).await {
+            Ok(()) => {
+                write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+            }
+            Err(err) => {
+                write_http_response(socket, version, err, &body, cors_origin).await?;
+            }
+        },
+        ("PUT", "/api/v1/pd") | ("POST", "/api/v1/pd") => {
+            match handle_pd_update(body_str, &mut body, control, telemetry, eeprom).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
+                }
+            }
+        }
         ("PUT", "/api/v1/cc") | ("POST", "/api/v1/cc") => {
             match handle_cc_update(body_str, &mut body, telemetry).await {
                 Ok(()) => {
@@ -1932,6 +1951,229 @@ async fn render_cc_view_json(
     let _ = core::write!(buf, "{}", status.calc_p_mw);
 
     buf.push('}');
+    Ok(())
+}
+
+/// Render the JSON body for `GET /api/v1/pd`.
+async fn render_pd_view_json(
+    buf: &mut String,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let cfg = { control.lock().await.pd };
+    let status_opt: Option<PdStatus> = { telemetry.lock().await.last_pd_status.clone() };
+
+    buf.clear();
+    buf.push('{');
+    buf.push_str("\"config\":{");
+    buf.push_str("\"mode\":\"");
+    buf.push_str(match cfg.mode {
+        control::PdMode::Fixed => "fixed",
+        control::PdMode::Pps => "pps",
+    });
+    buf.push('"');
+    let _ = core::write!(buf, ",\"object_pos\":{}", cfg.object_pos);
+    let _ = core::write!(buf, ",\"target_mv\":{}", cfg.target_mv);
+    let _ = core::write!(buf, ",\"i_req_ma\":{}", cfg.i_req_ma);
+    buf.push_str("},\"pd\":");
+
+    if let Some(status) = status_opt.as_ref() {
+        buf.push('{');
+        buf.push_str("\"attached\":");
+        buf.push_str(if status.attached { "true" } else { "false" });
+        let _ = core::write!(buf, ",\"contract_mv\":{}", status.contract_mv);
+        let _ = core::write!(buf, ",\"contract_ma\":{}", status.contract_ma);
+
+        buf.push_str(",\"fixed_pdos\":[");
+        for (idx, p) in status.fixed_pdos.iter().enumerate() {
+            if idx != 0 {
+                buf.push(',');
+            }
+            let _ = core::write!(
+                buf,
+                "{{\"pos\":{},\"mv\":{},\"max_ma\":{}}}",
+                p.pos,
+                p.mv,
+                p.max_ma
+            );
+        }
+        buf.push(']');
+
+        buf.push_str(",\"pps_pdos\":[");
+        for (idx, p) in status.pps_pdos.iter().enumerate() {
+            if idx != 0 {
+                buf.push(',');
+            }
+            let _ = core::write!(
+                buf,
+                "{{\"pos\":{},\"min_mv\":{},\"max_mv\":{},\"max_ma\":{}}}",
+                p.pos,
+                p.min_mv,
+                p.max_mv,
+                p.max_ma
+            );
+        }
+        buf.push(']');
+        buf.push('}');
+    } else {
+        buf.push_str("null");
+    }
+
+    buf.push('}');
+    Ok(())
+}
+
+struct PdUpdateRequest {
+    mode: control::PdMode,
+    object_pos: u8,
+    target_mv: u32,
+    i_req_ma: u32,
+}
+
+fn parse_pd_update_json(body: &str) -> Result<PdUpdateRequest, &'static str> {
+    let mode_s = parse_json_str(body, "\"mode\"")?;
+    let mode = match mode_s {
+        "fixed" => control::PdMode::Fixed,
+        "pps" => control::PdMode::Pps,
+        _ => return Err("unsupported mode (expected \"fixed\" or \"pps\")"),
+    };
+
+    let object_pos = parse_json_i64(body, "\"object_pos\"")?;
+    if object_pos < 1 || object_pos > 32 {
+        return Err("object_pos out of range (1..=32)");
+    }
+    let target_mv = parse_json_i64(body, "\"target_mv\"")?;
+    if target_mv <= 0 || target_mv > control::HARD_MAX_V_MV as i64 {
+        return Err("target_mv out of range");
+    }
+    let i_req_ma = parse_json_i64(body, "\"i_req_ma\"")?;
+    if i_req_ma < 0 || i_req_ma > control::HARD_MAX_I_MA_TOTAL as i64 {
+        return Err("i_req_ma out of range");
+    }
+
+    Ok(PdUpdateRequest {
+        mode,
+        object_pos: object_pos as u8,
+        target_mv: target_mv as u32,
+        i_req_ma: i_req_ma as u32,
+    })
+}
+
+async fn handle_pd_update(
+    body_in: &str,
+    body_out: &mut String,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+) -> Result<(), &'static str> {
+    let parsed = match parse_pd_update_json(body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    let status_opt: Option<PdStatus> = { telemetry.lock().await.last_pd_status.clone() };
+    let Some(status) = status_opt.as_ref() else {
+        write_error_body(body_out, "UNAVAILABLE", "pd status unavailable", true, None);
+        return Err("503 Service Unavailable");
+    };
+    if !status.attached {
+        write_error_body(body_out, "UNAVAILABLE", "pd not attached", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    let (max_ma, target_mv_checked) = match parsed.mode {
+        control::PdMode::Fixed => {
+            let Some(pdo) = status
+                .fixed_pdos
+                .iter()
+                .find(|p| p.pos == parsed.object_pos)
+            else {
+                write_error_body(body_out, "LIMIT_VIOLATION", "pdo not found", false, None);
+                return Err("422 Unprocessable Entity");
+            };
+            (pdo.max_ma, pdo.mv)
+        }
+        control::PdMode::Pps => {
+            let Some(pdo) = status.pps_pdos.iter().find(|p| p.pos == parsed.object_pos) else {
+                write_error_body(body_out, "LIMIT_VIOLATION", "apdo not found", false, None);
+                return Err("422 Unprocessable Entity");
+            };
+            if parsed.target_mv < pdo.min_mv || parsed.target_mv > pdo.max_mv {
+                write_error_body(
+                    body_out,
+                    "LIMIT_VIOLATION",
+                    "target_mv out of APDO range",
+                    false,
+                    None,
+                );
+                return Err("422 Unprocessable Entity");
+            }
+            if parsed.target_mv % 20 != 0 {
+                write_error_body(
+                    body_out,
+                    "LIMIT_VIOLATION",
+                    "target_mv must be multiple of 20mV",
+                    false,
+                    None,
+                );
+                return Err("422 Unprocessable Entity");
+            }
+            (pdo.max_ma, parsed.target_mv)
+        }
+    };
+
+    if parsed.i_req_ma != 0 {
+        if parsed.i_req_ma > max_ma {
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "i_req_ma exceeds max_ma",
+                false,
+                None,
+            );
+            return Err("422 Unprocessable Entity");
+        }
+        if parsed.i_req_ma % 50 != 0 {
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "i_req_ma must be multiple of 50mA",
+                false,
+                None,
+            );
+            return Err("422 Unprocessable Entity");
+        }
+    }
+
+    let cfg = control::PdConfig {
+        mode: parsed.mode,
+        object_pos: parsed.object_pos,
+        target_mv: target_mv_checked,
+        i_req_ma: parsed.i_req_ma,
+    };
+
+    let blob = control::encode_pd_blob(&cfg);
+    let write_ok = {
+        let mut ep = eeprom.lock().await;
+        ep.write_pd_blob(&blob).await.is_ok()
+    };
+    if !write_ok {
+        write_error_body(body_out, "UNAVAILABLE", "eeprom write failed", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    {
+        let mut guard = control.lock().await;
+        guard.pd = cfg;
+        guard.pd_editing = cfg;
+        guard.pd_edit_dirty = false;
+    }
+    bump_control_rev();
+
+    render_pd_view_json(body_out, control, telemetry).await?;
     Ok(())
 }
 

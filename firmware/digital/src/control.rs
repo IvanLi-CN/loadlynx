@@ -128,6 +128,7 @@ pub enum UiView {
     Main,
     PresetPanel,
     PresetPanelBlocked,
+    PdPanel,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
@@ -151,16 +152,24 @@ impl PdMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
 pub struct PdConfig {
     pub mode: PdMode,
+    /// Selected PDO/APDO object position (1-based). `0` means "auto" (legacy upgrade path).
+    pub object_pos: u8,
     pub target_mv: u32,
+    /// Requested operating current in mA. `0` means "use maximum available".
+    pub i_req_ma: u32,
 }
 
 impl PdConfig {
     pub const DEFAULT_TARGET_MV: u32 = 5_000;
+    pub const DEFAULT_OBJECT_POS: u8 = 0;
+    pub const DEFAULT_I_REQ_MA: u32 = 0;
 
     pub const fn default() -> Self {
         Self {
             mode: PdMode::DEFAULT,
+            object_pos: Self::DEFAULT_OBJECT_POS,
             target_mv: Self::DEFAULT_TARGET_MV,
+            i_req_ma: Self::DEFAULT_I_REQ_MA,
         }
     }
 
@@ -174,6 +183,10 @@ impl PdConfig {
             false
         } else {
             self.target_mv = next;
+            // Legacy toggle path: keep selection compatible by falling back to
+            // "auto-select" and "use max".
+            self.object_pos = 0;
+            self.i_req_ma = 0;
             true
         }
     }
@@ -195,6 +208,9 @@ pub struct ControlState {
     pub panel_selected_field: PresetPanelField,
     pub panel_selected_digit: PresetPanelDigit,
     pub pd: PdConfig,
+    pub pd_editing: PdConfig,
+    pub pd_edit_dirty: bool,
+    pub pd_panel_scroll: u8,
 }
 
 impl ControlState {
@@ -211,6 +227,9 @@ impl ControlState {
             panel_selected_field: PresetPanelField::Target,
             panel_selected_digit: PresetPanelDigit::Tenths,
             pd,
+            pd_editing: pd,
+            pd_edit_dirty: false,
+            pd_panel_scroll: 0,
         }
     }
 
@@ -458,7 +477,7 @@ pub fn decode_presets_blob(
 // ---- EEPROM PD config blob -------------------------------------------------
 
 const PD_MAGIC: [u8; 4] = *b"LLPD";
-const PD_FMT_VERSION: u8 = 1;
+const PD_FMT_VERSION: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdBlobError {
@@ -466,6 +485,8 @@ pub enum PdBlobError {
     UnsupportedVersion(u8),
     InvalidMode(u8),
     InvalidTarget(u32),
+    InvalidObjectPos(u8),
+    InvalidCurrent(u32),
     CrcMismatch { stored: u32, computed: u32 },
     InvalidLayout,
 }
@@ -475,10 +496,11 @@ pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     out[0..4].copy_from_slice(&PD_MAGIC);
     out[4] = PD_FMT_VERSION;
     out[5] = cfg.mode as u8;
-    out[6] = 0;
+    out[6] = cfg.object_pos;
     out[7] = 0;
     put_u32_le(&mut out, 8, cfg.target_mv);
-    // out[12..28] reserved = 0
+    put_u32_le(&mut out, 12, cfg.i_req_ma);
+    // out[16..28] reserved = 0
 
     let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
     let crc = calfmt::crc32_ieee(&out[..crc_offset]);
@@ -491,12 +513,8 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
         return Err(PdBlobError::InvalidMagic);
     }
     let ver = bytes[4];
-    if ver != PD_FMT_VERSION {
-        return Err(PdBlobError::UnsupportedVersion(ver));
-    }
-
     let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
-    if crc_offset < 12 {
+    if crc_offset < 16 {
         return Err(PdBlobError::InvalidLayout);
     }
     let stored_crc = get_u32_le(bytes, crc_offset);
@@ -511,9 +529,36 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
     let mode_raw = bytes[5];
     let mode = PdMode::from_u8(mode_raw).ok_or(PdBlobError::InvalidMode(mode_raw))?;
     let target_mv = get_u32_le(bytes, 8);
-    if target_mv != 5_000 && target_mv != 20_000 {
+    if target_mv == 0 || target_mv > HARD_MAX_V_MV as u32 {
         return Err(PdBlobError::InvalidTarget(target_mv));
     }
 
-    Ok(PdConfig { mode, target_mv })
+    match ver {
+        1 => {
+            // Legacy blob: fixed 5V/20V toggle, no PDO position/current.
+            Ok(PdConfig {
+                mode,
+                object_pos: 0,
+                target_mv,
+                i_req_ma: 0,
+            })
+        }
+        2 => {
+            let object_pos = bytes[6];
+            if object_pos > 32 {
+                return Err(PdBlobError::InvalidObjectPos(object_pos));
+            }
+            let i_req_ma = get_u32_le(bytes, 12);
+            if i_req_ma > HARD_MAX_I_MA_TOTAL as u32 {
+                return Err(PdBlobError::InvalidCurrent(i_req_ma));
+            }
+            Ok(PdConfig {
+                mode,
+                object_pos,
+                target_mv,
+                i_req_ma,
+            })
+        }
+        _ => Err(PdBlobError::UnsupportedVersion(ver)),
+    }
 }

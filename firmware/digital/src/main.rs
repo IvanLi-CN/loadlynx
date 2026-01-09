@@ -43,11 +43,6 @@ use esp_hal::{
 };
 
 use esp_hal::gpio::{Input, InputConfig, Pull};
-use heapless::Vec;
-use minicbor::data::Type as CborType;
-use minicbor::decode::{Decode as CborDecode, Decoder as CborDecoder};
-use minicbor::encode::write::{Cursor as CborCursor, EndOfSlice as CborEndOfSlice};
-use minicbor::encode::{Encoder as CborEncoder, Error as CborEncodeError};
 
 #[cfg(not(feature = "mock_setpoint"))]
 use esp_hal::pcnt::{self, Pcnt, channel};
@@ -61,12 +56,13 @@ use loadlynx_protocol::{
     CRC_LEN, CalKind, CalMode, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
     FAULT_SINK_OVER_TEMP, FLAG_ACK_REQ, FLAG_IS_ACK, FLAG_IS_NACK, FastStatus, FrameHeader,
     HEADER_LEN, LimitProfile, LoadMode, MSG_CAL_MODE, MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO,
-    MSG_LIMIT_PROFILE, MSG_SET_MODE, MSG_SET_POINT, MSG_SOFT_RESET, PROTOCOL_VERSION,
-    STATE_FLAG_UV_LATCHED, SetEnable, SetMode, SetPoint, SlipDecoder, SoftReset, SoftResetReason,
-    crc16_ccitt_false, decode_cal_mode_frame, decode_fast_status_frame, decode_frame,
-    decode_hello_frame, decode_soft_reset_frame, encode_cal_mode_frame, encode_cal_write_frame,
-    encode_limit_profile_frame, encode_set_enable_frame, encode_set_mode_frame,
-    encode_set_point_frame, encode_soft_reset_frame, slip_encode,
+    MSG_LIMIT_PROFILE, MSG_SET_MODE, MSG_SET_POINT, MSG_SOFT_RESET, PdSinkMode, PdSinkRequest,
+    PdStatus, STATE_FLAG_UV_LATCHED, SetEnable, SetMode, SetPoint, SlipDecoder, SoftReset,
+    SoftResetReason, decode_cal_mode_frame, decode_fast_status_frame, decode_frame,
+    decode_hello_frame, decode_pd_status_frame, decode_soft_reset_frame, encode_cal_mode_frame,
+    encode_cal_write_frame, encode_limit_profile_frame, encode_pd_sink_request_frame,
+    encode_set_enable_frame, encode_set_mode_frame, encode_set_point_frame,
+    encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
@@ -805,6 +801,7 @@ async fn encoder_task(
                             bump_control_rev();
                         }
                     }
+                    control::UiView::PdPanel => {}
                 }
             }
         }
@@ -873,6 +870,7 @@ async fn encoder_task(
                                 prompt_tone::enqueue_ui_ok();
                             }
                             control::UiView::PresetPanelBlocked => {}
+                            control::UiView::PdPanel => {}
                         }
                     }
                     down_since_ms = None;
@@ -915,7 +913,11 @@ async fn encoder_task(
 }
 
 #[embassy_executor::task]
-async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMutex) {
+async fn touch_ui_task(
+    control: &'static ControlMutex,
+    eeprom: &'static EepromMutex,
+    telemetry: &'static TelemetryMutex,
+) {
     info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
     #[derive(Copy, Clone)]
@@ -998,7 +1000,10 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             // down
             0 => {
                 prompt_tone::notify_local_activity();
-                if view == control::UiView::PresetPanelBlocked {
+                if view == control::UiView::PdPanel {
+                    quick_switch = None;
+                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                } else if view == control::UiView::PresetPanelBlocked {
                     quick_switch = None;
                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                 } else {
@@ -1404,6 +1409,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                         );
                                     }
                                     control::UiView::PresetPanelBlocked => {}
+                                    control::UiView::PdPanel => {}
                                 },
                                 ui::ControlRowHit::TargetEntry => {
                                     if view == control::UiView::Main {
@@ -1438,19 +1444,255 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
-                        let (changed, cfg) = {
-                            let mut guard = control.lock().await;
-                            let changed = guard.pd.toggle_target();
-                            let cfg = guard.pd;
-                            if changed {
-                                bump_control_rev();
-                            }
-                            (changed, cfg)
-                        };
-                        if changed {
-                            let _ = save_pd_config_to_eeprom(cfg, eeprom).await;
-                        }
+                        let mut guard = control.lock().await;
+                        guard.ui_view = control::UiView::PdPanel;
+                        guard.pd_editing = guard.pd;
+                        guard.pd_edit_dirty = false;
+                        guard.pd_panel_scroll = 0;
+                        bump_control_rev();
                         prompt_tone::enqueue_ui_ok();
+                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        last_tab_tap = None;
+                        yield_now().await;
+                        continue;
+                    }
+
+                    if view == control::UiView::PdPanel {
+                        let (cfg, scroll) = {
+                            let mut guard = control.lock().await;
+                            (guard.pd_editing, guard.pd_panel_scroll)
+                        };
+                        let pd_status = { telemetry.lock().await.last_pd_status.clone() };
+                        let vm = build_pd_panel_vm(cfg, scroll, pd_status.as_ref());
+                        if let Some(hit) = ui::pd_panel::hit_test_pd_panel(marker.x, marker.y, &vm)
+                        {
+                            use ui::pd_panel::PdPanelHit as Hit;
+
+                            match hit {
+                                Hit::Close => {
+                                    let mut guard = control.lock().await;
+                                    guard.ui_view = control::UiView::Main;
+                                    guard.pd_editing = guard.pd;
+                                    guard.pd_edit_dirty = false;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                }
+                                Hit::ModeFixed => {
+                                    let mut guard = control.lock().await;
+                                    guard.pd_editing.mode = control::PdMode::Fixed;
+                                    guard.pd_editing.object_pos = 0;
+                                    guard.pd_editing.target_mv =
+                                        control::PdConfig::DEFAULT_TARGET_MV;
+                                    guard.pd_editing.i_req_ma = 0;
+                                    guard.pd_edit_dirty = true;
+                                    guard.pd_panel_scroll = 0;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                }
+                                Hit::ModePps => {
+                                    let mut guard = control.lock().await;
+                                    guard.pd_editing.mode = control::PdMode::Pps;
+                                    guard.pd_editing.object_pos = 0;
+                                    guard.pd_editing.i_req_ma = 0;
+                                    guard.pd_edit_dirty = true;
+                                    guard.pd_panel_scroll = 0;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                }
+                                Hit::ScrollUp => {
+                                    let mut guard = control.lock().await;
+                                    guard.pd_panel_scroll = guard.pd_panel_scroll.saturating_sub(1);
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                }
+                                Hit::ScrollDown => {
+                                    let mut guard = control.lock().await;
+                                    guard.pd_panel_scroll = guard.pd_panel_scroll.saturating_add(1);
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                }
+                                Hit::Row(i) => {
+                                    let Some(row) = vm.rows.get(i) else {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    };
+                                    if row.pos == 0 {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
+                                    let Some(status) = pd_status.as_ref() else {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    };
+
+                                    let mut guard = control.lock().await;
+                                    match guard.pd_editing.mode {
+                                        control::PdMode::Fixed => {
+                                            if let Some(pdo) =
+                                                status.fixed_pdos.iter().find(|p| p.pos == row.pos)
+                                            {
+                                                guard.pd_editing.object_pos = pdo.pos;
+                                                guard.pd_editing.target_mv = pdo.mv;
+                                                if guard.pd_editing.i_req_ma != 0
+                                                    && guard.pd_editing.i_req_ma > pdo.max_ma
+                                                {
+                                                    guard.pd_editing.i_req_ma = pdo.max_ma;
+                                                }
+                                                guard.pd_edit_dirty = true;
+                                                bump_control_rev();
+                                                prompt_tone::enqueue_ui_ok();
+                                            } else {
+                                                prompt_tone::enqueue_ui_fail();
+                                            }
+                                        }
+                                        control::PdMode::Pps => {
+                                            if let Some(pdo) =
+                                                status.pps_pdos.iter().find(|p| p.pos == row.pos)
+                                            {
+                                                guard.pd_editing.object_pos = pdo.pos;
+                                                let mut target = guard.pd_editing.target_mv;
+                                                if target < pdo.min_mv || target > pdo.max_mv {
+                                                    target = pdo.min_mv;
+                                                }
+                                                target = (target / 20) * 20;
+                                                guard.pd_editing.target_mv = target;
+                                                if guard.pd_editing.i_req_ma != 0
+                                                    && guard.pd_editing.i_req_ma > pdo.max_ma
+                                                {
+                                                    guard.pd_editing.i_req_ma = pdo.max_ma;
+                                                }
+                                                guard.pd_edit_dirty = true;
+                                                bump_control_rev();
+                                                prompt_tone::enqueue_ui_ok();
+                                            } else {
+                                                prompt_tone::enqueue_ui_fail();
+                                            }
+                                        }
+                                    }
+                                }
+                                Hit::TargetMinus | Hit::TargetPlus => {
+                                    let Some(status) = pd_status.as_ref() else {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    };
+                                    let mut guard = control.lock().await;
+                                    if guard.pd_editing.mode != control::PdMode::Pps {
+                                        prompt_tone::enqueue_ui_fail();
+                                    } else if guard.pd_editing.object_pos == 0 {
+                                        prompt_tone::enqueue_ui_fail();
+                                    } else if let Some(pdo) = status
+                                        .pps_pdos
+                                        .iter()
+                                        .find(|p| p.pos == guard.pd_editing.object_pos)
+                                    {
+                                        let step = 20u32;
+                                        let cur = guard.pd_editing.target_mv;
+                                        let mut next = match hit {
+                                            Hit::TargetMinus => cur.saturating_sub(step),
+                                            _ => cur.saturating_add(step),
+                                        };
+                                        if next < pdo.min_mv {
+                                            next = pdo.min_mv;
+                                        }
+                                        if next > pdo.max_mv {
+                                            next = pdo.max_mv;
+                                        }
+                                        next = (next / 20) * 20;
+                                        if next != guard.pd_editing.target_mv {
+                                            guard.pd_editing.target_mv = next;
+                                            guard.pd_edit_dirty = true;
+                                            bump_control_rev();
+                                            prompt_tone::enqueue_ui_ok();
+                                        }
+                                    } else {
+                                        prompt_tone::enqueue_ui_fail();
+                                    }
+                                }
+                                Hit::CurrentMinus | Hit::CurrentPlus => {
+                                    let Some(status) = pd_status.as_ref() else {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    };
+                                    let mut guard = control.lock().await;
+
+                                    let max_ma_opt = match guard.pd_editing.mode {
+                                        control::PdMode::Fixed => status
+                                            .fixed_pdos
+                                            .iter()
+                                            .find(|p| p.pos == guard.pd_editing.object_pos)
+                                            .map(|p| p.max_ma),
+                                        control::PdMode::Pps => status
+                                            .pps_pdos
+                                            .iter()
+                                            .find(|p| p.pos == guard.pd_editing.object_pos)
+                                            .map(|p| p.max_ma),
+                                    };
+                                    let Some(max_ma) = max_ma_opt else {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    };
+
+                                    let step = 50u32;
+                                    let cur = if guard.pd_editing.i_req_ma == 0 {
+                                        max_ma
+                                    } else {
+                                        guard.pd_editing.i_req_ma
+                                    };
+                                    let mut next = match hit {
+                                        Hit::CurrentMinus => cur.saturating_sub(step),
+                                        _ => cur.saturating_add(step),
+                                    };
+                                    if next < step {
+                                        next = step;
+                                    }
+                                    if next >= max_ma {
+                                        guard.pd_editing.i_req_ma = 0;
+                                    } else {
+                                        guard.pd_editing.i_req_ma = (next / 50) * 50;
+                                    }
+                                    guard.pd_edit_dirty = true;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                }
+                                Hit::Apply => {
+                                    if !vm.apply_enabled {
+                                        prompt_tone::enqueue_ui_fail();
+                                    } else {
+                                        let cfg_to_apply = {
+                                            let mut guard = control.lock().await;
+                                            guard.pd = guard.pd_editing;
+                                            guard.pd_edit_dirty = false;
+                                            bump_control_rev();
+                                            guard.pd
+                                        };
+                                        let ok =
+                                            save_pd_config_to_eeprom(cfg_to_apply, eeprom).await;
+                                        if ok {
+                                            prompt_tone::enqueue_ui_ok();
+                                        } else {
+                                            prompt_tone::enqueue_ui_fail();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
                         yield_now().await;
@@ -1730,6 +1972,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                     );
                                 }
                                 control::UiView::PresetPanelBlocked => {}
+                                control::UiView::PdPanel => {}
                             }
                         }
                     }
@@ -1995,6 +2238,190 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
     }
 }
 
+fn format_mv_2dp(mv: u32) -> heapless::String<12> {
+    use core::fmt::Write;
+    let v = mv / 1000;
+    let frac = (mv % 1000) / 10;
+    let mut out: heapless::String<12> = heapless::String::new();
+    let _ = core::write!(&mut out, "{}.{:02}V", v, frac);
+    out
+}
+
+fn format_ma_2dp(ma: u32) -> heapless::String<12> {
+    use core::fmt::Write;
+    let a = ma / 1000;
+    let frac = (ma % 1000) / 10;
+    let mut out: heapless::String<12> = heapless::String::new();
+    let _ = core::write!(&mut out, "{}.{:02}A", a, frac);
+    out
+}
+
+fn build_pd_panel_vm(
+    cfg: control::PdConfig,
+    scroll: u8,
+    status: Option<&PdStatus>,
+) -> ui::pd_panel::PdPanelVm {
+    use core::fmt::Write;
+
+    let is_pps = matches!(cfg.mode, control::PdMode::Pps);
+    let attached = status.map(|s| s.attached).unwrap_or(false);
+
+    let mut error_text: heapless::String<32> = heapless::String::new();
+    let mut detail_text: heapless::String<32> = heapless::String::new();
+
+    let (selected_pos, selected_max_ma, pps_range) = match (cfg.mode, status) {
+        (control::PdMode::Fixed, Some(s)) => {
+            let pdo = if cfg.object_pos != 0 {
+                s.fixed_pdos.iter().find(|p| p.pos == cfg.object_pos)
+            } else {
+                s.fixed_pdos.iter().find(|p| p.mv == cfg.target_mv)
+            };
+            if let Some(pdo) = pdo {
+                let _ = core::write!(
+                    &mut detail_text,
+                    "PDO #{} {} max {}",
+                    pdo.pos,
+                    format_mv_2dp(pdo.mv).as_str(),
+                    format_ma_2dp(pdo.max_ma).as_str()
+                );
+                (pdo.pos, Some(pdo.max_ma), None)
+            } else {
+                (0, None, None)
+            }
+        }
+        (control::PdMode::Pps, Some(s)) => {
+            if cfg.object_pos == 0 {
+                (0, None, None)
+            } else if let Some(pdo) = s.pps_pdos.iter().find(|p| p.pos == cfg.object_pos) {
+                let _ = core::write!(
+                    &mut detail_text,
+                    "APDO #{} {}-{} max {}",
+                    pdo.pos,
+                    format_mv_2dp(pdo.min_mv).as_str(),
+                    format_mv_2dp(pdo.max_mv).as_str(),
+                    format_ma_2dp(pdo.max_ma).as_str()
+                );
+                (pdo.pos, Some(pdo.max_ma), Some((pdo.min_mv, pdo.max_mv)))
+            } else {
+                (0, None, None)
+            }
+        }
+        _ => (0, None, None),
+    };
+
+    let mut apply_enabled = true;
+    if !attached {
+        apply_enabled = false;
+        error_text.push_str("PD: disconnected").ok();
+    } else if selected_pos == 0 {
+        apply_enabled = false;
+        error_text
+            .push_str(if is_pps { "Select APDO" } else { "Select PDO" })
+            .ok();
+    } else if is_pps {
+        if let Some((min_mv, max_mv)) = pps_range {
+            if cfg.target_mv < min_mv || cfg.target_mv > max_mv {
+                apply_enabled = false;
+                error_text.push_str("Target V out of range").ok();
+            }
+        }
+    }
+    if apply_enabled {
+        if let Some(max_ma) = selected_max_ma {
+            if cfg.i_req_ma != 0 && cfg.i_req_ma > max_ma {
+                apply_enabled = false;
+                error_text.push_str("Ireq out of range").ok();
+            }
+        }
+    }
+
+    let show_target_adjust = is_pps;
+
+    let target_text = format_mv_2dp(cfg.target_mv);
+    let current_text = if cfg.i_req_ma == 0 {
+        let mut s: heapless::String<12> = heapless::String::new();
+        s.push_str("MAX").ok();
+        s
+    } else {
+        format_ma_2dp(cfg.i_req_ma)
+    };
+
+    let mut rows: heapless::Vec<ui::pd_panel::PdPanelRowVm, 5> = heapless::Vec::new();
+    let mut can_scroll_up = false;
+    let mut can_scroll_down = false;
+
+    if let Some(status) = status {
+        let total = if is_pps {
+            status.pps_pdos.len()
+        } else {
+            status.fixed_pdos.len()
+        };
+        let max_start = total.saturating_sub(5);
+        let start = (scroll as usize).min(max_start);
+        can_scroll_up = start > 0;
+        can_scroll_down = start + 5 < total;
+
+        for i in 0..5usize {
+            let idx = start + i;
+            if idx >= total {
+                let _ = rows.push(ui::pd_panel::PdPanelRowVm {
+                    pos: 0,
+                    selected: false,
+                    text: heapless::String::new(),
+                });
+                continue;
+            }
+
+            let (pos, line, selected) = if is_pps {
+                let p = status.pps_pdos[idx];
+                let selected = p.pos == selected_pos;
+                let mut line: heapless::String<32> = heapless::String::new();
+                let _ = core::write!(
+                    &mut line,
+                    "#{} {}-{} {}",
+                    p.pos,
+                    format_mv_2dp(p.min_mv).as_str(),
+                    format_mv_2dp(p.max_mv).as_str(),
+                    format_ma_2dp(p.max_ma).as_str()
+                );
+                (p.pos, line, selected)
+            } else {
+                let p = status.fixed_pdos[idx];
+                let selected = p.pos == selected_pos;
+                let mut line: heapless::String<32> = heapless::String::new();
+                let _ = core::write!(
+                    &mut line,
+                    "#{} {} {}",
+                    p.pos,
+                    format_mv_2dp(p.mv).as_str(),
+                    format_ma_2dp(p.max_ma).as_str()
+                );
+                (p.pos, line, selected)
+            };
+
+            let _ = rows.push(ui::pd_panel::PdPanelRowVm {
+                pos,
+                selected,
+                text: line,
+            });
+        }
+    }
+
+    ui::pd_panel::PdPanelVm {
+        is_pps,
+        attached,
+        can_scroll_up,
+        can_scroll_down,
+        show_target_adjust,
+        apply_enabled,
+        error_text,
+        detail_text,
+        target_text,
+        current_text,
+        rows,
+    }
+}
+
 async fn save_editing_preset_to_eeprom(control: &ControlMutex, eeprom: &EepromMutex) -> bool {
     let (preset_id, blob) = {
         let guard = control.lock().await;
@@ -2043,169 +2470,23 @@ async fn save_pd_config_to_eeprom(cfg: control::PdConfig, eeprom: &EepromMutex) 
     match res {
         Ok(()) => {
             info!(
-                "touch: PD SAVE ok (mode={:?}, target_mv={})",
-                cfg.mode, cfg.target_mv
+                "touch: PD SAVE ok (mode={:?}, pos={}, target_mv={}, i_req_ma={})",
+                cfg.mode, cfg.object_pos, cfg.target_mv, cfg.i_req_ma
             );
             true
         }
         Err(err) => {
             warn!(
-                "touch: PD SAVE failed (mode={:?}, target_mv={}, err={:?})",
-                cfg.mode, cfg.target_mv, err
+                "touch: PD SAVE failed (mode={:?}, pos={}, target_mv={}, i_req_ma={}, err={:?})",
+                cfg.mode, cfg.object_pos, cfg.target_mv, cfg.i_req_ma, err
             );
             false
         }
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PdFixedPdo {
-    mv: u32,
-    max_ma: u32,
-}
-
-impl<'b, C> CborDecode<'b, C> for PdFixedPdo {
-    fn decode(d: &mut CborDecoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
-        let len = d.array()?;
-        if matches!(len, Some(n) if n < 2) {
-            return Err(minicbor::decode::Error::message("fixed_pdo: short array"));
-        }
-        let mv = d.u32()?;
-        let max_ma = d.u32()?;
-        match len {
-            Some(n) => {
-                for _ in 2..n {
-                    d.skip()?;
-                }
-            }
-            None => {
-                while d.datatype()? != CborType::Break {
-                    d.skip()?;
-                }
-                d.skip()?; // consume break
-            }
-        }
-        Ok(Self { mv, max_ma })
-    }
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PdPpsApdo {
-    min_mv: u32,
-    max_mv: u32,
-    max_ma: u32,
-}
-
-impl<'b, C> CborDecode<'b, C> for PdPpsApdo {
-    fn decode(d: &mut CborDecoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
-        let len = d.array()?;
-        if matches!(len, Some(n) if n < 3) {
-            return Err(minicbor::decode::Error::message("pps_apdo: short array"));
-        }
-        let min_mv = d.u32()?;
-        let max_mv = d.u32()?;
-        let max_ma = d.u32()?;
-        match len {
-            Some(n) => {
-                for _ in 3..n {
-                    d.skip()?;
-                }
-            }
-            None => {
-                while d.datatype()? != CborType::Break {
-                    d.skip()?;
-                }
-                d.skip()?; // consume break
-            }
-        }
-        Ok(Self {
-            min_mv,
-            max_mv,
-            max_ma,
-        })
-    }
-}
-
-#[derive(Clone, Debug)]
-struct PdStatus {
-    attached: bool,
-    contract_mv: u32,
-    contract_ma: u32,
-    fixed_pdos: Vec<PdFixedPdo, 8>,
-    pps_pdos: Vec<PdPpsApdo, 4>,
-}
-
-impl PdStatus {
-    fn has_fixed_mv(&self, mv: u32) -> bool {
-        self.fixed_pdos.iter().any(|p| p.mv == mv)
-    }
-}
-
-fn decode_pd_status_payload(payload: &[u8]) -> Result<PdStatus, minicbor::decode::Error> {
-    let mut d = CborDecoder::new(payload);
-    let len = d.map()?;
-
-    let mut attached = false;
-    let mut contract_mv = 0u32;
-    let mut contract_ma = 0u32;
-    let mut fixed_pdos: Vec<PdFixedPdo, 8> = Vec::new();
-    let mut pps_pdos: Vec<PdPpsApdo, 4> = Vec::new();
-
-    let mut handle_entry =
-        |key: u8, d: &mut CborDecoder<'_>| -> Result<(), minicbor::decode::Error> {
-            match key {
-                0 => attached = d.bool()?,
-                1 => contract_mv = d.u32()?,
-                2 => contract_ma = d.u32()?,
-                3 => {
-                    fixed_pdos.clear();
-                    let mut iter = d.array_iter::<PdFixedPdo>()?;
-                    while let Some(item) = iter.next() {
-                        let pdo = item?;
-                        fixed_pdos
-                            .push(pdo)
-                            .map_err(|_| minicbor::decode::Error::message("fixed_pdos overflow"))?;
-                    }
-                }
-                4 => {
-                    pps_pdos.clear();
-                    let mut iter = d.array_iter::<PdPpsApdo>()?;
-                    while let Some(item) = iter.next() {
-                        let pdo = item?;
-                        pps_pdos
-                            .push(pdo)
-                            .map_err(|_| minicbor::decode::Error::message("pps_pdos overflow"))?;
-                    }
-                }
-                _ => d.skip()?,
-            }
-            Ok(())
-        };
-
-    match len {
-        Some(n) => {
-            for _ in 0..n {
-                let key = d.u8()?;
-                handle_entry(key, &mut d)?;
-            }
-        }
-        None => loop {
-            if d.datatype()? == CborType::Break {
-                d.skip()?; // consume break
-                break;
-            }
-            let key = d.u8()?;
-            handle_entry(key, &mut d)?;
-        },
-    }
-
-    Ok(PdStatus {
-        attached,
-        contract_mv,
-        contract_ma,
-        fixed_pdos,
-        pps_pdos,
-    })
+fn pd_status_has_fixed_mv(status: &PdStatus, mv: u32) -> bool {
+    status.fixed_pdos.iter().any(|p| p.mv == mv)
 }
 
 async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
@@ -2800,8 +3081,9 @@ async fn display_task(
                 adjust_digit,
                 pd_desired_mv,
                 preview_panel,
-                panel_visible,
-                panel_vm,
+                ui_view,
+                preset_panel_vm,
+                pd_panel_state,
             ) = {
                 let guard = control.lock().await;
                 let preview_active = (1..=(control::PRESET_COUNT as u8)).contains(&preview_id);
@@ -2853,9 +3135,14 @@ async fn display_task(
                     guard.adjust_digit,
                     guard.pd.target_mv,
                     preview_panel,
-                    preset_panel_visible(guard.ui_view),
+                    guard.ui_view,
                     if preset_panel_visible(guard.ui_view) {
                         Some(build_preset_panel_vm(&guard))
+                    } else {
+                        None
+                    },
+                    if guard.ui_view == control::UiView::PdPanel {
+                        Some((guard.pd_editing, guard.pd_panel_scroll))
                     } else {
                         None
                     },
@@ -2863,22 +3150,25 @@ async fn display_task(
             };
 
             let preview_active = preview_panel.is_some();
+            let overlay_visible =
+                preset_panel_visible(ui_view) || ui_view == control::UiView::PdPanel;
             let mut force_full_render =
-                panel_visible || (panel_visible != last_panel_visible) || frame_idx == 1;
+                overlay_visible || (overlay_visible != last_panel_visible) || frame_idx == 1;
             if preview_active != last_preview_active {
                 force_full_render = true;
             }
             if preview_active && last_preview_active && overlay_mode != last_preview_mode {
                 force_full_render = true;
             }
-            last_panel_visible = panel_visible;
+            last_panel_visible = overlay_visible;
             last_preview_active = preview_active;
             if preview_active {
                 last_preview_mode = overlay_mode;
             }
 
-            let (snapshot, mask) = {
+            let (snapshot, mask, pd_status) = {
                 let mut guard = telemetry.lock().await;
+                let pd_status = guard.last_pd_status.clone();
                 guard.snapshot.blink_on = ((now / 500) & 1) == 0;
                 let uv_latched_raw = guard
                     .last_status
@@ -2899,7 +3189,7 @@ async fn display_task(
                 let pd_20v_available = guard
                     .last_pd_status
                     .as_ref()
-                    .map(|s| s.has_fixed_mv(20_000))
+                    .map(|s| pd_status_has_fixed_mv(s, 20_000))
                     .unwrap_or(true);
                 guard.snapshot.pd_20v_available = pd_20v_available;
 
@@ -2963,7 +3253,8 @@ async fn display_task(
                     active_target_unit,
                     adjust_digit,
                 );
-                guard.diff_for_render()
+                let diff = guard.diff_for_render();
+                (diff.0, diff.1, pd_status)
             };
 
             if mask.is_empty() && !force_full_render {
@@ -2987,8 +3278,12 @@ async fn display_task(
                         // 后续帧：仅按掩码重绘受影响区域。
                         ui::render_partial(&mut frame, &snapshot, &mask);
                     }
-                    if let Some(vm) = panel_vm.as_ref() {
+                    if let Some(vm) = preset_panel_vm.as_ref() {
                         ui::preset_panel::render_preset_panel(&mut frame, vm);
+                    }
+                    if let Some((cfg, scroll)) = pd_panel_state.as_ref() {
+                        let vm = build_pd_panel_vm(*cfg, *scroll, pd_status.as_ref());
+                        ui::pd_panel::render_pd_panel(&mut frame, &vm);
                     }
                     // 在左上角叠加 FPS 信息，使用上一统计窗口得到的整数 FPS。
                     ui::render_fps_overlay(&mut frame, last_fps);
@@ -3409,14 +3704,17 @@ async fn feed_decoder(
                                 decoder.reset();
                             }
                         },
-                        MSG_PD_STATUS => match decode_pd_status_payload(_payload) {
-                            Ok(status) => {
+                        MSG_PD_STATUS => match decode_pd_status_frame(&frame) {
+                            Ok((_hdr, status)) => {
                                 record_link_activity();
                                 apply_pd_status(telemetry, status).await;
                             }
                             Err(err) => {
                                 PROTO_DECODE_ERRS.fetch_add(1, Ordering::Relaxed);
-                                warn!("PD_STATUS decode error: {:?}", defmt::Debug2Format(&err));
+                                rate_limited_proto_warn(
+                                    protocol_error_str(&err),
+                                    Some(frame.as_slice()),
+                                );
                                 decoder.reset();
                             }
                         },
@@ -3699,8 +3997,8 @@ async fn main(spawner: Spawner) {
             Ok(blob) => match control::decode_pd_blob(&blob) {
                 Ok(cfg) => {
                     info!(
-                        "EEPROM PD config loaded (mode={:?}, target_mv={})",
-                        cfg.mode, cfg.target_mv
+                        "EEPROM PD config loaded (mode={:?}, pos={}, target_mv={}, i_req_ma={})",
+                        cfg.mode, cfg.object_pos, cfg.target_mv, cfg.i_req_ma
                     );
                     cfg
                 }
@@ -3710,6 +4008,8 @@ async fn main(spawner: Spawner) {
                         control::PdBlobError::UnsupportedVersion(_) => "version",
                         control::PdBlobError::InvalidMode(_) => "mode",
                         control::PdBlobError::InvalidTarget(_) => "target_mv",
+                        control::PdBlobError::InvalidObjectPos(_) => "object_pos",
+                        control::PdBlobError::InvalidCurrent(_) => "i_req_ma",
                         control::PdBlobError::CrcMismatch { .. } => "crc32",
                         control::PdBlobError::InvalidLayout => "layout",
                     };
@@ -4014,7 +4314,7 @@ async fn main(spawner: Spawner) {
         .expect("touch_task spawn");
     info!("spawning touch-ui task");
     spawner
-        .spawn(touch_ui_task(control, eeprom))
+        .spawn(touch_ui_task(control, eeprom, telemetry))
         .expect("touch_ui_task spawn");
     info!("spawning prompt tone task");
     spawner
@@ -4051,7 +4351,7 @@ async fn main(spawner: Spawner) {
     if let Some(uhci_tx) = uhci_tx_opt.take() {
         info!("spawning SetMode tx task (UHCI TX, active control)");
         spawner
-            .spawn(setmode_tx_task(uhci_tx, calibration, control))
+            .spawn(setmode_tx_task(uhci_tx, telemetry, calibration, control))
             .expect("setmode_tx_task spawn");
     } else {
         warn!("SetMode tx task not started (UHCI TX unavailable)");
@@ -4811,6 +5111,7 @@ async fn send_setpoint_frame(
 #[embassy_executor::task]
 async fn setmode_tx_task(
     mut uhci_tx: uhci::UhciTx<'static, Async>,
+    telemetry: &'static TelemetryMutex,
     calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
 ) {
@@ -4831,16 +5132,35 @@ async fn setmode_tx_task(
     let mut raw = [0u8; 64];
     let mut slip = [0u8; 192];
 
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct PdReqKey {
+        mode: PdSinkMode,
+        target_mv: u32,
+        object_pos: u8,
+        i_req_ma: u32,
+    }
+
+    impl PdReqKey {
+        fn from_req(req: &PdSinkRequest) -> Self {
+            Self {
+                mode: req.mode,
+                target_mv: req.target_mv,
+                object_pos: req.object_pos,
+                i_req_ma: req.i_req_ma,
+            }
+        }
+    }
+
     #[derive(Clone, Copy)]
     struct PdPending {
         seq: u8,
-        target_mv: u32,
+        key: PdReqKey,
         ack_total_at_send: u32,
         deadline_ms: u32,
     }
 
     let mut pd_pending: Option<PdPending> = None;
-    let mut pd_last_sent_target_mv: Option<u32> = None;
+    let mut pd_last_sent_key: Option<PdReqKey> = None;
     let mut pd_force_send: bool = false;
     let mut prev_attached: bool = false;
 
@@ -5056,9 +5376,19 @@ async fn setmode_tx_task(
                 guard.pd,
             )
         };
-        if pd_cfg.target_mv != 5_000 && pd_cfg.target_mv != 20_000 {
-            pd_cfg.target_mv = 5_000;
+        if pd_cfg.target_mv == 0 || pd_cfg.target_mv > control::HARD_MAX_V_MV as u32 {
+            pd_cfg.target_mv = control::PdConfig::DEFAULT_TARGET_MV;
         }
+        if pd_cfg.object_pos > 32 {
+            pd_cfg.object_pos = 0;
+        }
+        if pd_cfg.i_req_ma > control::HARD_MAX_I_MA_TOTAL as u32 {
+            pd_cfg.i_req_ma = 0;
+        }
+
+        let pd_status = { telemetry.lock().await.last_pd_status.clone() };
+        let pd_req = build_pd_sink_request(&pd_cfg, pd_status.as_ref());
+        let pd_req_key = pd_req.as_ref().map(PdReqKey::from_req);
 
         // PD auto-apply: attach rising edge triggers a re-send of the persisted policy.
         let attached_now = LAST_V_LOCAL_MV.load(Ordering::Relaxed) >= 2_000
@@ -5080,11 +5410,11 @@ async fn setmode_tx_task(
                 PD_REQ_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
                 warn!(
                     "pd_sink_request ack timeout (seq={}, target_mv={})",
-                    p.seq, p.target_mv
+                    p.seq, p.key.target_mv
                 );
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
-            } else if p.target_mv != pd_cfg.target_mv {
+            } else if pd_req_key.map(|k| k != p.key).unwrap_or(true) {
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
             }
@@ -5093,20 +5423,24 @@ async fn setmode_tx_task(
         // Send PD policy when forced (attach/link edge) or when the target changes.
         if LINK_UP.load(Ordering::Relaxed)
             && pd_pending.is_none()
-            && (pd_force_send || pd_last_sent_target_mv != Some(pd_cfg.target_mv))
+            && (pd_force_send || pd_last_sent_key != pd_req_key)
         {
             const PD_ACK_TIMEOUT_MS: u32 = 300;
             let seq_now = seq;
             seq = seq.wrapping_add(1);
             let ack_baseline = PD_REQ_ACK_TOTAL.load(Ordering::Relaxed);
-            if send_pd_sink_request_frame(&mut uhci_tx, seq_now, &pd_cfg, &mut raw, &mut slip).await
+            let Some(pd_req) = pd_req.as_ref() else {
+                pd_force_send = false;
+                continue;
+            };
+            if send_pd_sink_request_frame(&mut uhci_tx, seq_now, pd_req, &mut raw, &mut slip).await
             {
                 PD_LAST_APPLY_MS.store(now, Ordering::Relaxed);
-                pd_last_sent_target_mv = Some(pd_cfg.target_mv);
+                pd_last_sent_key = pd_req_key;
                 pd_force_send = false;
                 pd_pending = Some(PdPending {
                     seq: seq_now,
-                    target_mv: pd_cfg.target_mv,
+                    key: PdReqKey::from_req(pd_req),
                     ack_total_at_send: ack_baseline,
                     deadline_ms: now.saturating_add(PD_ACK_TIMEOUT_MS),
                 });
@@ -5346,68 +5680,98 @@ async fn send_setmode_frame(
     }
 }
 
-fn map_pd_encode_err(err: CborEncodeError<CborEndOfSlice>) -> loadlynx_protocol::Error {
-    if err.is_write() {
-        loadlynx_protocol::Error::BufferTooSmall
-    } else {
-        loadlynx_protocol::Error::CborEncode
-    }
-}
-
-fn encode_pd_sink_request_frame(
-    seq: u8,
+fn build_pd_sink_request(
     cfg: &control::PdConfig,
-    out: &mut [u8; 64],
-) -> Result<usize, loadlynx_protocol::Error> {
-    if out.len() < HEADER_LEN + CRC_LEN {
-        return Err(loadlynx_protocol::Error::BufferTooSmall);
-    }
-
-    out[0] = PROTOCOL_VERSION;
-    out[1] = FLAG_ACK_REQ;
-    out[2] = seq;
-    out[3] = MSG_PD_SINK_REQUEST;
-
-    let payload_len = {
-        let payload_slice = &mut out[HEADER_LEN..];
-        let mut cursor = CborCursor::new(payload_slice);
-        let mut enc = CborEncoder::new(&mut cursor);
-        // CBOR map: { 0: mode, 1: target_mv }
-        enc.map(2).map_err(map_pd_encode_err)?;
-        enc.u8(0).map_err(map_pd_encode_err)?;
-        enc.u8(cfg.mode as u8).map_err(map_pd_encode_err)?;
-        enc.u8(1).map_err(map_pd_encode_err)?;
-        enc.u32(cfg.target_mv).map_err(map_pd_encode_err)?;
-        cursor.position()
+    status: Option<&PdStatus>,
+) -> Option<PdSinkRequest> {
+    let mode = match cfg.mode {
+        control::PdMode::Fixed => PdSinkMode::Fixed,
+        control::PdMode::Pps => PdSinkMode::Pps,
     };
-    if payload_len > u16::MAX as usize {
-        return Err(loadlynx_protocol::Error::PayloadTooLarge);
+
+    match mode {
+        PdSinkMode::Fixed => {
+            let mut max_ma: u32 = 500;
+            let object_pos = if cfg.object_pos != 0 {
+                if let Some(status) = status {
+                    let pdo = status.fixed_pdos.iter().find(|p| p.pos == cfg.object_pos)?;
+                    max_ma = pdo.max_ma;
+                }
+                cfg.object_pos
+            } else if let Some(status) = status {
+                let pdo = status.fixed_pdos.iter().find(|p| p.mv == cfg.target_mv)?;
+                max_ma = pdo.max_ma;
+                pdo.pos
+            } else {
+                1
+            };
+
+            let i_req_ma = if cfg.i_req_ma != 0 {
+                if max_ma != 0 {
+                    cfg.i_req_ma.min(max_ma)
+                } else {
+                    cfg.i_req_ma
+                }
+            } else {
+                max_ma
+            };
+
+            Some(PdSinkRequest {
+                mode,
+                target_mv: cfg.target_mv,
+                object_pos,
+                i_req_ma: i_req_ma.max(1),
+            })
+        }
+        PdSinkMode::Pps => {
+            let mut max_ma: u32 = 500;
+            let object_pos = if cfg.object_pos != 0 {
+                if let Some(status) = status {
+                    let pdo = status.pps_pdos.iter().find(|p| p.pos == cfg.object_pos)?;
+                    if cfg.target_mv < pdo.min_mv || cfg.target_mv > pdo.max_mv {
+                        return None;
+                    }
+                    max_ma = pdo.max_ma;
+                }
+                cfg.object_pos
+            } else {
+                let status = status?;
+                let pdo = status
+                    .pps_pdos
+                    .iter()
+                    .find(|p| cfg.target_mv >= p.min_mv && cfg.target_mv <= p.max_mv)?;
+                max_ma = pdo.max_ma;
+                pdo.pos
+            };
+
+            let i_req_ma = if cfg.i_req_ma != 0 {
+                if max_ma != 0 {
+                    cfg.i_req_ma.min(max_ma)
+                } else {
+                    cfg.i_req_ma
+                }
+            } else {
+                max_ma
+            };
+            Some(PdSinkRequest {
+                mode,
+                target_mv: cfg.target_mv,
+                object_pos,
+                i_req_ma: i_req_ma.max(1),
+            })
+        }
+        PdSinkMode::Unknown(_) => None,
     }
-
-    let len_bytes = (payload_len as u16).to_le_bytes();
-    out[4] = len_bytes[0];
-    out[5] = len_bytes[1];
-
-    let frame_len_without_crc = HEADER_LEN + payload_len;
-    if frame_len_without_crc + CRC_LEN > out.len() {
-        return Err(loadlynx_protocol::Error::BufferTooSmall);
-    }
-
-    let crc = crc16_ccitt_false(&out[..frame_len_without_crc]);
-    let crc_bytes = crc.to_le_bytes();
-    out[frame_len_without_crc] = crc_bytes[0];
-    out[frame_len_without_crc + 1] = crc_bytes[1];
-    Ok(frame_len_without_crc + CRC_LEN)
 }
 
 async fn send_pd_sink_request_frame(
     uhci_tx: &mut uhci::UhciTx<'static, Async>,
     seq: u8,
-    cfg: &control::PdConfig,
+    req: &PdSinkRequest,
     raw: &mut [u8; 64],
     slip: &mut [u8; 192],
 ) -> bool {
-    let frame_len = match encode_pd_sink_request_frame(seq, cfg, raw) {
+    let frame_len = match encode_pd_sink_request_frame(seq, req, raw) {
         Ok(len) => len,
         Err(err) => {
             warn!("pd_sink_request: encode error: {:?}", err);
@@ -5429,12 +5793,14 @@ async fn send_pd_sink_request_frame(
             PD_REQ_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
             PD_REQ_ACK_PENDING.store(true, Ordering::Release);
             info!(
-                "pd_sink_request sent (msg=0x{:02x}, flags=0x{:02x}): seq={} mode={:?} target_mv={} len={} slip_len={}",
+                "pd_sink_request sent (msg=0x{:02x}, flags=0x{:02x}): seq={} mode={:?} target_mv={} pos={} i_req_ma={} len={} slip_len={}",
                 MSG_PD_SINK_REQUEST,
                 FLAG_ACK_REQ,
                 seq,
-                cfg.mode,
-                cfg.target_mv,
+                req.mode,
+                req.target_mv,
+                req.object_pos,
+                req.i_req_ma,
                 frame_len,
                 slip_len
             );
