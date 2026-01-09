@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 待设计
 - Created: 2026-01-09
 - Last: 2026-01-09
 
@@ -86,6 +86,29 @@
 
 - 在后续版本加入“自动选择 APDO”选项（与当前“手动选择”并存）。
 - 增加更丰富的 PD 诊断信息（例如协商阶段、Reject/Wait 计数、PPS keep-alive 状态）。
+
+## UI 效果图（UI mock）
+
+> 说明：以下效果图用于冻结“信息架构 / 状态 / 控件分区 / 文案口径”。像素级对齐与最终渲染细节，以实现阶段的真实 UI 渲染输出为准。
+
+UI mock（320×240 PNG）：
+
+### Fixed 模式（全量 Fixed PDO 列表 + Ireq）
+
+![PD settings (Fixed)](../../assets/usb-pd-settings-panel/pd-settings-fixed.png)
+
+### PPS 模式（全量 PPS APDO 列表 + Vreq/Ireq）
+
+![PD settings (PPS)](../../assets/usb-pd-settings-panel/pd-settings-pps.png)
+
+### 所选能力不可用（Apply 禁用）
+
+![PD settings (Unavailable)](../../assets/usb-pd-settings-panel/pd-settings-unavailable.png)
+
+#### UI mock 资产一致性（冻结）
+
+- 资产目录：`docs/assets/usb-pd-settings-panel/*.png`。
+- 若本文修改了字段名/状态/布局分区，导致效果图表达不再准确，应在同一次推进中同步更新对应 PNG（实现阶段可替换为来自真实 UI 渲染的 mock）。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -187,7 +210,11 @@
 
 - 风险：不同 PD Source 对 PPS/请求电流的容忍差异很大；需要通过矩阵测试收敛“默认 Ireq”与错误呈现策略。
 - 风险：若能力列表不携带 object position，将无法可靠实现“用户选 APDO”的跨板协议；该点必须优先冻结。
-- 开放问题：无（关键策略已冻结：手动选 APDO、全量展示、Ireq 可配、不可用即拒绝 Apply、PD 与负载不联动）。
+- 开放问题（需要决策）：
+  - UI 入口：从主界面 PD 按钮如何进入该面板？
+    - 选项 A：短按进入 USB‑PD 设置；在面板内完成 Fixed/PPS 选择与 Apply（主界面不再承担“快速切换 5V/20V”）。
+    - 选项 B：短按保持“快速切换”（兼容 #0010）；长按进入 USB‑PD 设置面板。
+  - 默认 Ireq：初次进入或切换 PDO/APDO 时，Ireq 默认值策略是什么？（例如 `min(Imax, 3000mA)` / 记忆上次值 / 固定安全值）
 
 ## 参考（References）
 
