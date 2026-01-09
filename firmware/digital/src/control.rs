@@ -152,15 +152,18 @@ impl PdMode {
 pub struct PdConfig {
     pub mode: PdMode,
     pub target_mv: u32,
+    pub i_req_ma: u32,
 }
 
 impl PdConfig {
     pub const DEFAULT_TARGET_MV: u32 = 5_000;
+    pub const DEFAULT_I_REQ_MA: u32 = 3_000;
 
     pub const fn default() -> Self {
         Self {
             mode: PdMode::DEFAULT,
             target_mv: Self::DEFAULT_TARGET_MV,
+            i_req_ma: Self::DEFAULT_I_REQ_MA,
         }
     }
 
@@ -458,7 +461,7 @@ pub fn decode_presets_blob(
 // ---- EEPROM PD config blob -------------------------------------------------
 
 const PD_MAGIC: [u8; 4] = *b"LLPD";
-const PD_FMT_VERSION: u8 = 1;
+const PD_FMT_VERSION: u8 = 2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdBlobError {
@@ -478,7 +481,8 @@ pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     out[6] = 0;
     out[7] = 0;
     put_u32_le(&mut out, 8, cfg.target_mv);
-    // out[12..28] reserved = 0
+    put_u32_le(&mut out, 12, cfg.i_req_ma);
+    // out[16..28] reserved = 0
 
     let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
     let crc = calfmt::crc32_ieee(&out[..crc_offset]);
@@ -491,7 +495,7 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
         return Err(PdBlobError::InvalidMagic);
     }
     let ver = bytes[4];
-    if ver != PD_FMT_VERSION {
+    if ver != 1 && ver != PD_FMT_VERSION {
         return Err(PdBlobError::UnsupportedVersion(ver));
     }
 
@@ -511,9 +515,22 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
     let mode_raw = bytes[5];
     let mode = PdMode::from_u8(mode_raw).ok_or(PdBlobError::InvalidMode(mode_raw))?;
     let target_mv = get_u32_le(bytes, 8);
-    if target_mv != 5_000 && target_mv != 20_000 {
+    if ver == 1 && target_mv != 5_000 && target_mv != 20_000 {
+        return Err(PdBlobError::InvalidTarget(target_mv));
+    }
+    if ver >= 2 && (target_mv < 3_000 || target_mv > 21_000) {
         return Err(PdBlobError::InvalidTarget(target_mv));
     }
 
-    Ok(PdConfig { mode, target_mv })
+    let i_req_ma = if ver >= 2 {
+        get_u32_le(bytes, 12)
+    } else {
+        PdConfig::DEFAULT_I_REQ_MA
+    };
+
+    Ok(PdConfig {
+        mode,
+        target_mv,
+        i_req_ma,
+    })
 }
