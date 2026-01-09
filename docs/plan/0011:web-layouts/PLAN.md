@@ -1,4 +1,11 @@
-# Web UI Layout 规范化（Layouts 抽象）
+# Web UI Layout 规范化（Layouts 抽象）（#0011）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-12-25
+- Last: 2025-12-26
+- Source: migrated from `web-layouts.md` (removed)
 
 ## 背景与问题
 
@@ -62,9 +69,9 @@
 为避免把 calibration 变成“另一个 App”，本方案仍复用 `ConsoleLayout` 的顶栏，并且 calibration **仍在 `DeviceLayout` 之下**；同时允许 `ConsoleLayout` 基于路由元信息切换布局变体：
 
 - **默认变体（shell）**：顶栏 + 侧栏 + 内容区（内容区内再用 `PageContainer` 做 `max-w-5xl` 收敛）
-- **工具变体（tool）**：顶栏 + 内容区（隐藏常驻侧栏/rail），内容区 **不限制宽度**（用于 Calibration 这类长表格/多列操作）；响应式抽屉入口见 `docs/dev-notes/web-responsive-drawer-sidebar.md`。
+- **工具变体（tool）**：顶栏 + 内容区（隐藏常驻侧栏/rail），内容区 **不限制宽度**（用于 Calibration 这类长表格/多列操作）；响应式抽屉入口见 `docs/plan/0012:web-responsive-drawer-sidebar/PLAN.md`。
 
-另见：`docs/dev-notes/web-responsive-drawer-sidebar.md`（响应式 drawer / icon rail / 大屏固定侧栏的交互与断点规范）。
+另见：`docs/plan/0012:web-responsive-drawer-sidebar/PLAN.md`（响应式 drawer / icon rail / 大屏固定侧栏的交互与断点规范）。
 
 实现建议（实现阶段落地）：
 

@@ -1,4 +1,11 @@
-# 提示音管理器（蜂鸣器 Prompt Tone）设计
+# 提示音管理器（蜂鸣器 Prompt Tone）设计（#0007）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-12-31
+- Last: 2026-01-07
+- Source: migrated from `prompt-tone-manager.md` (removed)
 
 ## 背景
 
@@ -6,7 +13,7 @@ LoadLynx 控制板（ESP32‑S3）已集成无源蜂鸣器，但当前固件缺�
 
 - **提示音管理器**：以事件驱动、非阻塞播放、可扩展的“提示音表”与调度策略。
 - **操作反馈音**：所有本地交互（触摸、旋钮 detent、按键）都要有声音反馈，且音量偏小（靠占空比控制）。
-- **告警音**：按“告警分级”策略持续/一次性提示，并与 UI 的右下角状态缩写保持一致（见 `docs/dev-notes/on-device-preset-ui.md`）。
+- **告警音**：按“告警分级”策略持续/一次性提示，并与 UI 的右下角状态缩写保持一致（见 `docs/plan/0005:on-device-preset-ui/PLAN.md`）。
 
 本设计只覆盖控制板本地蜂鸣器（GPIO21）提示音，不涉及 UI 视觉提示或远程接口反馈。
 

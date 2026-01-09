@@ -1,4 +1,11 @@
-# Web Storybook 组件工作台：需求分析与概要设计
+# Web Storybook 组件工作台：需求分析与概要设计（#0008）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-12-22
+- Last: 2025-12-23
+- Source: migrated from `storybook-component-workshop.md` (removed)
 
 ## 1. 背景与目标
 

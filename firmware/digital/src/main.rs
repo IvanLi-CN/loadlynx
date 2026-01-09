@@ -373,7 +373,7 @@ pub fn timestamp_ms() -> u64 {
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
 
 fn fault_flags_abbrev(flags: u32) -> &'static str {
-    // Public, user-facing abbreviations (frozen by docs/dev-notes/on-device-preset-ui.md).
+    // Public, user-facing abbreviations (frozen by docs/plan/0005:on-device-preset-ui/PLAN.md).
     if flags & FAULT_OVERVOLTAGE != 0 {
         "OVP"
     } else if flags & (FAULT_MCU_OVER_TEMP | FAULT_SINK_OVER_TEMP) != 0 {
@@ -386,7 +386,7 @@ fn fault_flags_abbrev(flags: u32) -> &'static str {
 }
 
 fn current_load_block_abbrev() -> Option<&'static str> {
-    // Priority is frozen by docs/dev-notes/on-device-preset-ui.md.
+    // Priority is frozen by docs/plan/0005:on-device-preset-ui/PLAN.md.
     let fault_flags = LAST_FAULT_FLAGS.load(Ordering::Relaxed);
     if fault_flags != 0 {
         Some(fault_flags_abbrev(fault_flags))
@@ -421,7 +421,7 @@ fn current_uvlo_inhibit(min_v_mv: i32) -> bool {
 }
 
 fn current_load_enable_block_abbrev(min_v_mv: i32) -> Option<&'static str> {
-    // Priority is frozen by docs/dev-notes/on-device-preset-ui.md.
+    // Priority is frozen by docs/plan/0005:on-device-preset-ui/PLAN.md.
     let fault_flags = LAST_FAULT_FLAGS.load(Ordering::Relaxed);
     if fault_flags != 0 {
         Some(fault_flags_abbrev(fault_flags))

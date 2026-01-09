@@ -1,4 +1,11 @@
-# 本机 Preset UI（触屏 + 旋钮）需求与概要设计
+# 本机 Preset UI（触屏 + 旋钮）需求与概要设计（#0005）
+
+## 状态
+
+- Status: 已完成
+- Created: 2026-01-01
+- Last: 2026-01-07
+- Source: migrated from `on-device-preset-ui.md` (removed)
 
 ## 背景
 
@@ -6,8 +13,8 @@
 
 相关资料（参考现有规格，不在本文重复展开）：
 
-- Preset 数据模型与安全语义基线：`docs/dev-notes/cv-mode-presets.md`
-- Preset UI 保护字段命名与三线约束：`docs/dev-notes/preset-ui-protection-labels.md`
+- Preset 数据模型与安全语义基线：`docs/plan/0002:cv-mode-presets/PLAN.md`
+- Preset UI 保护字段命名与三线约束：`docs/plan/0006:preset-ui-protection-labels/PLAN.md`
 - HTTP API（现有控制/预设接口）：`docs/interfaces/network-http-api.md`
 
 ## 目标
@@ -41,23 +48,23 @@ UI mock（320×240 PNG）：
 
 - 主界面（Dashboard）
 
-  ![Dashboard](../assets/on-device-preset-ui/dashboard.png)
+  ![Dashboard](../../assets/on-device-preset-ui/dashboard.png)
 
 - 主界面（Dashboard；blocked enable：LNK）
 
-  ![Dashboard blocked (LNK)](../assets/on-device-preset-ui/dashboard-blocked-lnk.png)
+  ![Dashboard blocked (LNK)](../../assets/on-device-preset-ui/dashboard-blocked-lnk.png)
 
 - 主界面（Dashboard；forced OFF：UVLO）
 
-  ![Dashboard blocked (UVLO)](../assets/on-device-preset-ui/dashboard-blocked-uv.png)
+  ![Dashboard blocked (UVLO)](../../assets/on-device-preset-ui/dashboard-blocked-uv.png)
 
 - 预设设置面板（LOAD=OFF）
 
-  ![Preset panel load off](../assets/on-device-preset-ui/preset-panel-output-off.png)
+  ![Preset panel load off](../../assets/on-device-preset-ui/preset-panel-output-off.png)
 
 - 预设设置面板（LOAD=ON）
 
-  ![Preset panel load on](../assets/on-device-preset-ui/preset-panel-output-on.png)
+  ![Preset panel load on](../../assets/on-device-preset-ui/preset-panel-output-on.png)
 
 说明（示例状态，仅用于 mock 展示）：
 
@@ -112,7 +119,7 @@ UI mock（320×240 PNG）：
   - `UVLO`：欠压（阈值为当前预设的 `min_v_mv`）：
     - **Enable 预检拒绝**（启动前就欠压）：当用户尝试启用 `LOAD` 且 `V_main ≤ min_v_mv`，拒绝启用（播放一次 `UI fail` 失败音），**不进入连续告警**；右下角短暂显示 `UVLO`（闪烁，用于解释无法启用；例如持续 ~3s）。
       - 在用户**未尝试启用负载**之前，UI 不应主动显示 `UVLO/OCP/OPP` 这类“负载输入相关”的故障缩写（启用前未连接被测设备是常见情况）。
-      - 若用户希望“先打开 LOAD 再接入被测设备”，可将 `UVLO(min_v_mv)` 设为 `0` 以禁用该预检（见 `docs/dev-notes/preset-ui-protection-labels.md`）。
+      - 若用户希望“先打开 LOAD 再接入被测设备”，可将 `UVLO(min_v_mv)` 设为 `0` 以禁用该预检（见 `docs/plan/0006:preset-ui-protection-labels/PLAN.md`）。
     - **运行期间 Trip**（欠压导致停机）：当 `LOAD` 为 ON 且 `V_main ≤ min_v_mv`，触发欠压锁存并强制关断；进入 Trip 告警音，持续到用户一次**本地确认**；在确认前必须显示 `UVLO`；确认后若锁存仍在，缩写仍可继续显示（用于解释无法启用/为何强制关断）。
   - `OCP`：过流保护触发（相对预设阈值），负载被强制置为 OFF；告警音持续到用户一次**本地确认**；在确认前必须显示缩写。
   - `OPP`：过功率保护触发（相对预设阈值），负载被强制置为 OFF；告警音持续到用户一次**本地确认**；在确认前必须显示缩写。
@@ -145,7 +152,7 @@ UI mock（320×240 PNG）：
   - `OFF`：不触发连续告警（正常解释状态）。
   - `CAL` 或其它“无法启用”类状态：仅在用户尝试 enable 时播放一次 `UI fail`（失败音），不主动连续告警。
 
-建议的节奏基线（实现可在 `docs/dev-notes/prompt-tone-manager.md` 的 `FaultAlarm` 基础上扩展；需实机试听后微调，但必须保证 primary/secondary 可区分）：
+建议的节奏基线（实现可在 `docs/plan/0007:prompt-tone-manager/PLAN.md` 的 `FaultAlarm` 基础上扩展；需实机试听后微调，但必须保证 primary/secondary 可区分）：
 
 - Critical（默认，`FLT` 等）：`Tone(2200Hz, 6%, 300ms)` + `Silence(700ms)` 循环。
 - Critical（链路，`LNK`）：双短鸣（与默认 Critical 可盲听区分）。
@@ -210,11 +217,11 @@ UI mock（320×240 PNG）：
 
 - CC 示例（`PRESET / MODE / TARGET / UVLO / OCP / OPP`）：
 
-  ![Preset preview panel CC](../assets/on-device-preset-ui/preset-preview-panel-cc.png)
+  ![Preset preview panel CC](../../assets/on-device-preset-ui/preset-preview-panel-cc.png)
 
 - CV 示例（`PRESET / MODE / TARGET / UVLO / OCP / OPP`）：
 
-  ![Preset preview panel CV](../assets/on-device-preset-ui/preset-preview-panel-cv.png)
+  ![Preset preview panel CV](../../assets/on-device-preset-ui/preset-preview-panel-cv.png)
 
 #### 字段与顺序（冻结）
 
@@ -313,7 +320,7 @@ UI mock（320×240 PNG）：
 
 ### 字段集合（按 mode）
 
-> `UVLO` / `OCP` / `OPP` 对应 `docs/dev-notes/cv-mode-presets.md` 的字段语义；命名与约束详见 `docs/dev-notes/preset-ui-protection-labels.md`。
+> `UVLO` / `OCP` / `OPP` 对应 `docs/plan/0002:cv-mode-presets/PLAN.md` 的字段语义；命名与约束详见 `docs/plan/0006:preset-ui-protection-labels/PLAN.md`。
 
 - `mode`：`CC` / `CV`
 - mode=CC（恒流）字段：

@@ -1,4 +1,11 @@
-# FT6336U 触控（P024C128-CTP）驱动与 digital 集成设计（草案）
+# FT6336U 触控（P024C128-CTP）驱动与 digital 集成设计（草案）（#0003）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-12-25
+- Last: 2025-12-25
+- Source: migrated from `ft6336u-touch-int.md` (removed)
 
 ## 背景
 

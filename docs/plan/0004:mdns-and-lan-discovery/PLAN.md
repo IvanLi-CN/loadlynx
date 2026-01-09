@@ -1,4 +1,11 @@
-# mDNS 与局域网发现设计草案
+# mDNS 与局域网发现设计草案（#0004）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-12-11
+- Last: 2025-12-11
+- Source: migrated from `mdns-and-lan-discovery.md` (removed)
 
 ## 背景与目标
 

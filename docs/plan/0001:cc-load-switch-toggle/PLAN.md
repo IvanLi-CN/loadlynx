@@ -1,4 +1,11 @@
-# CC 负载开关（Load Switch）：设置值 / 生效值分离
+# CC 负载开关（Load Switch）：设置值 / 生效值分离（#0001）
+
+## 状态
+
+- Status: 已完成
+- Created: 2025-12-26
+- Last: 2025-12-26
+- Source: migrated from `cc-load-switch-toggle.md` (removed)
 
 本文档定义数字板（ESP32‑S3）“负载开关”交互的预期行为：将“设置值（setpoint）”与“生效值（effective）”分离，并让旋钮单击（按下）作为负载开关使用；同时同步 Web Console 与 HTTP API（`/api/v1/cc`）的语义，确保本地与远程控制一致。
 
