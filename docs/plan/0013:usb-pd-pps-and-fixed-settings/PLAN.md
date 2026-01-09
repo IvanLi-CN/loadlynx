@@ -101,6 +101,10 @@ UI mock（320×240 PNG）：
 
 ![PD settings (PPS)](../../assets/usb-pd-settings-panel/pd-settings-pps.png)
 
+### PPS 模式（选择并编辑 Ireq）
+
+![PD settings (PPS, Ireq selected)](../../assets/usb-pd-settings-panel/pd-settings-pps-ireq-selected.png)
+
 ### 所选能力不可用（Apply 禁用）
 
 ![PD settings (Unavailable)](../../assets/usb-pd-settings-panel/pd-settings-unavailable.png)
