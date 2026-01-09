@@ -28,9 +28,9 @@ use loadlynx_protocol::{
     FastStatus, FrameHeader, HEADER_LEN, Hello, LoadMode, MSG_CAL_MODE, MSG_SET_MODE,
     MSG_SET_POINT, STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD,
     STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE, STATE_FLAG_UV_LATCHED, SlipDecoder,
-    SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame, decode_frame,
-    decode_limit_profile_frame, decode_set_enable_frame, decode_set_mode_frame,
-    decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
+    SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame,
+    decode_limit_profile_frame, decode_pd_sink_request_frame, decode_set_enable_frame,
+    decode_set_mode_frame, decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
     encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
@@ -1949,10 +1949,8 @@ async fn uart_setpoint_rx_task(
                                                         Err(ProtocolError::UnsupportedMessage(
                                                             _,
                                                         )) => {
-                                                            if let Ok((hdr, payload)) =
-                                                                decode_frame(&frame)
-                                                                && hdr.msg
-                                                                    == pd::MSG_PD_SINK_REQUEST
+                                                            if let Ok((hdr, req)) =
+                                                                decode_pd_sink_request_frame(&frame)
                                                             {
                                                                 if hdr.flags & FLAG_IS_ACK != 0 {
                                                                     info!(
@@ -1962,43 +1960,131 @@ async fn uart_setpoint_rx_task(
                                                                     continue;
                                                                 }
 
-                                                                let (is_nack, reason) =
-                                                                        match pd::decode_pd_sink_request_payload(
-                                                                            payload,
-                                                                        ) {
-                                                                            Ok(req) => {
-                                                                                if req.mode
-                                                                                    != pd::PD_MODE_FIXED
-                                                                                {
-                                                                                    (true, "unsupported mode")
-                                                                                } else if req.target_mv
-                                                                                    != pd::PD_TARGET_5V_MV
-                                                                                    && req.target_mv
-                                                                                        != pd::PD_TARGET_20V_MV
-                                                                                {
-                                                                                    (
-                                                                                        true,
-                                                                                        "unsupported target_mv",
-                                                                                    )
+                                                                let mut is_nack = false;
+                                                                let mut reason = "";
+
+                                                                let mut selected_mode = req.mode;
+                                                                let mut selected_pos: u8 = 0;
+                                                                let mut selected_mv: u32 = 0;
+                                                                let mut selected_i_ma: u32 = 0;
+
+                                                                {
+                                                                    let cache = pd::PD_CAPS_CACHE
+                                                                        .lock()
+                                                                        .await;
+                                                                    if !cache.attached {
+                                                                        is_nack = true;
+                                                                        reason = "no pd caps";
+                                                                    } else {
+                                                                        match req.mode {
+                                                                            loadlynx_protocol::PdSinkMode::Fixed => {
+                                                                                let pdo = if req.object_pos != 0 {
+                                                                                    cache
+                                                                                        .fixed_pdos
+                                                                                        .iter()
+                                                                                        .find(|p| p.pos == req.object_pos)
                                                                                 } else {
-                                                                                    pd::PD_DESIRED_TARGET_MV.store(
-                                                                                        req.target_mv,
-                                                                                        Ordering::Relaxed,
-                                                                                    );
-                                                                                    pd::PD_RENEGOTIATE_SIGNAL.signal(());
-                                                                                    info!(
-                                                                                        "PD_SINK_REQUEST received: mode={} target_mv={} seq={}",
-                                                                                        req.mode,
-                                                                                        req.target_mv,
-                                                                                        hdr.seq
-                                                                                    );
-                                                                                    (false, "")
+                                                                                    cache
+                                                                                        .fixed_pdos
+                                                                                        .iter()
+                                                                                        .find(|p| p.mv == req.target_mv)
+                                                                                };
+                                                                                if let Some(pdo) = pdo {
+                                                                                    let i_req_ma = if req.i_req_ma == 0 {
+                                                                                        pdo.max_ma
+                                                                                    } else {
+                                                                                        req.i_req_ma
+                                                                                    };
+                                                                                    if i_req_ma > pdo.max_ma {
+                                                                                        is_nack = true;
+                                                                                        reason = "i_req out of range";
+                                                                                    } else {
+                                                                                        selected_mode = req.mode;
+                                                                                        selected_pos = pdo.pos;
+                                                                                        selected_mv = pdo.mv;
+                                                                                        selected_i_ma = i_req_ma;
+                                                                                    }
+                                                                                } else {
+                                                                                    is_nack = true;
+                                                                                    reason = "fixed pdo not found";
                                                                                 }
                                                                             }
-                                                                            Err(_err) => {
-                                                                                (true, "CBOR decode error")
+                                                                            loadlynx_protocol::PdSinkMode::Pps => {
+                                                                                if req.object_pos == 0 {
+                                                                                    is_nack = true;
+                                                                                    reason = "pps missing object_pos";
+                                                                                } else if let Some(pdo) = cache
+                                                                                    .pps_pdos
+                                                                                    .iter()
+                                                                                    .find(|p| p.pos == req.object_pos)
+                                                                                {
+                                                                                    if req.target_mv < pdo.min_mv
+                                                                                        || req.target_mv > pdo.max_mv
+                                                                                    {
+                                                                                        is_nack = true;
+                                                                                        reason = "pps voltage out of range";
+                                                                                    } else {
+                                                                                        let i_req_ma = if req.i_req_ma == 0 {
+                                                                                            pdo.max_ma
+                                                                                        } else {
+                                                                                            req.i_req_ma
+                                                                                        };
+                                                                                        if i_req_ma > pdo.max_ma {
+                                                                                            is_nack = true;
+                                                                                            reason = "i_req out of range";
+                                                                                        } else {
+                                                                                            selected_mode = req.mode;
+                                                                                            selected_pos = pdo.pos;
+                                                                                            selected_mv = req.target_mv;
+                                                                                            selected_i_ma = i_req_ma;
+                                                                                        }
+                                                                                    }
+                                                                                } else {
+                                                                                    is_nack = true;
+                                                                                    reason = "pps apdo not found";
+                                                                                }
                                                                             }
-                                                                        };
+                                                                            loadlynx_protocol::PdSinkMode::Unknown(_) => {
+                                                                                is_nack = true;
+                                                                                reason = "unsupported mode";
+                                                                            }
+                                                                        }
+                                                                    }
+                                                                }
+
+                                                                if !is_nack {
+                                                                    pd::PD_DESIRED_MODE.store(
+                                                                        match selected_mode {
+                                                                            loadlynx_protocol::PdSinkMode::Fixed => 0,
+                                                                            loadlynx_protocol::PdSinkMode::Pps => 1,
+                                                                            loadlynx_protocol::PdSinkMode::Unknown(_) => 0,
+                                                                        },
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                    pd::PD_DESIRED_OBJECT_POS
+                                                                        .store(
+                                                                            selected_pos,
+                                                                            Ordering::Relaxed,
+                                                                        );
+                                                                    pd::PD_DESIRED_TARGET_MV.store(
+                                                                        selected_mv,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                    pd::PD_DESIRED_I_REQ_MA.store(
+                                                                        selected_i_ma,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                    pd::PD_RENEGOTIATE_SIGNAL
+                                                                        .signal(());
+                                                                    info!(
+                                                                        "PD_SINK_REQUEST received: mode={:?} pos={} target_mv={} i_req_ma={} seq={}",
+                                                                        selected_mode,
+                                                                        selected_pos,
+                                                                        selected_mv,
+                                                                        selected_i_ma,
+                                                                        hdr.seq
+                                                                    );
+                                                                }
 
                                                                 if is_nack {
                                                                     warn!(
