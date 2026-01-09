@@ -435,32 +435,52 @@ impl<'b, C> Decode<'b, C> for PdSinkMode {
 pub struct PdSinkRequest {
     #[n(0)]
     pub mode: PdSinkMode,
-    /// Desired target VBUS in millivolts (mV), e.g. 5000 or 20000.
+    /// Desired target VBUS in millivolts (mV).
+    ///
+    /// - For `Fixed`: optional informational value; the selected fixed PDO is
+    ///   identified by `object_pos`.
+    /// - For `Pps`: required, and must be within the selected APDO range.
     #[n(1)]
     pub target_mv: u32,
+    /// Selected PDO/APDO object position (1-based; matches USB-PD Request "Object Position").
+    ///
+    /// - For `Fixed`: selects a Fixed PDO from the Source Capabilities list.
+    /// - For `Pps`: selects a PPS APDO from the Source Capabilities list.
+    #[n(2)]
+    pub object_pos: u8,
+    /// Requested operating current in milliamperes (mA).
+    ///
+    /// Callers must keep this within the selected PDO/APDO maximum. The analog
+    /// side may reject out-of-range requests.
+    #[n(3)]
+    pub i_req_ma: u32,
 }
 
-/// Source-provided fixed PDO capability summary: `[mv, max_ma]`.
+/// Source-provided fixed PDO capability summary: `[pos, mv, max_ma]`.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
 #[cbor(array)]
 pub struct FixedPdo {
     #[n(0)]
-    pub mv: u32,
+    pub pos: u8,
     #[n(1)]
+    pub mv: u32,
+    #[n(2)]
     pub max_ma: u32,
 }
 
-/// Source-provided PPS APDO capability summary: `[min_mv, max_mv, max_ma]`.
+/// Source-provided PPS APDO capability summary: `[pos, min_mv, max_mv, max_ma]`.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
 #[cbor(array)]
 pub struct PpsPdo {
     #[n(0)]
-    pub min_mv: u32,
+    pub pos: u8,
     #[n(1)]
-    pub max_mv: u32,
+    pub min_mv: u32,
     #[n(2)]
+    pub max_mv: u32,
+    #[n(3)]
     pub max_ma: u32,
 }
 
@@ -1639,6 +1659,8 @@ mod tests {
         let req = PdSinkRequest {
             mode: PdSinkMode::Fixed,
             target_mv: 20_000,
+            object_pos: 5,
+            i_req_ma: 1_500,
         };
 
         let mut raw = [0u8; 64];
@@ -1655,12 +1677,14 @@ mod tests {
         let mut fixed_pdos = FixedPdoList::new();
         fixed_pdos
             .push(FixedPdo {
+                pos: 1,
                 mv: 5_000,
                 max_ma: 3_000,
             })
             .unwrap();
         fixed_pdos
             .push(FixedPdo {
+                pos: 5,
                 mv: 20_000,
                 max_ma: 1_500,
             })
@@ -1669,6 +1693,7 @@ mod tests {
         let mut pps_pdos = PpsPdoList::new();
         pps_pdos
             .push(PpsPdo {
+                pos: 6,
                 min_mv: 3_300,
                 max_mv: 11_000,
                 max_ma: 3_000,
