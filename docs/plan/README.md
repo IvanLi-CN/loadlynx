@@ -67,3 +67,4 @@
 | 0010 | USB‑PD Sink：5V/20V 两态切换（STM32G431 UCPD） | 已完成 | `0010:usb-pd-sink-toggle/PLAN.md` | 2026-01-07 | - |
 | 0011 | Web UI Layout 规范化（Layouts 抽象） | 已完成 | `0011:web-layouts/PLAN.md` | 2025-12-26 | - |
 | 0012 | Web：Responsive Drawer Sidebar（ConsoleLayout 导航） | 已完成 | `0012:web-responsive-drawer-sidebar/PLAN.md` | 2025-12-26 | - |
+| 0013 | USB‑PD 设置面板：Fixed PDO / PPS APDO（UI + UART 协议 + HTTP API） | 待实现 | `0013:usb-pd-pps-and-fixed-settings/PLAN.md` | 2026-01-09 | - |
