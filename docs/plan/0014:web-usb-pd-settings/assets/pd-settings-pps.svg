@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <defs>
+    <style>
+      .bg { fill: #0b1020; }
+      .panel { fill: #121a31; stroke: #243153; stroke-width: 2; }
+      .card { fill: #0f172c; stroke: #243153; stroke-width: 2; }
+      .muted { fill: #8aa0c7; font: 500 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .text { fill: #e6eeff; font: 600 16px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .title { fill: #e6eeff; font: 800 22px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .kpi { fill: #e6eeff; font: 800 18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .chip { fill: #152245; stroke: #2a3a66; stroke-width: 2; }
+      .ok { fill: #1b8f5a; }
+      .btn { fill: #1b2a55; stroke: #3a55a2; stroke-width: 2; }
+      .btn2 { fill: #1b8f5a; stroke: #2dbb7b; stroke-width: 2; }
+      .btnText { fill: #e6eeff; font: 800 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .tab { fill: #101a34; stroke: #2a3a66; stroke-width: 2; }
+      .tabActive { fill: #1b2a55; stroke: #3a55a2; stroke-width: 2; }
+      .sel { fill: #14224a; stroke: #4cc9f0; stroke-width: 2.5; }
+      .num { fill: #101a34; stroke: #2a3a66; stroke-width: 2; }
+      .bar { stroke: #2a3a66; stroke-width: 10; stroke-linecap: round; }
+      .barOn { stroke: #4cc9f0; stroke-width: 10; stroke-linecap: round; }
+      .knob { fill: #e6eeff; stroke: #4cc9f0; stroke-width: 3; }
+      .divider { stroke: #243153; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="700"/>
+
+  <!-- top bar -->
+  <rect class="panel" x="24" y="20" width="1152" height="64" rx="14"/>
+  <text class="title" x="52" y="60">LoadLynx · USB‑PD Settings</text>
+  <text class="muted" x="1020" y="52" text-anchor="end" dominant-baseline="middle">device: 192.168.1.100</text>
+  <rect class="btn" x="1040" y="34" width="120" height="36" rx="12"/>
+  <text class="btnText" x="1100" y="52" text-anchor="middle" dominant-baseline="middle">Back</text>
+
+  <!-- content -->
+  <rect class="panel" x="24" y="104" width="1152" height="572" rx="14"/>
+
+  <!-- header chips -->
+  <text class="text" x="52" y="150">Status</text>
+  <rect class="chip ok" x="120" y="132" width="110" height="24" rx="12"/>
+  <text class="btnText" x="175" y="144" text-anchor="middle" dominant-baseline="middle">ATTACHED</text>
+  <text class="muted" x="260" y="150">Contract</text>
+  <text class="text" x="330" y="150">9.0 V @ 2000 mA</text>
+
+  <!-- tabs -->
+  <rect class="tab" x="52" y="168" width="120" height="40" rx="12"/>
+  <text class="btnText" x="112" y="188" text-anchor="middle" dominant-baseline="middle" opacity="0.7">Fixed</text>
+  <rect class="tabActive" x="178" y="168" width="120" height="40" rx="12"/>
+  <text class="btnText" x="238" y="188" text-anchor="middle" dominant-baseline="middle">PPS</text>
+
+  <!-- columns -->
+  <rect class="card" x="52" y="226" width="520" height="410" rx="14"/>
+  <text class="text" x="80" y="264">PPS APDOs</text>
+  <text class="muted" x="80" y="292">Select one APDO (object position)</text>
+
+  <rect class="sel" x="80" y="312" width="464" height="70" rx="12"/>
+  <rect class="sel" x="104" y="328" width="28" height="24" rx="12"/>
+  <text class="btnText" x="118" y="340" text-anchor="middle" dominant-baseline="middle">3</text>
+  <text class="text" x="142" y="340">3.3–21.0 V</text>
+  <text class="muted" x="390" y="340">3000 mA</text>
+  <text class="muted" x="104" y="362">PPS step: 20 mV · I step: 50 mA</text>
+
+  <rect class="card" x="80" y="396" width="464" height="70" rx="12"/>
+  <rect class="num" x="104" y="412" width="28" height="24" rx="12"/>
+  <text class="btnText" x="118" y="424" text-anchor="middle" dominant-baseline="middle" opacity="0.7">4</text>
+  <text class="text" x="142" y="424">5.0–11.0 V</text>
+  <text class="muted" x="390" y="424">2000 mA</text>
+  <text class="muted" x="104" y="446">No auto-select</text>
+
+  <!-- right column -->
+  <rect class="card" x="600" y="226" width="548" height="410" rx="14"/>
+  <text class="text" x="628" y="264">Configure</text>
+  <text class="muted" x="628" y="292">APDO #3 selected</text>
+
+  <!-- voltage slider -->
+  <text class="muted" x="628" y="334" dominant-baseline="middle">Vreq (mV)</text>
+  <rect class="card" x="740" y="312" width="160" height="44" rx="12"/>
+  <text class="text" x="820" y="334" text-anchor="middle" dominant-baseline="middle">9000</text>
+  <text class="muted" x="910" y="334" dominant-baseline="middle">step 20 mV</text>
+
+  <line class="bar" x1="650" y1="390" x2="1100" y2="390"/>
+  <line class="barOn" x1="650" y1="390" x2="870" y2="390"/>
+  <circle class="knob" cx="870" cy="390" r="10"/>
+  <text class="muted" x="650" y="418">min 3300</text>
+  <text class="muted" x="1040" y="418">max 21000</text>
+
+  <!-- current -->
+  <line class="divider" x1="628" y1="450" x2="1120" y2="450"/>
+  <text class="muted" x="628" y="486" dominant-baseline="middle">Ireq (mA)</text>
+  <rect class="card" x="700" y="464" width="170" height="44" rx="12"/>
+  <text class="text" x="785" y="486" text-anchor="middle" dominant-baseline="middle">2000</text>
+  <text class="muted" x="890" y="486" dominant-baseline="middle">step 50 mA</text>
+  <text class="muted" x="628" y="522">Imax: 3000 mA (hard limit)</text>
+
+  <!-- apply -->
+  <rect class="btn2" x="980" y="566" width="140" height="44" rx="12"/>
+  <text class="btnText" x="1050" y="588" text-anchor="middle" dominant-baseline="middle">Apply</text>
+
+  <!-- active -->
+  <rect class="card" x="628" y="566" width="320" height="44" rx="12"/>
+  <text class="muted" x="652" y="588" dominant-baseline="middle">Active: 9.0 V @ 2.0 A</text>
+</svg>

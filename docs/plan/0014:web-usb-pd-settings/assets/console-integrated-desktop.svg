@@ -1,0 +1,105 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <defs>
+    <style>
+      .bg { fill: #0b1020; }
+      .panel { fill: #121a31; stroke: #243153; stroke-width: 2; }
+      .card { fill: #0f172c; stroke: #243153; stroke-width: 2; }
+      .muted { fill: #8aa0c7; font: 500 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .text { fill: #e6eeff; font: 600 16px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .title { fill: #e6eeff; font: 800 22px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .kpi { fill: #e6eeff; font: 800 18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .chip { fill: #152245; stroke: #2a3a66; stroke-width: 2; }
+      .ok { fill: #1b8f5a; }
+      .btn { fill: #1b2a55; stroke: #3a55a2; stroke-width: 2; }
+      .btn2 { fill: #1b8f5a; stroke: #2dbb7b; stroke-width: 2; }
+      .btnText { fill: #e6eeff; font: 800 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .tab { fill: #101a34; stroke: #2a3a66; stroke-width: 2; }
+      .tabActive { fill: #1b2a55; stroke: #3a55a2; stroke-width: 2; }
+      .divider { stroke: #243153; stroke-width: 2; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="700"/>
+
+  <!-- app shell -->
+  <rect class="panel" x="24" y="20" width="1152" height="64" rx="14"/>
+  <text class="title" x="52" y="60">LoadLynx · Console</text>
+  <text class="muted" x="1148" y="52" text-anchor="end" dominant-baseline="middle">devices</text>
+
+  <!-- primary sidebar -->
+  <rect class="panel" x="24" y="104" width="86" height="572" rx="14"/>
+  <rect class="tabActive" x="38" y="128" width="58" height="44" rx="12"/>
+  <text class="btnText" x="67" y="150" text-anchor="middle" dominant-baseline="middle">S</text>
+  <rect class="tab" x="38" y="184" width="58" height="44" rx="12"/>
+  <text class="btnText" x="67" y="206" text-anchor="middle" dominant-baseline="middle" opacity="0.7">C</text>
+  <rect class="tab" x="38" y="240" width="58" height="44" rx="12"/>
+  <text class="btnText" x="67" y="262" text-anchor="middle" dominant-baseline="middle" opacity="0.7">P</text>
+  <rect class="tab" x="38" y="296" width="58" height="44" rx="12"/>
+  <text class="btnText" x="67" y="318" text-anchor="middle" dominant-baseline="middle" opacity="0.7">K</text>
+  <text class="muted" x="44" y="360">…</text>
+
+  <!-- main content -->
+  <rect class="panel" x="126" y="104" width="1050" height="572" rx="14"/>
+  <text class="text" x="154" y="148">Device</text>
+  <text class="muted" x="222" y="148">192.168.1.100</text>
+
+  <!-- device subnav (tabs) -->
+  <rect class="tabActive" x="154" y="168" width="120" height="40" rx="12"/>
+  <text class="btnText" x="214" y="188" text-anchor="middle" dominant-baseline="middle">Status</text>
+  <rect class="tab" x="280" y="168" width="90" height="40" rx="12"/>
+  <text class="btnText" x="325" y="188" text-anchor="middle" dominant-baseline="middle" opacity="0.7">CC</text>
+  <rect class="tab" x="376" y="168" width="110" height="40" rx="12"/>
+  <text class="btnText" x="431" y="188" text-anchor="middle" dominant-baseline="middle" opacity="0.7">Presets</text>
+  <rect class="tab" x="492" y="168" width="130" height="40" rx="12"/>
+  <text class="btnText" x="557" y="188" text-anchor="middle" dominant-baseline="middle" opacity="0.7">Calibration</text>
+
+  <line class="divider" x1="154" y1="222" x2="1148" y2="222"/>
+
+  <!-- status overview grid -->
+  <rect class="card" x="154" y="240" width="290" height="124" rx="14"/>
+  <text class="muted" x="176" y="274">Fast Status</text>
+  <text class="kpi" x="176" y="310">20 Hz</text>
+  <text class="muted" x="176" y="340">SSE stream</text>
+
+  <rect class="card" x="456" y="240" width="290" height="124" rx="14"/>
+  <text class="muted" x="478" y="274">Analog</text>
+  <rect class="chip ok" x="478" y="286" width="90" height="24" rx="12"/>
+  <text class="btnText" x="523" y="298" text-anchor="middle" dominant-baseline="middle">READY</text>
+  <text class="kpi" x="478" y="340">OK</text>
+
+  <rect class="card" x="758" y="240" width="390" height="124" rx="14"/>
+  <text class="muted" x="780" y="274">VBUS (local)</text>
+  <text class="kpi" x="780" y="340">19.9 V</text>
+
+  <!-- PD block embedded in status page (secondary entry) -->
+  <rect class="card" x="154" y="382" width="994" height="200" rx="14"/>
+  <text class="text" x="176" y="420">USB‑PD</text>
+  <rect class="chip ok" x="256" y="402" width="110" height="24" rx="12"/>
+  <text class="btnText" x="311" y="414" text-anchor="middle" dominant-baseline="middle">ATTACHED</text>
+
+  <text class="muted" x="176" y="460">Contract</text>
+  <text class="kpi" x="176" y="492">20 V @ 1500 mA</text>
+
+  <text class="muted" x="460" y="460">Saved</text>
+  <text class="text" x="460" y="488">PPS · APDO #3 · 9000 mV · 2000 mA</text>
+  <text class="muted" x="460" y="512">No compatibility shims pre‑1.0</text>
+
+  <rect class="btn2" x="940" y="468" width="188" height="44" rx="12"/>
+  <text class="btnText" x="1034" y="490" text-anchor="middle" dominant-baseline="middle">Open settings</text>
+
+  <!-- fill the lower area to avoid a large empty slab inside the PD card -->
+  <line class="divider" x1="176" y1="530" x2="1126" y2="530"/>
+  <text class="muted" x="176" y="552">Capabilities</text>
+  <text class="text" x="176" y="572">Fixed 5/9/12/15/20V · PPS 3.3–21V (1 APDO)</text>
+  <text class="muted" x="720" y="552">Last apply</text>
+  <text class="text" x="720" y="572">ACK · contract 20V</text>
+
+  <!-- status page footer (avoid awkward empty space when content is short) -->
+  <rect class="card" x="154" y="594" width="994" height="66" rx="14"/>
+  <text class="muted" x="176" y="627" dominant-baseline="middle">Fast Status</text>
+  <rect class="chip ok" x="260" y="615" width="112" height="24" rx="12"/>
+  <text class="btnText" x="316" y="627" text-anchor="middle" dominant-baseline="middle">CONNECTED</text>
+  <text class="muted" x="412" y="627" dominant-baseline="middle">Updated</text>
+  <text class="text" x="482" y="627" dominant-baseline="middle">0.2 s ago</text>
+  <text class="muted" x="1128" y="627" text-anchor="end" dominant-baseline="middle">SSE · low‑latency status stream</text>
+</svg>
