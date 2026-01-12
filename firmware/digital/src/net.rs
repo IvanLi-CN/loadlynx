@@ -944,8 +944,26 @@ async fn handle_http_connection(
                 write_http_response(socket, version, err, &body, cors_origin).await?;
             }
         },
+        ("GET", "/api/v1/pd") => match render_pd_view_json(&mut body, control, telemetry).await {
+            Ok(()) => {
+                write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+            }
+            Err(err) => {
+                write_http_response(socket, version, err, &body, cors_origin).await?;
+            }
+        },
         ("PUT", "/api/v1/cc") | ("POST", "/api/v1/cc") => {
             match handle_cc_update(body_str, &mut body, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
+                }
+            }
+        }
+        ("PUT", "/api/v1/pd") | ("POST", "/api/v1/pd") => {
+            match handle_pd_update(body_str, &mut body, control, telemetry, eeprom).await {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
@@ -2018,6 +2036,453 @@ async fn handle_cc_update(
 
     // Reuse the GET /cc view to report the updated state back to the caller.
     render_cc_view_json(body_out, telemetry).await
+}
+
+/// Render the JSON body for `GET /api/v1/pd`.
+async fn render_pd_view_json(
+    buf: &mut String,
+    control_mutex: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    if !link_up {
+        write_error_body(buf, "LINK_DOWN", "UART link is down", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted => {
+            write_error_body(
+                buf,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+        AnalogState::Offline => {
+            write_error_body(buf, "LINK_DOWN", "analog board is offline", true, None);
+            return Err("503 Service Unavailable");
+        }
+        AnalogState::CalMissing | AnalogState::Ready => {}
+    }
+
+    let status = {
+        let guard = telemetry.lock().await;
+        guard.last_pd_status.clone()
+    }
+    .ok_or_else(|| {
+        write_error_body(
+            buf,
+            "UNAVAILABLE",
+            "PD status not yet available",
+            true,
+            None,
+        );
+        "503 Service Unavailable"
+    })?;
+
+    let saved = { control_mutex.lock().await.pd_saved };
+    let ack_pending = crate::PD_REQ_ACK_PENDING.load(Ordering::Relaxed);
+    let last_code = crate::PD_LAST_RESULT_CODE.load(Ordering::Relaxed);
+    let last_ms = crate::PD_LAST_RESULT_MS.load(Ordering::Relaxed);
+
+    buf.clear();
+    buf.push('{');
+    buf.push_str("\"attached\":");
+    buf.push_str(if status.attached { "true" } else { "false" });
+    buf.push_str(",\"contract_mv\":");
+    let _ = core::write!(buf, "{}", status.contract_mv);
+    buf.push_str(",\"contract_ma\":");
+    let _ = core::write!(buf, "{}", status.contract_ma);
+
+    // Capabilities
+    buf.push_str(",\"fixed_pdos\":[");
+    for (i, pdo) in status.fixed_pdos.iter().enumerate() {
+        if i != 0 {
+            buf.push(',');
+        }
+        let pos = if pdo.pos != 0 { pdo.pos } else { (i + 1) as u8 };
+        let _ = core::write!(
+            buf,
+            "{{\"pos\":{},\"mv\":{},\"max_ma\":{}}}",
+            pos,
+            pdo.mv,
+            pdo.max_ma
+        );
+    }
+    buf.push(']');
+
+    buf.push_str(",\"pps_pdos\":[");
+    for (i, pdo) in status.pps_pdos.iter().enumerate() {
+        if i != 0 {
+            buf.push(',');
+        }
+        let pos = if pdo.pos != 0 { pdo.pos } else { (i + 1) as u8 };
+        let _ = core::write!(
+            buf,
+            "{{\"pos\":{},\"min_mv\":{},\"max_mv\":{},\"max_ma\":{}}}",
+            pos,
+            pdo.min_mv,
+            pdo.max_mv,
+            pdo.max_ma
+        );
+    }
+    buf.push(']');
+
+    // Saved config
+    buf.push_str(",\"saved\":{");
+    buf.push_str("\"mode\":\"");
+    buf.push_str(match saved.mode {
+        crate::control::PdMode::Fixed => "fixed",
+        crate::control::PdMode::Pps => "pps",
+    });
+    buf.push('"');
+    let _ = core::write!(
+        buf,
+        ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"i_req_ma\":{}",
+        saved.fixed_object_pos,
+        saved.pps_object_pos,
+        saved.target_mv,
+        saved.i_req_ma
+    );
+    buf.push('}');
+
+    // Apply state (best-effort snapshot).
+    buf.push_str(",\"apply\":{");
+    buf.push_str("\"pending\":");
+    buf.push_str(if ack_pending { "true" } else { "false" });
+    if last_code != 0 {
+        buf.push_str(",\"last\":{");
+        buf.push_str("\"code\":\"");
+        buf.push_str(match last_code {
+            1 => "ok",
+            2 => "nack",
+            3 => "timeout",
+            4 => "persist_fail",
+            _ => "failed",
+        });
+        buf.push('"');
+        let _ = core::write!(buf, ",\"at_ms\":{}", last_ms);
+        buf.push('}');
+    }
+    buf.push('}');
+
+    buf.push('}');
+    Ok(())
+}
+
+struct PdUpdateRequest {
+    mode: control::PdMode,
+    object_pos: u8,
+    target_mv: Option<u32>,
+    i_req_ma: u32,
+}
+
+fn parse_pd_update_json(body: &str) -> Result<PdUpdateRequest, &'static str> {
+    fn parse_u32_field(body: &str, key: &str) -> Result<Option<u32>, &'static str> {
+        let Some(idx) = body.find(key) else {
+            return Ok(None);
+        };
+        let Some(colon_idx) = body[idx..].find(':') else {
+            return Err("malformed numeric field");
+        };
+        let mut value_str = body[idx + colon_idx + 1..].trim_start();
+        let mut end = 0usize;
+        for ch in value_str.chars() {
+            if ch.is_ascii_digit() {
+                end += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+        if end == 0 {
+            return Err("numeric field must be an integer");
+        }
+        value_str = &value_str[..end];
+        value_str
+            .parse::<u32>()
+            .map(Some)
+            .map_err(|_| "invalid integer")
+    }
+
+    let mode = {
+        let idx = body.find("\"mode\"").ok_or("missing field mode")?;
+        let colon_idx = body[idx..].find(':').ok_or("malformed mode field")?;
+        let mut value_str = body[idx + colon_idx + 1..].trim_start();
+        if !value_str.starts_with('"') {
+            return Err("mode must be a string");
+        }
+        value_str = &value_str[1..];
+        let end = value_str.find('"').ok_or("malformed mode string")?;
+        let raw = &value_str[..end];
+        match raw {
+            "fixed" => control::PdMode::Fixed,
+            "pps" => control::PdMode::Pps,
+            _ => return Err("mode must be \"fixed\" or \"pps\""),
+        }
+    };
+
+    let object_pos = parse_u32_field(body, "\"object_pos\"")?
+        .ok_or("missing field object_pos")?
+        .min(u8::MAX as u32) as u8;
+    let i_req_ma = parse_u32_field(body, "\"i_req_ma\"")?.ok_or("missing field i_req_ma")?;
+    let target_mv = parse_u32_field(body, "\"target_mv\"")?;
+
+    Ok(PdUpdateRequest {
+        mode,
+        object_pos,
+        target_mv,
+        i_req_ma,
+    })
+}
+
+/// Handle `PUT/POST /api/v1/pd`: update saved PD config, persist to EEPROM, and trigger apply.
+async fn handle_pd_update(
+    body_in: &str,
+    body_out: &mut String,
+    control_mutex: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+) -> Result<(), &'static str> {
+    let link_up = LINK_UP.load(Ordering::Relaxed);
+    if !link_up {
+        write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
+        return Err("503 Service Unavailable");
+    }
+
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted => {
+            write_error_body(
+                body_out,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+        AnalogState::Offline => {
+            write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
+            return Err("503 Service Unavailable");
+        }
+        AnalogState::CalMissing | AnalogState::Ready => {}
+    }
+
+    let status = {
+        let guard = telemetry.lock().await;
+        guard.last_pd_status.clone()
+    }
+    .ok_or_else(|| {
+        write_error_body(
+            body_out,
+            "UNAVAILABLE",
+            "PD status not yet available",
+            true,
+            None,
+        );
+        "503 Service Unavailable"
+    })?;
+
+    if !status.attached {
+        write_error_body(
+            body_out,
+            "NOT_ATTACHED",
+            "PD not attached; refusing apply",
+            true,
+            None,
+        );
+        return Err("409 Conflict");
+    }
+
+    let parsed = match parse_pd_update_json(body_in) {
+        Ok(v) => v,
+        Err(msg) => {
+            write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+
+    if parsed.object_pos == 0 {
+        write_error_body(
+            body_out,
+            "INVALID_REQUEST",
+            "object_pos must be >= 1",
+            false,
+            None,
+        );
+        return Err("400 Bad Request");
+    }
+    if parsed.i_req_ma < 50 {
+        write_error_body(
+            body_out,
+            "LIMIT_VIOLATION",
+            "i_req_ma must be >= 50",
+            false,
+            None,
+        );
+        return Err("422 Unprocessable Entity");
+    }
+
+    let find_fixed = |pos: u8| {
+        status
+            .fixed_pdos
+            .iter()
+            .enumerate()
+            .find(|(idx, pdo)| {
+                let effective = if pdo.pos != 0 {
+                    pdo.pos
+                } else {
+                    (idx + 1) as u8
+                };
+                effective == pos
+            })
+            .map(|(_idx, pdo)| *pdo)
+    };
+
+    let find_pps = |pos: u8| {
+        status
+            .pps_pdos
+            .iter()
+            .enumerate()
+            .find(|(idx, pdo)| {
+                let effective = if pdo.pos != 0 {
+                    pdo.pos
+                } else {
+                    (idx + 1) as u8
+                };
+                effective == pos
+            })
+            .map(|(_idx, pdo)| *pdo)
+    };
+
+    // Validate against current capabilities (no implicit clamping).
+    match parsed.mode {
+        control::PdMode::Fixed => {
+            let Some(pdo) = find_fixed(parsed.object_pos) else {
+                let details = format!(r#"{{"object_pos":{}}}"#, parsed.object_pos);
+                write_error_body(
+                    body_out,
+                    "LIMIT_VIOLATION",
+                    "selected PDO not present in capabilities",
+                    false,
+                    Some(&details),
+                );
+                return Err("422 Unprocessable Entity");
+            };
+            if parsed.i_req_ma > pdo.max_ma {
+                let details = format!(
+                    r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                    parsed.i_req_ma, pdo.max_ma, parsed.object_pos
+                );
+                write_error_body(
+                    body_out,
+                    "LIMIT_VIOLATION",
+                    "i_req_ma exceeds PDO Imax",
+                    false,
+                    Some(&details),
+                );
+                return Err("422 Unprocessable Entity");
+            }
+        }
+        control::PdMode::Pps => {
+            let Some(apdo) = find_pps(parsed.object_pos) else {
+                let details = format!(r#"{{"object_pos":{}}}"#, parsed.object_pos);
+                write_error_body(
+                    body_out,
+                    "LIMIT_VIOLATION",
+                    "selected APDO not present in capabilities",
+                    false,
+                    Some(&details),
+                );
+                return Err("422 Unprocessable Entity");
+            };
+            let target_mv = parsed.target_mv.ok_or_else(|| {
+                write_error_body(
+                    body_out,
+                    "INVALID_REQUEST",
+                    "missing field target_mv for PPS",
+                    false,
+                    None,
+                );
+                "400 Bad Request"
+            })?;
+            if target_mv < apdo.min_mv || target_mv > apdo.max_mv {
+                let details = format!(
+                    r#"{{"target_mv":{},"min_mv":{},"max_mv":{},"object_pos":{}}}"#,
+                    target_mv, apdo.min_mv, apdo.max_mv, parsed.object_pos
+                );
+                write_error_body(
+                    body_out,
+                    "LIMIT_VIOLATION",
+                    "target_mv out of APDO range",
+                    false,
+                    Some(&details),
+                );
+                return Err("422 Unprocessable Entity");
+            }
+            if parsed.i_req_ma > apdo.max_ma {
+                let details = format!(
+                    r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                    parsed.i_req_ma, apdo.max_ma, parsed.object_pos
+                );
+                write_error_body(
+                    body_out,
+                    "LIMIT_VIOLATION",
+                    "i_req_ma exceeds APDO Imax",
+                    false,
+                    Some(&details),
+                );
+                return Err("422 Unprocessable Entity");
+            }
+        }
+    }
+
+    // Update and persist.
+    let mut cfg = { control_mutex.lock().await.pd_saved };
+    cfg.mode = parsed.mode;
+    cfg.i_req_ma = parsed.i_req_ma;
+    match parsed.mode {
+        control::PdMode::Fixed => {
+            cfg.fixed_object_pos = parsed.object_pos;
+            // Keep PPS target_mv intact (fixed does not use target_mv).
+        }
+        control::PdMode::Pps => {
+            cfg.pps_object_pos = parsed.object_pos;
+            cfg.target_mv = parsed.target_mv.unwrap_or(cfg.target_mv);
+        }
+    }
+
+    {
+        let mut guard = control_mutex.lock().await;
+        guard.pd_saved = cfg;
+        if guard.ui_view == crate::control::UiView::PdSettings {
+            guard.pd_draft = cfg;
+        }
+        bump_control_rev();
+    }
+
+    let blob = control::encode_pd_blob(&cfg);
+    let res = {
+        let mut guard = eeprom.lock().await;
+        guard.write_pd_blob(&blob).await
+    };
+    if let Err(_err) = res {
+        write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
+        crate::PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed);
+        crate::PD_LAST_RESULT_MS.store(now_ms32(), Ordering::Relaxed);
+        return Err("503 Service Unavailable");
+    }
+
+    // Trigger apply on the UART TX task.
+    let now = now_ms32();
+    crate::PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
+    crate::PD_FORCE_SEND.store(true, Ordering::Release);
+
+    render_pd_view_json(body_out, control_mutex, telemetry).await
 }
 
 struct CcUpdateRequest {

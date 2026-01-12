@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 部分完成（2/5）
+- Status: 部分完成（4/5）
 - Created: 2026-01-09
-- Last: 2026-01-09
+- Last: 2026-01-12
 
 ## 背景 / 问题陈述
 
@@ -168,8 +168,8 @@ UI mock（320×240 PNG）：
 
 - [x] M1: UART 协议契约冻结（含 object position 与 Ireq）+ `libs/protocol` 单测补齐
 - [x] M2: 模拟板 PD：支持按 object position 请求 Fixed/PPS（含 Ireq）+ PPS keep-alive + `PD_STATUS` 完整上报
-- [ ] M3: 数字板 UI：USB‑PD 设置面板（全量列表 + 越界阻止 + Apply/错误态 + EEPROM 持久化）
-- [ ] M4: 数字板 HTTP API：读写 PD 配置 + 状态输出（与 UI 同口径错误码）
+- [x] M3: 数字板 UI：USB‑PD 设置面板（全量列表 + 越界阻止 + Apply/错误态 + EEPROM 持久化）
+- [x] M4: 数字板 HTTP API：读写 PD 配置 + 状态输出（与 UI 同口径错误码）
 - [ ] M5: HIL 验收：多 Source/线缆矩阵验证 + 记录日志/结论
 
 ## 方案概述（Approach, high-level）

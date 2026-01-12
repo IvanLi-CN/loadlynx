@@ -165,7 +165,7 @@ pub struct PdSettingsVm {
     pub pps_pdos: PpsPdoList,
     pub contract_mv: u32,
     pub contract_ma: u32,
-    pub fixed_target_mv: u32,
+    pub fixed_object_pos: u8,
     pub pps_object_pos: u8,
     pub pps_target_mv: u32,
     pub i_req_ma: u32,
@@ -419,9 +419,16 @@ fn draw_mode_toggle(canvas: &mut Canvas, vm: &PdSettingsVm) {
 
 fn draw_caps_list(canvas: &mut Canvas, vm: &PdSettingsVm) {
     let (row_h, row_gap) = list_row_metrics(vm.mode);
+    let fixed_missing = vm.mode == PdMode::Fixed && fixed_selection_missing(vm);
     let pps_missing = vm.mode == PdMode::Pps && pps_selection_missing(vm);
     let title = match vm.mode {
-        PdMode::Fixed => "Fixed PDOs (tap to select)",
+        PdMode::Fixed => {
+            if fixed_missing {
+                "Fixed PDOs"
+            } else {
+                "Fixed PDOs (tap to select)"
+            }
+        }
         PdMode::Pps => {
             if pps_missing {
                 "PPS APDOs"
@@ -445,7 +452,8 @@ fn draw_caps_list(canvas: &mut Canvas, vm: &PdSettingsVm) {
             for (idx, pdo) in vm.fixed_pdos.iter().enumerate() {
                 let top = LIST_TOP + idx as i32 * (row_h + row_gap);
                 let rect = Rect::new(LIST_LEFT, top, LIST_RIGHT, top + row_h);
-                let selected = vm.fixed_target_mv == pdo.mv && vm.fixed_target_mv != 0;
+                let pos = effective_pos(pdo.pos, idx);
+                let selected = vm.fixed_object_pos != 0 && vm.fixed_object_pos == pos;
                 draw_list_row_fixed(canvas, rect, idx as u8, *pdo, selected);
             }
         }
@@ -921,24 +929,29 @@ fn draw_selected_fixed_summary(canvas: &mut Canvas, vm: &PdSettingsVm, rect: Rec
     let selected = vm
         .fixed_pdos
         .iter()
-        .find(|pdo| pdo.mv == vm.fixed_target_mv);
+        .enumerate()
+        .find(|(idx, pdo)| effective_pos(pdo.pos, *idx) == vm.fixed_object_pos)
+        .map(|(idx, pdo)| (idx, *pdo));
 
     let mut line1 = String::<20>::new();
     let mut line2_left = String::<8>::new();
     let mut line2_right = String::<16>::new();
 
-    if let Some(pdo) = selected {
+    if let Some((idx, pdo)) = selected {
         let _ = write!(&mut line1, "Fixed {}", format_v_short(pdo.mv).as_str());
-        let pos = effective_pos(pdo.pos, find_idx_fixed(&vm.fixed_pdos, pdo.mv));
+        let pos = effective_pos(pdo.pos, idx);
         let _ = write!(&mut line2_left, "PDO{}", pos);
         let _ = write!(
             &mut line2_right,
             "Imax {}",
             format_a_short(pdo.max_ma).as_str()
         );
+    } else if vm.fixed_object_pos == 0 {
+        let _ = line1.push_str("Fixed (select PDO)");
+        let _ = line2_left.push_str("Tap a row to select");
     } else {
         let _ = line1.push_str("Fixed (missing)");
-        let _ = line2_left.push_str("--");
+        let _ = write!(&mut line2_left, "PDO{}", vm.fixed_object_pos);
     }
 
     draw_small(
@@ -1623,8 +1636,17 @@ fn effective_pos(pos: u8, idx: usize) -> u8 {
     }
 }
 
-fn find_idx_fixed(list: &FixedPdoList, mv: u32) -> usize {
-    list.iter().position(|p| p.mv == mv).unwrap_or(0)
+fn fixed_selection_missing(vm: &PdSettingsVm) -> bool {
+    if vm.mode != PdMode::Fixed {
+        return false;
+    }
+    if vm.fixed_object_pos == 0 {
+        return false;
+    }
+    !vm.fixed_pdos
+        .iter()
+        .enumerate()
+        .any(|(idx, pdo)| effective_pos(pdo.pos, idx) == vm.fixed_object_pos)
 }
 
 fn pps_selection_missing(vm: &PdSettingsVm) -> bool {
