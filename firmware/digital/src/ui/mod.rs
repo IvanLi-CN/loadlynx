@@ -1,4 +1,5 @@
 mod fonts;
+pub mod pd_settings;
 pub mod preset_panel;
 
 use embedded_graphics::pixelcolor::{

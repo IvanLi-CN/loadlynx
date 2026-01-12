@@ -799,6 +799,7 @@ async fn encoder_task(
                             bump_control_rev();
                         }
                     }
+                    control::UiView::PdSettings => {}
                 }
             }
         }
@@ -867,6 +868,7 @@ async fn encoder_task(
                                 prompt_tone::enqueue_ui_ok();
                             }
                             control::UiView::PresetPanelBlocked => {}
+                            control::UiView::PdSettings => {}
                         }
                     }
                     down_since_ms = None;
@@ -909,7 +911,11 @@ async fn encoder_task(
 }
 
 #[embassy_executor::task]
-async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMutex) {
+async fn touch_ui_task(
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+) {
     info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
     #[derive(Copy, Clone)]
@@ -992,6 +998,12 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
             // down
             0 => {
                 prompt_tone::notify_local_activity();
+                if view == control::UiView::PdSettings {
+                    quick_switch = None;
+                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                    yield_now().await;
+                    continue;
+                }
                 if view == control::UiView::PresetPanelBlocked {
                     quick_switch = None;
                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -1398,6 +1410,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                         );
                                     }
                                     control::UiView::PresetPanelBlocked => {}
+                                    control::UiView::PdSettings => {}
                                 },
                                 ui::ControlRowHit::TargetEntry => {
                                     if view == control::UiView::Main {
@@ -1432,23 +1445,289 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
-                        let (changed, cfg) = {
-                            let mut guard = control.lock().await;
-                            let changed = guard.pd.toggle_target();
-                            let cfg = guard.pd;
-                            if changed {
-                                bump_control_rev();
-                            }
-                            (changed, cfg)
-                        };
-                        if changed {
-                            let _ = save_pd_config_to_eeprom(cfg, eeprom).await;
-                        }
+                        let mut guard = control.lock().await;
+                        guard.ui_view = control::UiView::PdSettings;
+                        guard.pd_draft = guard.pd_saved;
+                        guard.pd_settings_focus = control::PdSettingsFocus::DEFAULT;
+                        bump_control_rev();
                         prompt_tone::enqueue_ui_ok();
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
+                        info!("touch: PD button tap -> open PD settings panel");
                         yield_now().await;
                         continue;
+                    }
+
+                    if view == control::UiView::PdSettings {
+                        let (draft, focus) = {
+                            let guard = control.lock().await;
+                            (guard.pd_draft, guard.pd_settings_focus)
+                        };
+                        let pd_status = { telemetry.lock().await.last_pd_status.clone() };
+                        let vm = build_pd_settings_vm(draft, focus, pd_status.as_ref());
+
+                        if let Some(hit) =
+                            ui::pd_settings::hit_test_pd_settings(marker.x, marker.y, &vm)
+                        {
+                            match hit {
+                                ui::pd_settings::PdSettingsHit::Back => {
+                                    let mut guard = control.lock().await;
+                                    guard.ui_view = control::UiView::Main;
+                                    guard.pd_draft = guard.pd_saved;
+                                    guard.pd_settings_focus = control::PdSettingsFocus::DEFAULT;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_ui_ok();
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    info!("touch: PD settings Back -> main");
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::Apply => {
+                                    if !vm.apply_enabled {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
+
+                                    // Apply = persist + update active PD policy.
+                                    let (changed, cfg) = {
+                                        let mut guard = control.lock().await;
+                                        let changed = guard.pd_saved != guard.pd_draft;
+                                        guard.pd_saved = guard.pd_draft;
+                                        (changed, guard.pd_saved)
+                                    };
+                                    if changed {
+                                        bump_control_rev();
+                                        let ok = save_pd_config_to_eeprom(cfg, eeprom).await;
+                                        if ok {
+                                            prompt_tone::enqueue_ui_ok();
+                                        } else {
+                                            prompt_tone::enqueue_ui_fail();
+                                        }
+                                    } else {
+                                        prompt_tone::enqueue_ui_ok();
+                                    }
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::ModeFixed => {
+                                    let mut guard = control.lock().await;
+                                    if guard.pd_draft.mode != control::PdMode::Fixed {
+                                        guard.pd_draft.mode = control::PdMode::Fixed;
+                                        // If we have capabilities, snap to a valid fixed target.
+                                        if let Some(pdo) = vm.fixed_pdos.first() {
+                                            if !vm
+                                                .fixed_pdos
+                                                .iter()
+                                                .any(|p| p.mv == guard.pd_draft.target_mv)
+                                            {
+                                                guard.pd_draft.target_mv = pdo.mv;
+                                            }
+                                            guard.pd_draft.i_req_ma =
+                                                guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
+                                        }
+                                        bump_control_rev();
+                                    }
+                                    prompt_tone::enqueue_ui_ok();
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::ModePps => {
+                                    let mut guard = control.lock().await;
+                                    if guard.pd_draft.mode != control::PdMode::Pps {
+                                        guard.pd_draft.mode = control::PdMode::Pps;
+                                        // If we have APDOs, snap to the first APDO range.
+                                        if let Some(apdo) = vm.pps_pdos.first() {
+                                            guard.pd_draft.target_mv = guard
+                                                .pd_draft
+                                                .target_mv
+                                                .clamp(apdo.min_mv, apdo.max_mv);
+                                            guard.pd_draft.i_req_ma =
+                                                guard.pd_draft.i_req_ma.min(apdo.max_ma).max(50);
+                                        }
+                                        bump_control_rev();
+                                    }
+                                    prompt_tone::enqueue_ui_ok();
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::VreqMinus => {
+                                    let mut guard = control.lock().await;
+                                    let step = 20u32;
+                                    let mut next = guard.pd_draft.target_mv.saturating_sub(step);
+                                    if let Some(apdo) = vm
+                                        .pps_pdos
+                                        .iter()
+                                        .find(|pdo| {
+                                            guard.pd_draft.target_mv >= pdo.min_mv
+                                                && guard.pd_draft.target_mv <= pdo.max_mv
+                                        })
+                                        .or_else(|| vm.pps_pdos.first())
+                                    {
+                                        next = next.clamp(apdo.min_mv, apdo.max_mv);
+                                    } else {
+                                        next = next.max(3_000);
+                                    }
+                                    if next != guard.pd_draft.target_mv {
+                                        guard.pd_draft.target_mv = next;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ticks(1);
+                                    } else {
+                                        prompt_tone::enqueue_ui_fail();
+                                    }
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::VreqPlus => {
+                                    let mut guard = control.lock().await;
+                                    let step = 20u32;
+                                    let mut next = guard.pd_draft.target_mv.saturating_add(step);
+                                    if let Some(apdo) = vm
+                                        .pps_pdos
+                                        .iter()
+                                        .find(|pdo| {
+                                            guard.pd_draft.target_mv >= pdo.min_mv
+                                                && guard.pd_draft.target_mv <= pdo.max_mv
+                                        })
+                                        .or_else(|| vm.pps_pdos.first())
+                                    {
+                                        next = next.clamp(apdo.min_mv, apdo.max_mv);
+                                    } else {
+                                        next = next.min(21_000);
+                                    }
+                                    if next != guard.pd_draft.target_mv {
+                                        guard.pd_draft.target_mv = next;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ticks(1);
+                                    } else {
+                                        prompt_tone::enqueue_ui_fail();
+                                    }
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::IreqMinus => {
+                                    let mut guard = control.lock().await;
+                                    let step = 50u32;
+                                    let mut next =
+                                        guard.pd_draft.i_req_ma.saturating_sub(step).max(50);
+                                    let max_ma = match guard.pd_draft.mode {
+                                        control::PdMode::Fixed => vm
+                                            .fixed_pdos
+                                            .iter()
+                                            .find(|pdo| pdo.mv == guard.pd_draft.target_mv)
+                                            .map(|pdo| pdo.max_ma)
+                                            .unwrap_or(10_000),
+                                        control::PdMode::Pps => vm
+                                            .pps_pdos
+                                            .iter()
+                                            .find(|pdo| {
+                                                guard.pd_draft.target_mv >= pdo.min_mv
+                                                    && guard.pd_draft.target_mv <= pdo.max_mv
+                                            })
+                                            .or_else(|| vm.pps_pdos.first())
+                                            .map(|pdo| pdo.max_ma)
+                                            .unwrap_or(10_000),
+                                    };
+                                    next = next.min(max_ma);
+                                    if next != guard.pd_draft.i_req_ma {
+                                        guard.pd_draft.i_req_ma = next;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ticks(1);
+                                    } else {
+                                        prompt_tone::enqueue_ui_fail();
+                                    }
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::IreqPlus => {
+                                    let mut guard = control.lock().await;
+                                    let step = 50u32;
+                                    let mut next = guard.pd_draft.i_req_ma.saturating_add(step);
+                                    let max_ma = match guard.pd_draft.mode {
+                                        control::PdMode::Fixed => vm
+                                            .fixed_pdos
+                                            .iter()
+                                            .find(|pdo| pdo.mv == guard.pd_draft.target_mv)
+                                            .map(|pdo| pdo.max_ma)
+                                            .unwrap_or(10_000),
+                                        control::PdMode::Pps => vm
+                                            .pps_pdos
+                                            .iter()
+                                            .find(|pdo| {
+                                                guard.pd_draft.target_mv >= pdo.min_mv
+                                                    && guard.pd_draft.target_mv <= pdo.max_mv
+                                            })
+                                            .or_else(|| vm.pps_pdos.first())
+                                            .map(|pdo| pdo.max_ma)
+                                            .unwrap_or(10_000),
+                                    };
+                                    next = next.min(max_ma);
+                                    if next != guard.pd_draft.i_req_ma {
+                                        guard.pd_draft.i_req_ma = next;
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_ticks(1);
+                                    } else {
+                                        prompt_tone::enqueue_ui_fail();
+                                    }
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                                ui::pd_settings::PdSettingsHit::ListRow(idx) => {
+                                    let mut guard = control.lock().await;
+                                    match guard.pd_draft.mode {
+                                        control::PdMode::Fixed => {
+                                            if let Some(pdo) = vm.fixed_pdos.get(idx).copied() {
+                                                guard.pd_draft.target_mv = pdo.mv;
+                                                guard.pd_draft.i_req_ma =
+                                                    guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
+                                                bump_control_rev();
+                                                prompt_tone::enqueue_ui_ok();
+                                            } else {
+                                                prompt_tone::enqueue_ui_fail();
+                                            }
+                                        }
+                                        control::PdMode::Pps => {
+                                            if let Some(apdo) = vm.pps_pdos.get(idx).copied() {
+                                                guard.pd_draft.target_mv = guard
+                                                    .pd_draft
+                                                    .target_mv
+                                                    .clamp(apdo.min_mv, apdo.max_mv);
+                                                guard.pd_draft.i_req_ma = guard
+                                                    .pd_draft
+                                                    .i_req_ma
+                                                    .min(apdo.max_ma)
+                                                    .max(50);
+                                                bump_control_rev();
+                                                prompt_tone::enqueue_ui_ok();
+                                            } else {
+                                                prompt_tone::enqueue_ui_fail();
+                                            }
+                                        }
+                                    }
+                                    PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                    last_tab_tap = None;
+                                    yield_now().await;
+                                    continue;
+                                }
+                            }
+                        }
                     }
 
                     if view == control::UiView::Main
@@ -1724,6 +2003,7 @@ async fn touch_ui_task(control: &'static ControlMutex, eeprom: &'static EepromMu
                                     );
                                 }
                                 control::UiView::PresetPanelBlocked => {}
+                                control::UiView::PdSettings => {}
                             }
                         }
                     }
@@ -1986,6 +2266,76 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
         v_lim_text: format_av_3dp(editing.min_v_mv, 'V'),
         i_lim_text: format_av_3dp(editing.max_i_ma_total, 'A'),
         p_lim_text: format_power_2dp(editing.max_p_mw as i32),
+    }
+}
+
+fn build_pd_settings_vm(
+    draft: control::PdConfig,
+    focus: control::PdSettingsFocus,
+    status: Option<&PdStatus>,
+) -> ui::pd_settings::PdSettingsVm {
+    fn pdo_pos(pos: u8, idx: usize) -> u8 {
+        if pos != 0 {
+            pos
+        } else {
+            (idx + 1).min(u8::MAX as usize) as u8
+        }
+    }
+
+    let mut attached = false;
+    let mut contract_mv = 0u32;
+    let mut contract_ma = 0u32;
+    let mut fixed_pdos = loadlynx_protocol::FixedPdoList::new();
+    let mut pps_pdos = loadlynx_protocol::PpsPdoList::new();
+
+    if let Some(s) = status {
+        attached = s.attached;
+        contract_mv = s.contract_mv;
+        contract_ma = s.contract_ma;
+        fixed_pdos = s.fixed_pdos.clone();
+        pps_pdos = s.pps_pdos.clone();
+    }
+
+    // Derive an APDO selection from the target voltage (legacy config shape).
+    let pps_object_pos = pps_pdos
+        .iter()
+        .enumerate()
+        .find(|(_idx, pdo)| draft.target_mv >= pdo.min_mv && draft.target_mv <= pdo.max_mv)
+        .or_else(|| pps_pdos.iter().enumerate().next())
+        .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))
+        .unwrap_or(0);
+
+    let apply_enabled = if !attached {
+        false
+    } else {
+        match draft.mode {
+            control::PdMode::Fixed => fixed_pdos
+                .iter()
+                .find(|pdo| pdo.mv == draft.target_mv)
+                .map(|pdo| draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma)
+                .unwrap_or(false),
+            control::PdMode::Pps => pps_pdos
+                .iter()
+                .find(|pdo| draft.target_mv >= pdo.min_mv && draft.target_mv <= pdo.max_mv)
+                .map(|pdo| draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma)
+                .unwrap_or(false),
+        }
+    };
+
+    ui::pd_settings::PdSettingsVm {
+        attached,
+        mode: draft.mode,
+        focus,
+        fixed_pdos,
+        pps_pdos,
+        contract_mv,
+        contract_ma,
+        fixed_target_mv: draft.target_mv,
+        pps_object_pos,
+        pps_target_mv: draft.target_mv,
+        i_req_ma: draft.i_req_ma,
+        apply_enabled,
+        message: ui::pd_settings::PdSettingsMessage::None,
     }
 }
 
@@ -2618,6 +2968,7 @@ async fn display_task(
     let mut last_panel_visible: bool = false;
     let mut last_preview_active: bool = false;
     let mut last_preview_mode: LoadMode = LoadMode::Cc;
+    let mut last_ui_view: control::UiView = control::UiView::Main;
     loop {
         let now = timestamp_ms() as u32;
         let dt_ms = now.wrapping_sub(last_push_ms);
@@ -2642,7 +2993,10 @@ async fn display_task(
                 active_target_milli,
                 active_target_unit,
                 adjust_digit,
+                ui_view,
                 pd_desired_mv,
+                pd_draft,
+                pd_focus,
                 preview_panel,
                 panel_visible,
                 panel_vm,
@@ -2695,7 +3049,10 @@ async fn display_task(
                     active_target_milli,
                     active_target_unit,
                     guard.adjust_digit,
-                    guard.pd.target_mv,
+                    guard.ui_view,
+                    guard.pd_saved.target_mv,
+                    guard.pd_draft,
+                    guard.pd_settings_focus,
                     preview_panel,
                     preset_panel_visible(guard.ui_view),
                     if preset_panel_visible(guard.ui_view) {
@@ -2709,6 +3066,9 @@ async fn display_task(
             let preview_active = preview_panel.is_some();
             let mut force_full_render =
                 panel_visible || (panel_visible != last_panel_visible) || frame_idx == 1;
+            if ui_view != last_ui_view {
+                force_full_render = true;
+            }
             if preview_active != last_preview_active {
                 force_full_render = true;
             }
@@ -2720,8 +3080,9 @@ async fn display_task(
             if preview_active {
                 last_preview_mode = overlay_mode;
             }
+            last_ui_view = ui_view;
 
-            let (snapshot, mask) = {
+            let (snapshot, mask, pd_status_for_panel) = {
                 let mut guard = telemetry.lock().await;
                 guard.snapshot.blink_on = ((now / 500) & 1) == 0;
                 let uv_latched_raw = guard
@@ -2807,10 +3168,12 @@ async fn display_task(
                     active_target_unit,
                     adjust_digit,
                 );
-                guard.diff_for_render()
+                let pd_status = guard.last_pd_status.clone();
+                let (snapshot, mask) = guard.diff_for_render();
+                (snapshot, mask, pd_status)
             };
 
-            if mask.is_empty() && !force_full_render {
+            if ui_view != control::UiView::PdSettings && mask.is_empty() && !force_full_render {
                 if log_this_frame {
                     info!(
                         "display: frame {} skipped (no UI changes, dt_ms={})",
@@ -2824,15 +3187,27 @@ async fn display_task(
                         DISPLAY_WIDTH,
                         DISPLAY_HEIGHT,
                     );
-                    if force_full_render || mask.touch_marker {
-                        // 首帧：完整绘制静态布局 + 动态内容。
-                        ui::render(&mut frame, &snapshot);
-                    } else {
-                        // 后续帧：仅按掩码重绘受影响区域。
-                        ui::render_partial(&mut frame, &snapshot, &mask);
-                    }
-                    if let Some(vm) = panel_vm.as_ref() {
-                        ui::preset_panel::render_preset_panel(&mut frame, vm);
+                    match ui_view {
+                        control::UiView::PdSettings => {
+                            let vm = build_pd_settings_vm(
+                                pd_draft,
+                                pd_focus,
+                                pd_status_for_panel.as_ref(),
+                            );
+                            ui::pd_settings::render_pd_settings(&mut frame, &vm);
+                        }
+                        _ => {
+                            if force_full_render || mask.touch_marker {
+                                // 首帧：完整绘制静态布局 + 动态内容。
+                                ui::render(&mut frame, &snapshot);
+                            } else {
+                                // 后续帧：仅按掩码重绘受影响区域。
+                                ui::render_partial(&mut frame, &snapshot, &mask);
+                            }
+                            if let Some(vm) = panel_vm.as_ref() {
+                                ui::preset_panel::render_preset_panel(&mut frame, vm);
+                            }
+                        }
                     }
                     // 在左上角叠加 FPS 信息，使用上一统计窗口得到的整数 FPS。
                     ui::render_fps_overlay(&mut frame, last_fps);
@@ -3861,7 +4236,7 @@ async fn main(spawner: Spawner) {
         .expect("touch_task spawn");
     info!("spawning touch-ui task");
     spawner
-        .spawn(touch_ui_task(control, eeprom))
+        .spawn(touch_ui_task(control, telemetry, eeprom))
         .expect("touch_ui_task spawn");
     info!("spawning prompt tone task");
     spawner
@@ -4909,7 +5284,7 @@ async fn setmode_tx_task(
             (
                 CONTROL_REV.load(Ordering::Relaxed),
                 sanitize_setmode(cmd),
-                guard.pd,
+                guard.pd_saved,
             )
         };
         if pd_cfg.target_mv < 3_000 || pd_cfg.target_mv > 21_000 {

@@ -2,6 +2,7 @@ downloads/
 tmp/
 logs/
 logs/agentd/
+docs/assets/usb-pd-settings-panel-rendered/
 
 # Rust build artifacts
 **/target/

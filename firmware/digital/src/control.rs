@@ -128,6 +128,7 @@ pub enum UiView {
     Main,
     PresetPanel,
     PresetPanelBlocked,
+    PdSettings,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
@@ -146,6 +147,17 @@ impl PdMode {
             _ => None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
+pub enum PdSettingsFocus {
+    None = 0,
+    Vreq = 1,
+    Ireq = 2,
+}
+
+impl PdSettingsFocus {
+    pub const DEFAULT: Self = Self::None;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
@@ -197,7 +209,11 @@ pub struct ControlState {
     pub ui_view: UiView,
     pub panel_selected_field: PresetPanelField,
     pub panel_selected_digit: PresetPanelDigit,
-    pub pd: PdConfig,
+    /// Persisted PD policy (EEPROM-backed); used by the UART PD apply task.
+    pub pd_saved: PdConfig,
+    /// Draft PD policy edited in the PD settings UI; copied to `pd_saved` on Apply.
+    pub pd_draft: PdConfig,
+    pub pd_settings_focus: PdSettingsFocus,
 }
 
 impl ControlState {
@@ -213,7 +229,9 @@ impl ControlState {
             ui_view: UiView::Main,
             panel_selected_field: PresetPanelField::Target,
             panel_selected_digit: PresetPanelDigit::Tenths,
-            pd,
+            pd_saved: pd,
+            pd_draft: pd,
+            pd_settings_focus: PdSettingsFocus::DEFAULT,
         }
     }
 
