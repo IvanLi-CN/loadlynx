@@ -25,7 +25,6 @@ use usbpd_traits::{Driver, DriverRxError, DriverTxError};
 use embassy_stm32::mode::Async as UartAsync;
 use embassy_stm32::usart::UartTx;
 
-pub const MSG_PD_STATUS: u8 = 0x13;
 pub const MSG_PD_SINK_REQUEST: u8 = 0x27;
 
 pub const PD_MODE_FIXED: u8 = 0;
@@ -249,18 +248,16 @@ impl AnalogDpm {
                     let max_ma = fixed.max_current().get::<uom_milliampere>();
                     let _ = self.fixed_pdos.push(FixedPdo { pos, mv, max_ma });
                 }
-                pdo::PowerDataObject::Augmented(aug) => {
-                    if let pdo::Augmented::Spr(spr) = aug {
-                        let min_mv = spr.min_voltage().get::<uom_millivolt>();
-                        let max_mv = spr.max_voltage().get::<uom_millivolt>();
-                        let max_ma = spr.max_current().get::<uom_milliampere>();
-                        let _ = self.pps_pdos.push(PpsPdo {
-                            pos,
-                            min_mv,
-                            max_mv,
-                            max_ma,
-                        });
-                    }
+                pdo::PowerDataObject::Augmented(pdo::Augmented::Spr(spr)) => {
+                    let min_mv = spr.min_voltage().get::<uom_millivolt>();
+                    let max_mv = spr.max_voltage().get::<uom_millivolt>();
+                    let max_ma = spr.max_current().get::<uom_milliampere>();
+                    let _ = self.pps_pdos.push(PpsPdo {
+                        pos,
+                        min_mv,
+                        max_mv,
+                        max_ma,
+                    });
                 }
                 _ => {}
             }
@@ -434,14 +431,20 @@ impl AnalogDpm {
     }
 
     async fn send_pd_status(&mut self, attached: bool) {
-        let mut status = PdStatus::default();
-        status.attached = attached;
-        if attached {
-            status.contract_mv = self.contract_mv;
-            status.contract_ma = self.contract_ma;
-            status.fixed_pdos = self.fixed_pdos.clone();
-            status.pps_pdos = self.pps_pdos.clone();
-        }
+        let status = if attached {
+            PdStatus {
+                attached,
+                contract_mv: self.contract_mv,
+                contract_ma: self.contract_ma,
+                fixed_pdos: self.fixed_pdos.clone(),
+                pps_pdos: self.pps_pdos.clone(),
+            }
+        } else {
+            PdStatus {
+                attached,
+                ..PdStatus::default()
+            }
+        };
 
         let mut raw = [0u8; 256];
         let mut slip = [0u8; 512];
