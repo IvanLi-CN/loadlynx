@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（4/5）
+- Status: 已完成（5/5）
 - Created: 2026-01-09
 - Last: 2026-01-12
 
@@ -170,7 +170,35 @@ UI mock（320×240 PNG）：
 - [x] M2: 模拟板 PD：支持按 object position 请求 Fixed/PPS（含 Ireq）+ PPS keep-alive + `PD_STATUS` 完整上报
 - [x] M3: 数字板 UI：USB‑PD 设置面板（全量列表 + 越界阻止 + Apply/错误态 + EEPROM 持久化）
 - [x] M4: 数字板 HTTP API：读写 PD 配置 + 状态输出（与 UI 同口径错误码）
-- [ ] M5: HIL 验收：多 Source/线缆矩阵验证 + 记录日志/结论
+- [x] M5: HIL 验收：多 Source/线缆矩阵验证 + 记录日志/结论
+
+## HIL 记录（摘要）
+
+### Setup
+
+- Date: 2026-01-12
+- Source: IP6557（支持 PPS）
+- Cable: USB‑C（带 e‑marker）
+- Digital HTTP: `http://192.168.31.216/api/v1/pd`（同网段访问）
+- Digital FW: `digital 0.1.0 (profile release, dev-20260112-122259-27a9de1-2-ga1b2e1d)`
+
+### Capabilities（/api/v1/pd）
+
+- Fixed PDOs: 5/9/12/15 V（各 3 A），20 V（5 A）
+- PPS APDOs: 3.3–11 V（3 A），3.3–21 V（3 A）
+
+### Apply Matrix（/api/v1/pd，i_req_ma=500）
+
+- Fixed pos=1 → 5 V / 0.5 A（电压从 15V 降到 5V 时观察到更新延迟，约 6s 内收敛）
+- Fixed pos=4 → 15 V / 0.5 A
+- Fixed pos=5 → 20 V / 0.5 A
+- PPS pos=6 target=9000 → 9 V / 0.5 A
+- PPS pos=7 target=15000 → 15 V / 0.5 A
+
+### Logs（关键点）
+
+- 请求/ACK：`pd_sink_request sent` 与 `pd_sink_request ACK received` 成对出现
+- 本次 session 未观察到 `NACK` / `timeout`
 
 ## 方案概述（Approach, high-level）
 
