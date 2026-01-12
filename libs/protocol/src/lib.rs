@@ -435,33 +435,146 @@ impl<'b, C> Decode<'b, C> for PdSinkMode {
 pub struct PdSinkRequest {
     #[n(0)]
     pub mode: PdSinkMode,
-    /// Desired target VBUS in millivolts (mV), e.g. 5000 or 20000.
+    /// Desired target VBUS in millivolts (mV).
+    ///
+    /// - Fixed: requested fixed voltage, typically matching the selected PDO's `mv`
+    /// - PPS: requested PPS voltage (20mV step in PD spec)
     #[n(1)]
     pub target_mv: u32,
-}
-
-/// Source-provided fixed PDO capability summary: `[mv, max_ma]`.
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
-#[cbor(array)]
-pub struct FixedPdo {
-    #[n(0)]
-    pub mv: u32,
-    #[n(1)]
-    pub max_ma: u32,
-}
-
-/// Source-provided PPS APDO capability summary: `[min_mv, max_mv, max_ma]`.
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, Encode, Decode, Default, PartialEq, Eq)]
-#[cbor(array)]
-pub struct PpsPdo {
-    #[n(0)]
-    pub min_mv: u32,
-    #[n(1)]
-    pub max_mv: u32,
+    /// Source Capabilities object position (1-based), selecting the target PDO/APDO.
     #[n(2)]
+    pub object_pos: u8,
+    /// Requested current in milliamps (mA).
+    #[n(3)]
+    pub i_req_ma: u32,
+}
+
+/// Source-provided fixed PDO capability summary: `[pos, mv, max_ma]`.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FixedPdo {
+    pub pos: u8,
+    pub mv: u32,
     pub max_ma: u32,
+}
+
+impl<C> Encode<C> for FixedPdo {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.array(3)?;
+        e.u8(self.pos)?;
+        e.u32(self.mv)?;
+        e.u32(self.max_ma)?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for FixedPdo {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let Some(len) = d.array()? else {
+            return Err(minicbor::decode::Error::message(
+                "indefinite arrays not supported",
+            ));
+        };
+        let len = len as usize;
+
+        let mut out = FixedPdo::default();
+        let consumed = match len {
+            2 => {
+                // Legacy: `[mv, max_ma]` (pos not available).
+                out.pos = 0;
+                out.mv = d.u32()?;
+                out.max_ma = d.u32()?;
+                2
+            }
+            0 | 1 => {
+                return Err(minicbor::decode::Error::message(
+                    "invalid FixedPdo array length",
+                ));
+            }
+            _ => {
+                // New: `[pos, mv, max_ma, ...]`.
+                out.pos = d.u8()?;
+                out.mv = d.u32()?;
+                out.max_ma = d.u32()?;
+                3
+            }
+        };
+
+        for _ in consumed..len {
+            d.skip()?;
+        }
+        Ok(out)
+    }
+}
+
+/// Source-provided PPS APDO capability summary: `[pos, min_mv, max_mv, max_ma]`.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PpsPdo {
+    pub pos: u8,
+    pub min_mv: u32,
+    pub max_mv: u32,
+    pub max_ma: u32,
+}
+
+impl<C> Encode<C> for PpsPdo {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.array(4)?;
+        e.u8(self.pos)?;
+        e.u32(self.min_mv)?;
+        e.u32(self.max_mv)?;
+        e.u32(self.max_ma)?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for PpsPdo {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let Some(len) = d.array()? else {
+            return Err(minicbor::decode::Error::message(
+                "indefinite arrays not supported",
+            ));
+        };
+        let len = len as usize;
+
+        let mut out = PpsPdo::default();
+        let consumed = match len {
+            3 => {
+                // Legacy: `[min_mv, max_mv, max_ma]` (pos not available).
+                out.pos = 0;
+                out.min_mv = d.u32()?;
+                out.max_mv = d.u32()?;
+                out.max_ma = d.u32()?;
+                3
+            }
+            0 | 1 | 2 => {
+                return Err(minicbor::decode::Error::message(
+                    "invalid PpsPdo array length",
+                ));
+            }
+            _ => {
+                // New: `[pos, min_mv, max_mv, max_ma, ...]`.
+                out.pos = d.u8()?;
+                out.min_mv = d.u32()?;
+                out.max_mv = d.u32()?;
+                out.max_ma = d.u32()?;
+                4
+            }
+        };
+
+        for _ in consumed..len {
+            d.skip()?;
+        }
+        Ok(out)
+    }
 }
 
 pub type FixedPdoList = Vec<FixedPdo, PD_MAX_FIXED_PDOS>;
@@ -1639,6 +1752,8 @@ mod tests {
         let req = PdSinkRequest {
             mode: PdSinkMode::Fixed,
             target_mv: 20_000,
+            object_pos: 4,
+            i_req_ma: 3_000,
         };
 
         let mut raw = [0u8; 64];
@@ -1655,12 +1770,14 @@ mod tests {
         let mut fixed_pdos = FixedPdoList::new();
         fixed_pdos
             .push(FixedPdo {
+                pos: 1,
                 mv: 5_000,
                 max_ma: 3_000,
             })
             .unwrap();
         fixed_pdos
             .push(FixedPdo {
+                pos: 4,
                 mv: 20_000,
                 max_ma: 1_500,
             })
@@ -1669,6 +1786,7 @@ mod tests {
         let mut pps_pdos = PpsPdoList::new();
         pps_pdos
             .push(PpsPdo {
+                pos: 2,
                 min_mv: 3_300,
                 max_mv: 11_000,
                 max_ma: 3_000,
@@ -1690,6 +1808,7 @@ mod tests {
         assert_eq!(hdr.seq, 9);
         assert_eq!(decoded, status);
         assert_eq!(decoded.fixed_pdos.len(), 2);
+        assert_eq!(decoded.fixed_pdos[1].pos, 4);
         assert_eq!(decoded.fixed_pdos[1].mv, 20_000);
     }
 

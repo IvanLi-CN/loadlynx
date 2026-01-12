@@ -29,8 +29,8 @@ use loadlynx_protocol::{
     MSG_SET_POINT, STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD,
     STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE, STATE_FLAG_UV_LATCHED, SlipDecoder,
     SoftReset, SoftResetReason, decode_cal_mode_frame, decode_cal_write_frame, decode_frame,
-    decode_limit_profile_frame, decode_set_enable_frame, decode_set_mode_frame,
-    decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
+    decode_limit_profile_frame, decode_pd_sink_request_frame, decode_set_enable_frame,
+    decode_set_mode_frame, decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
     encode_fast_status_frame, encode_hello_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
@@ -1949,7 +1949,7 @@ async fn uart_setpoint_rx_task(
                                                         Err(ProtocolError::UnsupportedMessage(
                                                             _,
                                                         )) => {
-                                                            if let Ok((hdr, payload)) =
+                                                            if let Ok((hdr, _payload)) =
                                                                 decode_frame(&frame)
                                                                 && hdr.msg
                                                                     == pd::MSG_PD_SINK_REQUEST
@@ -1963,42 +1963,65 @@ async fn uart_setpoint_rx_task(
                                                                 }
 
                                                                 let (is_nack, reason) =
-                                                                        match pd::decode_pd_sink_request_payload(
-                                                                            payload,
-                                                                        ) {
-                                                                            Ok(req) => {
-                                                                                if req.mode
-                                                                                    != pd::PD_MODE_FIXED
-                                                                                {
-                                                                                    (true, "unsupported mode")
-                                                                                } else if req.target_mv
-                                                                                    != pd::PD_TARGET_5V_MV
-                                                                                    && req.target_mv
-                                                                                        != pd::PD_TARGET_20V_MV
-                                                                                {
-                                                                                    (
-                                                                                        true,
-                                                                                        "unsupported target_mv",
-                                                                                    )
-                                                                                } else {
-                                                                                    pd::PD_DESIRED_TARGET_MV.store(
-                                                                                        req.target_mv,
-                                                                                        Ordering::Relaxed,
-                                                                                    );
-                                                                                    pd::PD_RENEGOTIATE_SIGNAL.signal(());
-                                                                                    info!(
-                                                                                        "PD_SINK_REQUEST received: mode={} target_mv={} seq={}",
-                                                                                        req.mode,
-                                                                                        req.target_mv,
-                                                                                        hdr.seq
-                                                                                    );
-                                                                                    (false, "")
+                                                                    match decode_pd_sink_request_frame(&frame) {
+                                                                        Ok((_hdr2, req)) => {
+                                                                            let mode = match req.mode {
+                                                                                loadlynx_protocol::PdSinkMode::Fixed => {
+                                                                                    Some(pd::PD_MODE_FIXED)
+                                                                                }
+                                                                                loadlynx_protocol::PdSinkMode::Pps => {
+                                                                                    Some(pd::PD_MODE_PPS)
+                                                                                }
+                                                                                loadlynx_protocol::PdSinkMode::Unknown(_) => None,
+                                                                            };
+
+                                                                            match mode {
+                                                                                None => (true, "unsupported mode"),
+                                                                                Some(mode) => {
+                                                                                    let object_pos = req.object_pos.max(1);
+                                                                                    if object_pos == 0 || object_pos > 14 {
+                                                                                        (true, "invalid object_pos")
+                                                                                    } else if req.target_mv < 3_000
+                                                                                        || req.target_mv > 21_000
+                                                                                    {
+                                                                                        (true, "invalid target_mv")
+                                                                                    } else if req.i_req_ma > 10_000 {
+                                                                                        (true, "invalid i_req_ma")
+                                                                                    } else {
+                                                                                        pd::PD_DESIRED_MODE.store(
+                                                                                            mode,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                        pd::PD_DESIRED_OBJECT_POS.store(
+                                                                                            object_pos,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                        pd::PD_DESIRED_TARGET_MV.store(
+                                                                                            req.target_mv,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                        pd::PD_DESIRED_I_REQ_MA.store(
+                                                                                            req.i_req_ma,
+                                                                                            Ordering::Relaxed,
+                                                                                        );
+                                                                                        pd::PD_RENEGOTIATE_SIGNAL.signal(());
+                                                                                        info!(
+                                                                                            "PD_SINK_REQUEST received: mode={} object_pos={} target_mv={} i_req_ma={} seq={}",
+                                                                                            mode,
+                                                                                            object_pos,
+                                                                                            req.target_mv,
+                                                                                            req.i_req_ma,
+                                                                                            hdr.seq
+                                                                                        );
+                                                                                        (false, "")
+                                                                                    }
                                                                                 }
                                                                             }
-                                                                            Err(_err) => {
-                                                                                (true, "CBOR decode error")
-                                                                            }
-                                                                        };
+                                                                        }
+                                                                        Err(_err) => {
+                                                                            (true, "frame decode error")
+                                                                        }
+                                                                    };
 
                                                                 if is_nack {
                                                                     warn!(

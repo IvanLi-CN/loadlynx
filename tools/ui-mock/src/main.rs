@@ -8,6 +8,7 @@ use loadlynx_protocol::LoadMode;
 pub const DISPLAY_WIDTH: usize = 240;
 pub const DISPLAY_HEIGHT: usize = 320;
 
+mod pd_settings_mock;
 mod preset_panel_mock;
 mod preset_preview_panel;
 
@@ -22,6 +23,27 @@ mod control {
 
     impl AdjustDigit {
         pub const DEFAULT: Self = Self::Tenths;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PdMode {
+        Fixed = 0,
+        Pps = 1,
+    }
+
+    impl PdMode {
+        pub const DEFAULT: Self = Self::Fixed;
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum PdSettingsFocus {
+        None = 0,
+        Vreq = 1,
+        Ireq = 2,
+    }
+
+    impl PdSettingsFocus {
+        pub const DEFAULT: Self = Self::None;
     }
 }
 
@@ -144,6 +166,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mode = std::env::args().nth(1);
     if mode.as_deref() == Some("pd") {
         return render_pd_toggle_mocks(&repo_root);
+    }
+    if mode.as_deref() == Some("pd-settings") {
+        return pd_settings_mock::render_pd_settings_mocks(&repo_root);
     }
     let out_dir = repo_root.join("docs/assets/main-display");
     let preset_dir = repo_root.join("docs/assets/on-device-preset-ui");
