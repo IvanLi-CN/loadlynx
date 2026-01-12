@@ -2,7 +2,10 @@ downloads/
 tmp/
 logs/
 logs/agentd/
-docs/assets/usb-pd-settings-panel-rendered/
+# Generated UI mock renders (tracked PNGs for PR review; keep other artifacts ignored)
+docs/assets/usb-pd-settings-panel-rendered/**
+!docs/assets/usb-pd-settings-panel-rendered/
+!docs/assets/usb-pd-settings-panel-rendered/*.png
 
 # Rust build artifacts
 **/target/
