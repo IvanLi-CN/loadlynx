@@ -163,6 +163,13 @@ impl PdSettingsFocus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
 pub struct PdConfig {
     pub mode: PdMode,
+    /// Selected Fixed PDO object position (1-based). `0` means "not explicitly selected".
+    ///
+    /// Note: capability lists may omit `pos` (legacy), in which case the effective position is
+    /// derived from the list index on the digital side.
+    pub fixed_object_pos: u8,
+    /// Selected PPS APDO object position (1-based). `0` means "not selected" and disables Apply.
+    pub pps_object_pos: u8,
     pub target_mv: u32,
     pub i_req_ma: u32,
 }
@@ -174,6 +181,8 @@ impl PdConfig {
     pub const fn default() -> Self {
         Self {
             mode: PdMode::DEFAULT,
+            fixed_object_pos: 0,
+            pps_object_pos: 0,
             target_mv: Self::DEFAULT_TARGET_MV,
             i_req_ma: Self::DEFAULT_I_REQ_MA,
         }
@@ -479,7 +488,7 @@ pub fn decode_presets_blob(
 // ---- EEPROM PD config blob -------------------------------------------------
 
 const PD_MAGIC: [u8; 4] = *b"LLPD";
-const PD_FMT_VERSION: u8 = 2;
+const PD_FMT_VERSION: u8 = 3;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdBlobError {
@@ -496,8 +505,8 @@ pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     out[0..4].copy_from_slice(&PD_MAGIC);
     out[4] = PD_FMT_VERSION;
     out[5] = cfg.mode as u8;
-    out[6] = 0;
-    out[7] = 0;
+    out[6] = cfg.fixed_object_pos;
+    out[7] = cfg.pps_object_pos;
     put_u32_le(&mut out, 8, cfg.target_mv);
     put_u32_le(&mut out, 12, cfg.i_req_ma);
     // out[16..28] reserved = 0
@@ -513,7 +522,7 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
         return Err(PdBlobError::InvalidMagic);
     }
     let ver = bytes[4];
-    if ver != 1 && ver != PD_FMT_VERSION {
+    if ver != 1 && ver != 2 && ver != PD_FMT_VERSION {
         return Err(PdBlobError::UnsupportedVersion(ver));
     }
 
@@ -532,6 +541,9 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
 
     let mode_raw = bytes[5];
     let mode = PdMode::from_u8(mode_raw).ok_or(PdBlobError::InvalidMode(mode_raw))?;
+
+    let fixed_object_pos = if ver >= 3 { bytes[6] } else { 0 };
+    let pps_object_pos = if ver >= 3 { bytes[7] } else { 0 };
     let target_mv = get_u32_le(bytes, 8);
     if ver == 1 && target_mv != 5_000 && target_mv != 20_000 {
         return Err(PdBlobError::InvalidTarget(target_mv));
@@ -548,6 +560,8 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
 
     Ok(PdConfig {
         mode,
+        fixed_object_pos,
+        pps_object_pos,
         target_mv,
         i_req_ma,
     })

@@ -324,6 +324,10 @@ static PD_REQ_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static PD_REQ_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static PD_REQ_LAST_ACK_FLAGS: AtomicU8 = AtomicU8::new(0);
 static PD_REQ_ACK_PENDING: AtomicBool = AtomicBool::new(false);
+static PD_FORCE_SEND: AtomicBool = AtomicBool::new(false);
+static PD_LAST_RESULT_CODE: AtomicU8 = AtomicU8::new(0);
+static PD_LAST_RESULT_MS: AtomicU32 = AtomicU32::new(0);
+static PD_UI_APPLY_MS: AtomicU32 = AtomicU32::new(0);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -1493,6 +1497,10 @@ async fn touch_ui_task(
                                     }
 
                                     // Apply = persist + update active PD policy.
+                                    let apply_ms = now_ms32();
+                                    PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
+                                    PD_FORCE_SEND.store(true, Ordering::Release);
+
                                     let (changed, cfg) = {
                                         let mut guard = control.lock().await;
                                         let changed = guard.pd_saved != guard.pd_draft;
@@ -1506,6 +1514,8 @@ async fn touch_ui_task(
                                             prompt_tone::enqueue_ui_ok();
                                         } else {
                                             prompt_tone::enqueue_ui_fail();
+                                            PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed); // persist fail
+                                            PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
                                         }
                                     } else {
                                         prompt_tone::enqueue_ui_ok();
@@ -1519,15 +1529,45 @@ async fn touch_ui_task(
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Fixed {
                                         guard.pd_draft.mode = control::PdMode::Fixed;
-                                        // If we have capabilities, snap to a valid fixed target.
-                                        if let Some(pdo) = vm.fixed_pdos.first() {
-                                            if !vm
+                                        // If we have capabilities, snap to a valid Fixed selection.
+                                        if let Some((idx0, pdo0)) =
+                                            vm.fixed_pdos.iter().enumerate().next()
+                                        {
+                                            let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                                if pos != 0 {
+                                                    pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                }
+                                            };
+
+                                            let desired_pos =
+                                                if guard.pd_draft.fixed_object_pos != 0 {
+                                                    guard.pd_draft.fixed_object_pos
+                                                } else {
+                                                    vm.fixed_pdos
+                                                        .iter()
+                                                        .enumerate()
+                                                        .find(|(_idx, p)| {
+                                                            p.mv == guard.pd_draft.target_mv
+                                                        })
+                                                        .map(|(idx, p)| pdo_pos(p.pos, idx))
+                                                        .unwrap_or(0)
+                                                };
+
+                                            let (pos, pdo) = vm
                                                 .fixed_pdos
                                                 .iter()
-                                                .any(|p| p.mv == guard.pd_draft.target_mv)
-                                            {
-                                                guard.pd_draft.target_mv = pdo.mv;
-                                            }
+                                                .enumerate()
+                                                .find(|(idx, p)| {
+                                                    pdo_pos(p.pos, *idx) == desired_pos
+                                                })
+                                                .map(|(idx, p)| (pdo_pos(p.pos, idx), *p))
+                                                .unwrap_or_else(|| {
+                                                    (pdo_pos(pdo0.pos, idx0), *pdo0)
+                                                });
+
+                                            guard.pd_draft.fixed_object_pos = pos;
                                             guard.pd_draft.i_req_ma =
                                                 guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                         }
@@ -1543,14 +1583,38 @@ async fn touch_ui_task(
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Pps {
                                         guard.pd_draft.mode = control::PdMode::Pps;
-                                        // If we have APDOs, snap to the first APDO range.
-                                        if let Some(apdo) = vm.pps_pdos.first() {
-                                            guard.pd_draft.target_mv = guard
-                                                .pd_draft
-                                                .target_mv
-                                                .clamp(apdo.min_mv, apdo.max_mv);
-                                            guard.pd_draft.i_req_ma =
-                                                guard.pd_draft.i_req_ma.min(apdo.max_ma).max(50);
+                                        // PPS requires an explicit APDO selection: do not auto-pick.
+                                        if guard.pd_draft.pps_object_pos != 0 {
+                                            let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                                if pos != 0 {
+                                                    pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                }
+                                            };
+                                            if let Some(apdo) = vm
+                                                .pps_pdos
+                                                .iter()
+                                                .enumerate()
+                                                .find(|(idx, p)| {
+                                                    pdo_pos(p.pos, *idx)
+                                                        == guard.pd_draft.pps_object_pos
+                                                })
+                                                .map(|(_idx, p)| *p)
+                                            {
+                                                if guard.pd_draft.target_mv == 0 {
+                                                    guard.pd_draft.target_mv = apdo.min_mv;
+                                                }
+                                                guard.pd_draft.target_mv = guard
+                                                    .pd_draft
+                                                    .target_mv
+                                                    .clamp(apdo.min_mv, apdo.max_mv);
+                                                guard.pd_draft.i_req_ma = guard
+                                                    .pd_draft
+                                                    .i_req_ma
+                                                    .min(apdo.max_ma)
+                                                    .max(50);
+                                            }
                                         }
                                         bump_control_rev();
                                     }
@@ -1562,21 +1626,43 @@ async fn touch_ui_task(
                                 }
                                 ui::pd_settings::PdSettingsHit::VreqMinus => {
                                     let mut guard = control.lock().await;
+                                    if guard.pd_draft.mode != control::PdMode::Pps
+                                        || guard.pd_draft.pps_object_pos == 0
+                                    {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let step = 20u32;
-                                    let mut next = guard.pd_draft.target_mv.saturating_sub(step);
-                                    if let Some(apdo) = vm
+                                    let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                        if pos != 0 {
+                                            pos
+                                        } else {
+                                            (idx + 1).min(u8::MAX as usize) as u8
+                                        }
+                                    };
+                                    let Some(apdo) = vm
                                         .pps_pdos
                                         .iter()
-                                        .find(|pdo| {
-                                            guard.pd_draft.target_mv >= pdo.min_mv
-                                                && guard.pd_draft.target_mv <= pdo.max_mv
+                                        .enumerate()
+                                        .find(|(idx, p)| {
+                                            pdo_pos(p.pos, *idx) == guard.pd_draft.pps_object_pos
                                         })
-                                        .or_else(|| vm.pps_pdos.first())
-                                    {
-                                        next = next.clamp(apdo.min_mv, apdo.max_mv);
-                                    } else {
-                                        next = next.max(3_000);
+                                        .map(|(_idx, p)| *p)
+                                    else {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    };
+                                    if guard.pd_draft.target_mv == 0 {
+                                        guard.pd_draft.target_mv = apdo.min_mv;
                                     }
+                                    let mut next = guard.pd_draft.target_mv.saturating_sub(step);
+                                    next = next.clamp(apdo.min_mv, apdo.max_mv);
                                     if next != guard.pd_draft.target_mv {
                                         guard.pd_draft.target_mv = next;
                                         bump_control_rev();
@@ -1591,21 +1677,43 @@ async fn touch_ui_task(
                                 }
                                 ui::pd_settings::PdSettingsHit::VreqPlus => {
                                     let mut guard = control.lock().await;
+                                    if guard.pd_draft.mode != control::PdMode::Pps
+                                        || guard.pd_draft.pps_object_pos == 0
+                                    {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let step = 20u32;
-                                    let mut next = guard.pd_draft.target_mv.saturating_add(step);
-                                    if let Some(apdo) = vm
+                                    let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                        if pos != 0 {
+                                            pos
+                                        } else {
+                                            (idx + 1).min(u8::MAX as usize) as u8
+                                        }
+                                    };
+                                    let Some(apdo) = vm
                                         .pps_pdos
                                         .iter()
-                                        .find(|pdo| {
-                                            guard.pd_draft.target_mv >= pdo.min_mv
-                                                && guard.pd_draft.target_mv <= pdo.max_mv
+                                        .enumerate()
+                                        .find(|(idx, p)| {
+                                            pdo_pos(p.pos, *idx) == guard.pd_draft.pps_object_pos
                                         })
-                                        .or_else(|| vm.pps_pdos.first())
-                                    {
-                                        next = next.clamp(apdo.min_mv, apdo.max_mv);
-                                    } else {
-                                        next = next.min(21_000);
+                                        .map(|(_idx, p)| *p)
+                                    else {
+                                        prompt_tone::enqueue_ui_fail();
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    };
+                                    if guard.pd_draft.target_mv == 0 {
+                                        guard.pd_draft.target_mv = apdo.min_mv;
                                     }
+                                    let mut next = guard.pd_draft.target_mv.saturating_add(step);
+                                    next = next.clamp(apdo.min_mv, apdo.max_mv);
                                     if next != guard.pd_draft.target_mv {
                                         guard.pd_draft.target_mv = next;
                                         bump_control_rev();
@@ -1624,22 +1732,53 @@ async fn touch_ui_task(
                                     let mut next =
                                         guard.pd_draft.i_req_ma.saturating_sub(step).max(50);
                                     let max_ma = match guard.pd_draft.mode {
-                                        control::PdMode::Fixed => vm
-                                            .fixed_pdos
-                                            .iter()
-                                            .find(|pdo| pdo.mv == guard.pd_draft.target_mv)
-                                            .map(|pdo| pdo.max_ma)
-                                            .unwrap_or(10_000),
-                                        control::PdMode::Pps => vm
-                                            .pps_pdos
-                                            .iter()
-                                            .find(|pdo| {
-                                                guard.pd_draft.target_mv >= pdo.min_mv
-                                                    && guard.pd_draft.target_mv <= pdo.max_mv
-                                            })
-                                            .or_else(|| vm.pps_pdos.first())
-                                            .map(|pdo| pdo.max_ma)
-                                            .unwrap_or(10_000),
+                                        control::PdMode::Fixed => {
+                                            let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                                if pos != 0 {
+                                                    pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                }
+                                            };
+                                            let desired = if guard.pd_draft.fixed_object_pos != 0 {
+                                                guard.pd_draft.fixed_object_pos
+                                            } else {
+                                                0
+                                            };
+                                            vm.fixed_pdos
+                                                .iter()
+                                                .enumerate()
+                                                .find(|(idx, p)| {
+                                                    (desired != 0
+                                                        && pdo_pos(p.pos, *idx) == desired)
+                                                        || (desired == 0
+                                                            && p.mv == guard.pd_draft.target_mv)
+                                                })
+                                                .map(|(_idx, p)| p.max_ma)
+                                                .unwrap_or(10_000)
+                                        }
+                                        control::PdMode::Pps => {
+                                            let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                                if pos != 0 {
+                                                    pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                }
+                                            };
+                                            if guard.pd_draft.pps_object_pos == 0 {
+                                                10_000
+                                            } else {
+                                                vm.pps_pdos
+                                                    .iter()
+                                                    .enumerate()
+                                                    .find(|(idx, p)| {
+                                                        pdo_pos(p.pos, *idx)
+                                                            == guard.pd_draft.pps_object_pos
+                                                    })
+                                                    .map(|(_idx, p)| p.max_ma)
+                                                    .unwrap_or(10_000)
+                                            }
+                                        }
                                     };
                                     next = next.min(max_ma);
                                     if next != guard.pd_draft.i_req_ma {
@@ -1659,22 +1798,53 @@ async fn touch_ui_task(
                                     let step = 50u32;
                                     let mut next = guard.pd_draft.i_req_ma.saturating_add(step);
                                     let max_ma = match guard.pd_draft.mode {
-                                        control::PdMode::Fixed => vm
-                                            .fixed_pdos
-                                            .iter()
-                                            .find(|pdo| pdo.mv == guard.pd_draft.target_mv)
-                                            .map(|pdo| pdo.max_ma)
-                                            .unwrap_or(10_000),
-                                        control::PdMode::Pps => vm
-                                            .pps_pdos
-                                            .iter()
-                                            .find(|pdo| {
-                                                guard.pd_draft.target_mv >= pdo.min_mv
-                                                    && guard.pd_draft.target_mv <= pdo.max_mv
-                                            })
-                                            .or_else(|| vm.pps_pdos.first())
-                                            .map(|pdo| pdo.max_ma)
-                                            .unwrap_or(10_000),
+                                        control::PdMode::Fixed => {
+                                            let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                                if pos != 0 {
+                                                    pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                }
+                                            };
+                                            let desired = if guard.pd_draft.fixed_object_pos != 0 {
+                                                guard.pd_draft.fixed_object_pos
+                                            } else {
+                                                0
+                                            };
+                                            vm.fixed_pdos
+                                                .iter()
+                                                .enumerate()
+                                                .find(|(idx, p)| {
+                                                    (desired != 0
+                                                        && pdo_pos(p.pos, *idx) == desired)
+                                                        || (desired == 0
+                                                            && p.mv == guard.pd_draft.target_mv)
+                                                })
+                                                .map(|(_idx, p)| p.max_ma)
+                                                .unwrap_or(10_000)
+                                        }
+                                        control::PdMode::Pps => {
+                                            let pdo_pos = |pos: u8, idx: usize| -> u8 {
+                                                if pos != 0 {
+                                                    pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                }
+                                            };
+                                            if guard.pd_draft.pps_object_pos == 0 {
+                                                10_000
+                                            } else {
+                                                vm.pps_pdos
+                                                    .iter()
+                                                    .enumerate()
+                                                    .find(|(idx, p)| {
+                                                        pdo_pos(p.pos, *idx)
+                                                            == guard.pd_draft.pps_object_pos
+                                                    })
+                                                    .map(|(_idx, p)| p.max_ma)
+                                                    .unwrap_or(10_000)
+                                            }
+                                        }
                                     };
                                     next = next.min(max_ma);
                                     if next != guard.pd_draft.i_req_ma {
@@ -1694,7 +1864,12 @@ async fn touch_ui_task(
                                     match guard.pd_draft.mode {
                                         control::PdMode::Fixed => {
                                             if let Some(pdo) = vm.fixed_pdos.get(idx).copied() {
-                                                guard.pd_draft.target_mv = pdo.mv;
+                                                let pos = if pdo.pos != 0 {
+                                                    pdo.pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                };
+                                                guard.pd_draft.fixed_object_pos = pos;
                                                 guard.pd_draft.i_req_ma =
                                                     guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                                 bump_control_rev();
@@ -1705,6 +1880,15 @@ async fn touch_ui_task(
                                         }
                                         control::PdMode::Pps => {
                                             if let Some(apdo) = vm.pps_pdos.get(idx).copied() {
+                                                let pos = if apdo.pos != 0 {
+                                                    apdo.pos
+                                                } else {
+                                                    (idx + 1).min(u8::MAX as usize) as u8
+                                                };
+                                                guard.pd_draft.pps_object_pos = pos;
+                                                if guard.pd_draft.target_mv == 0 {
+                                                    guard.pd_draft.target_mv = apdo.min_mv;
+                                                }
                                                 guard.pd_draft.target_mv = guard
                                                     .pd_draft
                                                     .target_mv
@@ -2296,29 +2480,103 @@ fn build_pd_settings_vm(
         pps_pdos = s.pps_pdos.clone();
     }
 
-    // Derive an APDO selection from the target voltage (legacy config shape).
-    let pps_object_pos = pps_pdos
-        .iter()
-        .enumerate()
-        .find(|(_idx, pdo)| draft.target_mv >= pdo.min_mv && draft.target_mv <= pdo.max_mv)
-        .or_else(|| pps_pdos.iter().enumerate().next())
-        .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))
-        .unwrap_or(0);
+    // Fixed selection: if not explicitly selected, fall back to target_mv matching for legacy blobs.
+    let fixed_object_pos = if draft.fixed_object_pos != 0 {
+        draft.fixed_object_pos
+    } else {
+        fixed_pdos
+            .iter()
+            .enumerate()
+            .find(|(_idx, pdo)| pdo.mv == draft.target_mv)
+            .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))
+            .unwrap_or(0)
+    };
 
+    let pps_object_pos = draft.pps_object_pos;
+
+    let fixed_selected = if fixed_object_pos != 0 {
+        fixed_pdos
+            .iter()
+            .enumerate()
+            .find(|(idx, pdo)| pdo_pos(pdo.pos, *idx) == fixed_object_pos)
+            .map(|(_idx, pdo)| *pdo)
+    } else {
+        None
+    };
+
+    let pps_selected = if pps_object_pos != 0 {
+        pps_pdos
+            .iter()
+            .enumerate()
+            .find(|(idx, pdo)| pdo_pos(pdo.pos, *idx) == pps_object_pos)
+            .map(|(_idx, pdo)| *pdo)
+    } else {
+        None
+    };
+
+    let mut selection_missing = false;
     let apply_enabled = if !attached {
         false
     } else {
         match draft.mode {
-            control::PdMode::Fixed => fixed_pdos
-                .iter()
-                .find(|pdo| pdo.mv == draft.target_mv)
-                .map(|pdo| draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma)
-                .unwrap_or(false),
-            control::PdMode::Pps => pps_pdos
-                .iter()
-                .find(|pdo| draft.target_mv >= pdo.min_mv && draft.target_mv <= pdo.max_mv)
-                .map(|pdo| draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma)
-                .unwrap_or(false),
+            control::PdMode::Fixed => match fixed_selected {
+                Some(pdo) => draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma,
+                None => {
+                    if fixed_object_pos != 0 {
+                        selection_missing = true;
+                    }
+                    false
+                }
+            },
+            control::PdMode::Pps => {
+                if pps_object_pos == 0 {
+                    false
+                } else {
+                    match pps_selected {
+                        Some(pdo) => {
+                            draft.target_mv >= pdo.min_mv
+                                && draft.target_mv <= pdo.max_mv
+                                && draft.i_req_ma >= 50
+                                && draft.i_req_ma <= pdo.max_ma
+                        }
+                        None => {
+                            selection_missing = true;
+                            false
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let message = if selection_missing {
+        ui::pd_settings::PdSettingsMessage::Unavailable
+    } else {
+        // Only surface apply state transitions when the user (or HTTP client) explicitly
+        // triggered an Apply. Background auto-apply (attach/link recovery) should not spam
+        // the PD settings UI.
+        let now = now_ms32();
+        let ui_apply_ms = PD_UI_APPLY_MS.load(Ordering::Relaxed);
+        if ui_apply_ms == 0 {
+            ui::pd_settings::PdSettingsMessage::None
+        } else {
+            let last_result_ms = PD_LAST_RESULT_MS.load(Ordering::Relaxed);
+            let last_result = PD_LAST_RESULT_CODE.load(Ordering::Relaxed);
+            let pending = PD_REQ_ACK_PENDING.load(Ordering::Relaxed);
+
+            if (pending || now.wrapping_sub(ui_apply_ms) < 800) && last_result_ms < ui_apply_ms {
+                ui::pd_settings::PdSettingsMessage::Applying
+            } else if last_result != 0
+                && last_result_ms >= ui_apply_ms
+                && now.wrapping_sub(last_result_ms) < 1500
+            {
+                match last_result {
+                    1 => ui::pd_settings::PdSettingsMessage::ApplyOk,
+                    _ => ui::pd_settings::PdSettingsMessage::ApplyFailed,
+                }
+            } else {
+                ui::pd_settings::PdSettingsMessage::None
+            }
         }
     };
 
@@ -2330,12 +2588,12 @@ fn build_pd_settings_vm(
         pps_pdos,
         contract_mv,
         contract_ma,
-        fixed_target_mv: draft.target_mv,
+        fixed_object_pos,
         pps_object_pos,
         pps_target_mv: draft.target_mv,
         i_req_ma: draft.i_req_ma,
         apply_enabled,
-        message: ui::pd_settings::PdSettingsMessage::None,
+        message,
     }
 }
 
@@ -2403,7 +2661,11 @@ async fn save_pd_config_to_eeprom(cfg: control::PdConfig, eeprom: &EepromMutex) 
 }
 
 async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
-    PD_STATUS_ATTACHED.store(status.attached, Ordering::Relaxed);
+    let prev = PD_STATUS_ATTACHED.swap(status.attached, Ordering::Relaxed);
+    if status.attached && !prev {
+        // PD auto-apply: trigger a re-send of the persisted policy on attach rising edge.
+        PD_FORCE_SEND.store(true, Ordering::Release);
+    }
     let mut guard = telemetry.lock().await;
     guard.last_pd_status = Some(status);
 }
@@ -5057,6 +5319,8 @@ async fn setmode_tx_task(
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct PdPolicyKey {
         mode: control::PdMode,
+        fixed_object_pos: u8,
+        pps_object_pos: u8,
         target_mv: u32,
         i_req_ma: u32,
     }
@@ -5067,12 +5331,12 @@ async fn setmode_tx_task(
         key: PdPolicyKey,
         ack_total_at_send: u32,
         deadline_ms: u32,
+        user_initiated: bool,
     }
 
     let mut pd_pending: Option<PdPending> = None;
     let mut pd_last_sent: Option<PdPolicyKey> = None;
     let mut pd_force_send: bool = false;
-    let mut prev_attached: bool = false;
     let mut last_pd_req_skip_warn_ms: u32 = 0;
 
     // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
@@ -5258,7 +5522,6 @@ async fn setmode_tx_task(
             )
             .await;
             force_send = true;
-            pd_force_send = true;
         } else if !link_up_now && prev_link_up {
             prev_link_up = false;
         }
@@ -5293,17 +5556,15 @@ async fn setmode_tx_task(
         pd_cfg.i_req_ma = pd_cfg.i_req_ma.clamp(50, 10_000);
         let pd_key = PdPolicyKey {
             mode: pd_cfg.mode,
+            fixed_object_pos: pd_cfg.fixed_object_pos,
+            pps_object_pos: pd_cfg.pps_object_pos,
             target_mv: pd_cfg.target_mv,
             i_req_ma: pd_cfg.i_req_ma,
         };
 
-        // PD auto-apply: attach rising edge triggers a re-send of the persisted policy.
-        let attached_now = LAST_V_LOCAL_MV.load(Ordering::Relaxed) >= 2_000
-            || PD_STATUS_ATTACHED.load(Ordering::Relaxed);
-        if attached_now && !prev_attached {
+        if PD_FORCE_SEND.swap(false, Ordering::AcqRel) {
             pd_force_send = true;
         }
-        prev_attached = attached_now;
 
         // PD ACK / timeout / preemption handling.
         if let Some(p) = pd_pending.as_ref() {
@@ -5311,6 +5572,12 @@ async fn setmode_tx_task(
             let ack_seq = PD_REQ_LAST_ACK_SEQ.load(Ordering::Relaxed);
             let ack_hit = ack_total != p.ack_total_at_send && ack_seq == p.seq;
             if ack_hit {
+                if p.user_initiated {
+                    let flags = PD_REQ_LAST_ACK_FLAGS.load(Ordering::Relaxed);
+                    let code = if (flags & FLAG_IS_NACK) != 0 { 2 } else { 1 };
+                    PD_LAST_RESULT_CODE.store(code, Ordering::Relaxed);
+                    PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                }
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
             } else if now >= p.deadline_ms {
@@ -5319,6 +5586,10 @@ async fn setmode_tx_task(
                     "pd_sink_request ack timeout (seq={}, mode={:?}, target_mv={}, i_req_ma={})",
                     p.seq, p.key.mode, p.key.target_mv, p.key.i_req_ma
                 );
+                if p.user_initiated {
+                    PD_LAST_RESULT_CODE.store(3, Ordering::Relaxed); // timeout
+                    PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                }
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
             } else if p.key != pd_key {
@@ -5332,10 +5603,16 @@ async fn setmode_tx_task(
             && pd_pending.is_none()
             && (pd_force_send || pd_last_sent != Some(pd_key))
         {
-            const PD_ACK_TIMEOUT_MS: u32 = 300;
+            // UART link can briefly flap while the analog side is busy; keep the ACK window
+            // comfortably above the link-down threshold so UI/API doesn't report false failures.
+            const PD_ACK_TIMEOUT_MS: u32 = 1200;
             let seq_now = seq;
             seq = seq.wrapping_add(1);
             let ack_baseline = PD_REQ_ACK_TOTAL.load(Ordering::Relaxed);
+            let user_initiated = {
+                let ui_apply_ms = PD_UI_APPLY_MS.load(Ordering::Relaxed);
+                ui_apply_ms != 0 && now.wrapping_sub(ui_apply_ms) < 2_000
+            };
             let pd_status = {
                 let guard = telemetry.lock().await;
                 guard.last_pd_status.clone()
@@ -5352,6 +5629,7 @@ async fn setmode_tx_task(
                         key: pd_key,
                         ack_total_at_send: ack_baseline,
                         deadline_ms: now.saturating_add(PD_ACK_TIMEOUT_MS),
+                        user_initiated,
                     });
                 }
             } else {
@@ -5614,36 +5892,71 @@ fn build_pd_sink_request(
     }
 
     let status = status?;
-    let target_mv = cfg.target_mv;
     let i_req_ma = cfg.i_req_ma.clamp(50, 10_000);
-
-    let object_pos = match cfg.mode {
-        control::PdMode::Fixed => status
-            .fixed_pdos
-            .iter()
-            .enumerate()
-            .find(|(_idx, pdo)| pdo.mv == target_mv)
-            .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))?,
-        control::PdMode::Pps => status
-            .pps_pdos
-            .iter()
-            .enumerate()
-            .find(|(_idx, pdo)| target_mv >= pdo.min_mv && target_mv <= pdo.max_mv)
-            .or_else(|| status.pps_pdos.iter().enumerate().next())
-            .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))?,
-    };
 
     let mode = match cfg.mode {
         control::PdMode::Fixed => PdSinkMode::Fixed,
         control::PdMode::Pps => PdSinkMode::Pps,
     };
 
-    Some(PdSinkRequest {
-        mode,
-        target_mv,
-        object_pos,
-        i_req_ma,
-    })
+    match cfg.mode {
+        control::PdMode::Fixed => {
+            let fixed_object_pos = if cfg.fixed_object_pos != 0 {
+                cfg.fixed_object_pos
+            } else {
+                // Legacy fallback: derive selection from target_mv.
+                status
+                    .fixed_pdos
+                    .iter()
+                    .enumerate()
+                    .find(|(_idx, pdo)| pdo.mv == cfg.target_mv)
+                    .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))?
+            };
+
+            let pdo = status
+                .fixed_pdos
+                .iter()
+                .enumerate()
+                .find(|(idx, p)| pdo_pos(p.pos, *idx) == fixed_object_pos)
+                .map(|(_idx, p)| *p)?;
+
+            if i_req_ma > pdo.max_ma {
+                return None;
+            }
+
+            Some(PdSinkRequest {
+                mode,
+                target_mv: pdo.mv,
+                object_pos: fixed_object_pos,
+                i_req_ma,
+            })
+        }
+        control::PdMode::Pps => {
+            let pps_object_pos = cfg.pps_object_pos;
+            if pps_object_pos == 0 || cfg.target_mv == 0 {
+                return None;
+            }
+
+            let apdo = status
+                .pps_pdos
+                .iter()
+                .enumerate()
+                .find(|(idx, p)| pdo_pos(p.pos, *idx) == pps_object_pos)
+                .map(|(_idx, p)| *p)?;
+
+            if cfg.target_mv < apdo.min_mv || cfg.target_mv > apdo.max_mv || i_req_ma > apdo.max_ma
+            {
+                return None;
+            }
+
+            Some(PdSinkRequest {
+                mode,
+                target_mv: cfg.target_mv,
+                object_pos: pps_object_pos,
+                i_req_ma,
+            })
+        }
+    }
 }
 
 async fn send_pd_sink_request_frame(

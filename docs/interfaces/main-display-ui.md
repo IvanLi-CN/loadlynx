@@ -136,6 +136,20 @@
 
 ## Interaction Hooks
 
+### USB‑PD settings panel
+
+- 入口：主界面 `PD` 按钮**短按**进入 `USB‑PD Settings` 面板；`Back` 返回主界面。
+- 模式切换：顶部 `Fixed / PPS` 两段式按钮切换模式（仅切换编辑视图，不自动联动负载开关/设定值）。
+- 能力列表：
+  - `Fixed`：全量展示 Fixed PDO 列表；点击行选择目标 PDO（以 `PDO{pos}` 表示 object position，1-based）。
+  - `PPS`：全量展示 PPS APDO 列表；**必须点击行显式选择**目标 APDO（`APDO{pos}`）后才允许 Apply（不做自动选）。
+- 编辑与越界：
+  - `PPS` 电压步进：`20mV/step`，并严格限制在所选 APDO 的 `min_mv..=max_mv` 范围内。
+  - `Fixed/PPS` 请求电流 `Ireq`：`50mA/step`，并严格限制在所选 PDO/APDO 的 `Imax` 内。
+- Apply 行为：
+  - 点击 `Apply` 会把配置保存到 EEPROM，并触发数字板→模拟板的 PD 协商策略下发（`PD_SINK_REQUEST`）。
+  - 若所选 PDO/APDO 在当前能力列表中不存在（例如更换了不支持该档位的充电器），面板显示 `Unavailable` 并禁用 `Apply`。
+
 ### Preset entry + quick switch
 
 - Tap the Preset/Mode pill (`M# / CC|CV`) to open the Preset Panel.
@@ -151,4 +165,7 @@
 
 - `docs/assets/main-display/main-display-mock-cc.png` — pixel-level mock (CC active).
 - `docs/assets/main-display/main-display-mock-cv.png` — pixel-level mock (CV active).
+- `docs/assets/usb-pd-settings-panel-rendered/pd-settings-fixed.png` — USB‑PD Settings（Fixed）渲染 mock。
+- `docs/assets/usb-pd-settings-panel-rendered/pd-settings-pps.png` — USB‑PD Settings（PPS）渲染 mock。
+- `docs/assets/usb-pd-settings-panel-rendered/pd-settings-unavailable.png` — USB‑PD Settings（Unavailable）渲染 mock。
 - `docs/assets/fonts/*.c` — raw UTFT fonts bundled for reproducible rendering.

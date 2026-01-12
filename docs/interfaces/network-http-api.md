@@ -438,7 +438,80 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   - `409 ANALOG_FAULTED`：模拟板当前处于故障状态；
   - `409 ANALOG_NOT_READY`：模拟板未标定或未完成上电流程。
 
-### 3.5 `POST /api/v1/soft-reset`（预留）
+### 3.5 `GET /api/v1/pd`
+
+读取 USB‑PD 连接状态、当前合同（Active contract）、Source 能力列表（Fixed/PPS）以及数字板保存的 PD 配置。
+
+- 请求：无请求体。
+- 响应（200）：
+
+```jsonc
+{
+  "attached": true,
+  "contract_mv": 9000,
+  "contract_ma": 2000,
+  "fixed_pdos": [
+    { "pos": 1, "mv": 5000, "max_ma": 3000 },
+    { "pos": 4, "mv": 20000, "max_ma": 5000 }
+  ],
+  "pps_pdos": [
+    { "pos": 2, "min_mv": 3300, "max_mv": 21000, "max_ma": 5000 }
+  ],
+  "saved": {
+    "mode": "fixed",
+    "fixed_object_pos": 4,
+    "pps_object_pos": 2,
+    "target_mv": 9000,
+    "i_req_ma": 2000
+  },
+  "apply": {
+    "pending": false,
+    "last": { "code": "ok", "at_ms": 123456 }
+  }
+}
+```
+
+字段说明：
+
+- `fixed_pdos[].pos` 与 `pps_pdos[].pos` 均为 **object position（1-based）**；若模拟板能力列表未携带 `pos`（旧格式），数字板以列表索引 `idx+1` 生成稳定的 `pos`。
+- `saved.target_mv` 在 `mode="pps"` 时表示 PPS 目标电压（mV）；在 `mode="fixed"` 时不参与协商（Fixed 的电压由所选 PDO 决定）。
+
+- 错误：
+  - `503 LINK_DOWN`：UART 链路不可用；
+  - `409 ANALOG_FAULTED`：模拟板故障；
+  - `503 UNAVAILABLE`：PD 状态未就绪（尚未收到 `PD_STATUS`）。
+
+### 3.6 `POST /api/v1/pd`
+
+更新并应用（Apply）USB‑PD 配置；固件会把配置写入 EEPROM，并触发数字板→模拟板的 `PD_SINK_REQUEST`（ACK/NACK 仅表示“接收/拒绝策略”，最终合同以 `contract_*` 为准）。
+
+兼容性约定：
+
+- 为避免浏览器私网预检（preflight），Web 端可使用 `POST` 且 `Content-Type: text/plain`，body 为 JSON 字符串；
+- 固件不强制校验 `Content-Type`，只解析 body 内容。
+
+- 请求（Fixed）：
+
+```jsonc
+{ "mode": "fixed", "object_pos": 4, "i_req_ma": 3000 }
+```
+
+- 请求（PPS）：
+
+```jsonc
+{ "mode": "pps", "object_pos": 2, "target_mv": 9000, "i_req_ma": 2000 }
+```
+
+- 响应（200）：返回更新后的 `GET /api/v1/pd` 视图。
+
+- 典型错误：
+  - `400 INVALID_REQUEST`：字段缺失/类型错误（例如 PPS 缺少 `target_mv`）；
+  - `409 NOT_ATTACHED`：PD 未 attach，拒绝 apply；
+  - `422 LIMIT_VIOLATION`：`object_pos` 不存在于当前能力列表、`target_mv` 越界、或 `i_req_ma` 超过 Imax；
+  - `503 LINK_DOWN`：UART 链路不可用；
+  - `503 UNAVAILABLE`：EEPROM 写入失败或 PD 状态未就绪。
+
+### 3.7 `POST /api/v1/soft-reset`（预留）
 
 触发数字板→模拟板的 SoftReset 握手，清除故障并恢复安全状态。
 
