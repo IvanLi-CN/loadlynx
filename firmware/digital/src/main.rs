@@ -5603,7 +5603,9 @@ async fn setmode_tx_task(
             && pd_pending.is_none()
             && (pd_force_send || pd_last_sent != Some(pd_key))
         {
-            const PD_ACK_TIMEOUT_MS: u32 = 300;
+            // UART link can briefly flap while the analog side is busy; keep the ACK window
+            // comfortably above the link-down threshold so UI/API doesn't report false failures.
+            const PD_ACK_TIMEOUT_MS: u32 = 1200;
             let seq_now = seq;
             seq = seq.wrapping_add(1);
             let ack_baseline = PD_REQ_ACK_TOTAL.load(Ordering::Relaxed);
