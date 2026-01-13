@@ -2,10 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Design: 已冻结（效果图 + 文字规格已确认）
 - Created: 2026-01-09
-- Last: 2026-01-10
+- Last: 2026-01-13
 
 ## 背景 / 问题陈述
 
@@ -71,6 +71,7 @@
   - 字体与字号：以仓库现有字体栈为准；允许在 ±1 个字号档内微调以适配真实组件。
   - 间距：允许在 8px 网格内做小幅调整（例如 padding/margin ±8px），但不得改变整体栅格与分区。
   - 文案：可在不改变语义的前提下做微调（例如 “Open settings” vs “Open PD settings”），但交互意图必须一致。
+  - 视觉层级：允许减少过多的 “card 边框/阴影” 层级，优先用扁平分区（背景块）收口；但不改变信息架构与栅格分区。
 
 ### 验收方式（实施阶段）
 
@@ -102,6 +103,9 @@
 - [x] M0.17: Mobile 组合示意图：顶栏菜单按钮（≡）点击目标不应过小，图标需清晰醒目且在按钮内水平/垂直居中（`assets/console-integrated-mobile.svg`）。
 - [x] M0.18: Desktop 组合示意图：Status 页 USB‑PD 卡片内部不得留大面积空白；需补齐能力摘要与最近一次 Apply 摘要以收口（`assets/console-integrated-desktop.svg`）。
 - [x] M0.19: PD Settings（Fixed/PPS）列表项的 object position 序号不得仅用纯文本前缀；需使用独立序号 badge（胶囊）以提升可读性与一致性（`assets/pd-settings-fixed.svg`、`assets/pd-settings-pps.svg`）。
+- [x] M0.20: PD Settings 页面卡片层级过多导致“圈太多”；需改为更扁平的分区视觉（减少边框/阴影层叠），并保持布局分区不变。
+- [x] M0.21: Desktop（两栏）布局：在“选项列表”与“右侧配置区”之间增加竖向分隔线，明确两栏边界（不影响移动端单栏布局）。
+- [x] M0.22: PD Settings 顶部状态区与下方两栏应有整体分区感：统一到同一个容器内，并使用分隔线（水平/竖向）组织层次，避免“分裂成三块各自为政”。
 
 ### 界面规格（冻结，实施需遵循）
 
@@ -161,6 +165,7 @@
   - 展示 Attach 状态、合同电压/电流（unknown 时明确显示未知）；
   - 全量展示 Fixed PDO 与 PPS APDO 列表（含 object position、能力摘要）；
   - 展示“已保存配置”（Saved）与“当前合同”（Contract/Active）并区分两者。
+  - **未 attach/未就绪时不视为错误**：`GET /api/v1/pd` 仍返回 200，页面显示 `DETACHED`（或 `unknown`），不把“未插 PD 电源”误报成设备异常。
 - 写（Write path）：
   - Fixed：用户显式选择目标 PDO（object position）与 Ireq；
   - PPS：用户显式选择目标 APDO（object position）与目标电压/电流；
@@ -204,11 +209,11 @@
 - 统一错误包裹：`{ "error": { code, message, retryable, details } }`（见 `docs/interfaces/network-http-api.md`）。
 - Web 必须至少正确处理以下错误码/状态（并给出可理解提示）：
   - `503 LINK_DOWN` / `503 UNAVAILABLE`
-  - `503 ANALOG_NOT_READY`
   - `422 LIMIT_VIOLATION`（含越界细节；包含“所选 PDO/APDO 不存在于当前能力列表”的场景）
   - `409 CONFLICT`（例如正在协商/忙）
   - `400 INVALID_REQUEST`
   - `404 UNSUPPORTED_OPERATION`（端点不存在/未启用）：视为“固件不支持 PD 设置”
+  - `409 NOT_ATTACHED`（未 attach / PD 状态不可用）：视为“当前不可 Apply”，但不影响读取页面展示。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -249,11 +254,11 @@
 
 ## 里程碑（Milestones）
 
-- [ ] M1: Web 端 API 契约对齐（TypeScript types + 错误码映射规则）
-- [ ] M2: mock:// 设备补齐 PD 读写与错误路径（支撑 Storybook/E2E）
-- [ ] M3: USB‑PD 设置页 UI（Fixed/PPS 切换 + 列表 + 编辑 + Apply）
-- [ ] M4: Storybook stories + E2E 用例落地
-- [ ] M5: 与真实设备联调验收（至少 1 个支持 PPS 的 Source）
+- [x] M1: Web 端 API 契约对齐（TypeScript types + 错误码映射规则）
+- [x] M2: mock:// 设备补齐 PD 读写与错误路径（支撑 Storybook/E2E）
+- [x] M3: USB‑PD 设置页 UI（Fixed/PPS 切换 + 列表 + 编辑 + Apply）
+- [x] M4: Storybook stories + E2E 用例落地
+- [x] M5: 与真实设备联调验收（至少 1 个支持 PPS 的 Source）
 
 ## 方案概述（Approach, high-level）
 

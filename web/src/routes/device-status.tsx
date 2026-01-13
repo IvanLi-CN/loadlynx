@@ -1,12 +1,19 @@
 import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
-import { getIdentity, getStatus, isHttpApiError } from "../api/client.ts";
-import type { FastStatusView, Identity } from "../api/types.ts";
+import {
+  getIdentity,
+  getPd,
+  getStatus,
+  isHttpApiError,
+} from "../api/client.ts";
+import type { FastStatusView, Identity, PdView } from "../api/types.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
 
 const FAST_STATUS_REFETCH_MS = 1000;
+const PD_REFETCH_MS = 1500;
 const RETRY_DELAY_MS = 500;
 
 export function DeviceStatusRoute() {
@@ -58,7 +65,23 @@ export function DeviceStatusRoute() {
     retryDelay: RETRY_DELAY_MS,
   });
 
+  const pdQuery = useQuery<PdView, HttpApiError>({
+    queryKey: ["device", deviceId, "pd"],
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getPd(baseUrl);
+    },
+    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+    refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
+    refetchIntervalInBackground: false,
+    retryDelay: RETRY_DELAY_MS,
+  });
+
   const firstHttpError: HttpApiError | null = (() => {
+    // PD is optional; the PD endpoint may legitimately be unavailable or not
+    // ready yet. Do not treat PD errors as a page-level HTTP error.
     const errors: Array<unknown> = [identityQuery.error, statusQuery.error];
     for (const err of errors) {
       if (isHttpApiError(err)) {
@@ -98,6 +121,7 @@ export function DeviceStatusRoute() {
 
   const identity = identityQuery.data;
   const status = statusQuery.data;
+  const pd = pdQuery.data ?? null;
 
   // Derived values
   const statusLocalMa = status?.raw.i_local_ma ?? null;
@@ -122,6 +146,106 @@ export function DeviceStatusRoute() {
       : null;
   const tempMcu =
     status?.raw.mcu_temp_mc != null ? status.raw.mcu_temp_mc / 1000 : null;
+
+  const pdSummary = (() => {
+    if (pd) {
+      const attached = pd.attached;
+      const contract =
+        attached && pd.contract_mv != null && pd.contract_ma != null
+          ? `${(pd.contract_mv / 1000).toFixed(1)} V @ ${pd.contract_ma} mA`
+          : attached
+            ? "unknown"
+            : "detached";
+
+      const fixedVolts = pd.fixed_pdos
+        .map((entry) => Math.round(entry.mv / 1000))
+        .join("/");
+      const fixedText =
+        fixedVolts.length > 0 ? `Fixed: ${fixedVolts}V` : "Fixed: —";
+
+      const ppsText = (() => {
+        const first = pd.pps_pdos[0];
+        if (!first) {
+          return "PPS: —";
+        }
+        return `PPS: ${(first.min_mv / 1000).toFixed(1)}–${(first.max_mv / 1000).toFixed(1)}V (${pd.pps_pdos.length} APDO)`;
+      })();
+
+      const saved =
+        pd.saved.mode === "fixed"
+          ? `Mode: Fixed · PDO #${pd.saved.fixed_object_pos} · ${pd.saved.i_req_ma} mA`
+          : `Mode: PPS · APDO #${pd.saved.pps_object_pos} · ${pd.saved.target_mv} mV · ${pd.saved.i_req_ma} mA`;
+
+      const lastApply = pd.apply.last
+        ? `${pd.apply.last.code.toUpperCase()} · at ${pd.apply.last.at_ms} ms`
+        : "none";
+
+      return {
+        badge: attached ? "ATTACHED" : "DETACHED",
+        badgeClass: attached ? "badge-success" : "badge-ghost",
+        contract,
+        fixedText,
+        ppsText,
+        saved,
+        lastApply,
+      } as const;
+    }
+
+    const err = pdQuery.error;
+    if (
+      err &&
+      isHttpApiError(err) &&
+      err.status === 404 &&
+      err.code === "UNSUPPORTED_OPERATION"
+    ) {
+      return {
+        badge: "UNSUPPORTED",
+        badgeClass: "badge-warning",
+        contract: "—",
+        fixedText: "Fixed: —",
+        ppsText: "PPS: —",
+        saved: "—",
+        lastApply: "—",
+      } as const;
+    }
+
+    if (err && isHttpApiError(err)) {
+      const code = err.code ?? "HTTP_ERROR";
+      const isTransient =
+        err.status === 0 ||
+        err.status === 503 ||
+        code === "LINK_DOWN" ||
+        code === "UNAVAILABLE" ||
+        code === "ANALOG_NOT_READY";
+      return {
+        badge: isTransient ? "PENDING" : "ERROR",
+        badgeClass: isTransient ? "badge-warning" : "badge-error",
+        contract: "—",
+        fixedText: "Fixed: —",
+        ppsText: "PPS: —",
+        saved: "—",
+        lastApply: "—",
+      } as const;
+    }
+
+    return {
+      badge: "LOADING",
+      badgeClass: "badge-ghost",
+      contract: "...",
+      fixedText: "...",
+      ppsText: "...",
+      saved: "...",
+      lastApply: "...",
+    } as const;
+  })();
+
+  const pdInlineError = (() => {
+    const err = pdQuery.error;
+    if (!err || !isHttpApiError(err)) return null;
+    if (err.status === 404 && err.code === "UNSUPPORTED_OPERATION") return null;
+    const code = err.code ?? "HTTP_ERROR";
+    return { summary: `${code} — ${err.message}` } as const;
+  })();
 
   return (
     <PageContainer className="flex flex-col gap-6 font-mono tabular-nums">
@@ -326,6 +450,56 @@ export function DeviceStatusRoute() {
           </div>
         </div>
       </div>
+
+      {/* PD summary card with secondary entry */}
+      <div className="card bg-base-100 shadow-sm border border-base-200">
+        <div className="card-body p-6">
+          <div className="flex flex-wrap items-center gap-3">
+            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 h-auto min-h-0">
+              USB‑PD
+            </h3>
+            <div className={`badge ${pdSummary.badgeClass}`}>
+              {pdSummary.badge}
+            </div>
+            <div className="ml-auto">
+              <Link
+                to="/$deviceId/pd"
+                params={{ deviceId }}
+                className="btn btn-sm btn-outline"
+              >
+                Open PD settings
+              </Link>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            <div>
+              <div className="text-xs text-base-content/60">Contract</div>
+              <div className="text-sm font-medium">{pdSummary.contract}</div>
+            </div>
+            <div>
+              <div className="text-xs text-base-content/60">Capabilities</div>
+              <div className="text-sm">{pdSummary.fixedText}</div>
+              <div className="text-sm">{pdSummary.ppsText}</div>
+            </div>
+            <div className="md:col-span-2">
+              <div className="text-xs text-base-content/60">Saved</div>
+              <div className="text-sm">{pdSummary.saved}</div>
+            </div>
+            <div className="md:col-span-2">
+              <div className="text-xs text-base-content/60">Last apply</div>
+              <div className="text-sm">{pdSummary.lastApply}</div>
+            </div>
+          </div>
+
+          {pdInlineError ? (
+            <div className="mt-4 alert alert-warning shadow-sm text-xs sm:text-sm">
+              <span className="font-bold">PD: {pdInlineError.summary}</span>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
       {/* Aux Card: Raw JSON */}
       <div className="collapse collapse-arrow border border-base-200 bg-base-100 rounded-box">
         <input type="checkbox" />

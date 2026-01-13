@@ -129,31 +129,31 @@ export function BreakpointRulerOverlay() {
         className="fixed z-[10001] rounded-md border border-base-content/20 bg-base-100/90 px-3 py-2 text-left text-sm text-base-content shadow-sm backdrop-blur"
         style={{ left: position.x, top: position.y }}
       >
-        <button
-          type="button"
-          className="flex w-full items-start justify-between gap-3 cursor-move text-left"
-          onPointerDown={(event) => {
-            if (event.button !== 0) return;
-            const card = cardRef.current;
-            if (!card) return;
-            const rect = card.getBoundingClientRect();
-            dragStateRef.current = {
-              active: true,
-              pointerId: event.pointerId,
-              offsetX: event.clientX - rect.x,
-              offsetY: event.clientY - rect.y,
-            };
-            (event.currentTarget as HTMLElement).setPointerCapture(
-              event.pointerId,
-            );
-          }}
-          style={{ touchAction: "none" }}
-          aria-label="Drag breakpoint ruler"
-          title="Drag to reposition"
-        >
-          <div className="font-mono select-none">
-            {width}px · <span className="font-semibold">{mode}</span>
-          </div>
+        <div className="flex w-full items-start gap-3 text-left">
+          <button
+            type="button"
+            className="flex-1 cursor-move text-left"
+            onPointerDown={(event) => {
+              if (event.button !== 0) return;
+              const card = cardRef.current;
+              if (!card) return;
+              const rect = card.getBoundingClientRect();
+              dragStateRef.current = {
+                active: true,
+                pointerId: event.pointerId,
+                offsetX: event.clientX - rect.x,
+                offsetY: event.clientY - rect.y,
+              };
+              event.currentTarget.setPointerCapture(event.pointerId);
+            }}
+            style={{ touchAction: "none" }}
+            aria-label="Drag breakpoint ruler"
+            title="Drag to reposition"
+          >
+            <div className="font-mono select-none">
+              {width}px · <span className="font-semibold">{mode}</span>
+            </div>
+          </button>
           <button
             type="button"
             className="btn btn-xs btn-ghost rounded px-2"
@@ -174,7 +174,7 @@ export function BreakpointRulerOverlay() {
           >
             ×{lineThickness}
           </button>
-        </button>
+        </div>
         <div className="mt-1 flex gap-2 font-mono text-xs text-base-content/70 select-none">
           <span>md: {BREAKPOINT_MD}</span>
           <span>lg: {BREAKPOINT_LG}</span>

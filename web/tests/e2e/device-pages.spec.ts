@@ -40,6 +40,24 @@ test.describe("Device Pages", () => {
     await expect(page.locator("text=Voltage")).toBeVisible();
   });
 
+  test("should open PD settings from Status page secondary entry", async ({
+    page,
+  }) => {
+    await page.click("text=Status");
+    await expect(page.url()).toContain("/status");
+
+    const openPdBtn = page.getByRole("link", { name: "Open PD settings" });
+    await expect(openPdBtn).toBeVisible();
+    await openPdBtn.click();
+
+    await expect(page.url()).toContain("/pd");
+    await expect(page.locator("h2")).toContainText("USB‑PD Settings");
+    await expect(page.getByRole("button", { name: "Fixed" })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "PPS", exact: true }),
+    ).toBeVisible();
+  });
+
   test("should navigate to Settings page and show content", async ({
     page,
   }) => {

@@ -2069,34 +2069,85 @@ async fn render_pd_view_json(
         AnalogState::CalMissing | AnalogState::Ready => {}
     }
 
-    let status = {
-        let guard = telemetry.lock().await;
-        guard.last_pd_status.clone()
-    }
-    .ok_or_else(|| {
-        write_error_body(
-            buf,
-            "UNAVAILABLE",
-            "PD status not yet available",
-            true,
-            None,
-        );
-        "503 Service Unavailable"
-    })?;
-
     let saved = { control_mutex.lock().await.pd_saved };
     let ack_pending = crate::PD_REQ_ACK_PENDING.load(Ordering::Relaxed);
     let last_code = crate::PD_LAST_RESULT_CODE.load(Ordering::Relaxed);
     let last_ms = crate::PD_LAST_RESULT_MS.load(Ordering::Relaxed);
 
+    let status = {
+        let guard = telemetry.lock().await;
+        guard.last_pd_status.clone()
+    };
+
     buf.clear();
     buf.push('{');
+
+    // Availability policy: GET /api/v1/pd must not fail just because PD is not
+    // attached or PD_STATUS has not arrived yet. In those cases, return a
+    // detached view with empty capabilities.
+    let Some(status) = status else {
+        buf.push_str("\"attached\":false");
+        buf.push_str(",\"contract_mv\":null");
+        buf.push_str(",\"contract_ma\":null");
+        buf.push_str(",\"fixed_pdos\":[]");
+        buf.push_str(",\"pps_pdos\":[]");
+
+        // Saved config
+        buf.push_str(",\"saved\":{");
+        buf.push_str("\"mode\":\"");
+        buf.push_str(match saved.mode {
+            crate::control::PdMode::Fixed => "fixed",
+            crate::control::PdMode::Pps => "pps",
+        });
+        buf.push('"');
+        let _ = core::write!(
+            buf,
+            ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"i_req_ma\":{}",
+            saved.fixed_object_pos,
+            saved.pps_object_pos,
+            saved.target_mv,
+            saved.i_req_ma
+        );
+        buf.push('}');
+
+        // Apply state (best-effort snapshot).
+        buf.push_str(",\"apply\":{");
+        buf.push_str("\"pending\":");
+        buf.push_str(if ack_pending { "true" } else { "false" });
+        if last_code != 0 {
+            buf.push_str(",\"last\":{");
+            buf.push_str("\"code\":\"");
+            buf.push_str(match last_code {
+                1 => "ok",
+                2 => "nack",
+                3 => "timeout",
+                4 => "persist_fail",
+                _ => "failed",
+            });
+            buf.push('"');
+            let _ = core::write!(buf, ",\"at_ms\":{}", last_ms);
+            buf.push('}');
+        }
+        buf.push('}');
+
+        buf.push('}');
+        return Ok(());
+    };
+
     buf.push_str("\"attached\":");
     buf.push_str(if status.attached { "true" } else { "false" });
     buf.push_str(",\"contract_mv\":");
-    let _ = core::write!(buf, "{}", status.contract_mv);
+    if status.attached {
+        let _ = core::write!(buf, "{}", status.contract_mv);
+    } else {
+        buf.push_str("null");
+    }
     buf.push_str(",\"contract_ma\":");
-    let _ = core::write!(buf, "{}", status.contract_ma);
+    if status.attached {
+        let _ = core::write!(buf, "{}", status.contract_ma);
+    } else {
+        buf.push_str("null");
+    }
 
     // Capabilities
     buf.push_str(",\"fixed_pdos\":[");
@@ -2279,12 +2330,12 @@ async fn handle_pd_update(
     .ok_or_else(|| {
         write_error_body(
             body_out,
-            "UNAVAILABLE",
-            "PD status not yet available",
+            "NOT_ATTACHED",
+            "PD status unavailable; refusing apply",
             true,
             None,
         );
-        "503 Service Unavailable"
+        "409 Conflict"
     })?;
 
     if !status.attached {
