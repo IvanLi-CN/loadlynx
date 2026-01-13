@@ -71,6 +71,7 @@
   - 字体与字号：以仓库现有字体栈为准；允许在 ±1 个字号档内微调以适配真实组件。
   - 间距：允许在 8px 网格内做小幅调整（例如 padding/margin ±8px），但不得改变整体栅格与分区。
   - 文案：可在不改变语义的前提下做微调（例如 “Open settings” vs “Open PD settings”），但交互意图必须一致。
+  - 视觉层级：允许减少过多的 “card 边框/阴影” 层级，优先用扁平分区（背景块）收口；但不改变信息架构与栅格分区。
 
 ### 验收方式（实施阶段）
 
@@ -102,6 +103,7 @@
 - [x] M0.17: Mobile 组合示意图：顶栏菜单按钮（≡）点击目标不应过小，图标需清晰醒目且在按钮内水平/垂直居中（`assets/console-integrated-mobile.svg`）。
 - [x] M0.18: Desktop 组合示意图：Status 页 USB‑PD 卡片内部不得留大面积空白；需补齐能力摘要与最近一次 Apply 摘要以收口（`assets/console-integrated-desktop.svg`）。
 - [x] M0.19: PD Settings（Fixed/PPS）列表项的 object position 序号不得仅用纯文本前缀；需使用独立序号 badge（胶囊）以提升可读性与一致性（`assets/pd-settings-fixed.svg`、`assets/pd-settings-pps.svg`）。
+- [x] M0.20: PD Settings 页面卡片层级过多导致“圈太多”；需改为更扁平的分区视觉（减少边框/阴影层叠），并保持布局分区不变。
 
 ### 界面规格（冻结，实施需遵循）
 

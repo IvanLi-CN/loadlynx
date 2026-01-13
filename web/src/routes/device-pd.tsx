@@ -345,8 +345,7 @@ export function DevicePdRoute() {
         </div>
       ) : null}
 
-      <div className="card bg-base-100 shadow-sm border border-base-200">
-        <div className="card-body p-6">
+      <section className="rounded-box bg-base-200/10 p-6">
           <div className="flex flex-wrap items-center gap-3">
             <div className="text-sm font-semibold">Status</div>
             <div
@@ -393,8 +392,7 @@ export function DevicePdRoute() {
               PPS
             </button>
           </div>
-        </div>
-      </div>
+      </section>
 
       {applyMutation.isSuccess ? (
         <div className="alert alert-success shadow-sm text-xs sm:text-sm">
@@ -409,8 +407,7 @@ export function DevicePdRoute() {
       ) : null}
 
       <div className="grid gap-6 md:grid-cols-2 items-start">
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-6 justify-start">
+        <section className="rounded-box bg-base-200/10 p-6">
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
               {tab === "fixed" ? "Fixed PDOs" : "PPS APDOs"}
             </h3>
@@ -495,11 +492,9 @@ export function DevicePdRoute() {
                 ) : null}
               </div>
             )}
-          </div>
-        </div>
+        </section>
 
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-6 justify-start">
+        <section className="rounded-box bg-base-200/10 p-6">
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
               Configure
             </h3>
@@ -508,8 +503,7 @@ export function DevicePdRoute() {
             </p>
 
             <div className="grid gap-4">
-              <div className="card bg-base-200/50 border border-base-200">
-                <div className="card-body p-4">
+              <div className="rounded-box bg-base-200/20 p-4">
                   <div className="text-xs text-base-content/60 mb-1">Saved</div>
                   <div className="text-sm">
                     Mode:{" "}
@@ -528,16 +522,13 @@ export function DevicePdRoute() {
                       <> · Vreq: {pd?.saved.target_mv ?? "..."} mV</>
                     ) : null}
                   </div>
-                </div>
               </div>
 
-              <div className="card bg-base-200/50 border border-base-200">
-                <div className="card-body p-4">
+              <div className="rounded-box bg-base-200/20 p-4">
                   <div className="text-xs text-base-content/60 mb-1">
                     Active (contract)
                   </div>
                   <div className="text-sm">{activeContractText}</div>
-                </div>
               </div>
             </div>
 
@@ -663,8 +654,7 @@ export function DevicePdRoute() {
                 Last apply: none
               </div>
             )}
-          </div>
-        </div>
+        </section>
       </div>
     </PageContainer>
   );
