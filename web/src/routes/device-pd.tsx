@@ -252,6 +252,7 @@ export function DevicePdRoute() {
     tab === "fixed" ? fixedValidation.reason : ppsValidation.reason;
 
   const applyError = (() => {
+    if (!applyMutation.isError) return null;
     const err = applyMutation.error;
     if (!err || !isHttpApiError(err)) return null;
     const code = err.code ?? "HTTP_ERROR";
