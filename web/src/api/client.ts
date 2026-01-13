@@ -881,7 +881,7 @@ async function mockUpdatePd(
   const next = structuredClone(current);
   const nowMs = state.status.raw.uptime_ms ?? 0;
 
-  const limitViolation = (message: string, details?: unknown) => {
+  function limitViolation(message: string, details?: unknown): never {
     throw new HttpApiError({
       status: 422,
       code: "LIMIT_VIOLATION",
@@ -889,7 +889,7 @@ async function mockUpdatePd(
       retryable: false,
       details: details ?? null,
     });
-  };
+  }
 
   const objectPos = payload.object_pos;
   if (payload.mode === "fixed") {
