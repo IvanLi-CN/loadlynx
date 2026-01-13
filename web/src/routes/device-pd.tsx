@@ -345,7 +345,8 @@ export function DevicePdRoute() {
         </div>
       ) : null}
 
-      <section className="rounded-box bg-base-200/10 p-6">
+      <section className="rounded-box bg-base-200/10 overflow-hidden">
+        <div className="p-6 border-b border-base-content/10">
           <div className="flex flex-wrap items-center gap-3">
             <div className="text-sm font-semibold">Status</div>
             <div
@@ -392,22 +393,22 @@ export function DevicePdRoute() {
               PPS
             </button>
           </div>
-      </section>
+        </div>
 
       {applyMutation.isSuccess ? (
-        <div className="alert alert-success shadow-sm text-xs sm:text-sm">
+        <div className="alert alert-success shadow-sm text-xs sm:text-sm mx-6 mt-4">
           <span>Apply succeeded.</span>
         </div>
       ) : null}
 
       {applyError ? (
-        <div className="alert alert-error shadow-sm text-xs sm:text-sm">
+        <div className="alert alert-error shadow-sm text-xs sm:text-sm mx-6 mt-4">
           <span className="font-bold">{applyError.summary}</span>
         </div>
       ) : null}
 
-      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)] md:gap-x-0 items-start">
-        <section className="rounded-box bg-base-200/10 p-6 md:mr-3">
+      <div className="grid gap-6 p-6 md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)] md:gap-0 items-start">
+        <section className="md:pr-6">
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
               {tab === "fixed" ? "Fixed PDOs" : "PPS APDOs"}
             </h3>
@@ -496,7 +497,7 @@ export function DevicePdRoute() {
 
         <div className="hidden md:block w-px self-stretch bg-base-content/15" />
 
-        <section className="rounded-box bg-base-200/10 p-6 md:ml-3">
+        <section className="md:pl-6">
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
               Configure
             </h3>
@@ -658,6 +659,7 @@ export function DevicePdRoute() {
             )}
         </section>
       </div>
+      </section>
     </PageContainer>
   );
 }
