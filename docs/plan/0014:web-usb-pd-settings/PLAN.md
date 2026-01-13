@@ -104,6 +104,7 @@
 - [x] M0.18: Desktop 组合示意图：Status 页 USB‑PD 卡片内部不得留大面积空白；需补齐能力摘要与最近一次 Apply 摘要以收口（`assets/console-integrated-desktop.svg`）。
 - [x] M0.19: PD Settings（Fixed/PPS）列表项的 object position 序号不得仅用纯文本前缀；需使用独立序号 badge（胶囊）以提升可读性与一致性（`assets/pd-settings-fixed.svg`、`assets/pd-settings-pps.svg`）。
 - [x] M0.20: PD Settings 页面卡片层级过多导致“圈太多”；需改为更扁平的分区视觉（减少边框/阴影层叠），并保持布局分区不变。
+- [x] M0.21: Desktop（两栏）布局：在“选项列表”与“右侧配置区”之间增加竖向分隔线，明确两栏边界（不影响移动端单栏布局）。
 
 ### 界面规格（冻结，实施需遵循）
 

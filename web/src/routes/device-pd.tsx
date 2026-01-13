@@ -406,8 +406,8 @@ export function DevicePdRoute() {
         </div>
       ) : null}
 
-      <div className="grid gap-6 md:grid-cols-2 items-start">
-        <section className="rounded-box bg-base-200/10 p-6">
+      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)] md:gap-x-0 items-start">
+        <section className="rounded-box bg-base-200/10 p-6 md:mr-3">
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
               {tab === "fixed" ? "Fixed PDOs" : "PPS APDOs"}
             </h3>
@@ -494,7 +494,9 @@ export function DevicePdRoute() {
             )}
         </section>
 
-        <section className="rounded-box bg-base-200/10 p-6">
+        <div className="hidden md:block w-px self-stretch bg-base-content/15" />
+
+        <section className="rounded-box bg-base-200/10 p-6 md:ml-3">
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
               Configure
             </h3>
