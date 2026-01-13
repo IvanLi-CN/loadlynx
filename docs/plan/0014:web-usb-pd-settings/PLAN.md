@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（4/5）
+- Status: 已完成
 - Design: 已冻结（效果图 + 文字规格已确认）
 - Created: 2026-01-09
 - Last: 2026-01-13
@@ -254,7 +254,7 @@
 - [x] M2: mock:// 设备补齐 PD 读写与错误路径（支撑 Storybook/E2E）
 - [x] M3: USB‑PD 设置页 UI（Fixed/PPS 切换 + 列表 + 编辑 + Apply）
 - [x] M4: Storybook stories + E2E 用例落地
-- [ ] M5: 与真实设备联调验收（至少 1 个支持 PPS 的 Source）
+- [x] M5: 与真实设备联调验收（至少 1 个支持 PPS 的 Source）
 
 ## 方案概述（Approach, high-level）
 
