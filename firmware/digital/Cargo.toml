@@ -23,6 +23,7 @@ embassy-sync = { version = "0.5" }
 minicbor = { version = "0.24", default-features = false }
 loadlynx-protocol = { path = "../../libs/protocol", features = ["defmt"] }
 loadlynx-calibration-format = { path = "../../libs/calibration-format" }
+loadlynx-screen-power = { path = "../../libs/screen-power" }
 
 # HAL + Embassy integration for ESP32-S3
 esp-hal = { version = "=1.0.0", features = ["esp32s3", "rt", "unstable", "defmt"] }

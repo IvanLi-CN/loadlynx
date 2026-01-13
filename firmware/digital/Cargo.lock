@@ -285,6 +285,7 @@ dependencies = [
  "lcd-async",
  "loadlynx-calibration-format",
  "loadlynx-protocol",
+ "loadlynx-screen-power",
  "minicbor",
  "nb 1.1.0",
  "smoltcp",
@@ -1272,6 +1273,10 @@ dependencies = [
  "heapless 0.8.0",
  "minicbor",
 ]
+
+[[package]]
+name = "loadlynx-screen-power"
+version = "0.1.0"
 
 [[package]]
 name = "lock_api"
