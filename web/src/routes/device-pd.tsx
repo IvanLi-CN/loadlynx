@@ -372,7 +372,9 @@ export function DevicePdRoute() {
               type="button"
               className={[
                 "btn btn-sm join-item",
-                tab === "fixed" ? "btn-active" : "btn-ghost",
+                tab === "fixed"
+                  ? "btn-info text-info-content font-semibold"
+                  : "btn-ghost border border-base-content/20 text-base-content/70",
               ].join(" ")}
               onClick={() => setTab("fixed")}
             >
@@ -382,7 +384,9 @@ export function DevicePdRoute() {
               type="button"
               className={[
                 "btn btn-sm join-item",
-                tab === "pps" ? "btn-active" : "btn-ghost",
+                tab === "pps"
+                  ? "btn-info text-info-content font-semibold"
+                  : "btn-ghost border border-base-content/20 text-base-content/70",
               ].join(" ")}
               onClick={() => setTab("pps")}
             >
