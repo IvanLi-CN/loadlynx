@@ -15,6 +15,8 @@ import type {
   FastStatusJson,
   FastStatusView,
   Identity,
+  PdUpdateRequest,
+  PdView,
   Preset,
   PresetId,
 } from "./types.ts";
@@ -226,6 +228,7 @@ interface MockDeviceState {
   identity: Identity;
   status: FastStatusView;
   cc: CcControlView;
+  pd: PdView | null;
   presets: Preset[];
   active_preset_id: PresetId;
   output_enabled: boolean;
@@ -285,7 +288,7 @@ function clampI16(value: number): number {
   return Math.max(-32768, Math.min(32767, value));
 }
 
-function createInitialStatus(): FastStatusView {
+function createInitialStatus(baseUrl?: string): FastStatusView {
   const raw: FastStatusJson = {
     uptime_ms: 123_456,
     mode: 0,
@@ -305,12 +308,66 @@ function createInitialStatus(): FastStatusView {
     fault_flags: 0,
   };
 
-  return {
+  const view: FastStatusView = {
     raw,
     link_up: true,
     hello_seen: true,
     analog_state: "ready",
     fault_flags_decoded: [],
+  };
+
+  if (baseUrl) {
+    const normalized = baseUrl.toLowerCase();
+    if (normalized.includes("link-down")) {
+      view.link_up = false;
+      view.hello_seen = false;
+      view.analog_state = "offline";
+    } else if (normalized.includes("cal-missing")) {
+      view.analog_state = "cal_missing";
+    } else if (normalized.includes("faulted")) {
+      view.analog_state = "faulted";
+    }
+  }
+
+  return view;
+}
+
+function createInitialPd(baseUrl: string): PdView | null {
+  const normalized = baseUrl.toLowerCase();
+  if (normalized.includes("no-pd")) {
+    return null;
+  }
+
+  const fixed_pdos = [
+    { pos: 1, mv: 5_000, max_ma: 3_000 },
+    { pos: 2, mv: 9_000, max_ma: 3_000 },
+    { pos: 3, mv: 12_000, max_ma: 3_000 },
+    { pos: 4, mv: 15_000, max_ma: 3_000 },
+    { pos: 5, mv: 20_000, max_ma: 1_500 },
+  ];
+
+  const pps_pdos = [
+    { pos: 3, min_mv: 3_300, max_mv: 21_000, max_ma: 3_000 },
+    { pos: 4, min_mv: 5_000, max_mv: 11_000, max_ma: 2_000 },
+  ];
+
+  return {
+    attached: true,
+    contract_mv: 9_000,
+    contract_ma: 2_000,
+    fixed_pdos,
+    pps_pdos,
+    saved: {
+      mode: "pps",
+      fixed_object_pos: 5,
+      pps_object_pos: 3,
+      target_mv: 9_000,
+      i_req_ma: 2_000,
+    },
+    apply: {
+      pending: false,
+      last: { code: "ok", at_ms: 123_456 },
+    },
   };
 }
 
@@ -391,8 +448,9 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
 
   const index = mockDevices.size + 1;
   const identity = createInitialIdentity(baseUrl, index);
-  const status = createInitialStatus();
+  const status = createInitialStatus(baseUrl);
   const cc = createInitialCc();
+  const pd = createInitialPd(baseUrl);
   const presets = createInitialPresets();
   const factoryProfile = createInitialCalibrationProfileWire();
   const calibration: MockCalibrationState = {
@@ -405,6 +463,7 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     identity,
     status,
     cc,
+    pd,
     presets,
     active_preset_id: 1,
     output_enabled: false,
@@ -412,6 +471,7 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     calibrationMode: "off",
     calibration,
   };
+
   mockDevices.set(baseUrl, state);
   return state;
 }
@@ -748,6 +808,150 @@ async function mockSoftReset(
   };
 }
 
+function mockRequirePdSupported(state: MockDeviceState): PdView {
+  if (!state.pd) {
+    throw new HttpApiError({
+      status: 404,
+      code: "UNSUPPORTED_OPERATION",
+      message: "USB-PD API not supported by this device",
+      retryable: false,
+      details: null,
+    });
+  }
+  return state.pd;
+}
+
+function mockRequirePdReady(state: MockDeviceState): void {
+  if (!state.status.link_up) {
+    throw new HttpApiError({
+      status: 503,
+      code: "LINK_DOWN",
+      message: "UART link is down",
+      retryable: true,
+      details: null,
+    });
+  }
+  if (state.status.analog_state === "cal_missing") {
+    throw new HttpApiError({
+      status: 503,
+      code: "ANALOG_NOT_READY",
+      message: "Analog is not ready (calibration missing)",
+      retryable: true,
+      details: null,
+    });
+  }
+  if (state.status.analog_state === "faulted") {
+    throw new HttpApiError({
+      status: 409,
+      code: "ANALOG_FAULTED",
+      message: "Analog is faulted",
+      retryable: false,
+      details: null,
+    });
+  }
+}
+
+async function mockGetPd(baseUrl: string): Promise<PdView> {
+  const state = getOrCreateMockDevice(baseUrl);
+  mockRequirePdReady(state);
+  return structuredClone(mockRequirePdSupported(state));
+}
+
+async function mockUpdatePd(
+  baseUrl: string,
+  payload: PdUpdateRequest,
+): Promise<PdView> {
+  const state = getOrCreateMockDevice(baseUrl);
+  mockRequirePdReady(state);
+
+  const current = mockRequirePdSupported(state);
+  if (!current.attached) {
+    throw new HttpApiError({
+      status: 409,
+      code: "NOT_ATTACHED",
+      message: "PD is not attached",
+      retryable: true,
+      details: null,
+    });
+  }
+
+  const next = structuredClone(current);
+  const nowMs = state.status.raw.uptime_ms ?? 0;
+
+  const limitViolation = (message: string, details?: unknown) => {
+    throw new HttpApiError({
+      status: 422,
+      code: "LIMIT_VIOLATION",
+      message,
+      retryable: false,
+      details: details ?? null,
+    });
+  };
+
+  const objectPos = payload.object_pos;
+  if (payload.mode === "fixed") {
+    const pdo = next.fixed_pdos.find((entry) => entry.pos === objectPos);
+    if (!pdo) {
+      limitViolation("Selected fixed PDO does not exist", {
+        object_pos: objectPos,
+      });
+    }
+    if (payload.i_req_ma < 0 || payload.i_req_ma > pdo.max_ma) {
+      limitViolation("Ireq exceeds Imax for selected PDO", {
+        i_req_ma: payload.i_req_ma,
+        max_ma: pdo.max_ma,
+      });
+    }
+
+    next.saved = {
+      ...next.saved,
+      mode: "fixed",
+      fixed_object_pos: objectPos,
+      i_req_ma: payload.i_req_ma,
+    };
+    next.contract_mv = pdo.mv;
+    next.contract_ma = payload.i_req_ma;
+  } else {
+    const apdo = next.pps_pdos.find((entry) => entry.pos === objectPos);
+    if (!apdo) {
+      limitViolation("Selected PPS APDO does not exist", {
+        object_pos: objectPos,
+      });
+    }
+    if (payload.target_mv < apdo.min_mv || payload.target_mv > apdo.max_mv) {
+      limitViolation("Vreq is out of range for selected APDO", {
+        target_mv: payload.target_mv,
+        min_mv: apdo.min_mv,
+        max_mv: apdo.max_mv,
+      });
+    }
+    if (payload.i_req_ma < 0 || payload.i_req_ma > apdo.max_ma) {
+      limitViolation("Ireq exceeds Imax for selected APDO", {
+        i_req_ma: payload.i_req_ma,
+        max_ma: apdo.max_ma,
+      });
+    }
+
+    next.saved = {
+      ...next.saved,
+      mode: "pps",
+      pps_object_pos: objectPos,
+      target_mv: payload.target_mv,
+      i_req_ma: payload.i_req_ma,
+    };
+    next.contract_mv = payload.target_mv;
+    next.contract_ma = payload.i_req_ma;
+  }
+
+  next.apply = {
+    pending: false,
+    last: { code: "ok", at_ms: nowMs },
+  };
+
+  state.pd = next;
+  return structuredClone(next);
+}
+
 export async function getIdentity(baseUrl: string): Promise<Identity> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetIdentity(baseUrl);
@@ -1016,6 +1220,34 @@ export async function getCc(baseUrl: string): Promise<CcControlView> {
     return mockGetCc(baseUrl);
   }
   return httpJsonQueued<CcControlView>(baseUrl, "/api/v1/cc");
+}
+
+export async function getPd(baseUrl: string): Promise<PdView> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockGetPd(baseUrl);
+  }
+  return httpJsonQueued<PdView>(baseUrl, "/api/v1/pd");
+}
+
+export async function postPd(
+  baseUrl: string,
+  payload: PdUpdateRequest,
+): Promise<PdView> {
+  if (isMockBaseUrl(baseUrl)) {
+    return mockUpdatePd(baseUrl, payload);
+  }
+
+  const body = JSON.stringify(payload);
+
+  // Use POST + text/plain to stay within the CORS simple-request surface and
+  // avoid私网预检；body is JSON string as documented in docs/interfaces/network-http-api.md.
+  return httpJsonQueued<PdView>(baseUrl, "/api/v1/pd", {
+    method: "POST",
+    body,
+    headers: {
+      "Content-Type": "text/plain",
+    },
+  });
 }
 
 export async function updateCc(

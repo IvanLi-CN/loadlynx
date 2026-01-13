@@ -31,6 +31,13 @@ Core scripts:
 - `bun run check` – run `biome check .`.
 - `bun run test:e2e` – run Playwright E2E tests.
 
+## USB‑PD Settings
+
+- Entry point: `Status` → `USB‑PD` card → `Open PD settings` (route: `/$deviceId/pd`).
+- Required device endpoints (see `docs/interfaces/network-http-api.md`):
+  - `GET /api/v1/pd` — read attach/contract/capabilities/saved config
+  - `POST /api/v1/pd` — apply config; Web uses `POST` + `Content-Type: text/plain` with a JSON string body to avoid private-network preflight issues.
+
 ## Simulation devices & mock backend
 
 - `mock://` devices are in-memory simulation devices handled entirely in the web app. They are helpful when you do not have hardware on hand, or when you want fast UI demos and automated tests. Real devices use `http://` or `https://` base URLs backed by the LoadLynx HTTP API.

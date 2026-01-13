@@ -19,12 +19,13 @@ import {
 } from "../components/icons/nav-icons.ts";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
-type DeviceTab = "cc" | "status" | "settings" | "calibration";
+type DeviceTab = "cc" | "status" | "pd" | "settings" | "calibration";
 
 function isDeviceTab(value: string): value is DeviceTab {
   return (
     value === "cc" ||
     value === "status" ||
+    value === "pd" ||
     value === "settings" ||
     value === "calibration"
   );
@@ -97,6 +98,12 @@ export function ConsoleLayout() {
       case "status":
         navigate({
           to: "/$deviceId/status",
+          params: { deviceId: nextDeviceId },
+        });
+        return;
+      case "pd":
+        navigate({
+          to: "/$deviceId/pd",
           params: { deviceId: nextDeviceId },
         });
         return;

@@ -241,3 +241,52 @@ export interface ControlView {
   uv_latched: boolean;
   preset: Preset; // snapshot of active preset
 }
+
+// USB-PD (docs/interfaces/network-http-api.md §3.5..§3.6)
+
+export interface PdFixedPdo {
+  pos: number; // object position (1-based)
+  mv: number;
+  max_ma: number;
+}
+
+export interface PdPpsPdo {
+  pos: number; // object position (1-based)
+  min_mv: number;
+  max_mv: number;
+  max_ma: number;
+}
+
+export type PdSavedMode = "fixed" | "pps";
+
+export interface PdSavedConfig {
+  mode: PdSavedMode;
+  fixed_object_pos: number;
+  pps_object_pos: number;
+  target_mv: number; // PPS target; ignored for fixed negotiation
+  i_req_ma: number;
+}
+
+export interface PdApplyLast {
+  code: string; // "ok" | "ack" | "nack" | ...
+  at_ms: number;
+}
+
+export interface PdApplyState {
+  pending: boolean;
+  last: PdApplyLast | null;
+}
+
+export interface PdView {
+  attached: boolean;
+  contract_mv: number | null;
+  contract_ma: number | null;
+  fixed_pdos: PdFixedPdo[];
+  pps_pdos: PdPpsPdo[];
+  saved: PdSavedConfig;
+  apply: PdApplyState;
+}
+
+export type PdUpdateRequest =
+  | { mode: "fixed"; object_pos: number; i_req_ma: number }
+  | { mode: "pps"; object_pos: number; target_mv: number; i_req_ma: number };

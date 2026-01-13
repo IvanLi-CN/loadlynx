@@ -2,10 +2,10 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 部分完成（4/5）
 - Design: 已冻结（效果图 + 文字规格已确认）
 - Created: 2026-01-09
-- Last: 2026-01-10
+- Last: 2026-01-13
 
 ## 背景 / 问题陈述
 
@@ -249,10 +249,10 @@
 
 ## 里程碑（Milestones）
 
-- [ ] M1: Web 端 API 契约对齐（TypeScript types + 错误码映射规则）
-- [ ] M2: mock:// 设备补齐 PD 读写与错误路径（支撑 Storybook/E2E）
-- [ ] M3: USB‑PD 设置页 UI（Fixed/PPS 切换 + 列表 + 编辑 + Apply）
-- [ ] M4: Storybook stories + E2E 用例落地
+- [x] M1: Web 端 API 契约对齐（TypeScript types + 错误码映射规则）
+- [x] M2: mock:// 设备补齐 PD 读写与错误路径（支撑 Storybook/E2E）
+- [x] M3: USB‑PD 设置页 UI（Fixed/PPS 切换 + 列表 + 编辑 + Apply）
+- [x] M4: Storybook stories + E2E 用例落地
 - [ ] M5: 与真实设备联调验收（至少 1 个支持 PPS 的 Source）
 
 ## 方案概述（Approach, high-level）

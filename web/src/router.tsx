@@ -11,6 +11,7 @@ import { DeviceLayout } from "./layouts/device-layout.tsx";
 import { RootLayout } from "./layouts/root-layout.tsx";
 import { DeviceCalibrationRoute } from "./routes/device-calibration.tsx";
 import { DeviceCcRoute } from "./routes/device-cc.tsx";
+import { DevicePdRoute } from "./routes/device-pd.tsx";
 import { DeviceSettingsRoute } from "./routes/device-settings.tsx";
 import { DeviceStatusRoute } from "./routes/device-status.tsx";
 import { DevicesRoute } from "./routes/devices.tsx";
@@ -60,6 +61,12 @@ const deviceStatusRoute = createRoute({
   component: DeviceStatusRoute,
 });
 
+const devicePdRoute = createRoute({
+  getParentRoute: () => deviceRoute,
+  path: "pd",
+  component: DevicePdRoute,
+});
+
 const deviceSettingsRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "settings",
@@ -75,6 +82,7 @@ const deviceCalibrationRoute = createRoute({
 const deviceRouteTree = deviceRoute.addChildren([
   deviceCcRoute,
   deviceStatusRoute,
+  devicePdRoute,
   deviceSettingsRoute,
   deviceCalibrationRoute,
 ]);
