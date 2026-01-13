@@ -2320,17 +2320,7 @@ async fn handle_pd_update(
             write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
             return Err("503 Service Unavailable");
         }
-        AnalogState::CalMissing => {
-            write_error_body(
-                body_out,
-                "ANALOG_NOT_READY",
-                "analog board is not ready (calibration missing)",
-                true,
-                None,
-            );
-            return Err("503 Service Unavailable");
-        }
-        AnalogState::Ready => {}
+        AnalogState::CalMissing | AnalogState::Ready => {}
     }
 
     let status = {

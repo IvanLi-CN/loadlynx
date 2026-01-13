@@ -518,7 +518,6 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   - `409 NOT_ATTACHED`：PD 未 attach（或 PD 状态不可用），拒绝 apply；
   - `422 LIMIT_VIOLATION`：`object_pos` 不存在于当前能力列表、`target_mv` 越界、或 `i_req_ma` 超过 Imax；
   - `503 LINK_DOWN`：UART 链路不可用；
-  - `503 ANALOG_NOT_READY`：模拟板未标定或未完成上电流程；
   - `503 UNAVAILABLE`：EEPROM 写入失败。
 
 ### 3.7 `POST /api/v1/soft-reset`（预留）

@@ -205,7 +205,6 @@
 - 统一错误包裹：`{ "error": { code, message, retryable, details } }`（见 `docs/interfaces/network-http-api.md`）。
 - Web 必须至少正确处理以下错误码/状态（并给出可理解提示）：
   - `503 LINK_DOWN` / `503 UNAVAILABLE`
-  - `503 ANALOG_NOT_READY`
   - `422 LIMIT_VIOLATION`（含越界细节；包含“所选 PDO/APDO 不存在于当前能力列表”的场景）
   - `409 CONFLICT`（例如正在协商/忙）
   - `400 INVALID_REQUEST`
