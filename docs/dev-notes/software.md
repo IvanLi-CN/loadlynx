@@ -253,3 +253,21 @@
 ### 5.5 历史 Bring‑up 规划（简述）
 
 早期版本中，G431 侧仅实现 UART Echo 与固定 0.5 A 输出，规划是拆分为 `adc_sampler_task`、`cc_supervisor_task` 与 `uart_telemetry_task` 三个 Embassy 任务。本节前述当前实现已经在单任务主循环中落地了绝大部分规划要点（ADC 采样、恒流设定、基础保护与 FastStatus 遥测），并在此基础上实现了“两通道合流”的恒流控制策略（<2 A 单通道、≥2 A 双通道近似均分）。后续若需要更复杂的环路控制（例如按温度/老化动态调整通道配比、在特定模式下强制单通道运行等），可在现有结构上再拆分任务与状态机。
+
+## 6. 数字板：屏幕省电策略（自动调暗 / 熄屏）
+
+数字板固件实现了“仅在 LOAD OFF 且无用户输入时自动省电”的屏幕策略（不涉及 ESP32 系统级 sleep）：
+
+- **触发条件**
+  - 仅当 `output_enabled=false`（LOAD OFF）时启用计时；LOAD ON 时禁止自动熄屏。
+  - “无操作”以本地用户输入事件为准：触控 / 旋钮旋转 / 旋钮按压均会刷新 `last_user_activity_ms`。
+- **两段计时**
+  - `T+2min`：进入调暗（`backlight_pct = min(orig_pct, 10)`；不得调亮）。
+  - `T+5min`：进入熄屏（背光关断 0% → `Display::sleep()`）。
+- **唤醒**
+  - 任意用户输入或 `LOAD OFF → ON` 会唤醒：`Display::wake()` → 恢复背光到 `orig_pct` → 强制整帧重绘 UI。
+  - **安全策略**：在熄屏状态下，第一次输入仅用于唤醒且会被消费，不会触发 UI 动作（避免盲操作误开负载/改设置）。
+- **可观测性**
+  - 状态切换会打印一次日志：`screen_power: active->dim` / `dim->off` / `off->active`（包含 `idle_ms` 与目标背光百分比）。
+
+实现位置：`firmware/digital/src/main.rs`（`display_task` + `touch_ui_task` + `encoder_task`）。

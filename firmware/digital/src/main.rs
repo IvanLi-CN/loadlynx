@@ -20,6 +20,8 @@ use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
 use embedded_io_async::Read as AsyncRead;
+use esp_hal::gpio::OutputSignal as GpioOutputSignal;
+use esp_hal::gpio::interconnect::OutputSignal as OutputSignalPin;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::time::Instant as HalInstant;
 use esp_hal::timer::timg::TimerGroup;
@@ -64,6 +66,7 @@ use loadlynx_protocol::{
     encode_limit_profile_frame, encode_pd_sink_request_frame, encode_set_enable_frame,
     encode_set_mode_frame, encode_set_point_frame, encode_soft_reset_frame, slip_encode,
 };
+use loadlynx_screen_power::{ScreenPowerConfig, ScreenPowerModel, ScreenPowerState};
 use static_cell::StaticCell;
 use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over espflash
 
@@ -72,6 +75,54 @@ const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
 
 const PD_T_PD_MS: u32 = 2_000;
+
+const BACKLIGHT_DEFAULT_PCT: u8 = 50;
+
+const SCREEN_DIM_AFTER_MS: u32 = 2 * 60 * 1000;
+const SCREEN_OFF_AFTER_MS: u32 = 5 * 60 * 1000;
+const SCREEN_DIM_MAX_PCT: u8 = 10;
+
+const SCREEN_POWER_STATE_ACTIVE: u8 = 0;
+const SCREEN_POWER_STATE_DIM: u8 = 1;
+const SCREEN_POWER_STATE_OFF: u8 = 2;
+
+static LAST_USER_ACTIVITY_MS: AtomicU32 = AtomicU32::new(0);
+static SCREEN_POWER_STATE: AtomicU8 = AtomicU8::new(SCREEN_POWER_STATE_ACTIVE);
+
+#[inline]
+fn backlight_hw_duty_pct(logical_pct: u8) -> u8 {
+    // BLK is active-low (PMOS high-side switch on BL_A, gate pulled up to 3V3 by default).
+    // Therefore, LEDC duty_pct maps to "off time": logical brightness is inverted.
+    let pct = logical_pct.min(100);
+    100u8.saturating_sub(pct)
+}
+
+#[inline]
+fn set_backlight_pct(
+    backlight_channel: &'static ledc_channel::Channel<'static, LowSpeed>,
+    logical_pct: u8,
+    context: &'static str,
+) {
+    if backlight_channel
+        .set_duty(backlight_hw_duty_pct(logical_pct))
+        .is_err()
+    {
+        defmt::panic!("backlight duty set ({})", context);
+    }
+}
+
+#[inline]
+fn backlight_pwm_connect(backlight_pin: &'static OutputSignalPin<'static>) {
+    // Connect LEDC low-speed channel 0 output to BLK.
+    GpioOutputSignal::LEDC_LS_SIG0.connect_to(backlight_pin);
+}
+
+#[inline]
+fn backlight_pwm_disconnect(backlight_pin: &'static OutputSignalPin<'static>) {
+    GpioOutputSignal::LEDC_LS_SIG0.disconnect_from(backlight_pin);
+    // Force gate high when disconnected to ensure the PMOS high-side switch stays off.
+    backlight_pin.set_output_high(true);
+}
 
 mod control;
 use control::{ControlState, PresetsBlobError};
@@ -199,6 +250,7 @@ static PREVIOUS_FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = Static
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static BACKLIGHT_PIN: StaticCell<OutputSignalPin<'static>> = StaticCell::new();
 static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static BUZZER_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
@@ -369,6 +421,33 @@ pub fn timestamp_ms() -> u64 {
 }
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
+
+#[inline]
+fn screen_power_state_to_u8(state: ScreenPowerState) -> u8 {
+    match state {
+        ScreenPowerState::Active => SCREEN_POWER_STATE_ACTIVE,
+        ScreenPowerState::Dim => SCREEN_POWER_STATE_DIM,
+        ScreenPowerState::Off => SCREEN_POWER_STATE_OFF,
+    }
+}
+
+#[inline]
+fn screen_power_state_is_off() -> bool {
+    SCREEN_POWER_STATE.load(Ordering::Relaxed) == SCREEN_POWER_STATE_OFF
+}
+
+#[inline]
+fn note_user_activity() {
+    LAST_USER_ACTIVITY_MS.store(now_ms32(), Ordering::Relaxed);
+    prompt_tone::notify_local_activity();
+}
+
+#[inline]
+fn note_user_activity_and_should_consume_off() -> bool {
+    let was_off = screen_power_state_is_off();
+    note_user_activity();
+    was_off
+}
 
 fn fault_flags_abbrev(flags: u32) -> &'static str {
     // Public, user-facing abbreviations (frozen by docs/plan/0005:on-device-preset-ui/PLAN.md).
@@ -674,7 +753,12 @@ async fn encoder_task(
 
                 // Reverse logical direction to match panel orientation (CW increments).
                 let logical_step = -phys_step;
-                prompt_tone::notify_local_activity();
+                if note_user_activity_and_should_consume_off() {
+                    // Screen is waking from "off": consume this physical input so it can't
+                    // change setpoints or toggle output while the UI is not visible.
+                    residual = 0;
+                    break;
+                }
                 prompt_tone::enqueue_ticks(1);
                 let mut guard = control.lock().await;
                 match guard.ui_view {
@@ -815,7 +899,12 @@ async fn encoder_task(
                 last_button = pressed;
                 debounce = 0;
                 if pressed {
-                    prompt_tone::notify_local_activity();
+                    if note_user_activity_and_should_consume_off() {
+                        // Consume the wake input; ignore this press sequence.
+                        down_since_ms = None;
+                        long_action_fired = false;
+                        continue;
+                    }
                     // Start press window: short press toggles output, long press cycles preset.
                     down_since_ms = Some(now_ms32());
                     long_action_fired = false;
@@ -922,6 +1011,7 @@ async fn touch_ui_task(
 ) {
     info!("touch-ui task starting (preset entry + quick switch)");
     let mut last_seq: u32 = 0;
+    let mut consume_touch_until_up: bool = false;
     #[derive(Copy, Clone)]
     enum ControlRowTouch {
         PresetSwitch {
@@ -997,11 +1087,33 @@ async fn touch_ui_task(
             continue;
         };
 
+        // Safety: when the screen is OFF, the first user input is consumed only to wake.
+        // For touch gestures, this must include both DOWN/CONTACT and the matching UP.
+        if consume_touch_until_up {
+            note_user_activity();
+            quick_switch = None;
+            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+            last_tab_tap = None;
+            if marker.event == 1 {
+                consume_touch_until_up = false;
+            }
+            yield_now().await;
+            continue;
+        }
+
+        if note_user_activity_and_should_consume_off() {
+            consume_touch_until_up = marker.event != 1;
+            quick_switch = None;
+            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+            last_tab_tap = None;
+            yield_now().await;
+            continue;
+        }
+
         let view = { control.lock().await.ui_view };
         match marker.event {
             // down
             0 => {
-                prompt_tone::notify_local_activity();
                 if view == control::UiView::PdSettings {
                     quick_switch = None;
                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -3142,6 +3254,8 @@ async fn display_task(
     ctx: &'static mut DisplayResources,
     telemetry: &'static TelemetryMutex,
     control: &'static ControlMutex,
+    backlight_channel: &'static ledc_channel::Channel<'static, LowSpeed>,
+    backlight_pin: &'static OutputSignalPin<'static>,
 ) {
     DISPLAY_TASK_RUNNING.store(true, Ordering::Relaxed);
     info!("Display task starting");
@@ -3231,8 +3345,111 @@ async fn display_task(
     let mut last_preview_active: bool = false;
     let mut last_preview_mode: LoadMode = LoadMode::Cc;
     let mut last_ui_view: control::UiView = control::UiView::Main;
+    let screen_cfg =
+        ScreenPowerConfig::new(SCREEN_DIM_AFTER_MS, SCREEN_OFF_AFTER_MS, SCREEN_DIM_MAX_PCT);
+    let mut screen_power = ScreenPowerModel::new(BACKLIGHT_DEFAULT_PCT);
+    let mut last_backlight_pct: u8 = BACKLIGHT_DEFAULT_PCT;
+    let mut backlight_pwm_attached: bool = true;
+    let mut display_sleeping: bool = false;
+    let mut screen_force_full_render: bool = false;
     loop {
         let now = timestamp_ms() as u32;
+
+        // Screen power management (Plan #0015): only auto-dim/off when LOAD is OFF,
+        // and consume the first input in OFF so it cannot trigger UI actions.
+        let last_user_activity_ms = LAST_USER_ACTIVITY_MS.load(Ordering::Relaxed);
+        let load_enabled = control.lock().await.output_enabled;
+        let tick = screen_power.tick(screen_cfg, now, last_user_activity_ms, load_enabled);
+        if let Some(tr) = tick.transition {
+            let from_label = match tr.from {
+                ScreenPowerState::Active => "active",
+                ScreenPowerState::Dim => "dim",
+                ScreenPowerState::Off => "off",
+            };
+            let to_label = match tr.to {
+                ScreenPowerState::Active => "active",
+                ScreenPowerState::Dim => "dim",
+                ScreenPowerState::Off => "off",
+            };
+            info!(
+                "screen_power: {}->{} (idle_ms={}, load_enabled={}, backlight={}%)",
+                from_label, to_label, tick.idle_ms, load_enabled, tick.target_backlight_pct
+            );
+
+            match (tr.from, tr.to) {
+                (ScreenPowerState::Active, ScreenPowerState::Dim) => {
+                    set_backlight_pct(backlight_channel, tick.target_backlight_pct, "dim");
+                    if !backlight_pwm_attached {
+                        backlight_pwm_connect(backlight_pin);
+                        backlight_pwm_attached = true;
+                    }
+                    last_backlight_pct = tick.target_backlight_pct;
+                }
+                (ScreenPowerState::Dim, ScreenPowerState::Active) => {
+                    set_backlight_pct(backlight_channel, tick.target_backlight_pct, "restore");
+                    if !backlight_pwm_attached {
+                        backlight_pwm_connect(backlight_pin);
+                        backlight_pwm_attached = true;
+                    }
+                    last_backlight_pct = tick.target_backlight_pct;
+                }
+                (ScreenPowerState::Dim, ScreenPowerState::Off)
+                | (ScreenPowerState::Active, ScreenPowerState::Off) => {
+                    set_backlight_pct(backlight_channel, 0, "off");
+                    last_backlight_pct = 0;
+                    backlight_pwm_disconnect(backlight_pin);
+                    backlight_pwm_attached = false;
+
+                    display.sleep(&mut delay).await.expect("display sleep");
+                    display_sleeping = true;
+                    screen_force_full_render = true;
+                    last_push_ms = now;
+                }
+                (ScreenPowerState::Off, ScreenPowerState::Active) => {
+                    if display_sleeping {
+                        display.wake(&mut delay).await.expect("display wake");
+                        display_sleeping = false;
+                    }
+                    unsafe {
+                        // Some controllers require DISPON after SLP OUT.
+                        use lcd_async::dcs::{EnterNormalMode, InterfaceExt as _, SetDisplayOn};
+                        let dcs = display.dcs();
+                        dcs.write_command(EnterNormalMode)
+                            .await
+                            .expect("display normal mode");
+                        dcs.write_command(SetDisplayOn).await.expect("display on");
+                    }
+                    delay.delay_ns(120_000_000).await;
+
+                    set_backlight_pct(backlight_channel, tick.target_backlight_pct, "wake");
+                    if !backlight_pwm_attached {
+                        backlight_pwm_connect(backlight_pin);
+                        backlight_pwm_attached = true;
+                    }
+                    last_backlight_pct = tick.target_backlight_pct;
+                    screen_force_full_render = true;
+                }
+                _ => {}
+            }
+
+            SCREEN_POWER_STATE.store(screen_power_state_to_u8(tick.state), Ordering::Relaxed);
+        } else if tick.target_backlight_pct != last_backlight_pct
+            && tick.state != ScreenPowerState::Off
+        {
+            // Keep the backlight aligned with the policy even if we re-enter a state
+            // (e.g. after a firmware brightness change in future work).
+            set_backlight_pct(backlight_channel, tick.target_backlight_pct, "sync");
+            if !backlight_pwm_attached {
+                backlight_pwm_connect(backlight_pin);
+                backlight_pwm_attached = true;
+            }
+            last_backlight_pct = tick.target_backlight_pct;
+        }
+
+        if tick.state == ScreenPowerState::Off {
+            cooperative_delay_ms(20).await;
+            continue;
+        }
         let dt_ms = now.wrapping_sub(last_push_ms);
         if dt_ms >= DISPLAY_MIN_FRAME_INTERVAL_MS {
             let frame_idx = DISPLAY_FRAME_COUNT
@@ -3326,8 +3543,10 @@ async fn display_task(
             };
 
             let preview_active = preview_panel.is_some();
-            let mut force_full_render =
-                panel_visible || (panel_visible != last_panel_visible) || frame_idx == 1;
+            let mut force_full_render = screen_force_full_render
+                || panel_visible
+                || (panel_visible != last_panel_visible)
+                || frame_idx == 1;
             if ui_view != last_ui_view {
                 force_full_render = true;
             }
@@ -3343,6 +3562,9 @@ async fn display_task(
                 last_preview_mode = overlay_mode;
             }
             last_ui_view = ui_view;
+            if force_full_render && screen_force_full_render {
+                screen_force_full_render = false;
+            }
 
             let (snapshot, mask, pd_status_for_panel) = {
                 let mut guard = telemetry.lock().await;
@@ -4253,6 +4475,12 @@ async fn main(spawner: Spawner) {
     let mut ledc = Ledc::new(ledc_peripheral);
     ledc.set_global_slow_clock(LSGlobalClkSource::APBClk);
 
+    let backlight_pin = BACKLIGHT_PIN.init(backlight_pin.into());
+    backlight_pin
+        .apply_output_config(&OutputConfig::default().with_drive_mode(DriveMode::PushPull));
+    backlight_pin.set_output_enable(true);
+    backlight_pin.set_output_high(true);
+
     let mut backlight_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer0);
     backlight_timer
         .configure(ledc_timer::config::Config {
@@ -4263,18 +4491,18 @@ async fn main(spawner: Spawner) {
         .expect("backlight timer");
     let backlight_timer = BACKLIGHT_TIMER.init(backlight_timer);
 
-    let mut backlight_channel =
-        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel0, backlight_pin);
+    let mut backlight_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel0, NoPin);
     backlight_channel
         .configure(ledc_channel::config::Config {
             timer: &*backlight_timer,
             // 调试阶段提升背光亮度，避免“有画面但看起来近似黑屏”。
-            duty_pct: 80,
+            duty_pct: backlight_hw_duty_pct(BACKLIGHT_DEFAULT_PCT),
             drive_mode: DriveMode::PushPull,
         })
         .expect("backlight channel");
     let backlight_channel = BACKLIGHT_CHANNEL.init(backlight_channel);
-    backlight_channel.set_duty(80).expect("backlight duty set");
+    backlight_pwm_connect(backlight_pin);
+    set_backlight_pct(backlight_channel, BACKLIGHT_DEFAULT_PCT, "init");
 
     // FAN_PWM: 低速 LEDC 通道，恒定 20–25 kHz 频率，由 fan_task 周期性更新占空比。
     let mut fan_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer1);
@@ -4342,6 +4570,8 @@ async fn main(spawner: Spawner) {
     let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
     let control = CONTROL.init(Mutex::new(ControlState::new(initial_presets, initial_pd)));
     CONTROL_REV.store(1, Ordering::Relaxed);
+    LAST_USER_ACTIVITY_MS.store(now_ms32(), Ordering::Relaxed);
+    SCREEN_POWER_STATE.store(SCREEN_POWER_STATE_ACTIVE, Ordering::Relaxed);
 
     let touch_input_cfg = InputConfig::default().with_pull(Pull::Up);
     let ctp_int = Input::new(peripherals.GPIO7, touch_input_cfg);
@@ -4490,7 +4720,13 @@ async fn main(spawner: Spawner) {
     }
     info!("spawning display task");
     spawner
-        .spawn(display_task(resources, telemetry, control))
+        .spawn(display_task(
+            resources,
+            telemetry,
+            control,
+            backlight_channel,
+            backlight_pin,
+        ))
         .expect("display_task spawn");
     info!("spawning touch task");
     spawner
