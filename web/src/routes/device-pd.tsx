@@ -366,147 +366,153 @@ export function DevicePdRoute() {
                 : "..."}
             </div>
           </div>
+        </div>
 
-          <div className="mt-4 join">
-            <button
-              type="button"
-              className={[
-                "btn btn-sm join-item",
-                tab === "fixed"
-                  ? "btn-info text-info-content font-semibold"
-                  : "btn-ghost border border-base-content/20 text-base-content/70",
-              ].join(" ")}
-              onClick={() => setTab("fixed")}
-            >
-              Fixed
-            </button>
-            <button
-              type="button"
-              className={[
-                "btn btn-sm join-item",
-                tab === "pps"
-                  ? "btn-info text-info-content font-semibold"
-                  : "btn-ghost border border-base-content/20 text-base-content/70",
-              ].join(" ")}
-              onClick={() => setTab("pps")}
-            >
-              PPS
-            </button>
+        <div className="p-6 grid gap-4">
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="text-xs text-base-content/60">Mode</div>
+            <div className="join">
+              <button
+                type="button"
+                className={[
+                  "btn btn-sm join-item",
+                  tab === "fixed"
+                    ? "btn-info text-info-content font-semibold"
+                    : "btn-ghost border border-base-content/20 text-base-content/70",
+                ].join(" ")}
+                onClick={() => setTab("fixed")}
+              >
+                Fixed
+              </button>
+              <button
+                type="button"
+                className={[
+                  "btn btn-sm join-item",
+                  tab === "pps"
+                    ? "btn-info text-info-content font-semibold"
+                    : "btn-ghost border border-base-content/20 text-base-content/70",
+                ].join(" ")}
+                onClick={() => setTab("pps")}
+              >
+                PPS
+              </button>
+            </div>
           </div>
-        </div>
 
-      {applyMutation.isSuccess ? (
-        <div className="alert alert-success shadow-sm text-xs sm:text-sm mx-6 mt-4">
-          <span>Apply succeeded.</span>
-        </div>
-      ) : null}
+          {applyMutation.isSuccess ? (
+            <div className="alert alert-success shadow-sm text-xs sm:text-sm">
+              <span>Apply succeeded.</span>
+            </div>
+          ) : null}
 
-      {applyError ? (
-        <div className="alert alert-error shadow-sm text-xs sm:text-sm mx-6 mt-4">
-          <span className="font-bold">{applyError.summary}</span>
-        </div>
-      ) : null}
+          {applyError ? (
+            <div className="alert alert-error shadow-sm text-xs sm:text-sm">
+              <span className="font-bold">{applyError.summary}</span>
+            </div>
+          ) : null}
 
-      <div className="grid gap-6 p-6 md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)] md:gap-0 items-start">
-        <section className="md:pr-6">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
-              {tab === "fixed" ? "Fixed PDOs" : "PPS APDOs"}
-            </h3>
-            <p className="text-xs text-base-content/60 mb-4">
-              {tab === "fixed"
-                ? "Select one PDO (object position)."
-                : "Select one APDO (object position)."}
-            </p>
+          <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)] md:gap-0 items-start">
+            <section className="md:pr-6">
+              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
+                {tab === "fixed" ? "Fixed PDOs" : "PPS APDOs"}
+              </h3>
+              <p className="text-xs text-base-content/60 mb-4">
+                {tab === "fixed"
+                  ? "Select one PDO (object position)."
+                  : "Select one APDO (object position)."}
+              </p>
 
-            {tab === "fixed" ? (
-              <div className="flex flex-col gap-2">
-                {(pd?.fixed_pdos ?? []).map((entry) => {
-                  const selected = entry.pos === selectedFixedPos;
-                  return (
-                    <button
-                      key={entry.pos}
-                      type="button"
-                      className={[
-                        "w-full text-left rounded-box border px-4 py-3 flex items-center justify-between",
-                        selected
-                          ? "border-info bg-info/10"
-                          : "border-base-200 bg-base-100 hover:bg-base-200/50",
-                      ].join(" ")}
-                      onClick={() => setSelectedFixedPos(entry.pos)}
-                    >
-                      <div className="flex items-center gap-3">
-                        <span className="badge badge-ghost">{entry.pos}</span>
-                        <span className="font-semibold">
-                          {formatMilliVolts(entry.mv)}
-                        </span>
-                      </div>
-                      <span className="text-xs text-base-content/60">
-                        {entry.max_ma} mA
-                      </span>
-                    </button>
-                  );
-                })}
-                {(pd?.fixed_pdos ?? []).length === 0 ? (
-                  <div className="text-xs text-base-content/60">
-                    No fixed PDOs.
-                  </div>
-                ) : null}
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {(pd?.pps_pdos ?? []).map((entry) => {
-                  const selected = entry.pos === selectedPpsPos;
-                  return (
-                    <button
-                      key={entry.pos}
-                      type="button"
-                      className={[
-                        "w-full text-left rounded-box border px-4 py-3 flex flex-col gap-1",
-                        selected
-                          ? "border-info bg-info/10"
-                          : "border-base-200 bg-base-100 hover:bg-base-200/50",
-                      ].join(" ")}
-                      onClick={() => setSelectedPpsPos(entry.pos)}
-                    >
-                      <div className="flex items-center justify-between">
+              {tab === "fixed" ? (
+                <div className="flex flex-col gap-2">
+                  {(pd?.fixed_pdos ?? []).map((entry) => {
+                    const selected = entry.pos === selectedFixedPos;
+                    return (
+                      <button
+                        key={entry.pos}
+                        type="button"
+                        className={[
+                          "w-full text-left rounded-box border px-4 py-3 flex items-center justify-between",
+                          selected
+                            ? "border-info bg-info/10"
+                            : "border-base-200 bg-base-100 hover:bg-base-200/50",
+                        ].join(" ")}
+                        onClick={() => setSelectedFixedPos(entry.pos)}
+                      >
                         <div className="flex items-center gap-3">
                           <span className="badge badge-ghost">{entry.pos}</span>
                           <span className="font-semibold">
-                            {(entry.min_mv / 1000).toFixed(1)}–
-                            {(entry.max_mv / 1000).toFixed(1)} V
+                            {formatMilliVolts(entry.mv)}
                           </span>
                         </div>
                         <span className="text-xs text-base-content/60">
                           {entry.max_ma} mA
                         </span>
-                      </div>
-                      <div className="text-xs text-base-content/60">
-                        PPS step: 20 mV · I step: 50 mA
-                      </div>
-                    </button>
-                  );
-                })}
-                {(pd?.pps_pdos ?? []).length === 0 ? (
-                  <div className="text-xs text-base-content/60">
-                    No PPS APDOs.
-                  </div>
-                ) : null}
-              </div>
-            )}
-        </section>
+                      </button>
+                    );
+                  })}
+                  {(pd?.fixed_pdos ?? []).length === 0 ? (
+                    <div className="text-xs text-base-content/60">
+                      No fixed PDOs.
+                    </div>
+                  ) : null}
+                </div>
+              ) : (
+                <div className="flex flex-col gap-2">
+                  {(pd?.pps_pdos ?? []).map((entry) => {
+                    const selected = entry.pos === selectedPpsPos;
+                    return (
+                      <button
+                        key={entry.pos}
+                        type="button"
+                        className={[
+                          "w-full text-left rounded-box border px-4 py-3 flex flex-col gap-1",
+                          selected
+                            ? "border-info bg-info/10"
+                            : "border-base-200 bg-base-100 hover:bg-base-200/50",
+                        ].join(" ")}
+                        onClick={() => setSelectedPpsPos(entry.pos)}
+                      >
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center gap-3">
+                            <span className="badge badge-ghost">
+                              {entry.pos}
+                            </span>
+                            <span className="font-semibold">
+                              {(entry.min_mv / 1000).toFixed(1)}–
+                              {(entry.max_mv / 1000).toFixed(1)} V
+                            </span>
+                          </div>
+                          <span className="text-xs text-base-content/60">
+                            {entry.max_ma} mA
+                          </span>
+                        </div>
+                        <div className="text-xs text-base-content/60">
+                          PPS step: 20 mV · I step: 50 mA
+                        </div>
+                      </button>
+                    );
+                  })}
+                  {(pd?.pps_pdos ?? []).length === 0 ? (
+                    <div className="text-xs text-base-content/60">
+                      No PPS APDOs.
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </section>
 
-        <div className="hidden md:block w-px self-stretch bg-base-content/15" />
+            <div className="hidden md:block w-px self-stretch bg-base-content/15" />
 
-        <section className="md:pl-6">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
-              Configure
-            </h3>
-            <p className="text-xs text-base-content/60 mb-4">
-              Saved vs Active contract
-            </p>
+            <section className="md:pl-6">
+              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
+                Configure
+              </h3>
+              <p className="text-xs text-base-content/60 mb-4">
+                Saved vs Active contract
+              </p>
 
-            <div className="grid gap-4">
-              <div className="rounded-box bg-base-200/20 p-4">
+              <div className="grid gap-4">
+                <div className="rounded-box bg-base-200/20 p-4">
                   <div className="text-xs text-base-content/60 mb-1">Saved</div>
                   <div className="text-sm">
                     Mode:{" "}
@@ -525,140 +531,147 @@ export function DevicePdRoute() {
                       <> · Vreq: {pd?.saved.target_mv ?? "..."} mV</>
                     ) : null}
                   </div>
-              </div>
+                </div>
 
-              <div className="rounded-box bg-base-200/20 p-4">
+                <div className="rounded-box bg-base-200/20 p-4">
                   <div className="text-xs text-base-content/60 mb-1">
                     Active (contract)
                   </div>
                   <div className="text-sm">{activeContractText}</div>
-              </div>
-            </div>
-
-            {tab === "fixed" ? (
-              <div className="mt-4">
-                <div className="flex flex-wrap items-center gap-3">
-                  <div className="text-xs text-base-content/60">Ireq (mA)</div>
-                  <input
-                    type="number"
-                    className="input input-bordered input-sm w-40"
-                    value={fixedIReqMa}
-                    min={0}
-                    step={50}
-                    max={selectedFixed?.max_ma ?? undefined}
-                    onChange={(event) =>
-                      setFixedIReqMa(Number(event.target.value))
-                    }
-                  />
-                  <div className="text-xs text-base-content/60">
-                    step: 50 mA
-                  </div>
-                  <button
-                    type="button"
-                    className="btn btn-success btn-sm ml-auto"
-                    disabled={applyDisabled}
-                    onClick={() => {
-                      applyMutation.reset();
-                      applyMutation.mutate({ tab: "fixed" });
-                    }}
-                  >
-                    Apply
-                  </button>
                 </div>
               </div>
-            ) : (
-              <div className="mt-4">
-                <div className="flex flex-wrap items-center gap-3">
-                  <div className="text-xs text-base-content/60">Vreq (mV)</div>
-                  <input
-                    type="number"
-                    className="input input-bordered input-sm w-44"
-                    value={ppsTargetMv}
-                    step={20}
-                    min={selectedPps?.min_mv ?? undefined}
-                    max={selectedPps?.max_mv ?? undefined}
-                    onChange={(event) =>
-                      setPpsTargetMv(Number(event.target.value))
-                    }
-                  />
-                  <div className="text-xs text-base-content/60">
-                    step: 20 mV
-                  </div>
-                </div>
 
-                <div className="mt-3">
-                  <input
-                    type="range"
-                    className="range range-info"
-                    min={selectedPps?.min_mv ?? 0}
-                    max={selectedPps?.max_mv ?? 0}
-                    step={20}
-                    value={ppsTargetMv}
-                    disabled={!selectedPps}
-                    onChange={(event) =>
-                      setPpsTargetMv(Number(event.target.value))
-                    }
-                  />
-                  <div className="flex justify-between text-xs text-base-content/60 mt-1">
-                    <span>min {selectedPps?.min_mv ?? "-"}</span>
-                    <span>max {selectedPps?.max_mv ?? "-"}</span>
-                  </div>
-                </div>
-
-                <div className="mt-4 flex flex-wrap items-center gap-3">
-                  <div className="text-xs text-base-content/60">Ireq (mA)</div>
-                  <input
-                    type="number"
-                    className="input input-bordered input-sm w-40"
-                    value={ppsIReqMa}
-                    min={0}
-                    step={50}
-                    max={selectedPps?.max_ma ?? undefined}
-                    onChange={(event) =>
-                      setPpsIReqMa(Number(event.target.value))
-                    }
-                  />
-                  <div className="text-xs text-base-content/60">
-                    step: 50 mA
-                  </div>
-                  {selectedPps ? (
+              {tab === "fixed" ? (
+                <div className="mt-4">
+                  <div className="flex flex-wrap items-center gap-3">
                     <div className="text-xs text-base-content/60">
-                      Imax: {selectedPps.max_ma} mA (hard limit)
+                      Ireq (mA)
                     </div>
-                  ) : null}
-
-                  <button
-                    type="button"
-                    className="btn btn-success btn-sm ml-auto"
-                    disabled={applyDisabled}
-                    onClick={() => {
-                      applyMutation.reset();
-                      applyMutation.mutate({ tab: "pps" });
-                    }}
-                  >
-                    Apply
-                  </button>
+                    <input
+                      type="number"
+                      className="input input-bordered input-sm w-40"
+                      value={fixedIReqMa}
+                      min={0}
+                      step={50}
+                      max={selectedFixed?.max_ma ?? undefined}
+                      onChange={(event) =>
+                        setFixedIReqMa(Number(event.target.value))
+                      }
+                    />
+                    <div className="text-xs text-base-content/60">
+                      step: 50 mA
+                    </div>
+                    <button
+                      type="button"
+                      className="btn btn-success btn-sm ml-auto"
+                      disabled={applyDisabled}
+                      onClick={() => {
+                        applyMutation.reset();
+                        applyMutation.mutate({ tab: "fixed" });
+                      }}
+                    >
+                      Apply
+                    </button>
+                  </div>
                 </div>
-              </div>
-            )}
+              ) : (
+                <div className="mt-4">
+                  <div className="flex flex-wrap items-center gap-3">
+                    <div className="text-xs text-base-content/60">
+                      Vreq (mV)
+                    </div>
+                    <input
+                      type="number"
+                      className="input input-bordered input-sm w-44"
+                      value={ppsTargetMv}
+                      step={20}
+                      min={selectedPps?.min_mv ?? undefined}
+                      max={selectedPps?.max_mv ?? undefined}
+                      onChange={(event) =>
+                        setPpsTargetMv(Number(event.target.value))
+                      }
+                    />
+                    <div className="text-xs text-base-content/60">
+                      step: 20 mV
+                    </div>
+                  </div>
 
-            {validationHint ? (
-              <div className="mt-3 text-xs text-base-content/60">
-                {validationHint}
-              </div>
-            ) : null}
+                  <div className="mt-3">
+                    <input
+                      type="range"
+                      className="range range-info"
+                      min={selectedPps?.min_mv ?? 0}
+                      max={selectedPps?.max_mv ?? 0}
+                      step={20}
+                      value={ppsTargetMv}
+                      disabled={!selectedPps}
+                      onChange={(event) =>
+                        setPpsTargetMv(Number(event.target.value))
+                      }
+                    />
+                    <div className="flex justify-between text-xs text-base-content/60 mt-1">
+                      <span>min {selectedPps?.min_mv ?? "-"}</span>
+                      <span>max {selectedPps?.max_mv ?? "-"}</span>
+                    </div>
+                  </div>
 
-            {pd?.apply.last ? (
-              <div className="mt-4 text-xs text-base-content/60">
-                Last apply: {pd.apply.last.code} · at {pd.apply.last.at_ms} ms
-              </div>
-            ) : (
-              <div className="mt-4 text-xs text-base-content/60">
-                Last apply: none
-              </div>
-            )}
-        </section>
-      </div>
+                  <div className="mt-4 flex flex-wrap items-center gap-3">
+                    <div className="text-xs text-base-content/60">
+                      Ireq (mA)
+                    </div>
+                    <input
+                      type="number"
+                      className="input input-bordered input-sm w-40"
+                      value={ppsIReqMa}
+                      min={0}
+                      step={50}
+                      max={selectedPps?.max_ma ?? undefined}
+                      onChange={(event) =>
+                        setPpsIReqMa(Number(event.target.value))
+                      }
+                    />
+                    <div className="text-xs text-base-content/60">
+                      step: 50 mA
+                    </div>
+                    {selectedPps ? (
+                      <div className="text-xs text-base-content/60">
+                        Imax: {selectedPps.max_ma} mA (hard limit)
+                      </div>
+                    ) : null}
+
+                    <button
+                      type="button"
+                      className="btn btn-success btn-sm ml-auto"
+                      disabled={applyDisabled}
+                      onClick={() => {
+                        applyMutation.reset();
+                        applyMutation.mutate({ tab: "pps" });
+                      }}
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {validationHint ? (
+                <div className="mt-3 text-xs text-base-content/60">
+                  {validationHint}
+                </div>
+              ) : null}
+
+              {pd?.apply.last ? (
+                <div className="mt-4 text-xs text-base-content/60">
+                  Last apply: {pd.apply.last.code} · at {pd.apply.last.at_ms} ms
+                </div>
+              ) : (
+                <div className="mt-4 text-xs text-base-content/60">
+                  Last apply: none
+                </div>
+              )}
+            </section>
+          </div>
+        </div>
       </section>
     </PageContainer>
   );
