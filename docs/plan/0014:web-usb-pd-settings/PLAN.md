@@ -161,6 +161,7 @@
   - 展示 Attach 状态、合同电压/电流（unknown 时明确显示未知）；
   - 全量展示 Fixed PDO 与 PPS APDO 列表（含 object position、能力摘要）；
   - 展示“已保存配置”（Saved）与“当前合同”（Contract/Active）并区分两者。
+  - **未 attach/未就绪时不视为错误**：`GET /api/v1/pd` 仍返回 200，页面显示 `DETACHED`（或 `unknown`），不把“未插 PD 电源”误报成设备异常。
 - 写（Write path）：
   - Fixed：用户显式选择目标 PDO（object position）与 Ireq；
   - PPS：用户显式选择目标 APDO（object position）与目标电压/电流；
@@ -209,6 +210,7 @@
   - `409 CONFLICT`（例如正在协商/忙）
   - `400 INVALID_REQUEST`
   - `404 UNSUPPORTED_OPERATION`（端点不存在/未启用）：视为“固件不支持 PD 设置”
+  - `409 NOT_ATTACHED`（未 attach / PD 状态不可用）：视为“当前不可 Apply”，但不影响读取页面展示。
 
 ## 验收标准（Acceptance Criteria）
 

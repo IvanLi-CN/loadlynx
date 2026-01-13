@@ -351,10 +351,13 @@ function createInitialPd(baseUrl: string): PdView | null {
     { pos: 4, min_mv: 5_000, max_mv: 11_000, max_ma: 2_000 },
   ];
 
+  const detached =
+    normalized.includes("detached") || normalized.includes("not-attached");
+
   return {
-    attached: true,
-    contract_mv: 9_000,
-    contract_ma: 2_000,
+    attached: !detached,
+    contract_mv: detached ? null : 9_000,
+    contract_ma: detached ? null : 2_000,
     fixed_pdos,
     pps_pdos,
     saved: {

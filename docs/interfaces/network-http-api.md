@@ -475,11 +475,20 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 - `fixed_pdos[].pos` 与 `pps_pdos[].pos` 均为 **object position（1-based）**；若模拟板能力列表未携带 `pos`（旧格式），数字板以列表索引 `idx+1` 生成稳定的 `pos`。
 - `saved.target_mv` 在 `mode="pps"` 时表示 PPS 目标电压（mV）；在 `mode="fixed"` 时不参与协商（Fixed 的电压由所选 PDO 决定）。
+- `contract_mv` / `contract_ma` 在 `attached=false`（或合同未知）时为 `null`。
+
+可用性约定（重要）：
+
+- `GET /api/v1/pd` **不应因为 PD 未 attach 或状态尚未就绪而返回错误**。
+  - 当尚未收到 `PD_STATUS`（或 PD 未 attach）时，固件应返回 `200`，并设置：
+    - `attached=false`
+    - `contract_mv=null`、`contract_ma=null`
+    - `fixed_pdos=[]`、`pps_pdos=[]`（若暂无 Source 能力）
+  - 这样 Web UI 可以稳定显示 “DETACHED/未知能力”，而不是把“未插 PD 电源”误报成设备异常。
 
 - 错误：
   - `503 LINK_DOWN`：UART 链路不可用；
-  - `409 ANALOG_FAULTED`：模拟板故障；
-  - `503 UNAVAILABLE`：PD 状态未就绪（尚未收到 `PD_STATUS`）。
+  - `409 ANALOG_FAULTED`：模拟板故障。
 
 ### 3.6 `POST /api/v1/pd`
 
@@ -506,10 +515,11 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 - 典型错误：
   - `400 INVALID_REQUEST`：字段缺失/类型错误（例如 PPS 缺少 `target_mv`）；
-  - `409 NOT_ATTACHED`：PD 未 attach，拒绝 apply；
+  - `409 NOT_ATTACHED`：PD 未 attach（或 PD 状态不可用），拒绝 apply；
   - `422 LIMIT_VIOLATION`：`object_pos` 不存在于当前能力列表、`target_mv` 越界、或 `i_req_ma` 超过 Imax；
   - `503 LINK_DOWN`：UART 链路不可用；
-  - `503 UNAVAILABLE`：EEPROM 写入失败或 PD 状态未就绪。
+  - `503 ANALOG_NOT_READY`：模拟板未标定或未完成上电流程；
+  - `503 UNAVAILABLE`：EEPROM 写入失败。
 
 ### 3.7 `POST /api/v1/soft-reset`（预留）
 
