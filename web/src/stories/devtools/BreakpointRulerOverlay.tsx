@@ -129,8 +129,7 @@ export function BreakpointRulerOverlay() {
         className="fixed z-[10001] rounded-md border border-base-content/20 bg-base-100/90 px-3 py-2 text-left text-sm text-base-content shadow-sm backdrop-blur"
         style={{ left: position.x, top: position.y }}
       >
-        <button
-          type="button"
+        <div
           className="flex w-full items-start justify-between gap-3 cursor-move text-left"
           onPointerDown={(event) => {
             if (event.button !== 0) return;
@@ -143,11 +142,11 @@ export function BreakpointRulerOverlay() {
               offsetX: event.clientX - rect.x,
               offsetY: event.clientY - rect.y,
             };
-            (event.currentTarget as HTMLElement).setPointerCapture(
-              event.pointerId,
-            );
+            event.currentTarget.setPointerCapture(event.pointerId);
           }}
           style={{ touchAction: "none" }}
+          role="button"
+          tabIndex={0}
           aria-label="Drag breakpoint ruler"
           title="Drag to reposition"
         >
@@ -174,7 +173,7 @@ export function BreakpointRulerOverlay() {
           >
             ×{lineThickness}
           </button>
-        </button>
+        </div>
         <div className="mt-1 flex gap-2 font-mono text-xs text-base-content/70 select-none">
           <span>md: {BREAKPOINT_MD}</span>
           <span>lg: {BREAKPOINT_LG}</span>
