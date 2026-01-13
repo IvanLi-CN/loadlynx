@@ -23,7 +23,6 @@
 - `待设计`：范围/约束/验收标准尚未冻结，仍在补齐信息与决策。
 - `待实现`：计划已冻结，允许进入实现阶段（或进入 PM/DEV 交付流程）。
 - `部分完成（x/y）`：实现进行中；`y` 为该计划里定义的里程碑数，`x` 为已完成里程碑数（见该计划 `PLAN.md` 的 Milestones）。
-- `待验收`：实现已完成，等待按验收标准进行验证与确认。
 - `已完成`：该计划已完成（实现已落地或将随某个 PR 落地）；如需关联 PR 号，写在 Index 的 `Notes`（例如 `PR #123`）。
 - `作废`：不再推进（取消/价值不足/外部条件变化）。
 - `重新设计（#<id>）`：该计划被另一个计划取代；`#<id>` 指向新的计划编号。
@@ -32,7 +31,7 @@
 
 - `Last` 表示该计划**上一次“推进进度/口径”**的日期，用于快速发现长期未推进的计划。
 - 仅在以下情况更新 `Last`（不要因为改措辞/排版就更新）：
-  - `Status` 变化（例如 `待验收` → `已完成`）
+  - `Status` 变化（例如 `部分完成（2/3）` → `已完成`）
   - `Notes` 中写入/更新 PR 号（例如 `PR #123`）
   - `PLAN.md` 的里程碑勾选变化
   - 范围/验收标准冻结或发生实质变更
@@ -69,4 +68,4 @@
 | 0012 | Web：Responsive Drawer Sidebar（ConsoleLayout 导航） | 已完成 | `0012:web-responsive-drawer-sidebar/PLAN.md` | 2025-12-26 | - |
 | 0013 | USB‑PD 设置面板：Fixed PDO / PPS APDO（UI + UART 协议 + HTTP API） | 已完成 | `0013:usb-pd-pps-and-fixed-settings/PLAN.md` | 2026-01-12 | HIL: IP6557 + e‑marker |
 | 0014 | Web：USB‑PD 设置页（对接 /api/v1/pd） | 已完成 | `0014:web-usb-pd-settings/PLAN.md` | 2026-01-13 | HIL: PPS OK (9V@500mA) |
-| 0015 | 数字板：屏幕自动调暗与熄屏（背光省电） | 待实现 | `0015:auto-screen-dim-off/PLAN.md` | 2026-01-11 | - |
+| 0015 | 数字板：屏幕自动调暗与熄屏（背光省电） | 已完成 | `0015:auto-screen-dim-off/PLAN.md` | 2026-01-13 | HIL: verify 2min/5min + wake |
