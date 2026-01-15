@@ -165,7 +165,7 @@
 
 - `docs/assets/main-display/main-display-mock-cc.png` — pixel-level mock (CC active).
 - `docs/assets/main-display/main-display-mock-cv.png` — pixel-level mock (CV active).
-- `docs/assets/usb-pd-settings-panel-rendered/pd-settings-fixed.png` — USB‑PD Settings（Fixed）渲染 mock。
-- `docs/assets/usb-pd-settings-panel-rendered/pd-settings-pps.png` — USB‑PD Settings（PPS）渲染 mock。
-- `docs/assets/usb-pd-settings-panel-rendered/pd-settings-unavailable.png` — USB‑PD Settings（Unavailable）渲染 mock。
+- `docs/assets/usb-pd-settings-panel/pd-settings-fixed.png` — USB‑PD Settings（Fixed）渲染 mock。
+- `docs/assets/usb-pd-settings-panel/pd-settings-pps.png` — USB‑PD Settings（PPS）渲染 mock。
+- `docs/assets/usb-pd-settings-panel/pd-settings-unavailable.png` — USB‑PD Settings（Unavailable）渲染 mock。
 - `docs/assets/fonts/*.c` — raw UTFT fonts bundled for reproducible rendering.
