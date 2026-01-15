@@ -109,6 +109,7 @@
 ## 附：效果图位置
 
 - 资产目录：`docs/assets/usb-pd-settings-panel/`
+  - `pd-settings-pps-touch-available-area.png`（空白卡片：标出目标值编辑的可用区域）
   - `pd-settings-pps-touch-vreq.png`
   - `pd-settings-pps-touch-ireq.png`
   - `pd-settings-fixed-touch-ireq.png`
