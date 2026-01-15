@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PD Settings Touch Value Editor Mocks (#0016)</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        --bg: #0b111e;
+        --panel: #141d2f;
+        --text: #dfe7ff;
+        --muted: #899ec2;
+        --accent: #4cc9f0;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+          sans-serif;
+      }
+      main {
+        max-width: 980px;
+        margin: 24px auto 56px;
+        padding: 0 16px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 8px;
+        letter-spacing: 0.2px;
+      }
+      p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        line-height: 1.4;
+        font-size: 13px;
+      }
+      code {
+        background: rgba(255, 255, 255, 0.06);
+        padding: 2px 6px;
+        border-radius: 6px;
+        color: var(--text);
+      }
+      .grid {
+        margin-top: 16px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
+      @media (min-width: 920px) {
+        .grid {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      figure {
+        margin: 0;
+        padding: 12px;
+        background: rgba(255, 255, 255, 0.04);
+        border: 1px solid rgba(255, 255, 255, 0.06);
+        border-radius: 12px;
+      }
+      figcaption {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0 0 10px;
+      }
+      img {
+        display: block;
+        width: 320px;
+        height: 240px;
+        image-rendering: pixelated;
+        border-radius: 8px;
+        background: #000;
+      }
+      .hint {
+        margin-top: 12px;
+        padding: 10px 12px;
+        border: 1px dashed rgba(76, 201, 240, 0.35);
+        border-radius: 12px;
+        background: rgba(76, 201, 240, 0.05);
+        color: var(--muted);
+        font-size: 13px;
+      }
+      .hint b {
+        color: var(--text);
+      }
+    </style>
+    <script>
+      window.addEventListener("DOMContentLoaded", () => {
+        const ts = Date.now();
+        for (const img of document.querySelectorAll("img")) {
+          const url = new URL(img.src, window.location.href);
+          url.searchParams.set("ts", String(ts));
+          img.src = url.toString();
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <main>
+      <h1>PD Settings Touch Value Editor Mocks (#0016)</h1>
+      <p>
+        本页展示 #0016 的最新效果图（320×240）。实现阶段将按
+        <code>docs/plan/0016:pd-settings-touch-value-editor/PLAN.md</code>
+        的验收标准落地。
+      </p>
+      <div class="hint">
+        <b>注意：</b>若你用于校验“左右分栏比例/右栏内容宽度”的那张标注图不在工作区，
+        请把文件（例如 <code>codex-clipboard-Wyjbq8.png</code>）再发一次或放到仓库，
+        我会用它反推最终像素契约并更新这三张图。
+      </div>
+      <div class="grid">
+        <figure>
+          <figcaption>PPS · Vreq focused（触屏目标值编辑）</figcaption>
+          <img
+            alt="PPS · Vreq focused"
+            src="../../assets/usb-pd-settings-panel/pd-settings-pps-touch-vreq.png"
+          />
+        </figure>
+        <figure>
+          <figcaption>PPS · Ireq focused（Ireq 以 A 显示，2 位小数）</figcaption>
+          <img
+            alt="PPS · Ireq focused"
+            src="../../assets/usb-pd-settings-panel/pd-settings-pps-touch-ireq.png"
+          />
+        </figure>
+        <figure>
+          <figcaption>Fixed · Ireq focused</figcaption>
+          <img
+            alt="Fixed · Ireq focused"
+            src="../../assets/usb-pd-settings-panel/pd-settings-fixed-touch-ireq.png"
+          />
+        </figure>
+      </div>
+    </main>
+  </body>
+</html>
