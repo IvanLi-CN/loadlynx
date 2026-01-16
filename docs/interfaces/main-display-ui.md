@@ -60,6 +60,7 @@
 | Control row | 主界面 Preset 概览与入口：左侧两行 `M#` / `CC|CV`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更） | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；分别用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；交互语义详见 `docs/plan/0005:on-device-preset-ui/PLAN.md`。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
+| PD button | 两行：`<line1>/<line2>`（`/` 代表换行）；入口：短按进入 USB‑PD settings | SmallFont | 上行/边框按 PD 状态色；下行在不可用/缺失时灰显 | 圆角矩形 `(198,118)-(277,145)`；文案规则见 `docs/plan/0019:dashboard-pd-button-label/PLAN.md`：Detach→`PD/Detach`；PPS→`PPS/20.0V`；Fixed→`PD/20V`；缺失→`*/N/A` |
 | Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `LNK` / `UVLO` / `OCF` / `OVP` / `OTP` / `FLT 0x12345678`） | SmallFont | 默认 `#DFE7FF`；**Status line #5 在异常时闪烁（`#FF5252` ⇄ `#FFFFFF`）** | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
 
 ### Status line #5：状态文案（对外缩写，禁止 debug 噪声）
@@ -90,6 +91,44 @@
 - 主界面的 target 摘要文本固定为 7 字符：`DD.dddU`（例如 `12.000A`、`24.500V`）。
 - 数值部分 `DD.ddd` 使用 `SetpointFont`（10×18）绘制；单位 `U` 仍使用 `SmallFont`（8×12）绘制并紧贴其右侧。
 - 主界面不显示“选中位高亮”（避免被误认为可点选子区域）。
+
+### PD button：两行文案与示例（详见 #0019）
+
+![Dashboard PD button label states](../assets/main-display/pd-button/dashboard-pd-button-states.png)
+
+#### Placement（像素契约）
+
+- Button rect：`(198,118)-(277,145)`（含边框），圆角半径 `6 px`。
+- Border thickness：`1 px`（内缩后填充内层）。
+- 与右侧 Power button 的水平间距：`10 px`（见 `PD_BUTTON_GAP_TO_POWER`）。
+- 触控命中区域（Hit box）：与 button rect 一致。
+
+#### Color（颜色语义）
+
+- Base fill：`#1C2638`；Standby border：`#1C2A3F`。
+- Accent（由 PD 状态决定，上行文本 + 非 Standby 边框）：
+  - Standby：`#555F75`
+  - Negotiating：`#FFB347`
+  - Active：`#4CC9F0`
+  - Error：`#FF5252`
+- 下行文本颜色：
+  - 电压值：`accent` 或（不可用时）`#555F75`
+  - `Detach` / `N/A`：固定 `#555F75`（避免与“电压值”混淆）
+
+#### Typography & layout（字体与排版）
+
+- Font：`SmallFont`（8×12），字符间距 `0`，两行均水平居中。
+- 垂直布局（与固件一致，用轻微重叠换取 2–3 px 的视觉行距）：
+  - `pad_top = 3`
+  - `line1_y = rect.top + pad_top`
+  - `line2_y = line1_y + 11`
+
+#### Copy rules（文案规则；`/` 代表换行）
+
+- Detach（未连接到 PD Source / Unattached）：`PD/Detach`（无论配置为 Fixed/PPS 都显示该文案）。
+- Fixed（合同值）：`PD/<V>V`（`<V>` 为整数，例如 `PD/20V`）。
+- PPS（合同值）：`PPS/<V>V`（固定 1 位小数，例如 `PPS/20.0V`）。
+- 缺失值：`PD/N/A` 或 `PPS/N/A`（第二行灰显）。
 
 ## Color Palette
 
