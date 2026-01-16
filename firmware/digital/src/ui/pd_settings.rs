@@ -107,7 +107,8 @@ const APPLY_RIGHT: i32 = 313;
 // Target value editor (tap + swipe + encoder).
 const VALUE_PILL_W: i32 = 63;
 const VALUE_PILL_H: i32 = 21;
-const VALUE_PILL_RADIUS: i32 = 8;
+// Frozen mock uses a rounded-rect (not a full capsule).
+const VALUE_PILL_RADIUS: i32 = 6;
 const VALUE_PILL_RIGHT_PAD: i32 = 7;
 // Keep a small right padding so the unit doesn't visually touch the pill edge.
 const VALUE_PILL_TEXT_RIGHT_PAD: i32 = 8;
