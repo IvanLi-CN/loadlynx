@@ -70,3 +70,5 @@
 | 0014 | Web：USB‑PD 设置页（对接 /api/v1/pd） | 已完成 | `0014:web-usb-pd-settings/PLAN.md` | 2026-01-13 | HIL: PPS OK (9V@500mA) |
 | 0015 | 数字板：屏幕自动调暗与熄屏（背光省电） | 已完成 | `0015:auto-screen-dim-off/PLAN.md` | 2026-01-13 | HIL: verify 2min/5min + wake |
 | 0016 | PD 设置：触屏友好的目标值编辑（无 +/-；点击/滑动选位；旋钮调节） | 待实现 | `0016:pd-settings-touch-value-editor/PLAN.md` | 2026-01-15 | - |
+| 0017 | CP 模式：本机屏幕界面 + HTTP API | 待实现 | `0017:cp-mode-ui-http-api/PLAN.md` | 2026-01-16 | AC: tier B |
+| 0018 | Web：CP 模式控制页 | 待实现 | `0018:web-cp-mode-ui/PLAN.md` | 2026-01-16 | Entry: /$deviceId/cc |
