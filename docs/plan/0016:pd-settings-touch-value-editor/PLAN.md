@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Design: 已冻结（目标值 UI mocks 已确认；`DD.ddU` 对齐；含 20V 变体）
 - Created: 2026-01-14
 - Last: 2026-01-15
@@ -73,11 +73,9 @@
 
 > 说明：此处契约用于保证与主人的标注图一致的分栏比例。右栏宽度的定义为“**不含四周边距的内容区宽度**”；左右边距必须相等。
 
-- 分栏 divider：2px 宽（像素列精确坐标以标注图为准）。
-- 右栏内容区（不含 padding）：宽度必须与标注图一致。
-- 右栏 padding：左右边距必须相等（像素级一致）。
-
-当前缺口：主人用于标注比例的参考图（例如 `codex-clipboard-Wyjbq8.png`）未在工作区出现，无法反推最终像素坐标；在拿到标注图后，将把 divider/content/padding 坐标补齐并冻结到此处。
+- 分栏 divider：2px 宽，位于 `x=189..190`。
+- 右栏列起点：`x=190`；右栏卡片外边距：左右均为 `8px`（`CARD_LEFT=198`、`CARD_RIGHT=312`）。
+- 右栏内容不得溢出裁切；底部 `Back/Apply` 保持可见。
 
 ### 7.2 目标值区域效果图（Mocks）
 
@@ -101,11 +99,11 @@
 
 ## 8) 开放问题（需要主人决策）
 
-1. `Vreq` 编辑位允许集合是否固定为 `{Ones, Tenths, Hundredths}`（不允许 `Thousandths`）？
-2. `Ireq` 在 `0.05A` 步长下，是否也允许选择 `Hundredths` 位（但只能 0/5 变化），还是只允许 `{Ones, Tenths}`？
-3. 等宽目标值是否需要固定宽度（例如总是显示前导 0：`09.00V`、`02.00A`）？
-4. 目标值区域的“高亮”形态：仅外框高亮，还是同时对当前 digit 做下划线/反色？
-5. 请提供/放入工作区“右栏宽度标注图”（例如 `codex-clipboard-Wyjbq8.png`）或直接给出：divider 的 `x` 坐标与右栏内容区宽度（不含边距）。我会据此冻结 7.1 的像素契约并重绘效果图。
+1. `Vreq` 编辑位集合：`{Ones, Tenths, Hundredths}`。
+2. `Ireq` 在 `0.05A` 步长下允许选择 `Hundredths`（数字位只会按 `0/5` 变化）。
+3. 数字宽度：保留 2 位整数位宽度；当 `<10` 时十位不画（视觉上无前导 0）。
+4. 高亮形态：外框高亮 + 当前 digit 下划线。
+5. 像素契约已按实现冻结到 7.1（无需额外标注图）。
 
 ## 9) 假设（Assumptions；待主人确认）
 
@@ -114,9 +112,9 @@
 
 ## Milestones
 
-- [ ] 冻结交互口径（编辑位集合/手势规则/前导 0 策略）
-- [ ] 冻结布局像素契约（divider/右栏内容宽度/边距）
-- [ ] 产出并确认 3 张效果图（PPS Vreq focused / PPS Ireq focused / Fixed Ireq focused）
+- [x] 冻结交互口径（编辑位集合/手势规则/前导 0 策略）
+- [x] 冻结布局像素契约（divider/右栏内容宽度/边距）
+- [x] 产出并确认 3 张效果图（PPS Vreq focused / PPS Ireq focused / Fixed Ireq focused）
 
 ## 附：效果图位置
 
@@ -125,4 +123,7 @@
   - `pd-settings-pps-touch-vreq.png`
   - `pd-settings-pps-touch-ireq.png`
   - `pd-settings-fixed-touch-ireq.png`
-- 预览页：`docs/plan/0016:pd-settings-touch-value-editor/preview.html`（用 Playwright 打开）
+- 预览页：
+  - `docs/plan/0016:pd-settings-touch-value-editor/preview.html`（冻结设计图）
+  - `docs/plan/0016:pd-settings-touch-value-editor/preview-rendered.html`（当前代码渲染）
+  - `docs/plan/0016:pd-settings-touch-value-editor/preview-compare.html`（Design vs Rendered 对照）

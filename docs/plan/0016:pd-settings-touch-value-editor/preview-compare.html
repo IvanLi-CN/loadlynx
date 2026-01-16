@@ -1,0 +1,193 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>PD Settings Touch Value Editor — Design vs Rendered (#0016)</title>
+    <link rel="icon" href="data:," />
+    <style>
+      :root {
+        --bg: #0b111e;
+        --panel: rgba(255, 255, 255, 0.04);
+        --panelBorder: rgba(255, 255, 255, 0.06);
+        --text: #dfe7ff;
+        --muted: #899ec2;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: var(--bg);
+        color: var(--text);
+        font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial,
+          sans-serif;
+      }
+      main {
+        max-width: 1100px;
+        margin: 24px auto 56px;
+        padding: 0 16px;
+      }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 8px;
+        letter-spacing: 0.2px;
+      }
+      p {
+        margin: 8px 0 0;
+        color: var(--muted);
+        line-height: 1.4;
+        font-size: 13px;
+      }
+      code {
+        background: rgba(255, 255, 255, 0.06);
+        padding: 2px 6px;
+        border-radius: 6px;
+        color: var(--text);
+      }
+      .grid {
+        margin-top: 16px;
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 14px;
+      }
+      figure {
+        margin: 0;
+        padding: 12px;
+        background: var(--panel);
+        border: 1px solid var(--panelBorder);
+        border-radius: 12px;
+      }
+      figcaption {
+        font-size: 13px;
+        color: var(--muted);
+        margin: 0 0 10px;
+      }
+      .pair {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 12px;
+      }
+      @media (min-width: 940px) {
+        .pair {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      .card {
+        display: grid;
+        gap: 8px;
+      }
+      .label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      img {
+        display: block;
+        width: 320px;
+        height: 240px;
+        image-rendering: pixelated;
+        border-radius: 8px;
+        background: #000;
+      }
+    </style>
+    <script>
+      window.addEventListener("DOMContentLoaded", () => {
+        const ts = Date.now();
+        for (const img of document.querySelectorAll("img")) {
+          const url = new URL(img.src, window.location.href);
+          url.searchParams.set("ts", String(ts));
+          img.src = url.toString();
+        }
+      });
+    </script>
+  </head>
+  <body>
+    <main>
+      <h1>PD Settings Touch Value Editor — Design vs Rendered (#0016)</h1>
+      <p>
+        左侧为冻结设计图：<code>docs/assets/usb-pd-settings-panel/</code>；右侧为当前代码渲染：<code>docs/assets/usb-pd-settings-panel-rendered/</code>。
+      </p>
+      <div class="grid">
+        <figure>
+          <figcaption>PPS · Vreq focused</figcaption>
+          <div class="pair">
+            <div class="card">
+              <div class="label">Design</div>
+              <img
+                alt="Design — PPS · Vreq focused"
+                src="../../assets/usb-pd-settings-panel/pd-settings-pps-touch-vreq.png"
+              />
+            </div>
+            <div class="card">
+              <div class="label">Rendered</div>
+              <img
+                alt="Rendered — PPS · Vreq focused"
+                src="../../assets/usb-pd-settings-panel-rendered/pd-settings-pps-touch-vreq.png"
+              />
+            </div>
+          </div>
+        </figure>
+
+        <figure>
+          <figcaption>PPS · Ireq focused</figcaption>
+          <div class="pair">
+            <div class="card">
+              <div class="label">Design</div>
+              <img
+                alt="Design — PPS · Ireq focused"
+                src="../../assets/usb-pd-settings-panel/pd-settings-pps-touch-ireq.png"
+              />
+            </div>
+            <div class="card">
+              <div class="label">Rendered</div>
+              <img
+                alt="Rendered — PPS · Ireq focused"
+                src="../../assets/usb-pd-settings-panel-rendered/pd-settings-pps-touch-ireq.png"
+              />
+            </div>
+          </div>
+        </figure>
+
+        <figure>
+          <figcaption>Fixed · Ireq focused</figcaption>
+          <div class="pair">
+            <div class="card">
+              <div class="label">Design</div>
+              <img
+                alt="Design — Fixed · Ireq focused"
+                src="../../assets/usb-pd-settings-panel/pd-settings-fixed-touch-ireq.png"
+              />
+            </div>
+            <div class="card">
+              <div class="label">Rendered</div>
+              <img
+                alt="Rendered — Fixed · Ireq focused"
+                src="../../assets/usb-pd-settings-panel-rendered/pd-settings-fixed-touch-ireq.png"
+              />
+            </div>
+          </div>
+        </figure>
+
+        <figure>
+          <figcaption>PPS · Vreq focused @ 20V</figcaption>
+          <div class="pair">
+            <div class="card">
+              <div class="label">Design</div>
+              <img
+                alt="Design — PPS · Vreq focused @ 20V"
+                src="../../assets/usb-pd-settings-panel/pd-settings-pps-touch-vreq-20v.png"
+              />
+            </div>
+            <div class="card">
+              <div class="label">Rendered</div>
+              <img
+                alt="Rendered — PPS · Vreq focused @ 20V"
+                src="../../assets/usb-pd-settings-panel-rendered/pd-settings-pps-touch-vreq-20v.png"
+              />
+            </div>
+          </div>
+        </figure>
+      </div>
+    </main>
+  </body>
+</html>
+

@@ -223,6 +223,7 @@ pub struct ControlState {
     /// Draft PD policy edited in the PD settings UI; copied to `pd_saved` on Apply.
     pub pd_draft: PdConfig,
     pub pd_settings_focus: PdSettingsFocus,
+    pub pd_settings_digit: AdjustDigit,
 }
 
 impl ControlState {
@@ -241,6 +242,7 @@ impl ControlState {
             pd_saved: pd,
             pd_draft: pd,
             pd_settings_focus: PdSettingsFocus::DEFAULT,
+            pd_settings_digit: AdjustDigit::Tenths,
         }
     }
 

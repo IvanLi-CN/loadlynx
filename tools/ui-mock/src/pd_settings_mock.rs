@@ -106,13 +106,14 @@ fn pps_list_missing_selected() -> PpsPdoList {
 }
 
 pub fn render_pd_settings_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let out_dir = repo_root.join("docs/assets/usb-pd-settings-panel-rendered");
+    let out_dir = repo_root.join("tmp/ui-preview/pd-settings-touch-value-editor");
 
     // Fixed
     let fixed = ui::pd_settings::PdSettingsVm {
         attached: true,
         mode: crate::control::PdMode::Fixed,
         focus: crate::control::PdSettingsFocus::None,
+        focused_digit: crate::control::AdjustDigit::Tenths,
         fixed_pdos: fixed_list(),
         pps_pdos: PpsPdoList::new(),
         contract_mv: 20_000,
@@ -126,11 +127,22 @@ pub fn render_pd_settings_mocks(repo_root: &Path) -> Result<(), Box<dyn std::err
     };
     render_panel(&out_dir.join("pd-settings-fixed.png"), &fixed)?;
 
+    let fixed_ireq = ui::pd_settings::PdSettingsVm {
+        focus: crate::control::PdSettingsFocus::Ireq,
+        focused_digit: crate::control::AdjustDigit::Hundredths,
+        ..fixed.clone()
+    };
+    render_panel(
+        &out_dir.join("pd-settings-fixed-touch-ireq.png"),
+        &fixed_ireq,
+    )?;
+
     // PPS
     let pps = ui::pd_settings::PdSettingsVm {
         attached: true,
         mode: crate::control::PdMode::Pps,
         focus: crate::control::PdSettingsFocus::None,
+        focused_digit: crate::control::AdjustDigit::Tenths,
         fixed_pdos: FixedPdoList::new(),
         pps_pdos: pps_list_full(),
         contract_mv: 9_000,
@@ -144,13 +156,37 @@ pub fn render_pd_settings_mocks(repo_root: &Path) -> Result<(), Box<dyn std::err
     };
     render_panel(&out_dir.join("pd-settings-pps.png"), &pps)?;
 
-    // PPS (Ireq selected)
-    let pps_ireq_selected = ui::pd_settings::PdSettingsVm {
-        focus: crate::control::PdSettingsFocus::Ireq,
+    // PPS (Vreq selected)
+    let pps_vreq_selected = ui::pd_settings::PdSettingsVm {
+        focus: crate::control::PdSettingsFocus::Vreq,
+        focused_digit: crate::control::AdjustDigit::Tenths,
         ..pps.clone()
     };
     render_panel(
-        &out_dir.join("pd-settings-pps-ireq-selected.png"),
+        &out_dir.join("pd-settings-pps-touch-vreq.png"),
+        &pps_vreq_selected,
+    )?;
+
+    // PPS (Vreq selected @ 20V)
+    let pps_vreq_selected_20v = ui::pd_settings::PdSettingsVm {
+        focus: crate::control::PdSettingsFocus::Vreq,
+        focused_digit: crate::control::AdjustDigit::Ones,
+        pps_target_mv: 20_000,
+        ..pps.clone()
+    };
+    render_panel(
+        &out_dir.join("pd-settings-pps-touch-vreq-20v.png"),
+        &pps_vreq_selected_20v,
+    )?;
+
+    // PPS (Ireq selected)
+    let pps_ireq_selected = ui::pd_settings::PdSettingsVm {
+        focus: crate::control::PdSettingsFocus::Ireq,
+        focused_digit: crate::control::AdjustDigit::Hundredths,
+        ..pps.clone()
+    };
+    render_panel(
+        &out_dir.join("pd-settings-pps-touch-ireq.png"),
         &pps_ireq_selected,
     )?;
 
@@ -159,6 +195,7 @@ pub fn render_pd_settings_mocks(repo_root: &Path) -> Result<(), Box<dyn std::err
         attached: true,
         mode: crate::control::PdMode::Pps,
         focus: crate::control::PdSettingsFocus::None,
+        focused_digit: crate::control::AdjustDigit::Tenths,
         fixed_pdos: FixedPdoList::new(),
         pps_pdos: pps_list_missing_selected(),
         contract_mv: 5_000,
