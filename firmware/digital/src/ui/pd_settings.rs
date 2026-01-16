@@ -12,7 +12,7 @@ use u8g2_fonts::FontRenderer;
 use u8g2_fonts::fonts;
 use u8g2_fonts::types::{FontColor, HorizontalAlignment, VerticalPosition};
 
-use crate::control::{PdMode, PdSettingsFocus};
+use crate::control::{AdjustDigit, PdMode, PdSettingsFocus};
 use crate::{DISPLAY_HEIGHT as PHYS_HEIGHT, DISPLAY_WIDTH as PHYS_WIDTH};
 
 use super::{Canvas, Rect, rgb};
@@ -91,9 +91,10 @@ const SELECTED_SUMMARY_BOTTOM: i32 = 134;
 const CARD_RADIUS: i32 = 10;
 
 // Controls area (outside the selected-summary card).
-const CONTROL_ROW_VREQ_Y: i32 = SELECTED_CARD_TOP + 69; // 147
-const CONTROL_ROW_IREQ_FIXED_Y: i32 = SELECTED_CARD_TOP + 69; // 147
-const CONTROL_ROW_IREQ_PPS_Y: i32 = SELECTED_CARD_TOP + 105; // 183
+// NOTE: These are pixel-matched to the frozen mocks in `docs/assets/usb-pd-settings-panel/*.png`.
+const CONTROL_ROW_VREQ_Y: i32 = 144;
+const CONTROL_ROW_IREQ_FIXED_Y: i32 = 156;
+const CONTROL_ROW_IREQ_PPS_Y: i32 = 170;
 
 const BTN_TOP: i32 = 214;
 const BTN_BOTTOM: i32 = 235;
@@ -103,14 +104,14 @@ const APPLY_LEFT: i32 = 257;
 const APPLY_RIGHT: i32 = 313;
 
 // Controls sizing/placement matches `docs/assets/usb-pd-settings-panel/*.png`.
-// +/- buttons are slightly taller than the value field; the focused field draws a 2px accent outline.
-const VALUE_BTN_W: i32 = 24;
-const VALUE_BTN_H: i32 = 22;
-const VALUE_BTN_RADIUS: i32 = 6;
-// The value field in the design mock is a small-radius rounded rectangle (R≈2–3px), not a pill.
-const VALUE_FIELD_RADIUS: i32 = 3;
-const VALUE_FIELD_GAP_LEFT: i32 = 3;
-const VALUE_FIELD_GAP_RIGHT: i32 = 3;
+// Target value editor (tap + swipe + encoder).
+const VALUE_PILL_W: i32 = 63;
+const VALUE_PILL_H: i32 = 21;
+const VALUE_PILL_RADIUS: i32 = 8;
+const VALUE_PILL_RIGHT_PAD: i32 = 7;
+// Keep a small right padding so the unit doesn't visually touch the pill edge.
+const VALUE_PILL_TEXT_RIGHT_PAD: i32 = 8;
+const VALUE_PILL_TEXT_MIN_LEFT_PAD: i32 = 0;
 
 // Frozen palette sampled from `docs/assets/usb-pd-settings-panel/*.png`.
 const COLOR_TOP_BG: u32 = 0x1c2638;
@@ -128,7 +129,10 @@ const COLOR_TEXT_DIM: u32 = 0x899ec2;
 const COLOR_TEXT_LABEL: u32 = 0x899ec2;
 const COLOR_TEXT_DISABLED: u32 = 0x4f5d7b;
 const COLOR_TEXT_VALUE: u32 = 0xdfe7ff;
+// Unit glyph color sampled from the frozen mock (darker than label text).
+const COLOR_TEXT_UNIT: u32 = 0x666d7f;
 const COLOR_ACCENT_TEXT: u32 = 0x47badf;
+const COLOR_SETPOINT_SHADOW: u32 = 0xafb6cc;
 const COLOR_ACCENT: u32 = 0x367d9a;
 const COLOR_ACCENT_DARK: u32 = 0x2e718c;
 const COLOR_ACCENT_INNER: u32 = 0x347894;
@@ -142,6 +146,13 @@ const COLOR_WARN: u32 = 0xff5252;
 
 const VREQ_STEP_TEXT: &str = "20mV";
 const IREQ_STEP_TEXT: &str = "50mA";
+const VALUE_UNIT_GAP: i32 = 1;
+
+// Value pill: sampled from `docs/assets/usb-pd-settings-panel/*.png`.
+const COLOR_VALUE_PILL_FOCUSED_OUTER: u32 = 0x4cc9f0;
+const COLOR_VALUE_PILL_FOCUSED_INNER: u32 = 0x0f1d2b;
+const COLOR_VALUE_PILL_IDLE_OUTER: u32 = 0x243257;
+const COLOR_VALUE_PILL_IDLE_INNER: u32 = 0x0d1322;
 
 const SELECTED_SUM_LINE1_Y_OFF: i32 = 22;
 // Slightly increase line spacing in the selected-summary card to match the frozen mock.
@@ -161,6 +172,7 @@ pub struct PdSettingsVm {
     pub attached: bool,
     pub mode: PdMode,
     pub focus: PdSettingsFocus,
+    pub focused_digit: AdjustDigit,
     pub fixed_pdos: FixedPdoList,
     pub pps_pdos: PpsPdoList,
     pub contract_mv: u32,
@@ -178,10 +190,8 @@ pub enum PdSettingsHit {
     ModeFixed,
     ModePps,
     ListRow(usize),
-    VreqMinus,
-    VreqPlus,
-    IreqMinus,
-    IreqPlus,
+    VreqValue,
+    IreqValue,
     Back,
     Apply,
 }
@@ -268,30 +278,12 @@ pub fn hit_test_pd_settings(x: i32, y: i32, vm: &PdSettingsVm) -> Option<PdSetti
         return Some(PdSettingsHit::Apply);
     }
 
-    // +/- controls live in the selected card.
-    let controls = controls_layout(vm.mode);
-    if let Some((v_minus, v_plus, i_minus, i_plus)) = controls {
-        if hit_in_rect(x, y, v_minus) {
-            return Some(PdSettingsHit::VreqMinus);
-        }
-        if hit_in_rect(x, y, v_plus) {
-            return Some(PdSettingsHit::VreqPlus);
-        }
-        if hit_in_rect(x, y, i_minus) {
-            return Some(PdSettingsHit::IreqMinus);
-        }
-        if hit_in_rect(x, y, i_plus) {
-            return Some(PdSettingsHit::IreqPlus);
-        }
-    } else {
-        // Fixed-only: only Ireq buttons.
-        let (_v_minus, _v_plus, i_minus, i_plus) = fixed_controls_layout();
-        if hit_in_rect(x, y, i_minus) {
-            return Some(PdSettingsHit::IreqMinus);
-        }
-        if hit_in_rect(x, y, i_plus) {
-            return Some(PdSettingsHit::IreqPlus);
-        }
+    // Target value editor areas (tap to focus/select digit).
+    if vm.mode == PdMode::Pps && hit_in_rect(x, y, vreq_value_rect()) {
+        return Some(PdSettingsHit::VreqValue);
+    }
+    if hit_in_rect(x, y, ireq_value_rect(vm.mode)) {
+        return Some(PdSettingsHit::IreqValue);
     }
 
     // List rows.
@@ -564,39 +556,34 @@ fn draw_selected_card(canvas: &mut Canvas, vm: &PdSettingsVm) {
     } else {
         match vm.mode {
             PdMode::Fixed => {
-                let (i_minus, i_plus) = fixed_i_buttons();
-                draw_value_row(
+                draw_target_value_row(
                     canvas,
-                    "Ireq",
-                    Some(IREQ_STEP_TEXT),
-                    format_ma(vm.i_req_ma).as_str(),
-                    i_minus,
-                    i_plus,
+                    PdSettingsFocus::Ireq,
+                    format_req_a_2dp_digits(vm.i_req_ma).as_str(),
+                    'A',
+                    ireq_value_rect(PdMode::Fixed),
                     vm.focus == PdSettingsFocus::Ireq,
-                    vm.apply_enabled,
+                    vm.focused_digit,
                 );
             }
             PdMode::Pps => {
-                let (v_minus, v_plus, i_minus, i_plus) = pps_value_buttons();
-                draw_value_row(
+                draw_target_value_row(
                     canvas,
-                    "Vreq",
-                    Some(VREQ_STEP_TEXT),
-                    format_v_2dp(vm.pps_target_mv).as_str(),
-                    v_minus,
-                    v_plus,
+                    PdSettingsFocus::Vreq,
+                    format_req_v_2dp_digits(vm.pps_target_mv).as_str(),
+                    'V',
+                    vreq_value_rect(),
                     vm.focus == PdSettingsFocus::Vreq,
-                    vm.apply_enabled,
+                    vm.focused_digit,
                 );
-                draw_value_row(
+                draw_target_value_row(
                     canvas,
-                    "Ireq",
-                    Some(IREQ_STEP_TEXT),
-                    format_ma(vm.i_req_ma).as_str(),
-                    i_minus,
-                    i_plus,
+                    PdSettingsFocus::Ireq,
+                    format_req_a_2dp_digits(vm.i_req_ma).as_str(),
+                    'A',
+                    ireq_value_rect(PdMode::Pps),
                     vm.focus == PdSettingsFocus::Ireq,
-                    vm.apply_enabled,
+                    vm.focused_digit,
                 );
             }
         }
@@ -670,94 +657,333 @@ fn draw_button_apply(canvas: &mut Canvas, rect: Rect, label: &str, enabled: bool
     draw_centered_small_bold(canvas, label, rect, text_color);
 }
 
-fn draw_value_row(
+fn draw_target_value_row(
     canvas: &mut Canvas,
-    label: &str,
-    step: Option<&str>,
-    value: &str,
-    minus: Rect,
-    plus: Rect,
+    field: PdSettingsFocus,
+    digits: &str,
+    unit: char,
+    value_pill: Rect,
     focused: bool,
-    enabled: bool,
+    focused_digit: AdjustDigit,
 ) {
     let label_x = CARD_LEFT;
-    // Match the frozen mock: keep the label visually closer to the value row.
-    let label_y = minus.top - text_height("A", &FONT_REGULAR);
-    let label_color = rgb(if focused {
-        COLOR_ACCENT_TEXT
-    } else {
-        COLOR_TEXT_LABEL
-    });
-    draw_label_with_step(
+    let label_y = value_pill.top;
+    let label = match field {
+        PdSettingsFocus::Vreq => "Vreq",
+        PdSettingsFocus::Ireq => "Ireq",
+        PdSettingsFocus::None => "",
+    };
+    let step = match field {
+        PdSettingsFocus::Vreq => VREQ_STEP_TEXT,
+        PdSettingsFocus::Ireq => IREQ_STEP_TEXT,
+        PdSettingsFocus::None => "",
+    };
+
+    draw_label_two_line(
         canvas,
         label_x,
         label_y,
         label,
         step,
-        label_color,
-        CARD_RIGHT - 10,
+        rgb(COLOR_TEXT_VALUE),
+        rgb(COLOR_TEXT_LABEL),
+        value_pill.left - 4,
     );
 
-    draw_value_button(canvas, minus, "-", enabled);
-    draw_value_button(canvas, plus, "+", enabled);
-
-    // Centered value between +/-.
-    let mid_left = minus.right + VALUE_FIELD_GAP_LEFT;
-    let mid_right = plus.left - VALUE_FIELD_GAP_RIGHT;
-    // The value field is slightly shorter than the +/- buttons in the frozen mocks.
-    let field = Rect::new(mid_left, minus.top + 1, mid_right, minus.bottom - 1);
-    draw_value_field(canvas, field, enabled, focused);
-    let text_rect = if enabled && focused {
-        // Keep text inside the 2px focus ring.
-        Rect::new(
-            field.left + 2,
-            field.top + 2,
-            field.right - 2,
-            field.bottom - 2,
-        )
-    } else {
-        field
-    };
-    draw_centered_small_bold(canvas, value, text_rect, rgb(COLOR_TEXT_VALUE));
+    draw_value_pill(canvas, value_pill, focused);
+    draw_value_pill_text(canvas, value_pill, digits, unit, focused, focused_digit);
 }
 
-fn draw_value_button(canvas: &mut Canvas, rect: Rect, label: &str, enabled: bool) {
-    let fill = rgb(if enabled {
-        COLOR_INSET_BG
-    } else {
-        COLOR_ROW_BG
-    });
-    draw_round_rect_2px_border(
-        canvas,
-        rect,
-        VALUE_BTN_RADIUS,
-        rgb(COLOR_DIVIDER_MID),
-        rgb(COLOR_BORDER_INNER),
-        fill,
-    );
-    let color = if enabled {
-        rgb(COLOR_TEXT_VALUE)
-    } else {
-        rgb(COLOR_TEXT_DIM)
-    };
-    draw_centered_small_bold(canvas, label, rect, color);
-}
-
-fn draw_value_field(canvas: &mut Canvas, rect: Rect, enabled: bool, focused: bool) {
-    let fill = rgb(if enabled { COLOR_TOP_BG } else { COLOR_ROW_BG });
-    if enabled && focused {
-        // Focused value fields must be a small-radius rounded rectangle (R≈2–3px) with crisp
-        // corners (no anti-alias), matching the on-device mock look.
+fn draw_value_pill(canvas: &mut Canvas, rect: Rect, focused: bool) {
+    if focused {
         draw_round_rect_2px_border_hard(
             canvas,
             rect,
-            VALUE_FIELD_RADIUS,
-            rgb(COLOR_ACCENT),
-            rgb(COLOR_ACCENT_INNER),
-            fill,
+            VALUE_PILL_RADIUS,
+            rgb(COLOR_VALUE_PILL_FOCUSED_OUTER),
+            rgb(COLOR_VALUE_PILL_FOCUSED_INNER),
+            rgb(COLOR_RIGHT_BG),
         );
     } else {
-        canvas.fill_round_rect(rect, VALUE_FIELD_RADIUS, fill);
+        draw_round_rect_2px_border_hard(
+            canvas,
+            rect,
+            VALUE_PILL_RADIUS,
+            rgb(COLOR_VALUE_PILL_IDLE_OUTER),
+            rgb(COLOR_VALUE_PILL_IDLE_INNER),
+            rgb(COLOR_RIGHT_BG),
+        );
+    }
+}
+
+fn draw_value_pill_text(
+    canvas: &mut Canvas,
+    rect: Rect,
+    digits: &str,
+    unit: char,
+    focused: bool,
+    focused_digit: AdjustDigit,
+) {
+    let inner = if focused {
+        Rect::new(rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom - 2)
+    } else {
+        Rect::new(rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom - 2)
+    };
+
+    let cell_w = SETPOINT_CELL_W as i32;
+    let num_w = (digits.chars().count() as i32) * cell_w;
+
+    let mut unit_buf = [0u8; 4];
+    let unit_s = unit.encode_utf8(&mut unit_buf);
+    // Unit in the frozen mock is not the UTFT SmallFont; use the regular UI font
+    // to get the correct glyph width and tone.
+    // Use a slightly conservative width here: the font's advance can be narrower
+    // than its rendered bounds (especially with AA), which would otherwise let the
+    // glyph spill into the pill border.
+    let unit_w = text_bbox_scaled(unit_s, &FONT_REGULAR)
+        .map(|(w, _)| w)
+        .unwrap_or_else(|| text_width(unit_s));
+    let total_w = num_w + VALUE_UNIT_GAP + unit_w;
+
+    let num_x0 = (inner.right - VALUE_PILL_TEXT_RIGHT_PAD - total_w)
+        .max(inner.left + VALUE_PILL_TEXT_MIN_LEFT_PAD);
+
+    // The frozen PD settings mocks use the setpoint digits at a slightly smaller optical size
+    // than the raw 10x18 bitmap, so they fit within the pill's 2px border.
+    let num_h = SETPOINT_PILL_DIGIT_H as i32;
+    let unit_h = text_height("A", &FONT_REGULAR);
+    let num_y = inner.top + ((inner.bottom - inner.top - num_h).max(0)) / 2;
+    // Unit in the frozen mock is optically centered a bit higher than strict bottom-alignment.
+    let unit_y = num_y + num_h - unit_h - 1;
+
+    draw_setpoint_text_scaled(
+        canvas,
+        digits,
+        num_x0,
+        num_y,
+        rgb(COLOR_TEXT_VALUE),
+        0,
+        Rect::new(inner.left, inner.top, inner.right, inner.bottom),
+    );
+    let unit_x = num_x0 + num_w + VALUE_UNIT_GAP;
+    // Clip the unit to the pill's inner rect to prevent glyphs from bleeding into the border.
+    draw_small_clipped_with_font(
+        canvas,
+        unit_s,
+        unit_x + 1,
+        unit_y + 1,
+        rgb(COLOR_SETPOINT_SHADOW),
+        inner.right - 1,
+        &FONT_REGULAR,
+    );
+    draw_small_clipped_with_font(
+        canvas,
+        unit_s,
+        unit_x,
+        unit_y,
+        rgb(COLOR_TEXT_UNIT),
+        inner.right - 1,
+        &FONT_REGULAR,
+    );
+
+    if focused {
+        let idx = match focused_digit {
+            AdjustDigit::Ones => Some(1),
+            AdjustDigit::Tenths => Some(3),
+            AdjustDigit::Hundredths => Some(4),
+            _ => None,
+        };
+        if let Some(idx) = idx {
+            let cell_x = num_x0 + idx as i32 * cell_w;
+            // The frozen mock uses a 1px underline, aligned ~2px above the outer border.
+            let underline_top = rect.bottom - 3;
+            let ul_pad = ((SETPOINT_CELL_W - SETPOINT_PILL_DIGIT_W) / 2) as i32;
+            canvas.fill_rect(
+                Rect::new(
+                    cell_x + ul_pad,
+                    underline_top,
+                    cell_x + ul_pad + SETPOINT_PILL_DIGIT_W as i32,
+                    underline_top + 1,
+                ),
+                rgb(COLOR_VALUE_PILL_FOCUSED_OUTER),
+            );
+        }
+    }
+}
+
+const SETPOINT_SRC_W: usize = 10;
+const SETPOINT_SRC_H: usize = 18;
+// The PD settings value pill uses a slightly condensed setpoint layout compared to
+// the raw 10px UTFT glyph cell, matching the frozen mock assets.
+const SETPOINT_CELL_W: usize = 8;
+const SETPOINT_PILL_DIGIT_W: usize = 8;
+const SETPOINT_PILL_DIGIT_H: usize = 15;
+
+fn draw_setpoint_text_scaled(
+    canvas: &mut Canvas,
+    text: &str,
+    x: i32,
+    y: i32,
+    color: Rgb565,
+    spacing: i32,
+    clip: Rect,
+) {
+    const HR_SCALE: usize = 4;
+    const HR_W: usize = SETPOINT_SRC_W * HR_SCALE;
+    const HR_H: usize = SETPOINT_SRC_H * HR_SCALE;
+
+    debug_assert_eq!(super::fonts::SETPOINT_FONT.width() as usize, SETPOINT_SRC_W);
+    debug_assert_eq!(
+        super::fonts::SETPOINT_FONT.height() as usize,
+        SETPOINT_SRC_H
+    );
+
+    let glyph = SETPOINT_CELL_W as i32 + spacing;
+    let x_pad = ((SETPOINT_CELL_W - SETPOINT_PILL_DIGIT_W) / 2) as i32;
+    let mut cursor_x = x;
+
+    for ch in text.chars() {
+        if ch == ' ' {
+            cursor_x += glyph;
+            continue;
+        }
+
+        let mut src = [0u8; SETPOINT_SRC_W * SETPOINT_SRC_H];
+        super::fonts::SETPOINT_FONT.draw_char(
+            ch,
+            |px, py| {
+                if px < 0 || py < 0 {
+                    return;
+                }
+                let px = px as usize;
+                let py = py as usize;
+                if px >= SETPOINT_SRC_W || py >= SETPOINT_SRC_H {
+                    return;
+                }
+                src[py * SETPOINT_SRC_W + px] = 1;
+            },
+            0,
+            0,
+        );
+
+        let mut hr = [0u8; HR_W * HR_H];
+        for py in 0..SETPOINT_SRC_H {
+            for px in 0..SETPOINT_SRC_W {
+                if src[py * SETPOINT_SRC_W + px] == 0 {
+                    continue;
+                }
+                let hx0 = px * HR_SCALE;
+                let hy0 = py * HR_SCALE;
+                for sy in 0..HR_SCALE {
+                    for sx in 0..HR_SCALE {
+                        hr[(hy0 + sy) * HR_W + (hx0 + sx)] = 1;
+                    }
+                }
+            }
+        }
+
+        // Second pass: compute per-pixel alpha grid for the scaled glyph, then render a subtle halo.
+        let mut alpha_grid = [0u8; SETPOINT_PILL_DIGIT_W * SETPOINT_PILL_DIGIT_H];
+        for oy in 0..SETPOINT_PILL_DIGIT_H {
+            let hy0 = oy * HR_H / SETPOINT_PILL_DIGIT_H;
+            let hy1 = (oy + 1) * HR_H / SETPOINT_PILL_DIGIT_H;
+            if hy1 <= hy0 {
+                continue;
+            }
+            for ox in 0..SETPOINT_PILL_DIGIT_W {
+                let hx0 = ox * HR_W / SETPOINT_PILL_DIGIT_W;
+                let hx1 = (ox + 1) * HR_W / SETPOINT_PILL_DIGIT_W;
+                if hx1 <= hx0 {
+                    continue;
+                }
+
+                let mut inside: u16 = 0;
+                for hy in hy0..hy1 {
+                    for hx in hx0..hx1 {
+                        inside += hr[hy * HR_W + hx] as u16;
+                    }
+                }
+                if inside == 0 {
+                    continue;
+                }
+                let denom = ((hx1 - hx0) * (hy1 - hy0)) as u16;
+                if denom == 0 {
+                    continue;
+                }
+                let alpha = ((inside * 255 + (denom / 2)) / denom) as u8;
+                alpha_grid[oy * SETPOINT_PILL_DIGIT_W + ox] = alpha;
+            }
+        }
+
+        // Halo pass: blend into 1px neighbors where the glyph is empty.
+        let mut halo_grid = [0u8; SETPOINT_PILL_DIGIT_W * SETPOINT_PILL_DIGIT_H];
+        for oy in 0..SETPOINT_PILL_DIGIT_H {
+            for ox in 0..SETPOINT_PILL_DIGIT_W {
+                let a = alpha_grid[oy * SETPOINT_PILL_DIGIT_W + ox];
+                if a < 200 {
+                    continue;
+                }
+                for (dx, dy) in [
+                    (-1i32, -1i32),
+                    (0, -1),
+                    (1, -1),
+                    (-1, 0),
+                    (1, 0),
+                    (-1, 1),
+                    (0, 1),
+                    (1, 1),
+                ] {
+                    let nx = ox as i32 + dx;
+                    let ny = oy as i32 + dy;
+                    if nx < 0
+                        || ny < 0
+                        || nx >= SETPOINT_PILL_DIGIT_W as i32
+                        || ny >= SETPOINT_PILL_DIGIT_H as i32
+                    {
+                        continue;
+                    }
+                    let nidx = ny as usize * SETPOINT_PILL_DIGIT_W + nx as usize;
+                    if alpha_grid[nidx] != 0 {
+                        continue;
+                    }
+                    let ha = ((a as u16 * 2) / 5).min(110) as u8;
+                    halo_grid[nidx] = halo_grid[nidx].max(ha);
+                }
+            }
+        }
+
+        for oy in 0..SETPOINT_PILL_DIGIT_H {
+            for ox in 0..SETPOINT_PILL_DIGIT_W {
+                let ha = halo_grid[oy * SETPOINT_PILL_DIGIT_W + ox];
+                if ha == 0 {
+                    continue;
+                }
+                let gx = cursor_x + x_pad + ox as i32;
+                let gy = y + oy as i32;
+                if gx < clip.left || gx >= clip.right || gy < clip.top || gy >= clip.bottom {
+                    continue;
+                }
+                canvas.blend_pixel(gx, gy, rgb(COLOR_SETPOINT_SHADOW), ha);
+            }
+        }
+
+        // Main pass.
+        for oy in 0..SETPOINT_PILL_DIGIT_H {
+            for ox in 0..SETPOINT_PILL_DIGIT_W {
+                let a = alpha_grid[oy * SETPOINT_PILL_DIGIT_W + ox];
+                if a == 0 {
+                    continue;
+                }
+                let gx = cursor_x + x_pad + ox as i32;
+                let gy = y + oy as i32;
+                if gx < clip.left || gx >= clip.right || gy < clip.top || gy >= clip.bottom {
+                    continue;
+                }
+                canvas.blend_pixel(gx, gy, color, a);
+            }
+        }
+
+        cursor_x += glyph;
     }
 }
 
@@ -1381,6 +1607,25 @@ fn draw_label_with_step(
     );
 }
 
+fn draw_label_two_line(
+    canvas: &mut Canvas,
+    x: i32,
+    y: i32,
+    line1: &str,
+    line2: &str,
+    line1_color: Rgb565,
+    line2_color: Rgb565,
+    clip_right: i32,
+) {
+    if !line1.is_empty() {
+        draw_small_clipped(canvas, line1, x, y, line1_color, clip_right);
+    }
+    if !line2.is_empty() {
+        let line_h = text_height("A", &FONT_REGULAR);
+        draw_small_clipped(canvas, line2, x, y + line_h, line2_color, clip_right);
+    }
+}
+
 fn draw_dot_joined_small(
     canvas: &mut Canvas,
     x: i32,
@@ -1731,48 +1976,125 @@ fn format_a_short(ma: u32) -> String<8> {
 }
 
 fn format_ma(ma: u32) -> String<10> {
+    // Kept for older call sites; PD target values now format in A/V.
     let mut out = String::<10>::new();
     let _ = write!(&mut out, "{}mA", ma);
     out
 }
 
-fn controls_layout(mode: PdMode) -> Option<(Rect, Rect, Rect, Rect)> {
-    if mode == PdMode::Pps {
-        Some(pps_value_buttons())
+fn format_req_v_2dp_digits(mv: u32) -> String<5> {
+    let mv = mv.min(99_990);
+    let int_part = (mv / 1000).min(99);
+    let frac = ((mv % 1000) / 10).min(99); // 2dp
+
+    let mut out = String::<5>::new();
+    let tens = (int_part / 10) as u8;
+    let ones = (int_part % 10) as u8;
+    let frac_tens = (frac / 10) as u8;
+    let frac_ones = (frac % 10) as u8;
+
+    // Keep the 2-digit integer field width (DD.dd) but don't draw a leading '0' when < 10.
+    // Use a "non-glyph" placeholder that still advances the setpoint font cursor.
+    let _ = out.push(if tens == 0 {
+        ' '
     } else {
-        None
+        (b'0' + tens) as char
+    });
+    let _ = out.push((b'0' + ones) as char);
+    let _ = out.push('.');
+    let _ = out.push((b'0' + frac_tens) as char);
+    let _ = out.push((b'0' + frac_ones) as char);
+    out
+}
+
+fn format_req_a_2dp_digits(ma: u32) -> String<5> {
+    let ma = ma.min(99_990);
+    let int_part = (ma / 1000).min(99);
+    let frac = ((ma % 1000) / 10).min(99); // 2dp
+
+    let mut out = String::<5>::new();
+    let tens = (int_part / 10) as u8;
+    let ones = (int_part % 10) as u8;
+    let frac_tens = (frac / 10) as u8;
+    let frac_ones = (frac % 10) as u8;
+
+    let _ = out.push(if tens == 0 {
+        ' '
+    } else {
+        (b'0' + tens) as char
+    });
+    let _ = out.push((b'0' + ones) as char);
+    let _ = out.push('.');
+    let _ = out.push((b'0' + frac_tens) as char);
+    let _ = out.push((b'0' + frac_ones) as char);
+    out
+}
+
+fn vreq_value_rect() -> Rect {
+    let right = CARD_RIGHT - VALUE_PILL_RIGHT_PAD;
+    Rect::new(
+        right - VALUE_PILL_W,
+        CONTROL_ROW_VREQ_Y,
+        right,
+        CONTROL_ROW_VREQ_Y + VALUE_PILL_H,
+    )
+}
+
+fn ireq_value_rect(mode: PdMode) -> Rect {
+    let y = match mode {
+        PdMode::Fixed => CONTROL_ROW_IREQ_FIXED_Y,
+        PdMode::Pps => CONTROL_ROW_IREQ_PPS_Y,
+    };
+    let right = CARD_RIGHT - VALUE_PILL_RIGHT_PAD;
+    Rect::new(right - VALUE_PILL_W, y, right, y + VALUE_PILL_H)
+}
+
+pub fn pick_value_digit(field: PdSettingsFocus, x: i32, mode: PdMode) -> AdjustDigit {
+    let cell_w = SETPOINT_CELL_W as i32;
+    let num_w = cell_w * 5; // "DD.dd"
+
+    let mut unit_buf = [0u8; 4];
+    let unit = match field {
+        PdSettingsFocus::Vreq => 'V',
+        PdSettingsFocus::Ireq => 'A',
+        PdSettingsFocus::None => ' ',
+    };
+    let unit_s = unit.encode_utf8(&mut unit_buf);
+    let unit_w = text_bbox_scaled(unit_s, &FONT_REGULAR)
+        .map(|(w, _)| w)
+        .unwrap_or_else(|| text_width(unit_s));
+
+    let total_w = num_w + VALUE_UNIT_GAP + unit_w;
+    let pill = match field {
+        PdSettingsFocus::Vreq => vreq_value_rect(),
+        PdSettingsFocus::Ireq => ireq_value_rect(mode),
+        PdSettingsFocus::None => ireq_value_rect(mode),
+    };
+    let value_right = pill.right - 2 - VALUE_PILL_TEXT_RIGHT_PAD;
+    let num_left = (value_right - total_w).max(pill.left + 2 + VALUE_PILL_TEXT_MIN_LEFT_PAD);
+    let rel = x - num_left;
+
+    let (cell_idx, cell_off) = if rel < 0 {
+        (0, 0)
+    } else if rel >= num_w {
+        (4, cell_w.saturating_sub(1))
+    } else {
+        (rel / cell_w, rel % cell_w)
+    };
+
+    match cell_idx {
+        0 | 1 => AdjustDigit::Ones, // tens is non-selectable; snap to ones
+        2 => {
+            // Decimal point: snap to nearest adjacent selectable digit.
+            if cell_off < cell_w / 2 {
+                AdjustDigit::Ones
+            } else {
+                AdjustDigit::Tenths
+            }
+        }
+        3 => AdjustDigit::Tenths,
+        _ => AdjustDigit::Hundredths,
     }
-}
-
-fn pps_value_buttons() -> (Rect, Rect, Rect, Rect) {
-    let v_y = CONTROL_ROW_VREQ_Y;
-    let i_y = CONTROL_ROW_IREQ_PPS_Y;
-
-    let left = CARD_LEFT - 1;
-    let right = APPLY_RIGHT;
-    let v_minus = Rect::new(left, v_y, left + VALUE_BTN_W, v_y + VALUE_BTN_H);
-    let v_plus = Rect::new(right - VALUE_BTN_W, v_y, right, v_y + VALUE_BTN_H);
-
-    let i_minus = Rect::new(left, i_y, left + VALUE_BTN_W, i_y + VALUE_BTN_H);
-    let i_plus = Rect::new(right - VALUE_BTN_W, i_y, right, i_y + VALUE_BTN_H);
-
-    (v_minus, v_plus, i_minus, i_plus)
-}
-
-fn fixed_controls_layout() -> (Rect, Rect, Rect, Rect) {
-    // Dummy V buttons (unused) + I buttons.
-    let v = Rect::new(0, 0, 0, 0);
-    let (i_minus, i_plus) = fixed_i_buttons();
-    (v, v, i_minus, i_plus)
-}
-
-fn fixed_i_buttons() -> (Rect, Rect) {
-    let y = CONTROL_ROW_IREQ_FIXED_Y;
-    let left = CARD_LEFT - 1;
-    let right = APPLY_RIGHT;
-    let minus = Rect::new(left, y, left + VALUE_BTN_W, y + VALUE_BTN_H);
-    let plus = Rect::new(right - VALUE_BTN_W, y, right, y + VALUE_BTN_H);
-    (minus, plus)
 }
 
 trait CanvasAaExt {
