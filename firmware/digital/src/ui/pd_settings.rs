@@ -666,7 +666,8 @@ fn draw_target_value_row(
     focused: bool,
     focused_digit: AdjustDigit,
 ) {
-    let label_x = CARD_LEFT;
+    // Align with other right-column card content (e.g. "Active contract"/"Selected").
+    let label_x = CARD_LEFT + 10;
     let label_y = value_pill.top;
     let label = match field {
         PdSettingsFocus::Vreq => "Vreq",
