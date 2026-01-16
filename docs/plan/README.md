@@ -73,3 +73,4 @@
 | 0017 | CP 模式：本机屏幕界面 + HTTP API | 待实现 | `0017:cp-mode-ui-http-api/PLAN.md` | 2026-01-16 | AC: tier B |
 | 0018 | Web：CP 模式控制页 | 待实现 | `0018:web-cp-mode-ui/PLAN.md` | 2026-01-16 | Entry: /$deviceId/cc |
 | 0019 | 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed） | 待实现 | `0019:dashboard-pd-button-label/PLAN.md` | 2026-01-16 | - |
+| 0020 | Web：仪器风格主界面（左监右控） | 待实现 | `0020:web-instrument-control-ui/PLAN.md` | 2026-01-16 | - |
