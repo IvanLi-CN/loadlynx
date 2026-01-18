@@ -52,12 +52,13 @@ bind_interrupts!(struct Irqs {
     UCPD1 => stm32::ucpd::InterruptHandler<stm32::peripherals::UCPD1>;
 });
 
-// 模拟板 FAST_STATUS 发送周期：20 Hz → 1000/20 ms = 50 ms
-const FAST_STATUS_PERIOD_MS: u64 = 1000 / 20;
-// 控制环（DAC 更新）运行周期：提高 CV 环路更新频率以减少低频抖动；
+// 模拟板 FAST_STATUS 发送周期：20 Hz → 50 ms
+const FAST_STATUS_PERIOD_US: u64 = 1_000_000 / 20; // 50_000 us
+// 控制环（DAC 更新）运行周期：提高闭环更新频率以提升瞬态响应能力；
 // FastStatus 仍保持 20 Hz，不影响数字板协议/带宽。
-const CONTROL_PERIOD_MS: u64 = 1; // 1 kHz
-const CONTROL_TICKS_PER_STATUS: u32 = (FAST_STATUS_PERIOD_MS / CONTROL_PERIOD_MS) as u32;
+const CONTROL_PERIOD_US: u64 = 100; // 10 kHz
+const CONTROL_TICKS_PER_STATUS: u32 = (FAST_STATUS_PERIOD_US / CONTROL_PERIOD_US) as u32;
+const CONTROL_TICKS_PER_SEC: u32 = (1_000_000 / CONTROL_PERIOD_US) as u32;
 // 若超过该时间（ms）未收到任何来自数字板的有效控制帧，则认为链路当前异常。
 const LINK_DEAD_TIMEOUT_MS: u32 = 300;
 // 调试开关：如需只验证数字板→模拟板的 SetPoint 路径，可暂时关闭 FAST_STATUS TX。
@@ -126,7 +127,7 @@ const SINK_TEMP_LIMIT_MC: i32 = 100_000; // 100 °C
 // 通道调度阈值：总目标电流 < 2 A 时仅驱动通道 1；≥ 2 A 时两通道近似均分。
 const I_SHARE_THRESHOLD_MA: i32 = 2_000;
 
-// CV loop tuning (executed at FAST_STATUS_PERIOD_MS cadence).
+// CV loop tuning (legacy constants were historically tuned at FAST_STATUS_PERIOD_US cadence).
 //
 // Control model: integrate on conductance `G` so current demand scales with voltage:
 //   I = G * V
@@ -141,17 +142,26 @@ const CV_G_ERR_DIV_MV: i32 = 500; // 500 mV error -> 1 uA/mV step (before clampi
 const CV_G_STEP_UP_MAX_UA_PER_MV: i32 = 5;
 const CV_G_STEP_DN_MAX_UA_PER_MV: i32 = 10;
 const CV_G_MAX_UA_PER_MV: i32 = 2_000;
+// Control loop tick density relative to a 1ms baseline (used to keep time constants stable when
+// CONTROL_PERIOD_US changes).
+const CONTROL_TICKS_PER_MS: u32 = (1_000 / CONTROL_PERIOD_US) as u32;
+const CONTROL_RATE_SCALE: i32 = if CONTROL_PERIOD_US >= 1_000 {
+    1
+} else {
+    CONTROL_TICKS_PER_MS as i32
+};
+
 // CV voltage measurement smoothing for the control law (not used for faults).
 // y += (x - y) / N ; larger N => more smoothing / more phase lag.
-const CV_V_FILT_DIV: i32 = 8;
+const CV_V_FILT_DIV: i32 = 8 * CONTROL_RATE_SCALE;
 // CP voltage measurement smoothing for I ≈ P/V (not used for faults).
-const CP_V_FILT_DIV: i32 = 3;
+const CP_V_FILT_DIV: i32 = 3 * CONTROL_RATE_SCALE;
 // If V_main changes sharply (e.g. PD contract step), snap the CP voltage filter to the new value
 // to avoid an artificial current lag in CP mode.
 const CP_V_STEP_RESET_MV: i32 = 200;
 // CP steady-state trim: integrate a small current bias from power error to compensate calibration/model error.
 // Kept conservative to avoid oscillation; feed-forward I≈P/V remains the primary path.
-const CP_I_BIAS_ERR_DIV: i32 = 4;
+const CP_I_BIAS_ERR_DIV: i32 = 4 * CONTROL_RATE_SCALE;
 const CP_I_BIAS_STEP_MAX_MA: i32 = 200;
 const CP_I_BIAS_RESET_STEP_MW: u32 = 1_000;
 // CP P-term gain: feedforward already provides I≈P/V; keep the P correction
@@ -161,12 +171,40 @@ const CP_I_P_ERR_DIV: i32 = 4;
 // "sitting below target" after large down-steps without increasing high-power overshoot.
 const CP_I_P_ERR_DIV_LOW_POWER: i32 = 2;
 const CP_I_P_STEP_MAX_MA: i32 = 3_000;
-const CP_I_SLEW_MAX_UP_MA_PER_TICK: i32 = 2_000;
-const CP_I_SLEW_MAX_DN_MA_PER_TICK: i32 = 1_500;
+const CP_I_SLEW_MAX_UP_MA_PER_MS: i32 = 2_000;
+const CP_I_SLEW_MAX_DN_MA_PER_MS: i32 = 1_500;
+const CP_I_SLEW_MAX_UP_MA_PER_TICK: i32 = if CONTROL_TICKS_PER_MS <= 1 {
+    CP_I_SLEW_MAX_UP_MA_PER_MS
+} else {
+    {
+        let per = CP_I_SLEW_MAX_UP_MA_PER_MS / (CONTROL_TICKS_PER_MS as i32);
+        if per <= 0 { 1 } else { per }
+    }
+};
+const CP_I_SLEW_MAX_DN_MA_PER_TICK: i32 = if CONTROL_TICKS_PER_MS <= 1 {
+    CP_I_SLEW_MAX_DN_MA_PER_MS
+} else {
+    {
+        let per = CP_I_SLEW_MAX_DN_MA_PER_MS / (CONTROL_TICKS_PER_MS as i32);
+        if per <= 0 { 1 } else { per }
+    }
+};
 const CP_STEP_BOOST_DETECT_MW: u32 = 10_000;
 // Small positive bump during the post-downstep settling window to avoid
 // sitting just below the tight 10W tolerance band due to quantization/noise.
 const CP_DOWNSTEP_I_BOOST_MA: i32 = 4;
+
+const CP_PTERM_NEG_FREEZE_MS: u32 = 20;
+const CP_PTERM_POS_FREEZE_MS: u32 = 5;
+
+const fn control_ticks_from_ms(ms: u32) -> u32 {
+    let us = (ms as u64) * 1_000;
+    let ticks = us / CONTROL_PERIOD_US;
+    if ticks == 0 { 1 } else { ticks as u32 }
+}
+
+const CP_PTERM_NEG_FREEZE_TICKS: u32 = control_ticks_from_ms(CP_PTERM_NEG_FREEZE_MS);
+const CP_PTERM_POS_FREEZE_TICKS: u32 = control_ticks_from_ms(CP_PTERM_POS_FREEZE_MS);
 
 // CP performance capture (for on-device quick checks; external measurement remains the source of truth).
 const CP_PERF_PERIOD_MS: u16 = 1;
@@ -518,12 +556,12 @@ const CV_G_FP_SHIFT: i32 = 8;
 const CV_G_FP_SCALE: i32 = 1 << CV_G_FP_SHIFT;
 const CV_G_MAX_FP: i32 = CV_G_MAX_UA_PER_MV * CV_G_FP_SCALE;
 // Per-control-tick step clamp derived from the legacy per-FAST_STATUS tick clamp.
-const CV_G_STEP_UP_MAX_FP: i32 = (CV_G_STEP_UP_MAX_UA_PER_MV * CV_G_FP_SCALE)
-    * (CONTROL_PERIOD_MS as i32)
-    / (FAST_STATUS_PERIOD_MS as i32);
-const CV_G_STEP_DN_MAX_FP: i32 = (CV_G_STEP_DN_MAX_UA_PER_MV * CV_G_FP_SCALE)
-    * (CONTROL_PERIOD_MS as i32)
-    / (FAST_STATUS_PERIOD_MS as i32);
+const CV_G_STEP_UP_MAX_FP: i32 = ((CV_G_STEP_UP_MAX_UA_PER_MV * CV_G_FP_SCALE) as i64
+    * (CONTROL_PERIOD_US as i64)
+    / (FAST_STATUS_PERIOD_US as i64)) as i32;
+const CV_G_STEP_DN_MAX_FP: i32 = ((CV_G_STEP_DN_MAX_UA_PER_MV * CV_G_FP_SCALE) as i64
+    * (CONTROL_PERIOD_US as i64)
+    / (FAST_STATUS_PERIOD_US as i64)) as i32;
 
 // 由数字板通过 SetPoint 消息更新的电流设定（mA，视为“两通道合计目标电流”）。
 //
@@ -774,7 +812,7 @@ impl ActiveControl {
 
 // Active SetMode snapshot shared between UART RX task and the control loop.
 //
-// The control loop runs at 1 kHz; avoid `.await`/async mutexes on this path.
+// The control loop runs at a high rate; avoid `.await`/async mutexes on this path.
 // Use a simple seqlock (even=stable, odd=writer-in-progress) to read a consistent snapshot.
 static ACTIVE_CTRL_SEQ: AtomicU32 = AtomicU32::new(0);
 static ACTIVE_CTRL_PRESET_ID: AtomicU8 = AtomicU8::new(0);
@@ -1057,7 +1095,7 @@ async fn main(_spawner: Spawner) -> ! {
     // 内部温度传感器/参考电压在读取时临时切换到长采样时间。
     let mut adc1 = Adc::new(p.ADC1);
     let mut adc2 = Adc::new(p.ADC2);
-    // Default to a shorter sampling time for external channels to keep the 1 kHz loop budget.
+    // Default to a shorter sampling time for external channels to keep the control loop budget.
     adc1.set_sample_time(SampleTime::CYCLES24_5);
     adc2.set_sample_time(SampleTime::CYCLES24_5);
     info!("ADC1/ADC2 init complete");
@@ -1174,7 +1212,6 @@ async fn main(_spawner: Spawner) -> ! {
         init_total_i_ma, init_ch1_ma, init_ch2_ma, init_dac_code_ch1, init_dac_code_ch2
     );
 
-    let mut uptime_ms: u32 = 0;
     let mut raw_frame = [0u8; 192];
     let mut slip_frame = [0u8; 384];
 
@@ -1218,7 +1255,7 @@ async fn main(_spawner: Spawner) -> ! {
 
     // Calibration-only UI/RAW smoothing (see CAL_SMOOTH_WINDOW_FRAMES).
     let mut cal_smoother: CalSmoother<CAL_SMOOTH_WINDOW_FRAMES> = CalSmoother::new();
-    // Cache calibration curves; refresh without awaiting in the 1 kHz loop.
+    // Cache calibration curves; refresh without awaiting in the fast control loop.
     let mut curves = {
         let state = CAL_STATE.lock().await;
         state.snapshot()
@@ -1272,10 +1309,12 @@ async fn main(_spawner: Spawner) -> ! {
     let mut loop_dt_sum_us: u64 = 0;
     let mut loop_dt_n: u32 = 0;
 
-    let control_period = Duration::from_millis(CONTROL_PERIOD_MS);
+    let control_period = Duration::from_micros(CONTROL_PERIOD_US);
     let mut next_tick = Instant::now() + control_period;
 
     loop {
+        let now_ms = timestamp_ms() as u32;
+
         // Track actual loop period (includes Timer::after_millis sleep + work).
         let now_us = Instant::now().as_micros();
         let dt_us = now_us.saturating_sub(loop_last_us);
@@ -1287,7 +1326,7 @@ async fn main(_spawner: Spawner) -> ! {
             loop_dt_sum_us = loop_dt_sum_us.saturating_add(dt as u64);
         }
         loop_dt_n = loop_dt_n.saturating_add(1);
-        if loop_dt_n >= 1000 {
+        if loop_dt_n >= CONTROL_TICKS_PER_SEC {
             let denom = (loop_dt_n.saturating_sub(1)).max(1) as u64;
             let avg = (loop_dt_sum_us / denom) as u32;
             info!(
@@ -1295,7 +1334,7 @@ async fn main(_spawner: Spawner) -> ! {
                 loop_dt_min_us,
                 loop_dt_max_us,
                 avg,
-                (CONTROL_PERIOD_MS as u32) * 1000,
+                (CONTROL_PERIOD_US as u32),
             );
             loop_dt_min_us = u32::MAX;
             loop_dt_max_us = 0;
@@ -1304,6 +1343,7 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         let is_status_tick = status_div == 0;
+        let is_ms_tick = (status_div % CONTROL_TICKS_PER_MS.max(1)) == 0;
         if is_status_tick {
             let seq = CAL_CURVES_SEQ.load(Ordering::Acquire);
             if seq != curves_seq_seen && (seq & 1) == 0 {
@@ -1363,7 +1403,6 @@ async fn main(_spawner: Spawner) -> ! {
         // - 若自上次收到 SetPoint / SoftReset / SetEnable 起超过 LINK_DEAD_TIMEOUT_MS
         //   未再看到任何控制帧，则认为当前处于“通信异常”状态，让 LED1 闪烁；
         // - 一旦重新收到有效控制帧，则视作恢复正常，LED1 熄灭。
-        let now_ms = timestamp_ms() as u32;
         let last_rx = LAST_RX_GOOD_MS.load(Ordering::Relaxed);
         let link_fault = if last_rx == 0 {
             now_ms > LINK_DEAD_TIMEOUT_MS
@@ -1387,9 +1426,9 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         if link_fault {
-            // 以约 2 Hz 频率闪烁：利用 uptime_ms（50 ms tick），每 250 ms 翻转一次。
+            // 以约 2 Hz 频率闪烁：每 250 ms 翻转一次。
             #[allow(clippy::manual_is_multiple_of)]
-            if (uptime_ms / 250) % 2 == 0 {
+            if (now_ms / 250) % 2 == 0 {
                 led1.set_low();
             } else {
                 led1.set_high();
@@ -1802,8 +1841,8 @@ async fn main(_spawner: Spawner) -> ! {
             let mut desired_i_total_ma: i32 = match ctrl_snapshot.mode {
                 LoadMode::Cv => {
                     // CV outer loop: integrate conductance (G) based on smoothed voltage error.
-                    // This runs at CONTROL_PERIOD_MS, while the legacy tuning constants are
-                    // defined at FAST_STATUS_PERIOD_MS cadence; scale the update accordingly.
+                    // This runs at CONTROL_PERIOD_US, while the legacy tuning constants are
+                    // defined at FAST_STATUS_PERIOD_US cadence; scale the update accordingly.
                     if !effective_output_enable {
                         cv_g_uapermv_fp = 0;
                         cv_v_filt_init = false;
@@ -1823,10 +1862,10 @@ async fn main(_spawner: Spawner) -> ! {
                         let err_mv = cv_v_main_filt_mv - ctrl_snapshot.target_v_mv;
                         if err_mv.abs() > CV_ERR_DEADBAND_MV {
                             // Voltage error (mV) -> conductance step (uA/mV), fixed-point Q8.
-                            let denom = (CV_G_ERR_DIV_MV as i64) * (FAST_STATUS_PERIOD_MS as i64);
+                            let denom = (CV_G_ERR_DIV_MV as i64) * (FAST_STATUS_PERIOD_US as i64);
                             let mut step_fp = (err_mv as i64)
                                 .saturating_mul(CV_G_FP_SCALE as i64)
-                                .saturating_mul(CONTROL_PERIOD_MS as i64)
+                                .saturating_mul(CONTROL_PERIOD_US as i64)
                                 / denom;
                             step_fp = step_fp
                                 .clamp(-(CV_G_STEP_DN_MAX_FP as i64), CV_G_STEP_UP_MAX_FP as i64);
@@ -1899,15 +1938,15 @@ async fn main(_spawner: Spawner) -> ! {
                         let cp_downstep =
                             prev_target_p_mw != 0 && new_target_p_mw < prev_target_p_mw;
                         if cp_large_step && cp_downstep {
-                            // Freeze for ~20ms at 1kHz.
-                            cp_pterm_neg_freeze_ticks = 20;
+                            // Freeze for ~20ms (scaled to control tick rate).
+                            cp_pterm_neg_freeze_ticks = CP_PTERM_NEG_FREEZE_TICKS;
                             cp_pterm_pos_freeze_ticks = 0;
                         } else if prev_target_p_mw != 0 && new_target_p_mw > prev_target_p_mw {
                             // Clear the freeze on large up-steps.
                             cp_pterm_neg_freeze_ticks = 0;
                             // Freeze the positive P-term briefly on large up-steps to reduce overshoot.
                             if cp_large_step {
-                                cp_pterm_pos_freeze_ticks = 5;
+                                cp_pterm_pos_freeze_ticks = CP_PTERM_POS_FREEZE_TICKS;
                             }
                         }
 
@@ -2228,11 +2267,13 @@ async fn main(_spawner: Spawner) -> ! {
         // non-zero CUR*_SNS voltage is a measurement offset. Track it slowly so that
         // post-step recovery/drift does not poison the next CP session.
         if cal_kind == CalKind::Off && !effective_output_enable {
-            cur_zero_disabled_ticks = cur_zero_disabled_ticks.saturating_add(1);
-            // Require a short settle time (~20ms) before adapting.
-            if cur_zero_disabled_ticks >= 20 {
-                update_zero_mv_iir(&mut cur1_zero_mv, cur1_sns_mv, 4);
-                update_zero_mv_iir(&mut cur2_zero_mv, cur2_sns_mv, 4);
+            if is_ms_tick {
+                cur_zero_disabled_ticks = cur_zero_disabled_ticks.saturating_add(1);
+                // Require a short settle time (~20ms) before adapting.
+                if cur_zero_disabled_ticks >= 20 {
+                    update_zero_mv_iir(&mut cur1_zero_mv, cur1_sns_mv, 4);
+                    update_zero_mv_iir(&mut cur2_zero_mv, cur2_sns_mv, 4);
+                }
             }
             // Do not concurrently run the "near-zero command" learner.
             cur_zero_cmd_ticks = 0;
@@ -2256,14 +2297,16 @@ async fn main(_spawner: Spawner) -> ! {
             && dac_code_ch1 <= 2
             && dac_code_ch2 <= 2
         {
-            cur_zero_cmd_ticks = cur_zero_cmd_ticks.saturating_add(1);
+            if is_ms_tick {
+                cur_zero_cmd_ticks = cur_zero_cmd_ticks.saturating_add(1);
 
-            // Require ~10ms of "near-zero command", and only start learning once
-            // the measured sense voltages are already in the "small" region to
-            // reduce the risk of learning a decaying real current.
-            if cur_zero_cmd_ticks >= 10 && cur1_sns_mv <= 400 && cur2_sns_mv <= 400 {
-                update_zero_mv_iir(&mut cur1_zero_mv, cur1_sns_mv, 4);
-                update_zero_mv_iir(&mut cur2_zero_mv, cur2_sns_mv, 4);
+                // Require ~10ms of "near-zero command", and only start learning once
+                // the measured sense voltages are already in the "small" region to
+                // reduce the risk of learning a decaying real current.
+                if cur_zero_cmd_ticks >= 10 && cur1_sns_mv <= 400 && cur2_sns_mv <= 400 {
+                    update_zero_mv_iir(&mut cur1_zero_mv, cur1_sns_mv, 4);
+                    update_zero_mv_iir(&mut cur2_zero_mv, cur2_sns_mv, 4);
+                }
             }
         } else {
             cur_zero_cmd_ticks = 0;
@@ -2645,7 +2688,7 @@ async fn main(_spawner: Spawner) -> ! {
                     CalKind::Off => (None, None, None, None, None),
                 };
             let status = FastStatus {
-                uptime_ms,
+                uptime_ms: now_ms,
                 mode: status_mode,
                 state_flags,
                 enable: effective_output_enable,
@@ -2684,7 +2727,6 @@ async fn main(_spawner: Spawner) -> ! {
             status_div = 0;
         }
 
-        uptime_ms = uptime_ms.wrapping_add(CONTROL_PERIOD_MS as u32);
         // Use absolute scheduling to reduce drift/jitter versus after_millis().
         Timer::at(next_tick).await;
         next_tick += control_period;
