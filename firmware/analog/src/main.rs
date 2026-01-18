@@ -220,6 +220,7 @@ const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
 const CP_FS_H_MW: u32 = 100_000;
 const CP_PERF_T10_90_MAX_US: u32 = 1_000;
+const CP_PERF_ACCEPT_BUCKETS: usize = 3;
 
 // Best-effort TX sequencing for messages originating on the analog side (HELLO / FAST_STATUS).
 // Acks reply with the request's seq and do not use this counter.
@@ -308,6 +309,94 @@ fn cp_tol_mw(target_p_mw: u32) -> u32 {
 
 fn cp_abs_diff_u32(a: u32, b: u32) -> u32 {
     if a >= b { a - b } else { b - a }
+}
+
+#[derive(Clone, Copy)]
+struct CpPerfAcceptBucket {
+    steps: u32,
+    pass: u32,
+    fail: u32,
+    max_dt_us: u32,
+}
+
+impl CpPerfAcceptBucket {
+    const fn new() -> Self {
+        Self {
+            steps: 0,
+            pass: 0,
+            fail: 0,
+            max_dt_us: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct CpPerfAcceptStats {
+    steps: u32,
+    pass: u32,
+    fail: u32,
+    max_dt_us: u32,
+    buckets: [CpPerfAcceptBucket; CP_PERF_ACCEPT_BUCKETS],
+}
+
+impl CpPerfAcceptStats {
+    const fn new() -> Self {
+        Self {
+            steps: 0,
+            pass: 0,
+            fail: 0,
+            max_dt_us: 0,
+            buckets: [CpPerfAcceptBucket::new(); CP_PERF_ACCEPT_BUCKETS],
+        }
+    }
+}
+
+fn cp_perf_accept_bucket(delta_mw: u32) -> usize {
+    // Bucket by step size:
+    // - B0: <= 20W
+    // - B1: <= 50W
+    // - B2: > 50W
+    if delta_mw <= 20_000 {
+        0
+    } else if delta_mw <= 50_000 {
+        1
+    } else {
+        2
+    }
+}
+
+fn cp_perf_accept_reset(stats: &mut CpPerfAcceptStats) {
+    *stats = CpPerfAcceptStats::new();
+}
+
+fn cp_perf_accept_record(
+    stats: &mut CpPerfAcceptStats,
+    p0_mw: u32,
+    target_p_mw: u32,
+    dt_us: u32,
+) -> bool {
+    let delta_mw = cp_abs_diff_u32(p0_mw, target_p_mw);
+    let b = cp_perf_accept_bucket(delta_mw).min(CP_PERF_ACCEPT_BUCKETS.saturating_sub(1));
+    let pass = dt_us <= CP_PERF_T10_90_MAX_US;
+
+    stats.steps = stats.steps.saturating_add(1);
+    stats.max_dt_us = stats.max_dt_us.max(dt_us);
+    if pass {
+        stats.pass = stats.pass.saturating_add(1);
+    } else {
+        stats.fail = stats.fail.saturating_add(1);
+    }
+
+    let bucket = &mut stats.buckets[b];
+    bucket.steps = bucket.steps.saturating_add(1);
+    bucket.max_dt_us = bucket.max_dt_us.max(dt_us);
+    if pass {
+        bucket.pass = bucket.pass.saturating_add(1);
+    } else {
+        bucket.fail = bucket.fail.saturating_add(1);
+    }
+
+    pass
 }
 
 fn cp_interp_cross_us(
@@ -1364,6 +1453,8 @@ async fn main(_spawner: Spawner) -> ! {
     // Feed-forward already provides the primary step. Allowing a large positive
     // P-term immediately tends to overshoot power and delays settling.
     let mut cp_pterm_pos_freeze_ticks: u32 = 0;
+    let mut cp_accept_last_enable: bool = false;
+    let mut cp_perf_accept: CpPerfAcceptStats = CpPerfAcceptStats::new();
 
     // Current-sense zero tracking state (see below).
     let mut cur_zero_cmd_ticks: u16 = 0;
@@ -1887,6 +1978,18 @@ async fn main(_spawner: Spawner) -> ! {
         } else {
             enable_requested && cal_ready && !has_fault
         };
+
+        // CP 1ms acceptance run reset:
+        // Treat CP output enable rising-edge as the start of a new run.
+        if active_mode_seen && ctrl_snapshot.mode == LoadMode::Cp {
+            if effective_output_enable && !cp_accept_last_enable {
+                cp_perf_accept_reset(&mut cp_perf_accept);
+                info!("cp_perf: accept reset (output enabled)");
+            }
+            cp_accept_last_enable = effective_output_enable;
+        } else {
+            cp_accept_last_enable = false;
+        }
 
         // Physically gate the TPS22810 load switch based on the effective enable state.
         if effective_output_enable {
@@ -2581,27 +2684,45 @@ async fn main(_spawner: Spawner) -> ! {
 
             if let Some((t10, t90)) = t10t90 {
                 let dt = t90.saturating_sub(t10);
-                if dt <= CP_PERF_T10_90_MAX_US {
+                let pass = cp_perf_accept_record(&mut cp_perf_accept, p0_mw, target_p_mw, dt);
+                let delta_mw = cp_abs_diff_u32(p0_mw, target_p_mw);
+                let bucket = cp_perf_accept_bucket(delta_mw) as u8;
+
+                if pass {
                     if target_p_mw >= p0_mw {
                         info!(
-                            "cp_perf: quick_check pass (t10_90<={}us)",
-                            CP_PERF_T10_90_MAX_US
+                            "cp_perf: quick_check pass (t10_90={}us <= {}us delta={}mW bucket={})",
+                            dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
                         );
                     } else {
                         info!(
-                            "cp_perf: quick_check pass (t90_10<={}us)",
-                            CP_PERF_T10_90_MAX_US
+                            "cp_perf: quick_check pass (t90_10={}us <= {}us delta={}mW bucket={})",
+                            dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
                         );
                     }
                 } else if target_p_mw >= p0_mw {
                     warn!(
-                        "cp_perf: quick_check fail (t10_90={}us > {}us)",
-                        dt, CP_PERF_T10_90_MAX_US
+                        "cp_perf: quick_check FAIL (t10_90={}us > {}us delta={}mW bucket={})",
+                        dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
                     );
                 } else {
                     warn!(
-                        "cp_perf: quick_check fail (t90_10={}us > {}us)",
-                        dt, CP_PERF_T10_90_MAX_US
+                        "cp_perf: quick_check FAIL (t90_10={}us > {}us delta={}mW bucket={})",
+                        dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
+                    );
+                }
+
+                info!(
+                    "cp_perf: accept summary total={} pass={} fail={} max_dt={}us",
+                    cp_perf_accept.steps,
+                    cp_perf_accept.pass,
+                    cp_perf_accept.fail,
+                    cp_perf_accept.max_dt_us
+                );
+                for (i, b) in cp_perf_accept.buckets.iter().enumerate() {
+                    info!(
+                        "cp_perf: accept bucket{} steps={} pass={} fail={} max_dt={}us",
+                        i as u8, b.steps, b.pass, b.fail, b.max_dt_us
                     );
                 }
             }

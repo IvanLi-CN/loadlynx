@@ -184,6 +184,9 @@
   - 控制环调度抖动（analog 日志 `control_loop dt_us`）：`avg≈100us`（10kHz）
   - 通过标准（内部自测口径）：
     - `t_10_90 <= 1000us` 且 `t_90_10 <= 1000us`（`cp_perf: quick_check pass`）
+  - 建议增加多档位回归（减少“只在大步进下通过/只在特定区间通过”的盲区）：
+    - `10W → 30W → 50W → 70W → 90W → 70W → 50W → 30W → 10W`
+    - 脚本：`scripts/cp-acceptance.sh`（短 dwell，避免长时间高功率）
   - 注意：为避免长时间高功率运行，建议每次步进验证控制在数十秒内完成，并在高功率段插入 OFF/降功率间隔。
 
 ## 方案概述（Approach, high-level）
