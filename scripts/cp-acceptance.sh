@@ -46,8 +46,10 @@ sleep 0.10
 set_output true
 sleep 0.20
 
-# Multi-level steps (mW): 10W, 30W, 50W, 70W, 90W, then back down.
-targets=(10000 30000 50000 70000 90000 70000 50000 30000 10000)
+# Multi-level steps (mW):
+# - cover multiple setpoints
+# - include a large 90W->10W down-step to exercise the 1ms transient requirement on big moves
+targets=(10000 30000 50000 70000 90000 10000 90000 10000)
 
 for ((c = 1; c <= CYCLES; c++)); do
   for t in "${targets[@]}"; do
@@ -58,4 +60,3 @@ done
 
 set_output false
 echo "[cp-acceptance] done"
-
