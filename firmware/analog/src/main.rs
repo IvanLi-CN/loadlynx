@@ -309,7 +309,7 @@ fn cp_tol_mw(target_p_mw: u32) -> u32 {
 }
 
 fn cp_abs_diff_u32(a: u32, b: u32) -> u32 {
-    if a >= b { a - b } else { b - a }
+    a.abs_diff(b)
 }
 
 #[derive(Clone, Copy)]
@@ -565,11 +565,11 @@ fn cp_find_t10_t90_us(
         return None;
     }
     let rising = target_p_mw > p0_mw;
-    let delta = cp_abs_diff_u32(target_p_mw, p0_mw);
+    let delta = target_p_mw.abs_diff(p0_mw);
     let p10 = if rising {
-        p0_mw.saturating_add((delta as u64 * 1 / 10) as u32)
+        p0_mw.saturating_add((delta as u64 / 10) as u32)
     } else {
-        p0_mw.saturating_sub((delta as u64 * 1 / 10) as u32)
+        p0_mw.saturating_sub((delta as u64 / 10) as u32)
     };
     let p90 = if rising {
         p0_mw.saturating_add((delta as u64 * 9 / 10) as u32)
@@ -586,16 +586,17 @@ fn cp_find_t10_t90_us(
         let a = w[0];
         let b = w[1];
 
-        if ta.is_none() {
-            if let Some(t) = cp_interp_cross_us(a.dt_us, a.calc_p_mw, b.dt_us, b.calc_p_mw, p10) {
-                ta = Some(t);
-            }
+        if ta.is_none()
+            && let Some(t) = cp_interp_cross_us(a.dt_us, a.calc_p_mw, b.dt_us, b.calc_p_mw, p10)
+        {
+            ta = Some(t);
         }
-        if ta.is_some() && tb.is_none() {
-            if let Some(t) = cp_interp_cross_us(a.dt_us, a.calc_p_mw, b.dt_us, b.calc_p_mw, p90) {
-                tb = Some(t);
-                break;
-            }
+        if ta.is_some()
+            && tb.is_none()
+            && let Some(t) = cp_interp_cross_us(a.dt_us, a.calc_p_mw, b.dt_us, b.calc_p_mw, p90)
+        {
+            tb = Some(t);
+            break;
         }
     }
 
@@ -1545,7 +1546,7 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         let is_status_tick = status_div == 0;
-        let is_ms_tick = (status_div % CONTROL_TICKS_PER_MS.max(1)) == 0;
+        let is_ms_tick = status_div.is_multiple_of(CONTROL_TICKS_PER_MS.max(1));
         if is_status_tick {
             let seq = CAL_CURVES_SEQ.load(Ordering::Acquire);
             if seq != curves_seq_seen && (seq & 1) == 0 {
@@ -2127,10 +2128,8 @@ async fn main(_spawner: Spawner) -> ! {
                         let new_target_p_mw = ctrl_snapshot.target_p_mw;
                         let delta_p_mw = if prev_target_p_mw == 0 {
                             new_target_p_mw
-                        } else if new_target_p_mw >= prev_target_p_mw {
-                            new_target_p_mw - prev_target_p_mw
                         } else {
-                            prev_target_p_mw - new_target_p_mw
+                            new_target_p_mw.abs_diff(prev_target_p_mw)
                         };
 
                         // CP performance capture arm (best-effort internal self-test):
@@ -2178,10 +2177,8 @@ async fn main(_spawner: Spawner) -> ! {
 
                         // The bias term is intended for steady-state trim; clear it on large setpoint
                         // steps to avoid slow unwinding on falling edges.
-                        if prev_target_p_mw != 0 {
-                            if delta_p_mw >= CP_I_BIAS_RESET_STEP_MW {
-                                cp_i_bias_ma = 0;
-                            }
+                        if prev_target_p_mw != 0 && delta_p_mw >= CP_I_BIAS_RESET_STEP_MW {
+                            cp_i_bias_ma = 0;
                         }
                         cp_last_target_p_mw = new_target_p_mw;
 
@@ -2229,9 +2226,9 @@ async fn main(_spawner: Spawner) -> ! {
                             // Feed-forward I≈P/V is the primary path. After large down-steps, keep
                             // the P-term from going negative for a short window to avoid pulling the
                             // command below feed-forward while the plant is still settling.
-                            let i_p_ma = if cp_pterm_neg_freeze_ticks > 0 && i_err_clamped < 0 {
-                                0
-                            } else if cp_pterm_pos_freeze_ticks > 0 && i_err_clamped > 0 {
+                            let i_p_ma = if (cp_pterm_neg_freeze_ticks > 0 && i_err_clamped < 0)
+                                || (cp_pterm_pos_freeze_ticks > 0 && i_err_clamped > 0)
+                            {
                                 0
                             } else {
                                 let p_div = if ctrl_snapshot.target_p_mw <= CP_FS_L_MW {
@@ -2264,8 +2261,8 @@ async fn main(_spawner: Spawner) -> ! {
                                 // During the post-downstep settling window, avoid integrating
                                 // negative bias (which would pull the command below feed-forward
                                 // while the plant is still falling).
-                                if !(cp_pterm_neg_freeze_ticks > 0 && step < 0)
-                                    && !(cp_pterm_pos_freeze_ticks > 0 && step > 0)
+                                if !((cp_pterm_neg_freeze_ticks > 0 && step < 0)
+                                    || (cp_pterm_pos_freeze_ticks > 0 && step > 0))
                                 {
                                     cp_i_bias_ma = cp_i_bias_ma
                                         .saturating_add(step / CP_I_BIAS_ERR_DIV)
