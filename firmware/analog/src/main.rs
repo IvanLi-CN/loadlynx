@@ -56,6 +56,8 @@ bind_interrupts!(struct Irqs {
 const FAST_STATUS_PERIOD_US: u64 = 1_000_000 / 20; // 50_000 us
 // 控制环（DAC 更新）运行周期：提高闭环更新频率以提升瞬态响应能力；
 // FastStatus 仍保持 20 Hz，不影响数字板协议/带宽。
+// NOTE: This loop is compute-heavy (ADC + calibration + protection).
+// Keeping the tick at 100us ensures the control command can be updated at 10kHz.
 const CONTROL_PERIOD_US: u64 = 100; // 10 kHz
 const CONTROL_TICKS_PER_STATUS: u32 = (FAST_STATUS_PERIOD_US / CONTROL_PERIOD_US) as u32;
 const CONTROL_TICKS_PER_SEC: u32 = (1_000_000 / CONTROL_PERIOD_US) as u32;
@@ -1297,6 +1299,8 @@ async fn main(_spawner: Spawner) -> ! {
     let mut telemetry_log_div: u8 = 0;
 
     // Slow ADC channels (updated at FAST_STATUS cadence).
+    // Some channels do not need full control-tick bandwidth. Cache them and refresh at a lower rate.
+    let mut v_rmt_sns_code: u16 = adc1.blocking_read(&mut v_rmt_sns);
     let mut sns_5v_code: u16 = adc1.blocking_read(&mut sns_5v);
     let mut ts1_code: u16 = adc1.blocking_read(&mut ts1);
     let mut ts2_code: u16 = adc1.blocking_read(&mut ts2);
@@ -1443,7 +1447,13 @@ async fn main(_spawner: Spawner) -> ! {
         // Slow channels (FAST_STATUS cadence): 5V + NTC + MCU temp (slow dynamics, still safety-gated).
         let cal_kind = CalKind::from(CAL_MODE_KIND.load(Ordering::Relaxed));
 
-        let v_rmt_sns_code = adc1.blocking_read(&mut v_rmt_sns);
+        // Remote sense voltage is only needed for:
+        // - remote_active detection (20Hz via status tick)
+        // - remote-aware V_main selection (soft)
+        // Refresh at 1kHz to reduce control loop bandwidth cost.
+        if is_ms_tick {
+            v_rmt_sns_code = adc1.blocking_read(&mut v_rmt_sns);
+        }
         let v_nr_sns_code = adc1.blocking_read(&mut v_nr_sns);
 
         let cur1_sns_code = adc2.blocking_read(&mut cur1_sns);
