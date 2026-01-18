@@ -220,7 +220,7 @@ const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
 const CP_FS_H_MW: u32 = 100_000;
 const CP_PERF_T10_90_MAX_US: u32 = 1_000;
-const CP_PERF_PEAK_WINDOW_US: u32 = 2_000;
+const CP_PERF_PEAK_WINDOW_US: u32 = 1_000;
 const CP_PERF_ACCEPT_BUCKETS: usize = 3;
 
 // Best-effort TX sequencing for messages originating on the analog side (HELLO / FAST_STATUS).

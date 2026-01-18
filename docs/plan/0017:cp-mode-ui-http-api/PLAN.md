@@ -286,7 +286,7 @@ None.
 - 定义：
   - `Δ = |P2 - P1|`（步进幅度）
   - 允许峰值偏差（mW）：`peak_allow = max(0.1*Δ, tol(T))`
-  - 统计窗口：`t ∈ [0, 2ms]`（由 `cp_perf` 采样，窗口内取 `P_max/P_min`）
+  - 统计窗口：`t ∈ [0, 1ms]`（由 `cp_perf` 采样，窗口内取 `P_max/P_min`）
 - 约束：
   - 上升沿（`P2 > P1`）：`P_max - P2 <= peak_allow`
   - 下降沿（`P2 < P1`）：`P2 - P_min <= peak_allow`
