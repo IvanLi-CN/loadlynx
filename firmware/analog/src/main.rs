@@ -220,6 +220,7 @@ const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
 const CP_FS_H_MW: u32 = 100_000;
 const CP_PERF_T10_90_MAX_US: u32 = 1_000;
+const CP_PERF_PEAK_WINDOW_US: u32 = 2_000;
 const CP_PERF_ACCEPT_BUCKETS: usize = 3;
 
 // Best-effort TX sequencing for messages originating on the analog side (HELLO / FAST_STATUS).
@@ -317,6 +318,7 @@ struct CpPerfAcceptBucket {
     pass: u32,
     fail: u32,
     max_dt_us: u32,
+    max_peak_err_mw: u32,
 }
 
 impl CpPerfAcceptBucket {
@@ -326,6 +328,7 @@ impl CpPerfAcceptBucket {
             pass: 0,
             fail: 0,
             max_dt_us: 0,
+            max_peak_err_mw: 0,
         }
     }
 }
@@ -336,6 +339,7 @@ struct CpPerfAcceptStats {
     pass: u32,
     fail: u32,
     max_dt_us: u32,
+    max_peak_err_mw: u32,
     buckets: [CpPerfAcceptBucket; CP_PERF_ACCEPT_BUCKETS],
 }
 
@@ -346,6 +350,7 @@ impl CpPerfAcceptStats {
             pass: 0,
             fail: 0,
             max_dt_us: 0,
+            max_peak_err_mw: 0,
             buckets: [CpPerfAcceptBucket::new(); CP_PERF_ACCEPT_BUCKETS],
         }
     }
@@ -374,13 +379,16 @@ fn cp_perf_accept_record(
     p0_mw: u32,
     target_p_mw: u32,
     dt_us: u32,
+    peak_err_mw: u32,
 ) -> bool {
     let delta_mw = cp_abs_diff_u32(p0_mw, target_p_mw);
     let b = cp_perf_accept_bucket(delta_mw).min(CP_PERF_ACCEPT_BUCKETS.saturating_sub(1));
-    let pass = dt_us <= CP_PERF_T10_90_MAX_US;
+    let peak_allow_mw = (delta_mw / 10).max(cp_tol_mw(target_p_mw));
+    let pass = dt_us <= CP_PERF_T10_90_MAX_US && peak_err_mw <= peak_allow_mw;
 
     stats.steps = stats.steps.saturating_add(1);
     stats.max_dt_us = stats.max_dt_us.max(dt_us);
+    stats.max_peak_err_mw = stats.max_peak_err_mw.max(peak_err_mw);
     if pass {
         stats.pass = stats.pass.saturating_add(1);
     } else {
@@ -390,6 +398,7 @@ fn cp_perf_accept_record(
     let bucket = &mut stats.buckets[b];
     bucket.steps = bucket.steps.saturating_add(1);
     bucket.max_dt_us = bucket.max_dt_us.max(dt_us);
+    bucket.max_peak_err_mw = bucket.max_peak_err_mw.max(peak_err_mw);
     if pass {
         bucket.pass = bucket.pass.saturating_add(1);
     } else {
@@ -397,6 +406,27 @@ fn cp_perf_accept_record(
     }
 
     pass
+}
+
+fn cp_find_peak_window(samples: &[CpPerfSample], window_us: u32) -> Option<(u32, u32)> {
+    if samples.is_empty() {
+        return None;
+    }
+
+    let mut p_min = u32::MAX;
+    let mut p_max = 0u32;
+    for s in samples {
+        if s.dt_us > window_us {
+            break;
+        }
+        p_min = p_min.min(s.calc_p_mw);
+        p_max = p_max.max(s.calc_p_mw);
+    }
+    if p_min == u32::MAX {
+        None
+    } else {
+        Some((p_min, p_max))
+    }
 }
 
 fn cp_interp_cross_us(
@@ -2684,45 +2714,69 @@ async fn main(_spawner: Spawner) -> ! {
 
             if let Some((t10, t90)) = t10t90 {
                 let dt = t90.saturating_sub(t10);
-                let pass = cp_perf_accept_record(&mut cp_perf_accept, p0_mw, target_p_mw, dt);
                 let delta_mw = cp_abs_diff_u32(p0_mw, target_p_mw);
                 let bucket = cp_perf_accept_bucket(delta_mw) as u8;
+                let rising = target_p_mw >= p0_mw;
+                let (p_min, p_max) = cp_find_peak_window(samples, CP_PERF_PEAK_WINDOW_US)
+                    .unwrap_or((samples[0].calc_p_mw, samples[0].calc_p_mw));
+                let peak_err_mw = if rising {
+                    p_max.saturating_sub(target_p_mw)
+                } else {
+                    target_p_mw.saturating_sub(p_min)
+                };
+                let peak_allow_mw = (delta_mw / 10).max(cp_tol_mw(target_p_mw));
+
+                let pass =
+                    cp_perf_accept_record(&mut cp_perf_accept, p0_mw, target_p_mw, dt, peak_err_mw);
 
                 if pass {
-                    if target_p_mw >= p0_mw {
+                    if rising {
                         info!(
-                            "cp_perf: quick_check pass (t10_90={}us <= {}us delta={}mW bucket={})",
-                            dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
+                            "cp_perf: quick_check PASS (t10_90={}us <= {}us peak_ov={}mW <= {}mW window={}us delta={}mW bucket={})",
+                            dt,
+                            CP_PERF_T10_90_MAX_US,
+                            peak_err_mw,
+                            peak_allow_mw,
+                            CP_PERF_PEAK_WINDOW_US,
+                            delta_mw,
+                            bucket
                         );
                     } else {
                         info!(
-                            "cp_perf: quick_check pass (t90_10={}us <= {}us delta={}mW bucket={})",
-                            dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
+                            "cp_perf: quick_check PASS (t90_10={}us <= {}us peak_ud={}mW <= {}mW window={}us delta={}mW bucket={})",
+                            dt,
+                            CP_PERF_T10_90_MAX_US,
+                            peak_err_mw,
+                            peak_allow_mw,
+                            CP_PERF_PEAK_WINDOW_US,
+                            delta_mw,
+                            bucket
                         );
                     }
-                } else if target_p_mw >= p0_mw {
+                } else if rising {
                     warn!(
-                        "cp_perf: quick_check FAIL (t10_90={}us > {}us delta={}mW bucket={})",
-                        dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
+                        "cp_perf: quick_check FAIL (t10_90={}us peak_ov={}mW allow={}mW window={}us delta={}mW bucket={})",
+                        dt, peak_err_mw, peak_allow_mw, CP_PERF_PEAK_WINDOW_US, delta_mw, bucket
                     );
                 } else {
                     warn!(
-                        "cp_perf: quick_check FAIL (t90_10={}us > {}us delta={}mW bucket={})",
-                        dt, CP_PERF_T10_90_MAX_US, delta_mw, bucket
+                        "cp_perf: quick_check FAIL (t90_10={}us peak_ud={}mW allow={}mW window={}us delta={}mW bucket={})",
+                        dt, peak_err_mw, peak_allow_mw, CP_PERF_PEAK_WINDOW_US, delta_mw, bucket
                     );
                 }
 
                 info!(
-                    "cp_perf: accept summary total={} pass={} fail={} max_dt={}us",
+                    "cp_perf: accept summary total={} pass={} fail={} max_dt={}us max_peak_err={}mW",
                     cp_perf_accept.steps,
                     cp_perf_accept.pass,
                     cp_perf_accept.fail,
-                    cp_perf_accept.max_dt_us
+                    cp_perf_accept.max_dt_us,
+                    cp_perf_accept.max_peak_err_mw
                 );
                 for (i, b) in cp_perf_accept.buckets.iter().enumerate() {
                     info!(
-                        "cp_perf: accept bucket{} steps={} pass={} fail={} max_dt={}us",
-                        i as u8, b.steps, b.pass, b.fail, b.max_dt_us
+                        "cp_perf: accept bucket{} steps={} pass={} fail={} max_dt={}us max_peak_err={}mW",
+                        i as u8, b.steps, b.pass, b.fail, b.max_dt_us, b.max_peak_err_mw
                     );
                 }
             }
