@@ -25,7 +25,9 @@ use static_cell::StaticCell;
 
 use loadlynx_protocol::{
     CalKind, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP,
-    FastStatus, LimitProfile, LoadMode, PROTOCOL_VERSION, STATE_FLAG_UV_LATCHED, SoftResetReason,
+    FastStatus, LimitProfile, LoadMode, PROTOCOL_VERSION, STATE_FLAG_CURRENT_LIMITED,
+    STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD, STATE_FLAG_POWER_LIMITED, STATE_FLAG_UV_LATCHED,
+    SoftResetReason,
 };
 
 use crate::mdns::MdnsConfig;
@@ -1243,7 +1245,7 @@ async fn render_identity_json(
     buf.push_str("\"capabilities\":{");
     buf.push_str("\"cc_supported\":true,");
     buf.push_str("\"cv_supported\":true,");
-    buf.push_str("\"cp_supported\":false,");
+    buf.push_str("\"cp_supported\":true,");
     buf.push_str("\"presets_supported\":true,");
     buf.push_str("\"preset_count\":5,");
     buf.push_str("\"api_version\":\"2.0.0\"}");
@@ -1384,6 +1386,65 @@ async fn render_status_json_inner(
     }
     buf.push(']');
 
+    // state_flags_decoded
+    buf.push_str(",\"state_flags_decoded\":[");
+    let mut first = true;
+    let flags = status.state_flags;
+    if flags & STATE_FLAG_REMOTE_ACTIVE != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "REMOTE_ACTIVE");
+        buf.push('"');
+        first = false;
+    }
+    if flags & STATE_FLAG_LINK_GOOD != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "LINK_GOOD");
+        buf.push('"');
+        first = false;
+    }
+    if flags & STATE_FLAG_ENABLED != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "ENABLED");
+        buf.push('"');
+        first = false;
+    }
+    if flags & STATE_FLAG_UV_LATCHED != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "UV_LATCHED");
+        buf.push('"');
+        first = false;
+    }
+    if flags & STATE_FLAG_POWER_LIMITED != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "POWER_LIMITED");
+        buf.push('"');
+        first = false;
+    }
+    if flags & STATE_FLAG_CURRENT_LIMITED != 0 {
+        if !first {
+            buf.push(',');
+        }
+        buf.push('"');
+        write_json_string_escaped(buf, "CURRENT_LIMITED");
+        buf.push('"');
+    }
+    buf.push(']');
+
     buf.push('}');
     Ok(())
 }
@@ -1511,6 +1572,7 @@ fn mode_to_json_str(mode: LoadMode) -> &'static str {
     match mode {
         LoadMode::Cc => "cc",
         LoadMode::Cv => "cv",
+        LoadMode::Cp => "cp",
         LoadMode::Reserved(_) => "cc",
     }
 }
@@ -1521,6 +1583,7 @@ fn write_preset_json(buf: &mut String, preset: &control::Preset) {
     buf.push_str(",\"mode\":\"");
     write_json_string_escaped(buf, mode_to_json_str(preset.mode));
     buf.push_str("\"");
+    let _ = core::write!(buf, ",\"target_p_mw\":{}", preset.target_p_mw);
     let _ = core::write!(buf, ",\"target_i_ma\":{}", preset.target_i_ma);
     let _ = core::write!(buf, ",\"target_v_mv\":{}", preset.target_v_mv);
     let _ = core::write!(buf, ",\"min_v_mv\":{}", preset.min_v_mv);
@@ -1615,6 +1678,25 @@ fn parse_json_i64(body: &str, key: &str) -> Result<i64, &'static str> {
     value_str.parse::<i64>().map_err(|_| "expected integer")
 }
 
+fn parse_json_i64_optional(body: &str, key: &str) -> Result<Option<i64>, &'static str> {
+    let Some(idx) = body.find(key) else {
+        return Ok(None);
+    };
+    let colon = body[idx..].find(':').ok_or("missing ':'")?;
+    let mut value_str = body[idx + colon + 1..].trim_start();
+    let mut end = 0usize;
+    for ch in value_str.chars() {
+        if ch == '-' || ch.is_ascii_digit() {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    value_str = &value_str[..end];
+    let v = value_str.parse::<i64>().map_err(|_| "expected integer")?;
+    Ok(Some(v))
+}
+
 fn parse_json_str<'a>(body: &'a str, key: &str) -> Result<&'a str, &'static str> {
     let idx = body.find(key).ok_or("missing field")?;
     let colon = body[idx..].find(':').ok_or("missing ':'")?;
@@ -1636,8 +1718,14 @@ fn parse_preset_json(body: &str) -> Result<control::Preset, &'static str> {
     let mode = match mode_s {
         "cc" => LoadMode::Cc,
         "cv" => LoadMode::Cv,
-        _ => return Err("unsupported mode (expected \"cc\" or \"cv\")"),
+        "cp" => LoadMode::Cp,
+        _ => return Err("unsupported mode (expected \"cc\", \"cv\" or \"cp\")"),
     };
+
+    let target_p_mw = parse_json_i64_optional(body, "\"target_p_mw\"")?;
+    if mode == LoadMode::Cp && target_p_mw.is_none() {
+        return Err("missing field target_p_mw for mode=\"cp\"");
+    }
 
     let target_i_ma = parse_json_i64(body, "\"target_i_ma\"")?;
     let target_v_mv = parse_json_i64(body, "\"target_v_mv\"")?;
@@ -1648,6 +1736,7 @@ fn parse_preset_json(body: &str) -> Result<control::Preset, &'static str> {
     Ok(control::Preset {
         preset_id: preset_id as u8,
         mode,
+        target_p_mw: target_p_mw.unwrap_or(0).max(0) as u32,
         target_i_ma: target_i_ma as i32,
         target_v_mv: target_v_mv as i32,
         min_v_mv: min_v_mv as i32,
@@ -1669,6 +1758,44 @@ async fn handle_presets_update(
             return Err("400 Bad Request");
         }
     };
+
+    // CP contract: do not silently clamp critical target fields; report limit violations.
+    if preset.mode == LoadMode::Cp {
+        let hard_max_p = crate::LIMIT_PROFILE_DEFAULT.max_p_mw;
+        if preset.max_p_mw > hard_max_p {
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "max_p_mw exceeds hard limit",
+                false,
+                None,
+            );
+            return Err("422 Unprocessable Entity");
+        }
+        if preset.target_p_mw > hard_max_p {
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "target_p_mw exceeds hard limit",
+                false,
+                None,
+            );
+            return Err("422 Unprocessable Entity");
+        }
+        if preset.target_p_mw > preset.max_p_mw {
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "target_p_mw must be <= max_p_mw",
+                false,
+                None,
+            );
+            return Err("422 Unprocessable Entity");
+        }
+    } else {
+        // Stable schema: keep target_p_mw defined but ignored unless mode=cp.
+        preset.target_p_mw = 0;
+    }
     preset = preset.clamp();
 
     let updated = {

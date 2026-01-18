@@ -210,7 +210,7 @@ pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
 // 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
 pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     max_i_ma: TARGET_I_MAX_MA,
-    max_p_mw: 250_000,
+    max_p_mw: 100_000,
     ovp_mv: 40_000,
     temp_trip_mc: 100_000,
     thermal_derate_pct: 100,
@@ -770,18 +770,22 @@ async fn encoder_task(
                             continue;
                         }
 
-                        let digit = guard.adjust_digit;
-                        let step = digit.step_milli().saturating_mul(logical_step as i32);
-
                         let mut preset = guard.presets[preset_idx];
                         let mode = match preset.mode {
                             LoadMode::Cv => LoadMode::Cv,
+                            LoadMode::Cp => LoadMode::Cp,
                             LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
                         };
 
+                        let digit = coerce_adjust_digit_for_mode(mode, guard.adjust_digit);
+                        if digit != guard.adjust_digit {
+                            guard.adjust_digit = digit;
+                        }
+                        let step = digit.step_milli().saturating_mul(logical_step as i32);
+
                         let mut changed = false;
                         match mode {
-                            LoadMode::Cc | LoadMode::Reserved(_) => {
+                            LoadMode::Cc => {
                                 let prev = preset.target_i_ma;
                                 let max = preset.max_i_ma_total;
                                 let next = (prev.saturating_add(step)).clamp(0, max);
@@ -796,6 +800,24 @@ async fn encoder_task(
                                     (prev.saturating_add(step)).clamp(0, control::HARD_MAX_V_MV);
                                 if next != prev {
                                     preset.target_v_mv = next;
+                                    changed = true;
+                                }
+                            }
+                            LoadMode::Cp => {
+                                let prev = preset.target_p_mw as i64;
+                                let max = preset.max_p_mw as i64;
+                                let next = (prev + step as i64).clamp(0, max);
+                                if next != prev {
+                                    preset.target_p_mw = next as u32;
+                                    changed = true;
+                                }
+                            }
+                            LoadMode::Reserved(_) => {
+                                let prev = preset.target_i_ma;
+                                let max = preset.max_i_ma_total;
+                                let next = (prev.saturating_add(step)).clamp(0, max);
+                                if next != prev {
+                                    preset.target_i_ma = next;
                                     changed = true;
                                 }
                             }
@@ -816,14 +838,16 @@ async fn encoder_task(
                         };
                         let mode = match preset.mode {
                             LoadMode::Cv => LoadMode::Cv,
+                            LoadMode::Cp => LoadMode::Cp,
                             LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
                         };
 
                         let field = coerce_panel_field_for_mode(mode, guard.panel_selected_field);
                         guard.panel_selected_field = field;
-                        let digit = coerce_panel_digit_for_field(field, guard.panel_selected_digit);
+                        let digit =
+                            coerce_panel_digit_for_field(mode, field, guard.panel_selected_digit);
                         guard.panel_selected_digit = digit;
-                        let Some(step_unit) = panel_digit_step(field, digit) else {
+                        let Some(step_unit) = panel_digit_step(mode, field, digit) else {
                             continue;
                         };
                         let step = step_unit.saturating_mul(logical_step as i32);
@@ -832,7 +856,7 @@ async fn encoder_task(
                         match field {
                             ui::preset_panel::PresetPanelField::Mode => {}
                             ui::preset_panel::PresetPanelField::Target => match mode {
-                                LoadMode::Cc | LoadMode::Reserved(_) => {
+                                LoadMode::Cc => {
                                     let prev = preset.target_i_ma;
                                     let max = preset.max_i_ma_total;
                                     let next = (prev.saturating_add(step)).clamp(0, max);
@@ -847,6 +871,24 @@ async fn encoder_task(
                                         .clamp(0, control::HARD_MAX_V_MV);
                                     if next != prev {
                                         preset.target_v_mv = next;
+                                        changed = true;
+                                    }
+                                }
+                                LoadMode::Cp => {
+                                    let prev = preset.target_p_mw as i64;
+                                    let max = preset.max_p_mw as i64;
+                                    let next = (prev + step as i64).clamp(0, max);
+                                    if next != prev {
+                                        preset.target_p_mw = next as u32;
+                                        changed = true;
+                                    }
+                                }
+                                LoadMode::Reserved(_) => {
+                                    let prev = preset.target_i_ma;
+                                    let max = preset.max_i_ma_total;
+                                    let next = (prev.saturating_add(step)).clamp(0, max);
+                                    if next != prev {
+                                        preset.target_i_ma = next;
                                         changed = true;
                                     }
                                 }
@@ -1086,14 +1128,18 @@ async fn encoder_task(
                                     .get(idx)
                                     .map(|p| match p.mode {
                                         LoadMode::Cv => LoadMode::Cv,
+                                        LoadMode::Cp => LoadMode::Cp,
                                         LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
                                     })
                                     .unwrap_or(LoadMode::Cc);
                                 let field =
                                     coerce_panel_field_for_mode(mode, guard.panel_selected_field);
                                 guard.panel_selected_field = field;
-                                guard.panel_selected_digit =
-                                    cycle_panel_digit_right(field, guard.panel_selected_digit);
+                                guard.panel_selected_digit = cycle_panel_digit_right(
+                                    mode,
+                                    field,
+                                    guard.panel_selected_digit,
+                                );
                                 bump_control_rev();
                                 prompt_tone::enqueue_ui_ok();
                             }
@@ -1317,6 +1363,7 @@ async fn touch_ui_task(
                                 let preset = guard.active_preset();
                                 let unit = match preset.mode {
                                     LoadMode::Cv => 'V',
+                                    LoadMode::Cp => 'W',
                                     LoadMode::Cc | LoadMode::Reserved(_) => 'A',
                                 };
                                 (unit, guard.adjust_digit)
@@ -1389,6 +1436,7 @@ async fn touch_ui_task(
                                 let preset = guard.active_preset();
                                 let unit = match preset.mode {
                                     LoadMode::Cv => 'V',
+                                    LoadMode::Cp => 'W',
                                     LoadMode::Cc | LoadMode::Reserved(_) => 'A',
                                 };
                                 (unit, guard.adjust_digit)
@@ -1683,15 +1731,28 @@ async fn touch_ui_task(
                             let prev_digit = guard.panel_selected_digit;
 
                             guard.panel_selected_field = field;
-                            let cur_digit =
-                                coerce_panel_digit_for_field(field, guard.panel_selected_digit);
+                            let idx = guard.editing_preset_id.saturating_sub(1) as usize;
+                            let mode = guard
+                                .presets
+                                .get(idx)
+                                .map(|p| match p.mode {
+                                    LoadMode::Cv => LoadMode::Cv,
+                                    LoadMode::Cp => LoadMode::Cp,
+                                    _ => LoadMode::Cc,
+                                })
+                                .unwrap_or(LoadMode::Cc);
+                            let cur_digit = coerce_panel_digit_for_field(
+                                mode,
+                                field,
+                                guard.panel_selected_digit,
+                            );
                             guard.panel_selected_digit = cur_digit;
                             if prev_field != field || prev_digit != cur_digit {
                                 state_changed = true;
                             }
 
                             let (next_digit, attempted_oob) =
-                                shift_panel_digit_once(field, cur_digit, dir);
+                                shift_panel_digit_once(mode, field, cur_digit, dir);
                             if attempted_oob {
                                 if !next_boundary_fail_fired {
                                     prompt_tone::enqueue_ui_fail();
@@ -1782,14 +1843,21 @@ async fn touch_ui_task(
                                     if view == control::UiView::Main {
                                         let mut guard = control.lock().await;
                                         let preset = guard.active_preset();
-                                        let unit = match preset.mode {
+                                        let mode = match preset.mode {
+                                            LoadMode::Cv => LoadMode::Cv,
+                                            LoadMode::Cp => LoadMode::Cp,
+                                            _ => LoadMode::Cc,
+                                        };
+                                        let unit = match mode {
                                             LoadMode::Cv => 'V',
-                                            LoadMode::Cc | LoadMode::Reserved(_) => 'A',
+                                            LoadMode::Cp => 'W',
+                                            _ => 'A',
                                         };
                                         let pick =
                                             ui::pick_control_row_setpoint_digit(marker.x, unit);
-                                        if pick.digit != guard.adjust_digit {
-                                            guard.adjust_digit = pick.digit;
+                                        let digit = coerce_adjust_digit_for_mode(mode, pick.digit);
+                                        if digit != guard.adjust_digit {
+                                            guard.adjust_digit = digit;
                                             bump_control_rev();
                                             prompt_tone::enqueue_ui_ok();
                                             info!(
@@ -2133,6 +2201,7 @@ async fn touch_ui_task(
                                         if let Some(p) = guard.presets.get(idx).copied() {
                                             let mode = match p.mode {
                                                 LoadMode::Cv => LoadMode::Cv,
+                                                LoadMode::Cp => LoadMode::Cp,
                                                 LoadMode::Cc | LoadMode::Reserved(_) => {
                                                     LoadMode::Cc
                                                 }
@@ -2143,7 +2212,18 @@ async fn touch_ui_task(
                                                     guard.panel_selected_field,
                                                 );
                                         }
+                                        let mode = match guard
+                                            .presets
+                                            .get(idx)
+                                            .map(|p| p.mode)
+                                            .unwrap_or(LoadMode::Cc)
+                                        {
+                                            LoadMode::Cv => LoadMode::Cv,
+                                            LoadMode::Cp => LoadMode::Cp,
+                                            _ => LoadMode::Cc,
+                                        };
                                         guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                            mode,
                                             guard.panel_selected_field,
                                             guard.panel_selected_digit,
                                         );
@@ -2169,11 +2249,11 @@ async fn touch_ui_task(
                                         last_tab_tap = Some((preset_id, now));
                                     }
                                 }
-                                Hit::ModeCv | Hit::ModeCc => {
-                                    let mode = if hit == Hit::ModeCv {
-                                        LoadMode::Cv
-                                    } else {
-                                        LoadMode::Cc
+                                Hit::ModeCv | Hit::ModeCc | Hit::ModeCp => {
+                                    let mode = match hit {
+                                        Hit::ModeCv => LoadMode::Cv,
+                                        Hit::ModeCp => LoadMode::Cp,
+                                        _ => LoadMode::Cc,
                                     };
                                     let mut guard = control.lock().await;
                                     let preset_id = guard.editing_preset_id;
@@ -2192,7 +2272,13 @@ async fn touch_ui_task(
                                             mode,
                                             guard.panel_selected_field,
                                         );
+                                        let mode = match next {
+                                            LoadMode::Cv => LoadMode::Cv,
+                                            LoadMode::Cp => LoadMode::Cp,
+                                            _ => LoadMode::Cc,
+                                        };
                                         guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                            mode,
                                             guard.panel_selected_field,
                                             guard.panel_selected_digit,
                                         );
@@ -2208,7 +2294,19 @@ async fn touch_ui_task(
                                     let prev_field = guard.panel_selected_field;
                                     let prev_digit = guard.panel_selected_digit;
                                     guard.panel_selected_field = field;
+                                    let idx = guard.editing_preset_id.saturating_sub(1) as usize;
+                                    let mode = match guard
+                                        .presets
+                                        .get(idx)
+                                        .map(|p| p.mode)
+                                        .unwrap_or(LoadMode::Cc)
+                                    {
+                                        LoadMode::Cv => LoadMode::Cv,
+                                        LoadMode::Cp => LoadMode::Cp,
+                                        _ => LoadMode::Cc,
+                                    };
                                     guard.panel_selected_digit = coerce_panel_digit_for_field(
+                                        mode,
                                         guard.panel_selected_field,
                                         guard.panel_selected_digit,
                                     );
@@ -2235,11 +2333,13 @@ async fn touch_ui_task(
                                                 .get(idx)
                                                 .map(|p| match p.mode {
                                                     LoadMode::Cv => LoadMode::Cv,
+                                                    LoadMode::Cp => LoadMode::Cp,
                                                     _ => LoadMode::Cc,
                                                 })
                                                 .unwrap_or(LoadMode::Cc);
                                             match mode {
                                                 LoadMode::Cv => 'V',
+                                                LoadMode::Cp => 'W',
                                                 _ => 'A',
                                             }
                                         }
@@ -2250,8 +2350,18 @@ async fn touch_ui_task(
                                     };
                                     let pick_digit =
                                         ui::preset_panel::pick_value_digit(field, marker.x, unit);
+                                    let idx = guard.editing_preset_id.saturating_sub(1) as usize;
+                                    let mode = guard
+                                        .presets
+                                        .get(idx)
+                                        .map(|p| match p.mode {
+                                            LoadMode::Cv => LoadMode::Cv,
+                                            LoadMode::Cp => LoadMode::Cp,
+                                            _ => LoadMode::Cc,
+                                        })
+                                        .unwrap_or(LoadMode::Cc);
                                     guard.panel_selected_digit =
-                                        coerce_panel_digit_for_field(field, pick_digit);
+                                        coerce_panel_digit_for_field(mode, field, pick_digit);
                                     let changed = guard.panel_selected_field != prev_field
                                         || guard.panel_selected_digit != prev_digit;
                                     if changed {
@@ -2418,11 +2528,13 @@ async fn touch_ui_task(
                                         .get(idx)
                                         .map(|p| match p.mode {
                                             LoadMode::Cv => LoadMode::Cv,
+                                            LoadMode::Cp => LoadMode::Cp,
                                             _ => LoadMode::Cc,
                                         })
                                         .unwrap_or(LoadMode::Cc);
                                     match mode {
                                         LoadMode::Cv => 'V',
+                                        LoadMode::Cp => 'W',
                                         _ => 'A',
                                     }
                                 }
@@ -2433,8 +2545,18 @@ async fn touch_ui_task(
                             };
                             let pick_digit =
                                 ui::preset_panel::pick_value_digit(field, marker.x, unit);
+                            let idx = guard.editing_preset_id.saturating_sub(1) as usize;
+                            let mode = guard
+                                .presets
+                                .get(idx)
+                                .map(|p| match p.mode {
+                                    LoadMode::Cv => LoadMode::Cv,
+                                    LoadMode::Cp => LoadMode::Cp,
+                                    _ => LoadMode::Cc,
+                                })
+                                .unwrap_or(LoadMode::Cc);
                             guard.panel_selected_digit =
-                                coerce_panel_digit_for_field(field, pick_digit);
+                                coerce_panel_digit_for_field(mode, field, pick_digit);
                             let changed = guard.panel_selected_field != prev_field
                                 || guard.panel_selected_digit != prev_digit;
                             if changed {
@@ -2469,19 +2591,38 @@ fn coerce_panel_field_for_mode(
     field
 }
 
+fn coerce_adjust_digit_for_mode(
+    mode: LoadMode,
+    digit: control::AdjustDigit,
+) -> control::AdjustDigit {
+    match mode {
+        LoadMode::Cp => match digit {
+            control::AdjustDigit::Hundredths | control::AdjustDigit::Thousandths => {
+                control::AdjustDigit::Tenths
+            }
+            _ => digit,
+        },
+        _ => digit,
+    }
+}
+
 fn coerce_panel_digit_for_field(
+    mode: LoadMode,
     field: ui::preset_panel::PresetPanelField,
     digit: ui::preset_panel::PresetPanelDigit,
 ) -> ui::preset_panel::PresetPanelDigit {
     use ui::preset_panel::PresetPanelDigit as D;
     use ui::preset_panel::PresetPanelField as F;
 
+    let power_field = field == F::PLim || (mode == LoadMode::Cp && field == F::Target);
     match field {
-        F::PLim => match digit {
-            D::Tens | D::Ones | D::Tenths | D::Hundredths => digit,
-            D::Thousandths => D::Hundredths,
-        },
         F::Mode => digit,
+        _ if power_field => match digit {
+            D::Tens | D::Ones | D::Tenths => digit,
+            // For PLim we allow hundredths; for CP target we coerce to tenths (0.1 W).
+            D::Hundredths if field == F::PLim => D::Hundredths,
+            D::Hundredths | D::Thousandths => D::Tenths,
+        },
         _ => match digit {
             D::Ones | D::Tenths | D::Hundredths | D::Thousandths => digit,
             D::Tens => D::Ones,
@@ -2490,22 +2631,35 @@ fn coerce_panel_digit_for_field(
 }
 
 fn cycle_panel_digit_right(
+    mode: LoadMode,
     field: ui::preset_panel::PresetPanelField,
     digit: ui::preset_panel::PresetPanelDigit,
 ) -> ui::preset_panel::PresetPanelDigit {
     use ui::preset_panel::PresetPanelDigit as D;
     use ui::preset_panel::PresetPanelField as F;
 
-    let digit = coerce_panel_digit_for_field(field, digit);
+    let digit = coerce_panel_digit_for_field(mode, field, digit);
+    let power_field = field == F::PLim || (mode == LoadMode::Cp && field == F::Target);
     match field {
-        F::PLim => match digit {
-            D::Tens => D::Ones,
-            D::Ones => D::Tenths,
-            D::Tenths => D::Hundredths,
-            D::Hundredths => D::Tens,
-            D::Thousandths => D::Tens,
-        },
         F::Mode => digit,
+        _ if power_field => {
+            if field == F::PLim {
+                match digit {
+                    D::Tens => D::Ones,
+                    D::Ones => D::Tenths,
+                    D::Tenths => D::Hundredths,
+                    D::Hundredths => D::Tens,
+                    D::Thousandths => D::Tens,
+                }
+            } else {
+                // CP target: allow only Tens/Ones/Tenths (0.1 W).
+                match digit {
+                    D::Tens => D::Ones,
+                    D::Ones => D::Tenths,
+                    _ => D::Tens,
+                }
+            }
+        }
         _ => match digit {
             D::Ones => D::Tenths,
             D::Tenths => D::Hundredths,
@@ -2517,6 +2671,7 @@ fn cycle_panel_digit_right(
 }
 
 fn shift_panel_digit_once(
+    mode: LoadMode,
     field: ui::preset_panel::PresetPanelField,
     digit: ui::preset_panel::PresetPanelDigit,
     dir: i32,
@@ -2529,19 +2684,33 @@ fn shift_panel_digit_once(
         return (digit, false);
     }
 
-    let digit = coerce_panel_digit_for_field(field, digit);
-    let (cur_rank, max_rank) = match field {
-        F::PLim => (
-            match digit {
-                D::Tens => 0,
-                D::Ones => 1,
-                D::Tenths => 2,
-                D::Hundredths => 3,
-                _ => 0,
-            },
-            3,
-        ),
-        _ => (
+    let digit = coerce_panel_digit_for_field(mode, field, digit);
+    let power_field = field == F::PLim || (mode == LoadMode::Cp && field == F::Target);
+    let (cur_rank, max_rank) = if power_field {
+        if field == F::PLim {
+            (
+                match digit {
+                    D::Tens => 0,
+                    D::Ones => 1,
+                    D::Tenths => 2,
+                    D::Hundredths => 3,
+                    _ => 0,
+                },
+                3,
+            )
+        } else {
+            (
+                match digit {
+                    D::Tens => 0,
+                    D::Ones => 1,
+                    D::Tenths => 2,
+                    _ => 1,
+                },
+                2,
+            )
+        }
+    } else {
+        (
             match digit {
                 D::Ones => 0,
                 D::Tenths => 1,
@@ -2550,7 +2719,7 @@ fn shift_panel_digit_once(
                 _ => 0,
             },
             3,
-        ),
+        )
     };
 
     let raw_rank = cur_rank + dir;
@@ -2558,40 +2727,51 @@ fn shift_panel_digit_once(
         return (digit, true);
     }
 
-    let next = match field {
-        F::PLim => match raw_rank {
-            0 => D::Tens,
-            1 => D::Ones,
-            2 => D::Tenths,
-            _ => D::Hundredths,
-        },
-        _ => match raw_rank {
+    let next = if power_field {
+        if field == F::PLim {
+            match raw_rank {
+                0 => D::Tens,
+                1 => D::Ones,
+                2 => D::Tenths,
+                _ => D::Hundredths,
+            }
+        } else {
+            match raw_rank {
+                0 => D::Tens,
+                1 => D::Ones,
+                _ => D::Tenths,
+            }
+        }
+    } else {
+        match raw_rank {
             0 => D::Ones,
             1 => D::Tenths,
             2 => D::Hundredths,
             _ => D::Thousandths,
-        },
+        }
     };
 
     (next, false)
 }
 
 fn panel_digit_step(
+    mode: LoadMode,
     field: ui::preset_panel::PresetPanelField,
     digit: ui::preset_panel::PresetPanelDigit,
 ) -> Option<i32> {
     use ui::preset_panel::PresetPanelDigit as D;
     use ui::preset_panel::PresetPanelField as F;
 
+    let power_field = field == F::PLim || (mode == LoadMode::Cp && field == F::Target);
     match field {
-        F::PLim => match digit {
+        F::Mode => None,
+        _ if power_field => match digit {
             D::Tens => Some(10_000),
             D::Ones => Some(1_000),
             D::Tenths => Some(100),
             D::Hundredths => Some(10),
             _ => None,
         },
-        F::Mode => None,
         _ => match digit {
             D::Ones => Some(1_000),
             D::Tenths => Some(100),
@@ -2613,15 +2793,18 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
         .unwrap_or_else(|| state.active_preset());
     let editing_mode = match editing.mode {
         LoadMode::Cv => LoadMode::Cv,
+        LoadMode::Cp => LoadMode::Cp,
         LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
     };
 
     let selected_field = coerce_panel_field_for_mode(editing_mode, state.panel_selected_field);
-    let selected_digit = coerce_panel_digit_for_field(selected_field, state.panel_selected_digit);
+    let selected_digit =
+        coerce_panel_digit_for_field(editing_mode, selected_field, state.panel_selected_digit);
 
     let (target_milli, target_unit) = match editing_mode {
         LoadMode::Cv => (editing.target_v_mv, 'V'),
-        LoadMode::Cc | LoadMode::Reserved(_) => (editing.target_i_ma, 'A'),
+        LoadMode::Cp => (editing.target_p_mw as i32, 'W'),
+        _ => (editing.target_i_ma, 'A'),
     };
 
     ui::preset_panel::PresetPanelVm {
@@ -2634,7 +2817,11 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
         dirty: state.dirty.get(idx).copied().unwrap_or(false),
         selected_field,
         selected_digit,
-        target_text: format_av_3dp(target_milli, target_unit),
+        target_text: if editing_mode == LoadMode::Cp {
+            format_power_2dp(target_milli)
+        } else {
+            format_av_3dp(target_milli, target_unit)
+        },
         v_lim_text: format_av_3dp(editing.min_v_mv, 'V'),
         i_lim_text: format_av_3dp(editing.max_i_ma_total, 'A'),
         p_lim_text: format_power_2dp(editing.max_p_mw as i32),
@@ -3574,25 +3761,29 @@ async fn display_task(
                 };
                 let overlay_mode = match overlay_preset.mode {
                     LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Cp => LoadMode::Cp,
                     LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
                 };
                 let active_preset = guard.active_preset();
                 let active_mode = match active_preset.mode {
                     LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Cp => LoadMode::Cp,
                     LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
                 };
                 let (active_target_milli, active_target_unit) = match active_mode {
                     LoadMode::Cv => (active_preset.target_v_mv, 'V'),
+                    LoadMode::Cp => (active_preset.target_p_mw as i32, 'W'),
                     LoadMode::Cc | LoadMode::Reserved(_) => (active_preset.target_i_ma, 'A'),
                 };
                 let preview_panel = if preview_active {
                     use ui::preset_panel::{format_av_3dp, format_power_2dp};
-                    let (target_milli, target_unit) = match overlay_mode {
-                        LoadMode::Cv => (overlay_preset.target_v_mv, 'V'),
-                        _ => (overlay_preset.target_i_ma, 'A'),
+                    let target_text = match overlay_mode {
+                        LoadMode::Cv => format_av_3dp(overlay_preset.target_v_mv, 'V'),
+                        LoadMode::Cp => format_power_2dp(overlay_preset.target_p_mw as i32),
+                        _ => format_av_3dp(overlay_preset.target_i_ma, 'A'),
                     };
                     Some((
-                        format_av_3dp(target_milli, target_unit),
+                        target_text,
                         format_av_3dp(overlay_preset.min_v_mv, 'V'),
                         format_av_3dp(overlay_preset.max_i_ma_total, 'A'),
                         format_power_2dp(overlay_preset.max_p_mw as i32),
@@ -3606,7 +3797,7 @@ async fn display_task(
                     overlay_mode,
                     active_target_milli,
                     active_target_unit,
-                    guard.adjust_digit,
+                    coerce_adjust_digit_for_mode(active_mode, guard.adjust_digit),
                     guard.ui_view,
                     guard.pd_saved.target_mv,
                     guard.pd_draft,
@@ -4053,9 +4244,11 @@ async fn uart_link_task_dma(
         uhci_rx = rx_back;
         match res {
             Ok(()) => {
-                let received = buf_back.number_of_received_bytes();
-                let slice_len = received.min(buf_back.as_slice().len());
-                feed_decoder(&buf_back.as_slice()[..slice_len], decoder, telemetry).await;
+                // When chunk_limit < dma buffer len, received bytes may wrap across descriptors.
+                // Always consume via the provided iterator to preserve ordering.
+                for chunk in buf_back.received_data() {
+                    feed_decoder(chunk, decoder, telemetry).await;
+                }
                 dma_rx = buf_back;
             }
             Err(err) => {
@@ -4741,18 +4934,19 @@ async fn main(spawner: Spawner) {
     let mut uhci_dma_buf_opt: Option<DmaRxBuf> = None;
 
     if ENABLE_UART_UHCI_DMA {
+        let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
+            esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
+        let dma_rx = DmaRxBuf::new(uhci_rx_desc, uhci_rx_buf).expect("uhci dma rx buf");
+
         let uart_blocking = Uart::new(peripherals.UART1, uart_cfg)
             .expect("uart1 init")
             .with_tx(peripherals.GPIO17)
             .with_rx(peripherals.GPIO18);
 
-        // 为 UART UHCI 配置独立 DMA 通道与缓冲；chunk_limit 不得超过 buf 长度且 <=4095。
-        let (uhci_rx_buf, uhci_rx_desc, _uhci_tx_buf, _uhci_tx_desc) =
-            esp_hal::dma_buffers!(UART_DMA_BUF_LEN);
-        let dma_rx = DmaRxBuf::new(uhci_rx_desc, uhci_rx_buf).expect("uhci dma rx buf");
-
         let mut uhci =
             Uhci::new(uart_blocking, peripherals.UHCI0, peripherals.DMA_CH1).into_async();
+        // NOTE: chunk_limit must not exceed the DMA buffer length.
+        // Keep it equal to the DMA buffer so UHCI/DMA does not lock up.
         uhci.apply_rx_config(&UhciRxConfig::default().with_chunk_limit(UART_DMA_BUF_LEN as u16))
             .expect("uhci rx cfg");
         uhci.apply_tx_config(&UhciTxConfig::default())
@@ -5769,6 +5963,11 @@ async fn setmode_tx_task(
     let mut last_sent_rev: u32 = 0;
     let mut prev_link_up: bool = LINK_UP.load(Ordering::Relaxed);
     let mut force_send: bool = true; // boot
+    // Track how long we've been stuck in AnalogState::CalMissing so we can
+    // retry the SoftReset + CalWrite + SetEnable handshake after analog resets.
+    let mut calmissing_since_ms: Option<u32> = None;
+    let mut last_calmissing_warn_ms: u32 = 0;
+    let mut last_calmissing_handshake_ms: u32 = 0;
 
     loop {
         yield_now().await;
@@ -5845,6 +6044,114 @@ async fn setmode_tx_task(
         }
 
         let now = now_ms32();
+
+        // If the analog side resets while the digital stays up, we can end up in CalMissing
+        // until we resend the calibration curves. Do a conservative retry loop (only when
+        // idle) to avoid deadlocking output enable behind CAL_READY.
+        let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+        if LINK_UP.load(Ordering::Relaxed)
+            && analog_state == AnalogState::CalMissing
+            && pending.is_none()
+            && pd_pending.is_none()
+        {
+            let since = match calmissing_since_ms {
+                Some(v) => v,
+                None => {
+                    calmissing_since_ms = Some(now);
+                    now
+                }
+            };
+            let stuck_ms = now.wrapping_sub(since);
+            if stuck_ms >= 2_000 {
+                if now.wrapping_sub(last_calmissing_warn_ms) >= 5_000 {
+                    last_calmissing_warn_ms = now;
+                    warn!(
+                        "analog stuck in CalMissing; retrying calibration handshake (stuck_ms={})",
+                        stuck_ms
+                    );
+                }
+
+                if now.wrapping_sub(last_calmissing_handshake_ms) >= 5_000 {
+                    last_calmissing_handshake_ms = now;
+
+                    // SoftReset re-handshake: use a fresh seq to keep framing sane.
+                    let soft_reset_seq = seq;
+                    seq = seq.wrapping_add(1);
+                    let soft_reset_acked = send_soft_reset_handshake(
+                        &mut uhci_tx,
+                        soft_reset_seq,
+                        &mut raw,
+                        &mut slip,
+                    )
+                    .await;
+                    if !soft_reset_acked {
+                        warn!(
+                            "soft_reset re-handshake: ack missing; continuing with CalWrite+SetEnable"
+                        );
+                    }
+
+                    // Re-send the full calibration set (multi-chunk CalWrite) to unlock
+                    // CAL_READY on the analog side.
+                    let profile = { calibration.lock().await.profile.clone() };
+                    send_all_calibration_curves(
+                        &mut uhci_tx,
+                        &mut seq,
+                        &profile,
+                        &mut raw,
+                        &mut slip,
+                        "calmissing-recover",
+                    )
+                    .await;
+
+                    // Re-send SetEnable(true) to re-arm ENABLE_REQUESTED on analog.
+                    let enable_seq = seq;
+                    let enable_cmd = SetEnable { enable: true };
+                    match encode_set_enable_frame(enable_seq, &enable_cmd, &mut raw) {
+                        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
+                            Ok(slip_len) => {
+                                match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                                    Ok(written) if written == slip_len => {
+                                        let _ = uhci_tx.uart_tx.flush_async().await;
+                                        info!(
+                                            "SetEnable(true) frame re-sent seq={} len={} slip_len={}",
+                                            enable_seq, frame_len, slip_len
+                                        );
+                                    }
+                                    Ok(written) => {
+                                        warn!(
+                                            "SetEnable(true) re-send short write {} < {} (seq={})",
+                                            written, slip_len, enable_seq
+                                        );
+                                    }
+                                    Err(err) => {
+                                        warn!(
+                                            "SetEnable(true) re-send uart write error for seq={}: {:?}",
+                                            enable_seq, err
+                                        );
+                                    }
+                                }
+                            }
+                            Err(err) => {
+                                warn!("SetEnable(true) re-send slip_encode error: {:?}", err);
+                            }
+                        },
+                        Err(err) => {
+                            warn!(
+                                "SetEnable(true) re-send encode_set_enable_frame error: {:?}",
+                                err
+                            );
+                        }
+                    }
+                    seq = seq.wrapping_add(1);
+
+                    // Force a SetMode snapshot after recovering.
+                    force_send = true;
+                }
+            }
+        } else {
+            calmissing_since_ms = None;
+        }
+
         let (rev_now, desired_cmd, mut pd_cfg) = {
             let guard = control.lock().await;
             let p = guard.active_preset();
@@ -5854,7 +6161,13 @@ async fn setmode_tx_task(
                 mode: match p.mode {
                     LoadMode::Cc => LoadMode::Cc,
                     LoadMode::Cv => LoadMode::Cv,
+                    LoadMode::Cp => LoadMode::Cp,
                     LoadMode::Reserved(_) => LoadMode::Cc,
+                },
+                target_p_mw: if p.mode == LoadMode::Cp {
+                    Some(p.target_p_mw)
+                } else {
+                    None
                 },
                 target_i_ma: p.target_i_ma,
                 target_v_mv: p.target_v_mv,
@@ -6137,8 +6450,22 @@ fn sanitize_setmode(mut cmd: SetMode) -> SetMode {
     cmd.max_i_ma_total = cmd.max_i_ma_total.max(0).min(control::HARD_MAX_I_MA_TOTAL);
     let hard_max_p = LIMIT_PROFILE_DEFAULT.max_p_mw;
     cmd.max_p_mw = cmd.max_p_mw.min(hard_max_p);
+    if let Some(v) = cmd.target_p_mw {
+        cmd.target_p_mw = Some(v.min(hard_max_p));
+    }
     if cmd.mode == LoadMode::Cv && cmd.target_v_mv < cmd.min_v_mv {
         cmd.target_v_mv = cmd.min_v_mv;
+    }
+    if cmd.mode == LoadMode::Cp {
+        if let Some(v) = cmd.target_p_mw {
+            if v > cmd.max_p_mw {
+                cmd.target_p_mw = Some(cmd.max_p_mw);
+            }
+        } else {
+            cmd.target_p_mw = Some(0);
+        }
+    } else {
+        cmd.target_p_mw = None;
     }
     if cmd.target_i_ma > cmd.max_i_ma_total {
         cmd.target_i_ma = cmd.max_i_ma_total;

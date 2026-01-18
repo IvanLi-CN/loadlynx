@@ -161,7 +161,7 @@ interface CcControlView {
 ```ts
 interface FastStatusJson {
   uptime_ms: number;
-  mode: number;             // 当前工作模式（1=CC, 2=CV；其他值保留）
+  mode: number;             // 当前工作模式（1=CC, 2=CV, 3=CP；其他值保留）
   state_flags: number;      // 状态位掩码（uint32）
   enable: boolean;          // 来自模拟板 FastStatus；与 /api/v1/cc 中的 enable（负载开关）不是同一概念
   target_value: number;     // 目标总电流（mA）
@@ -191,25 +191,35 @@ type FaultFlag =
   | "MCU_OVER_TEMP"
   | "SINK_OVER_TEMP";
 
+type StateFlag =
+  | "REMOTE_ACTIVE"
+  | "LINK_GOOD"
+  | "ENABLED"
+  | "UV_LATCHED"
+  | "POWER_LIMITED"
+  | "CURRENT_LIMITED";
+
 interface FastStatusView {
   raw: FastStatusJson;
   link_up: boolean;          // 数字板根据 LAST_GOOD_FRAME_MS 推导
   hello_seen: boolean;       // 是否收到 HELLO
   analog_state: AnalogState; // 映射自数字板内部状态机
   fault_flags_decoded: FaultFlag[]; // 从 fault_flags 位掩码解码出的列表
+  state_flags_decoded: StateFlag[]; // 从 state_flags 位掩码解码出的列表
 }
 ```
 
 ### 2.5 Preset/Control（v1 冻结）
 
 ```ts
-type LoadMode = "cc" | "cv";
+type LoadMode = "cc" | "cv" | "cp";
 
 interface Preset {
   preset_id: number;        // 1..=5
   mode: LoadMode;
 
   // Targets (units fixed; unused field still present for wire stability).
+  target_p_mw: number;      // mW (used when mode="cp")
   target_i_ma: number;      // mA (used when mode="cc")
   target_v_mv: number;      // mV (used when mode="cv")
 
@@ -251,7 +261,7 @@ interface ControlView {
   "capabilities": {
     "cc_supported": true,
     "cv_supported": true,
-    "cp_supported": false,
+    "cp_supported": true,
     "presets_supported": true,
     "preset_count": 5,
     "api_version": "2.0.0"
@@ -297,7 +307,8 @@ interface ControlView {
   "link_up": true,
   "hello_seen": true,
   "analog_state": "ready",
-  "fault_flags_decoded": []
+  "fault_flags_decoded": [],
+  "state_flags_decoded": ["REMOTE_ACTIVE", "LINK_GOOD"]
 }
 ```
 
@@ -320,7 +331,7 @@ interface ControlView {
 
 ```text
 event: status
-data: {"status":{"uptime_ms":123456,"mode":0,...},"link_up":true,"hello_seen":true,"analog_state":"ready","fault_flags_decoded":[]}
+data: {"status":{"uptime_ms":123456,"mode":0,...},"link_up":true,"hello_seen":true,"analog_state":"ready","fault_flags_decoded":[],"state_flags_decoded":["REMOTE_ACTIVE","LINK_GOOD"]}
 
 ```
 
@@ -568,6 +579,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
     {
       "preset_id": 1,
       "mode": "cc",
+      "target_p_mw": 0,
       "target_i_ma": 1500,
       "target_v_mv": 12000,
       "min_v_mv": 0,
@@ -581,7 +593,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 ### 3.7 `PUT /api/v1/presets`（冻结）
 
-更新单个 Preset。请求体必须包含完整 Preset payload（包括 `preset_id`），固件需对范围做 clamp/校验。
+更新单个 Preset。请求体必须包含完整 Preset payload（包括 `preset_id`），固件需对范围做校验；对 CP 关键字段越界应返回 `422 LIMIT_VIOLATION`（不应静默夹紧目标功率）。
 
 - 请求：
 
@@ -589,6 +601,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 {
   "preset_id": 3,
   "mode": "cv",
+  "target_p_mw": 0,
   "target_i_ma": 1500,
   "target_v_mv": 12000,
   "min_v_mv": 0,
@@ -598,6 +611,9 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 ```
 
 - 响应（200）：返回更新后的 Preset（同请求结构）。
+
+- 约束（CP）：
+  - 当 `mode="cp"` 时必须提供 `target_p_mw`（mW），且满足 `target_p_mw <= max_p_mw`；不满足则返回 `422 LIMIT_VIOLATION`。
 
 ### 3.8 `POST /api/v1/presets/apply`（冻结）
 

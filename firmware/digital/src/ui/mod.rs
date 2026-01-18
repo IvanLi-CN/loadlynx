@@ -107,7 +107,7 @@ pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
 
 pub fn pick_control_row_setpoint_digit(x: i32, unit: char) -> SetpointDigitPick {
     // Mirror the `draw_control_row()` layout so hit-testing matches what is rendered:
-    // numeric "DD.ddd" is right-aligned inside the pill, followed by the unit in SmallFont.
+    // numeric is right-aligned inside the pill, followed by the unit in SmallFont.
     let glyph_w = SETPOINT_FONT.width() as i32;
     let num_w = glyph_w * 6;
 
@@ -135,19 +135,35 @@ pub fn pick_control_row_setpoint_digit(x: i32, unit: char) -> SetpointDigitPick 
         (rel / glyph_w, rel % glyph_w)
     };
 
-    let digit = match cell_idx {
-        0 | 1 => AdjustDigit::Ones, // tens is non-selectable; snap to ones
-        2 => {
-            // Decimal point: snap to nearest adjacent selectable digit.
-            if cell_off < glyph_w / 2 {
-                AdjustDigit::Ones
-            } else {
-                AdjustDigit::Tenths
+    let digit = if unit == 'W' {
+        match cell_idx {
+            0 | 1 | 2 => AdjustDigit::Ones, // hundreds/tens are non-selectable; snap to ones
+            3 => {
+                // Decimal point: snap to nearest adjacent selectable digit.
+                if cell_off < glyph_w / 2 {
+                    AdjustDigit::Ones
+                } else {
+                    AdjustDigit::Tenths
+                }
             }
+            4 | 5 => AdjustDigit::Tenths, // 0.1 W resolution
+            _ => AdjustDigit::Tenths,
         }
-        3 => AdjustDigit::Tenths,
-        4 => AdjustDigit::Hundredths,
-        _ => AdjustDigit::Thousandths,
+    } else {
+        match cell_idx {
+            0 | 1 => AdjustDigit::Ones, // tens is non-selectable; snap to ones
+            2 => {
+                // Decimal point: snap to nearest adjacent selectable digit.
+                if cell_off < glyph_w / 2 {
+                    AdjustDigit::Ones
+                } else {
+                    AdjustDigit::Tenths
+                }
+            }
+            3 => AdjustDigit::Tenths,
+            4 => AdjustDigit::Hundredths,
+            _ => AdjustDigit::Thousandths,
+        }
     };
 
     SetpointDigitPick {
@@ -543,6 +559,7 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
     let (mode_text, mode_color) = match data.active_mode {
         LoadMode::Cc | LoadMode::Reserved(_) => ("CC", rgb(0xFF5252)),
         LoadMode::Cv => ("CV", rgb(0xFFB347)),
+        LoadMode::Cp => ("CP", rgb(0xB27BFF)),
     };
 
     let mut preset_text = String::<2>::new();
@@ -607,13 +624,21 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
     );
 
     // Indicate which digit is currently selected for encoder adjustment.
-    // Format is fixed-width "DD.ddd", so indices are stable:
-    //   0 tens, 1 ones, 2 '.', 3 tenths, 4 hundredths, 5 thousandths.
-    let idx = match data.adjust_digit {
-        AdjustDigit::Ones => 1,
-        AdjustDigit::Tenths => 3,
-        AdjustDigit::Hundredths => 4,
-        AdjustDigit::Thousandths => 5,
+    // Format is fixed-width and unit-dependent:
+    // - A/V: "DD.ddd" (0 tens, 1 ones, 2 '.', 3 tenths, 4 hundredths, 5 thousandths)
+    // - W:   "DDD.dd" (0 hundreds, 1 tens, 2 ones, 3 '.', 4 tenths, 5 hundredths)
+    let idx = if data.control_target_unit == 'W' {
+        match data.adjust_digit {
+            AdjustDigit::Tenths => 4,
+            _ => 2,
+        }
+    } else {
+        match data.adjust_digit {
+            AdjustDigit::Ones => 1,
+            AdjustDigit::Tenths => 3,
+            AdjustDigit::Hundredths => 4,
+            AdjustDigit::Thousandths => 5,
+        }
     };
     let glyph_w = SETPOINT_FONT.width() as i32;
     let cell_x = value_x0 + idx as i32 * glyph_w;
@@ -658,9 +683,11 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
     const COLOR_TEXT_VALUE: u32 = 0xdfe7ff;
     const COLOR_MODE_CV: u32 = 0xffb24a;
     const COLOR_MODE_CC: u32 = 0xff5252;
+    const COLOR_MODE_CP: u32 = 0xb27bff;
 
     let mode = match data.active_mode {
         LoadMode::Cv => LoadMode::Cv,
+        LoadMode::Cp => LoadMode::Cp,
         _ => LoadMode::Cc,
     };
     let rows = 6;
@@ -719,6 +746,7 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
 
                 let (mode_text, mode_color) = match mode {
                     LoadMode::Cv => ("CV", rgb(COLOR_MODE_CV)),
+                    LoadMode::Cp => ("CP", rgb(COLOR_MODE_CP)),
                     _ => ("CC", rgb(COLOR_MODE_CC)),
                 };
                 let value_w = small_text_width(mode_text, 0);
@@ -1176,10 +1204,34 @@ fn format_pair_value(value: f32, unit: char) -> String<6> {
 }
 
 fn format_setpoint_milli(value_milli: i32, unit: char) -> String<7> {
-    // Fixed-width numeric text for the control row: always "DD.dddU" (7 chars).
-    // Matches `docs/plan/0005:on-device-preset-ui/PLAN.md`.
+    // Fixed-width numeric text for the control row:
+    // - A/V: "DD.dddU" (7 chars)
+    // - W:   "DDD.ddU" (7 chars)
+    // Matches `docs/plan/0005:on-device-preset-ui/PLAN.md` (+ CP extension).
     let mut s = String::<7>::new();
     let v = value_milli.max(0) as u32;
+
+    if unit == 'W' {
+        if v > 999_990 {
+            let _ = s.push_str("---.--");
+            let _ = s.push(unit);
+            return s;
+        }
+
+        // mW -> centi-watts (0.01 W).
+        let centi_w = v / 10;
+        let int_part = centi_w / 100; // 0..999
+        let frac_part = centi_w % 100; // 0..99
+
+        let _ = s.push((b'0' + ((int_part / 100) % 10) as u8) as char);
+        let _ = s.push((b'0' + ((int_part / 10) % 10) as u8) as char);
+        let _ = s.push((b'0' + (int_part % 10) as u8) as char);
+        let _ = s.push('.');
+        let _ = s.push((b'0' + (frac_part / 10) as u8) as char);
+        let _ = s.push((b'0' + (frac_part % 10) as u8) as char);
+        let _ = s.push(unit);
+        return s;
+    }
 
     if v > 99_999 {
         let _ = s.push_str("--.---");
@@ -1491,6 +1543,7 @@ impl UiSnapshot {
         self.active_mode = match mode {
             LoadMode::Cc => LoadMode::Cc,
             LoadMode::Cv => LoadMode::Cv,
+            LoadMode::Cp => LoadMode::Cp,
             LoadMode::Reserved(_) => LoadMode::Cc,
         };
         self.uv_latched = uv_latched;

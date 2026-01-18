@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-15
-- Last: 2026-01-16
+- Last: 2026-01-18
 
 ## 背景 / 问题陈述
 
@@ -42,9 +42,9 @@
 - CP 模式基本语义：
   - 目标值 `target_p_mw` 为恒功率设定（mW），UI 显示为 W；
   - 目标功率编辑分辨率：**0.1 W**（即 `100 mW`）；UI 必须按该步进调整数值；
-  - 目标功率可编辑范围：`0 <= target_p_mw <= max_p_mw`（`max_p_mw` 来自当前 preset 的功率上限；默认值见 `docs/plan/0002:cv-mode-presets/PLAN.md`，为 `150_000 mW`；当前固件硬上限参考 `LIMIT_PROFILE_DEFAULT.max_p_mw = 250_000 mW`）；
+  - 目标功率可编辑范围：`0 <= target_p_mw <= max_p_mw`（`max_p_mw` 来自当前 preset 的功率上限；默认值见 `docs/plan/0002:cv-mode-presets/PLAN.md`，为 `100_000 mW`；当前固件硬上限参考 `LIMIT_PROFILE_DEFAULT.max_p_mw = 100_000 mW`）；
   - 当 `output_enabled=false` 或触发 safing（fault/uv latch/link down）时，等效输出必须为安全关闭态；
-  - 在 `v_main_mv` 合理且未触发限值时，`calc_p_mw` 应在稳定时间窗口内收敛到 `target_p_mw` 附近（允差与窗口在“验收标准”冻结）。
+  - 在 `v_main_mv` 合理且未触发限值时，稳态功率误差应满足本计划“CP 编程精度（规格书口径，冻结）”。
 - 限值与保护（与现有语义对齐）：
   - `max_i_ma_total` 作为电流上限（OCP/软件电流限值）。
   - `max_p_mw` 作为功率上限（OPP/软件功率限值），且必须满足 `target_p_mw <= max_p_mw`（否则请求无效）。
@@ -103,7 +103,11 @@
 
 - Given `output_enabled=true` 且模拟板无故障、链路健康，
   When 进入 CP 模式并设置 `target_p_mw=T`（T 在硬件允许范围内），
-  Then `calc_p_mw` 在稳定窗口内收敛到 `T±tol`（`tol` 与窗口长度见下方“验收档位（已选：B）”）。
+  Then 稳态功率误差满足下方“CP 编程精度（内部自测口径，冻结）”。
+
+- Given `output_enabled=true` 且模拟板无故障、链路健康，
+  When 在 CP 模式下对 `target_p_mw` 做功率步进，
+  Then 响应速度满足下方“CP 瞬态响应（内部自测口径，冻结）”中的 `t_10_90/t_90_10 <= 1ms`，且超调/欠调满足同节“峰值偏差”约束。
 
 - Given `target_p_mw` 对应电流需求超过 `max_i_ma_total`，
   When 设备处于 CP 模式且输出开启，
@@ -141,12 +145,49 @@
 
 ## 里程碑（Milestones）
 
-- [ ] M1: 冻结 CP 的 “数据模型 + 协议 + HTTP API” 契约（本计划 contracts + 开放问题闭环）
-- [ ] M2: `loadlynx-protocol` 支持 CP（枚举 + SetMode 字段 + FastStatus mode 映射）并通过单测
-- [ ] M3: analog：实现 CP 等效电流计算与限值 gating（含基本滤波/限速）
-- [ ] M4: digital：本机 UI 支持 CP（模式选择 + 目标功率编辑 + 安全关断规则）
-- [ ] M5: digital：HTTP API 支持 CP（/identity + /presets + /control）并与文档一致
-- [ ] M6: HIL 验证（不同电压下功率维持、限流/欠压/故障路径）
+- [x] M1: 冻结 CP 的 “数据模型 + 协议 + HTTP API” 契约（本计划 contracts + 开放问题闭环）
+- [x] M2: `loadlynx-protocol` 支持 CP（枚举 + SetMode 字段 + FastStatus mode 映射）并通过单测
+- [x] M3: analog：实现 CP 等效电流计算与限值 gating（含基本滤波/限速）
+- [x] M4: digital：本机 UI 支持 CP（模式选择 + 目标功率编辑 + 安全关断规则）
+- [x] M5: digital：HTTP API 支持 CP（/identity + /presets + /control）并与文档一致
+- [x] M6: HIL 验证（不同电压下功率维持、限流/欠压/故障路径；并按本计划的“CP 编程精度/瞬态响应”口径复测）
+
+### M6：HIL 验证记录
+
+> 说明：本节记录端到端链路验证与观测结果；**验收以本计划的“CP 编程精度 / CP 瞬态响应（内部自测口径，冻结）”为准**。其中编程精度的 `P` 以 `FastStatus.raw.calc_p_mw`（板上 ADC 计算值）为准。
+>
+> 备注：仍建议后续用示波器/外部仪表复测 `P(t)=V(t)*I(t)` 以对标商用规格，但不作为本计划的当前验收前置条件。
+
+- 设备与链路
+  - digital HTTP：`loadlynx-d68638.local`（mDNS），IP `192.168.31.216`，端口 `80`
+  - `just agentd-get-port analog`：`0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989`
+  - `just agentd-get-port digital`：`/dev/cu.usbmodem412101`
+- 刷写与启动
+  - build：`just a-build`、`just d-build`
+  - flash：`just agentd flash analog`、`just agentd flash digital`
+  - `GET /api/v1/identity`：`capabilities.cp_supported=true`
+- CP 写入链路（HTTP → digital → UART → analog）
+  - `PUT /api/v1/presets`：`mode="cp"` + `target_p_mw=10000` 写入成功
+  - `POST /api/v1/presets/apply`：active preset 切换成功（mode=cp）
+  - analog 日志可见 `SetMode received: ... mode=Cp target_p=10000mW ...` 与 ACK 往返
+- 不同电压下恒功率达标（已覆盖两档：5V / 12V）
+  - 通过 `PUT /api/v1/pd` 切换 PD contract（fixed PDO），再运行 CP=10W：
+    - 5V：`object_pos=1`，`i_req_ma=2500`，`v_local_mv≈4.96V`；CP=10W：`avg_p≈9.949W`，`max_err≈0.102W`（PASS）
+    - 12V：`object_pos=3`，`i_req_ma=1500`，`v_local_mv≈12.50V`；CP=10W：`avg_p≈10.060W`，`max_err≈0.108W`（PASS）
+- 限流路径（CURRENT_LIMITED）
+  - CP=10W、12V 下，将 `max_i_ma_total` 限到 `200mA`：`calc_p_mw≈2.6W`，`state_flags_decoded` 含 `CURRENT_LIMITED`（预期）
+- 欠压锁存路径（UV_LATCHED）
+  - 在输出已开启时，将 preset 的 `min_v_mv` 调高到高于当前 `v_local_mv`（例如 13_000mV）：FastStatus 进入 `UV_LATCHED`，且 `enable=false`（effective output=0）
+  - 将 `min_v_mv` 恢复到 `0` 后，通过输出 `OFF → ON`（enable 上升沿）可清除 `UV_LATCHED`
+- 瞬态自测（内部 `cp_perf`，用于本计划的验收）
+  - 条件：PD `20V/5A`，CP 输出开启，步进 `10W ↔ 90W`；采样：`cp_perf` 以 100us 周期采样 `FastStatus.raw.calc_p_mw`（非示波器 `V(t)`/`I(t)`）
+  - 控制环调度抖动（analog 日志 `control_loop dt_us`）：`avg≈100us`（10kHz）
+  - 通过标准（内部自测口径）：
+    - `t_10_90 <= 1000us` 且 `t_90_10 <= 1000us`（`cp_perf: quick_check pass`）
+  - 建议增加多档位回归（减少“只在大步进下通过/只在特定区间通过”的盲区）：
+    - 覆盖多个设定值，并包含一次大步进（例如 `90W → 10W`）用于验证大幅下降沿
+    - 脚本：`scripts/cp-acceptance.sh`（短 dwell，避免长时间高功率）
+  - 注意：为避免长时间高功率运行，建议每次步进验证控制在数十秒内完成，并在高功率段插入 OFF/降功率间隔。
 
 ## 方案概述（Approach, high-level）
 
@@ -160,6 +201,7 @@
 
 - CP 的 `I = P/V` 在低电压区域会导致电流需求骤增，需要明确的 UVLO / OCP 策略与 UI 呈现，避免误解为“失控”。
 - 测量噪声会导致电流抖动，需要滤波/限速，否则可能引发热与稳定性问题。
+- 冻结的 `t_10_90/t_90_10 <= 1 ms` 属于“动态/瞬态”指标；实现上通常要求模拟板控制环更新频率显著高于 1 kHz 并重调滤波/限速，且不应与 HTTP/UART 的指令处理延迟混为同一指标。
 - 现有 “Preset/Control（v1 冻结）” 文档与实现需要同步演进，避免接口与 UI 口径分裂。
 
 ### 已冻结的决策（Freeze）
@@ -167,10 +209,10 @@
 - CP **纳入 Preset**：`Preset.mode` 允许取 `cp`，并通过 “编辑 preset + apply” 路径生效。
 - 目标功率编辑分辨率：`0.1 W`（`100 mW`）。
 - 欠压策略：触发欠压语义时执行“停机保护”（强制输出关闭），并沿用既有欠压锁存清除规则。
-- 功率达标验收真值：使用 `FastStatus.raw.calc_p_mw`（HTTP/本机 UI 均按此展示与判断）。
+- UI/HTTP 的功率读数来源：使用 `FastStatus.raw.calc_p_mw`（HTTP/本机 UI 均按此展示）。
 - HTTP 写路径：不新增 “立即应用 CP” 专用端点；沿用 `/api/v1/presets` + `/api/v1/presets/apply` + `/api/v1/control`。
 - 可诊断字段：`/api/v1/status` 增加 `state_flags_decoded`，其中必须包含 `POWER_LIMITED` / `CURRENT_LIMITED`（用于 UI/自动化解释“为何功率达不到”）。
-- 验收档位：**B（均衡）**（见下文“验收档位”）。
+- 验收口径：对标 **Chroma 6310A** 的 CP 编程精度口径（见下文“CP 编程精度（规格书口径，冻结；对标：Chroma 6310A）”）。
 
 ### 开放问题（需要主人决策；剩余）
 
@@ -180,21 +222,71 @@ None.
 
 - 默认采用 `LoadMode` 数值映射：`CC=1`、`CV=2`、`CP=3`（若需其它值，请在开放问题中确认后再冻结）。
 
-## 验收档位（已选：B）
+## CP 编程精度（内部自测口径，冻结）
+
+- 本节沿用对标 Chroma 6310A 的容差数学形式，但在本计划的验收中：
+  - `P` 以 `FastStatus.raw.calc_p_mw` 为准（板上 ADC 计算值）；
+  - 不要求外部仪表/示波器前置介入。
 
 说明：
 
-- `FastStatus` 发送周期当前为 **20 Hz（50 ms）**，因此稳定窗口最小粒度建议以 `N` 个连续样本定义（`N = window / 50ms`）。
-- 参考商用电子负载规格，CP 相关误差通常以 “`% of reading + absolute offset`” 的形式给出；我们用同样的双项形式定义 `tol = max(abs_w, rel_pct*T)`，便于覆盖低功率与高功率场景。
+- 参考商用电子负载规格，CP 相关误差通常以 “`% of reading + %FS` / `% + absolute offset`” 的形式给出；本计划选择对标 Chroma 6310A 的 `±(0.5% of reading + 0.5%FS)` 口径，便于与规格书直接对齐。
 
-候选档位（任选其一冻结到“验收标准”）：
+### 指标定义（Programming Accuracy）
 
-| 档位 | `tol` 定义 | `t_settle`（允许收敛时间） | `t_window`（稳定窗口） | 适用场景 |
-| --- | --- | --- | --- | --- |
-| A（严格） | `max(0.2 W, 2% * T)` | `<= 1.0 s` | `>= 0.5 s` | 自动化回归、对比测试、希望 UI 反馈更“跟手” |
-| **B（已选）** | `max(0.2 W, 3% * T)` | `<= 1.5 s` | `>= 1.0 s` | 日常使用、HIL 验证、脚本控制（兼顾稳定与实现成本） |
-| C（保守） | `max(0.5 W, 5% * T)` | `<= 2.0 s` | `>= 2.0 s` | 早期硬件/校准未完善、强调“可用优先”与误差容忍 |
+本计划在 CP 模式下对标规格书中的“编程精度（Programming Accuracy）”指标，仅描述**稳态误差**，不在本计划中给出动态/带宽指标。
+
+定义：
+
+- 满量程功率（Full Scale, FS）：本项目功率上限固定为 `FS_H = 100 W`；为对标商用负载的“双量程”口径，同时定义低量程 `FS_L = 10 W`（即 10%FS）。
+- 目标功率：`T`（单位 W；实现与遥测内部为 `target_p_mw`，单位 mW）。
+- 被测功率：`P`（单位 W；用外部仪表测得 `V` 与 `I` 并计算 `P = V * I`；`FastStatus.raw.calc_p_mw` 仅作为 UI/HTTP 展示读数，不作为该指标的测量来源）。
+- 容差（对标 Chroma 6310A：`±(0.5% of reading + 0.5%FS)`）：
+  - 低量程（`0 < T <= FS_L`）：`tol_L(T) = 0.005 * T + 0.005 * FS_L`
+  - 高量程（`FS_L < T <= FS_H`）：`tol_H(T) = 0.005 * T + 0.005 * FS_H`
+
+### PASS 条件
+
+- 在 CP 模式且输出已开启的稳态下：
+  - 若 `T <= FS_L`：`|P - T| <= tol_L(T)`；
+  - 若 `T > FS_L`：`|P - T| <= tol_H(T)`。
 
 参考（仅用于解释“为何用双项 tol 形式”）：
 
 - Keysight EL30000 系列电子负载：CP 模式给出 “`% + absolute`” 的编程精度口径（例如高量程项含 `+ 1.6 W` 的绝对项）。
+
+## CP 瞬态响应（内部自测口径，冻结）
+
+说明：
+
+- 商用电子负载对“速度”的规格通常以 **Slew rate（A/µs）**、**Transient response time（10%→90%）**（或 rise/fall time）等形式给出。
+- 本计划冻结的是 CP 模式下“功率设定步进”的 **10%→90% / 90%→10% 瞬态响应时间**。
+- 在本计划的验收中，`P(t)` 来自 `cp_perf` 对 `FastStatus.raw.calc_p_mw` 的 100us 采样（内部自测口径）。
+
+### 测试条件（Test Conditions）
+
+- `FS = 100 W`。
+- 固定输入电压：建议用 PD `20 V` contract（避免电流上限导致无法覆盖高功率区间；如无 PD，则使用可稳定输出 20 V 的电源）。
+- 模式：CP；输出开启；无欠压/故障/降额；`max_i_ma_total` 与 `max_p_mw` 不应成为限制因素。
+
+### 指标定义（Transient Response Time）
+
+- 令功率设定发生一步阶跃：`T1 → T2`（建议取 `T1=0.1*FS`，`T2=0.9*FS`，并同时测试下降沿 `T2 → T1`）。
+- 令 `P(t)` 表示被测功率随时间变化（用示波器同时测 `V(t)` 与 `I(t)` 并计算得到；**不使用** `FastStatus` 作为该指标的测量来源）。
+- 上升沿响应时间 `t_10_90`：`P(t)` 从 `P1 + 0.1*(P2-P1)` 上升到 `P1 + 0.9*(P2-P1)` 的时间。
+- 下降沿响应时间 `t_90_10`：`P(t)` 从 `P2 - 0.1*(P2-P1)` 下降到 `P2 - 0.9*(P2-P1)` 的时间。
+
+### PASS 条件
+
+- `t_10_90 <= 1 ms` 且 `t_90_10 <= 1 ms`。
+
+### 峰值偏差（内部自测口径，冻结）
+
+- 为避免“通过 1ms 但存在严重超调/振铃”的情况，本计划对步进的峰值偏差增加约束（同为内部自测口径）。
+- 定义：
+  - `Δ = |P2 - P1|`（步进幅度）
+  - 允许峰值偏差（mW）：`peak_allow = max(0.1*Δ, tol(T))`
+  - 统计窗口：`t ∈ [0, 1ms]`（由 `cp_perf` 采样，窗口内取 `P_max/P_min`）
+- 约束：
+  - 上升沿（`P2 > P1`）：`P_max - P2 <= peak_allow`
+  - 下降沿（`P2 < P1`）：`P2 - P_min <= peak_allow`

@@ -567,15 +567,6 @@ pub async fn pd_task(
         // the opposite CC once without requiring physical re-plugging.
         let mut attempt: u8 = 0;
         loop {
-            let cc_sel = if attempt == 0 {
-                detected_cc_sel
-            } else {
-                match detected_cc_sel {
-                    CcSel::CC1 => CcSel::CC2,
-                    CcSel::CC2 => CcSel::CC1,
-                }
-            };
-
             let mut ucpd = Ucpd::new(
                 peri.reborrow(),
                 super::Irqs,
@@ -584,13 +575,25 @@ pub async fn pd_task(
                 UcpdConfig::default(),
             );
             ucpd.cc_phy().set_pull(CcPull::Sink);
-            // Re-sync attach state after re-initializing UCPD (needed for retry attempt).
-            let _ = wait_for_attach(ucpd.cc_phy()).await;
-
+            // Re-sync attach state after re-initializing UCPD (needed for retry attempts).
+            // NOTE: Use the observed attach orientation to configure the PD PHY. Some sources
+            // appear sensitive to orientation mismatches and will not respond if we choose the
+            // wrong CC line.
+            let attached_cc_sel = wait_for_attach(ucpd.cc_phy()).await;
+            let cc_sel = if attempt == 0 {
+                attached_cc_sel
+            } else {
+                match attached_cc_sel {
+                    CcSel::CC1 => CcSel::CC2,
+                    CcSel::CC2 => CcSel::CC1,
+                }
+            };
             info!(
-                "PD starting session on {:?} (attempt {})",
+                "PD starting session on {:?} (attempt {}, detected={:?}, attached={:?})",
                 cc_sel,
-                attempt + 1
+                attempt + 1,
+                detected_cc_sel,
+                attached_cc_sel
             );
             let rx_seen = core::sync::atomic::AtomicBool::new(false);
 
@@ -620,11 +623,13 @@ pub async fn pd_task(
 
                     if !saw_rx && attempt == 0 {
                         attempt = 1;
-                        Timer::after_millis(50).await;
+                        // Brief backoff before retrying on the other CC.
+                        Timer::after_millis(100).await;
                         continue;
                     }
 
-                    Timer::after_millis(100).await;
+                    // Back off before re-entering the attach loop to avoid hammering the source.
+                    Timer::after_millis(200).await;
                     break;
                 }
                 Either::Second(()) => {

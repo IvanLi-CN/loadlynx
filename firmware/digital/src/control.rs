@@ -9,7 +9,7 @@ pub const HARD_MAX_I_MA_TOTAL: i32 = 10_000;
 pub const HARD_MAX_V_MV: i32 = 55_000;
 pub const DEFAULT_MIN_V_MV: i32 = 0;
 pub const DEFAULT_MAX_I_MA_TOTAL: i32 = HARD_MAX_I_MA_TOTAL;
-pub const DEFAULT_MAX_P_MW: u32 = 150_000;
+pub const DEFAULT_MAX_P_MW: u32 = 100_000;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
 pub enum AdjustDigit {
@@ -36,6 +36,7 @@ impl AdjustDigit {
 pub struct Preset {
     pub preset_id: u8, // 1..=5
     pub mode: LoadMode,
+    pub target_p_mw: u32,
     pub target_i_ma: i32,
     pub target_v_mv: i32,
     pub min_v_mv: i32,
@@ -57,12 +58,17 @@ impl Preset {
         self.max_i_ma_total = self.max_i_ma_total.min(HARD_MAX_I_MA_TOTAL);
         let hard_max_p = crate::LIMIT_PROFILE_DEFAULT.max_p_mw;
         self.max_p_mw = self.max_p_mw.min(hard_max_p);
+        self.target_p_mw = self.target_p_mw.min(hard_max_p);
 
         // Frozen UI invariants:
         // - CC:  TARGET_I <= OCP (max_i_ma_total)
         // - CV:  UVLO (min_v_mv) <= TARGET_V (target_v_mv)
         if self.mode == LoadMode::Cv {
             self.target_v_mv = self.target_v_mv.max(self.min_v_mv);
+        }
+        // - CP:  TARGET_P <= OPP (max_p_mw)
+        if self.mode == LoadMode::Cp && self.target_p_mw > self.max_p_mw {
+            self.target_p_mw = self.max_p_mw;
         }
 
         // Targets should never exceed the current caps.
@@ -78,6 +84,7 @@ pub fn default_presets() -> [Preset; PRESET_COUNT] {
         Preset {
             preset_id: 1,
             mode: LoadMode::Cc,
+            target_p_mw: 0,
             target_i_ma: 0,
             target_v_mv: 12_000,
             min_v_mv: DEFAULT_MIN_V_MV,
@@ -87,6 +94,7 @@ pub fn default_presets() -> [Preset; PRESET_COUNT] {
         Preset {
             preset_id: 2,
             mode: LoadMode::Cc,
+            target_p_mw: 0,
             target_i_ma: 0,
             target_v_mv: 12_000,
             min_v_mv: DEFAULT_MIN_V_MV,
@@ -96,6 +104,7 @@ pub fn default_presets() -> [Preset; PRESET_COUNT] {
         Preset {
             preset_id: 3,
             mode: LoadMode::Cc,
+            target_p_mw: 0,
             target_i_ma: 0,
             target_v_mv: 12_000,
             min_v_mv: DEFAULT_MIN_V_MV,
@@ -105,6 +114,7 @@ pub fn default_presets() -> [Preset; PRESET_COUNT] {
         Preset {
             preset_id: 4,
             mode: LoadMode::Cc,
+            target_p_mw: 0,
             target_i_ma: 0,
             target_v_mv: 12_000,
             min_v_mv: DEFAULT_MIN_V_MV,
@@ -114,6 +124,7 @@ pub fn default_presets() -> [Preset; PRESET_COUNT] {
         Preset {
             preset_id: 5,
             mode: LoadMode::Cc,
+            target_p_mw: 0,
             target_i_ma: 0,
             target_v_mv: 12_000,
             min_v_mv: DEFAULT_MIN_V_MV,
@@ -404,7 +415,8 @@ pub fn encode_presets_blob(
         put_i32_le(&mut out, base + 12, p.min_v_mv);
         put_i32_le(&mut out, base + 16, p.max_i_ma_total);
         put_u32_le(&mut out, base + 20, p.max_p_mw);
-        put_u32_le(&mut out, base + 24, 0);
+        // v1 reserved field repurposed for CP target power (mW).
+        put_u32_le(&mut out, base + 24, p.target_p_mw);
     }
 
     let crc_offset = crate::eeprom::EEPROM_PRESETS_LEN - 4;
@@ -454,6 +466,7 @@ pub fn decode_presets_blob(
         let mode = match LoadMode::from(mode_raw) {
             LoadMode::Cc => LoadMode::Cc,
             LoadMode::Cv => LoadMode::Cv,
+            LoadMode::Cp => LoadMode::Cp,
             LoadMode::Reserved(raw) => return Err(PresetsBlobError::InvalidMode(raw)),
         };
 
@@ -462,11 +475,12 @@ pub fn decode_presets_blob(
         let min_v_mv = get_i32_le(bytes, base + 12);
         let max_i_ma_total = get_i32_le(bytes, base + 16);
         let max_p_mw = get_u32_le(bytes, base + 20);
-        // reserved: base+24..+28
+        let target_p_mw = get_u32_le(bytes, base + 24);
 
         out[(preset_id - 1) as usize] = Preset {
             preset_id,
             mode,
+            target_p_mw,
             target_i_ma,
             target_v_mv,
             min_v_mv,
