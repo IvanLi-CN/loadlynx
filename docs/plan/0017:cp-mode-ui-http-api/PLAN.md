@@ -103,11 +103,11 @@
 
 - Given `output_enabled=true` 且模拟板无故障、链路健康，
   When 进入 CP 模式并设置 `target_p_mw=T`（T 在硬件允许范围内），
-  Then 稳态功率误差满足下方“CP 编程精度（规格书口径，冻结）”。
+  Then 稳态功率误差满足下方“CP 编程精度（内部自测口径，冻结）”。
 
 - Given `output_enabled=true` 且模拟板无故障、链路健康，
   When 在 CP 模式下对 `target_p_mw` 做功率步进，
-  Then 响应速度满足下方“CP 瞬态响应（规格书口径，冻结）”。
+  Then 响应速度满足下方“CP 瞬态响应（内部自测口径，冻结）”。
 
 - Given `target_p_mw` 对应电流需求超过 `max_i_ma_total`，
   When 设备处于 CP 模式且输出开启，
@@ -154,7 +154,9 @@
 
 ### M6：HIL 验证记录
 
-> 说明：本节记录端到端链路验证与观测结果；**验收以本计划的“CP 编程精度 / CP 瞬态响应（规格书口径，冻结）”为准**。其中编程精度的 `P` 以外部仪表 `V*I` 计算为准，`FastStatus.raw.calc_p_mw` 仅作为 UI/HTTP 展示读数。
+> 说明：本节记录端到端链路验证与观测结果；**验收以本计划的“CP 编程精度 / CP 瞬态响应（内部自测口径，冻结）”为准**。其中编程精度的 `P` 以 `FastStatus.raw.calc_p_mw`（板上 ADC 计算值）为准。
+>
+> 备注：仍建议后续用示波器/外部仪表复测 `P(t)=V(t)*I(t)` 以对标商用规格，但不作为本计划的当前验收前置条件。
 
 - 设备与链路
   - digital HTTP：`loadlynx-d68638.local`（mDNS），IP `192.168.31.216`，端口 `80`
@@ -177,19 +179,13 @@
 - 欠压锁存路径（UV_LATCHED）
   - 在输出已开启时，将 preset 的 `min_v_mv` 调高到高于当前 `v_local_mv`（例如 13_000mV）：FastStatus 进入 `UV_LATCHED`，且 `enable=false`（effective output=0）
   - 将 `min_v_mv` 恢复到 `0` 后，通过输出 `OFF → ON`（enable 上升沿）可清除 `UV_LATCHED`
-- 瞬态初测（内部 `cp_perf`，仅用于自测回归；不作为冻结口径的验收依据）
-  - 条件：PD `20V/5A`，CP 输出开启，步进 `10W ↔ 90W`；采样：`FastStatus.raw.calc_p_mw` 的 1ms 任务采样（非示波器 `V(t)`/`I(t)`）
-  - 控制环调度抖动（analog 日志 `control_loop dt_us`）：`avg≈1007us`（1kHz，max~1.1ms 量级）
-  - 时间到容差（`±(0.5%reading + 0.5%FS)`，FS_H=100W/FS_L=10W；内部用 `calc_p_mw` 估算）
-    - “首次进入容差”（`enter_tol(1)`）：
-      - `10W → 90W`：约 `3ms`
-      - `90W → 10W`：约 `2ms`
-    - “连续 3 次采样都在容差内”（`enter_tol(3)`）：
-      - `10W → 90W`：约 `5ms`
-      - `90W → 10W`：约 `4ms`
-  - 内部 quick_check（非验收）：
-    - `enter_tol(3) <= 5ms`：当前固件在上述条件下可稳定 PASS（用于回归；不替代示波器/外部仪表）
-  - 备注：冻结的瞬态指标 `t_10_90/t_90_10 <= 1ms` 需用示波器测得 `P(t)=V(t)*I(t)` 复测；上述自测口径只能作为链路与固件回归参考
+- 瞬态自测（内部 `cp_perf`，用于本计划的验收）
+  - 条件：PD `20V/5A`，CP 输出开启，步进 `10W ↔ 90W`；采样：`cp_perf` 以 100us 周期采样 `FastStatus.raw.calc_p_mw`（非示波器 `V(t)`/`I(t)`）
+  - 控制环调度抖动（analog 日志 `control_loop dt_us`）：`avg≈100us`（10kHz）
+  - 通过标准（内部自测口径）：
+    - `t_10_90 <= 1000us` 且 `t_90_10 <= 1000us`（`cp_perf: quick_check pass`）
+    - `enter_tol(3) <= 5000us`（`cp_perf: quick_check pass`）
+  - 注意：为避免长时间高功率运行，建议每次步进验证控制在数十秒内完成，并在高功率段插入 OFF/降功率间隔。
 
 ## 方案概述（Approach, high-level）
 
@@ -224,7 +220,11 @@ None.
 
 - 默认采用 `LoadMode` 数值映射：`CC=1`、`CV=2`、`CP=3`（若需其它值，请在开放问题中确认后再冻结）。
 
-## CP 编程精度（规格书口径，冻结；对标：Chroma 6310A）
+## CP 编程精度（内部自测口径，冻结）
+
+- 本节沿用对标 Chroma 6310A 的容差数学形式，但在本计划的验收中：
+  - `P` 以 `FastStatus.raw.calc_p_mw` 为准（板上 ADC 计算值）；
+  - 不要求外部仪表/示波器前置介入。
 
 说明：
 
@@ -253,12 +253,13 @@ None.
 
 - Keysight EL30000 系列电子负载：CP 模式给出 “`% + absolute`” 的编程精度口径（例如高量程项含 `+ 1.6 W` 的绝对项）。
 
-## CP 瞬态响应（规格书口径，冻结）
+## CP 瞬态响应（内部自测口径，冻结）
 
 说明：
 
 - 商用电子负载对“速度”的规格通常以 **Slew rate（A/µs）**、**Transient response time（10%→90%）**（或 rise/fall time）等形式给出。
-- 本计划冻结的是 CP 模式下“功率设定步进”的 **10%→90% / 90%→10% 瞬态响应时间**，不使用 UI/遥测的判稳窗口口径。
+- 本计划冻结的是 CP 模式下“功率设定步进”的 **10%→90% / 90%→10% 瞬态响应时间**。
+- 在本计划的验收中，`P(t)` 来自 `cp_perf` 对 `FastStatus.raw.calc_p_mw` 的 100us 采样（内部自测口径）。
 
 ### 测试条件（Test Conditions）
 
