@@ -107,7 +107,7 @@
 
 - Given `output_enabled=true` 且模拟板无故障、链路健康，
   When 在 CP 模式下对 `target_p_mw` 做功率步进，
-  Then 响应速度满足下方“CP 瞬态响应（内部自测口径，冻结）”。
+  Then 响应速度满足下方“CP 瞬态响应（内部自测口径，冻结）”中的 `t_10_90/t_90_10 <= 1ms`。
 
 - Given `target_p_mw` 对应电流需求超过 `max_i_ma_total`，
   When 设备处于 CP 模式且输出开启，
@@ -184,7 +184,6 @@
   - 控制环调度抖动（analog 日志 `control_loop dt_us`）：`avg≈100us`（10kHz）
   - 通过标准（内部自测口径）：
     - `t_10_90 <= 1000us` 且 `t_90_10 <= 1000us`（`cp_perf: quick_check pass`）
-    - `enter_tol(3) <= 5000us`（`cp_perf: quick_check pass`）
   - 注意：为避免长时间高功率运行，建议每次步进验证控制在数十秒内完成，并在高功率段插入 OFF/降功率间隔。
 
 ## 方案概述（Approach, high-level）

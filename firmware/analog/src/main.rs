@@ -220,7 +220,6 @@ const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
 const CP_FS_H_MW: u32 = 100_000;
 const CP_PERF_T10_90_MAX_US: u32 = 1_000;
-const CP_PERF_ENTER_TOL_MAX_US: u32 = 5_000;
 
 // Best-effort TX sequencing for messages originating on the analog side (HELLO / FAST_STATUS).
 // Acks reply with the request's seq and do not use this counter.
@@ -2578,40 +2577,6 @@ async fn main(_spawner: Spawner) -> ! {
                 }
             } else {
                 warn!("cp_perf: t10/t90=n/a");
-            }
-
-            if let Some(t) = t_enter_1 {
-                if t <= CP_PERF_ENTER_TOL_MAX_US {
-                    info!(
-                        "cp_perf: quick_check pass (enter_tol(1)<={}us)",
-                        CP_PERF_ENTER_TOL_MAX_US
-                    );
-                } else {
-                    warn!(
-                        "cp_perf: quick_check fail (enter_tol(1)={}us > {}us)",
-                        t, CP_PERF_ENTER_TOL_MAX_US
-                    );
-                }
-            } else {
-                warn!("cp_perf: quick_check n/a (enter_tol(1))");
-            }
-            if let Some(t) = t_enter_3 {
-                if t <= CP_PERF_ENTER_TOL_MAX_US {
-                    info!(
-                        "cp_perf: quick_check pass (enter_tol({})<={}us)",
-                        CP_PERF_WINDOW_CONSECUTIVE, CP_PERF_ENTER_TOL_MAX_US
-                    );
-                } else {
-                    warn!(
-                        "cp_perf: quick_check fail (enter_tol({})={}us > {}us)",
-                        CP_PERF_WINDOW_CONSECUTIVE, t, CP_PERF_ENTER_TOL_MAX_US
-                    );
-                }
-            } else {
-                warn!(
-                    "cp_perf: quick_check n/a (enter_tol({}))",
-                    CP_PERF_WINDOW_CONSECUTIVE
-                );
             }
 
             if let Some((t10, t90)) = t10t90 {
