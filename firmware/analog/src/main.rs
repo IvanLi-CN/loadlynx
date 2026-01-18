@@ -208,13 +208,19 @@ const fn control_ticks_from_ms(ms: u32) -> u32 {
 const CP_PTERM_NEG_FREEZE_TICKS: u32 = control_ticks_from_ms(CP_PTERM_NEG_FREEZE_MS);
 const CP_PTERM_POS_FREEZE_TICKS: u32 = control_ticks_from_ms(CP_PTERM_POS_FREEZE_MS);
 
-// CP performance capture (for on-device quick checks; external measurement remains the source of truth).
-const CP_PERF_PERIOD_MS: u16 = 1;
+// CP performance capture (for on-device quick checks).
+//
+// NOTE: This is an internal self-test based on `calc_p_mw` computed from on-board ADC values.
+// It is useful for regression and for "internal acceptance" when external instrumentation
+// (scope-based P(t)=V(t)*I(t)) is unavailable.
+const CP_PERF_PERIOD_US: u32 = 100;
 const CP_PERF_SAMPLES: usize = 512;
 const CP_PERF_WINDOW_CONSECUTIVE: usize = 3;
 const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
 const CP_FS_H_MW: u32 = 100_000;
+const CP_PERF_T10_90_MAX_US: u32 = 1_000;
+const CP_PERF_ENTER_TOL_MAX_US: u32 = 5_000;
 
 // Best-effort TX sequencing for messages originating on the analog side (HELLO / FAST_STATUS).
 // Acks reply with the request's seq and do not use this counter.
@@ -234,7 +240,7 @@ fn update_zero_mv_iir(zero_mv: &mut u32, sample_mv: u32, div: u32) {
 
 #[derive(Clone, Copy)]
 struct CpPerfSample {
-    dt_ms: u16,
+    dt_us: u32,
     calc_p_mw: u32,
     v_main_mv: i32,
     i_total_ma: i32,
@@ -245,13 +251,16 @@ struct CpPerfSample {
 // CP performance capture shared state.
 //
 // Notes:
-// - Sampling is done in a dedicated 1ms task to improve time resolution.
+// - Sampling is done in a dedicated 100us task to improve time resolution.
 // - The sampled signals are "latest values" published by the control loop, so samples may repeat
 //   if capture and control ticks align; this is still useful to quantify ms-level time-to-tolerance.
 static CP_PERF_ARM_SEQ: AtomicU32 = AtomicU32::new(0);
 static CP_PERF_ARM_MS: AtomicU32 = AtomicU32::new(0);
 static CP_PERF_ARM_TARGET_P_MW: AtomicU32 = AtomicU32::new(0);
 static CP_PERF_ARM_P0_MW: AtomicU32 = AtomicU32::new(0);
+static CP_PERF_ARM_V_MAIN_MV: AtomicI32 = AtomicI32::new(0);
+static CP_PERF_ARM_I_TOTAL_MA: AtomicI32 = AtomicI32::new(0);
+static CP_PERF_ARM_TARGET_I_TOTAL_MA: AtomicI32 = AtomicI32::new(0);
 static CP_PERF_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CP_PERF_DONE: AtomicBool = AtomicBool::new(false);
 static CP_PERF_START_MS: AtomicU32 = AtomicU32::new(0);
@@ -277,7 +286,7 @@ static CP_PERF_LATEST_EFFECTIVE_ENABLE: AtomicU8 = AtomicU8::new(0);
 static CP_PERF_LATEST_FLAGS: AtomicU8 = AtomicU8::new(0);
 
 static mut CP_PERF_BUF: [CpPerfSample; CP_PERF_SAMPLES] = [CpPerfSample {
-    dt_ms: 0,
+    dt_us: 0,
     calc_p_mw: 0,
     v_main_mv: 0,
     i_total_ma: 0,
@@ -302,11 +311,60 @@ fn cp_abs_diff_u32(a: u32, b: u32) -> u32 {
     if a >= b { a - b } else { b - a }
 }
 
+fn cp_interp_cross_us(
+    t0_us: u32,
+    p0_mw: u32,
+    t1_us: u32,
+    p1_mw: u32,
+    threshold_mw: u32,
+) -> Option<u32> {
+    if p0_mw == threshold_mw {
+        return Some(t0_us);
+    }
+    if p1_mw == threshold_mw {
+        return Some(t1_us);
+    }
+    if p0_mw == p1_mw {
+        return None;
+    }
+
+    let p0 = p0_mw as i64;
+    let p1 = p1_mw as i64;
+    let th = threshold_mw as i64;
+    let t0 = t0_us as i64;
+    let t1 = t1_us as i64;
+
+    let dp = p1 - p0;
+    let dt = t1 - t0;
+    if dt <= 0 {
+        return None;
+    }
+
+    let within = if dp > 0 {
+        th > p0 && th < p1
+    } else {
+        th < p0 && th > p1
+    };
+    if !within {
+        return None;
+    }
+
+    // Linear interpolation:
+    // t_cross = t0 + (th - p0) * dt / (p1 - p0)
+    //
+    // Note: dp and (th - p0) have the same sign when within==true, so the division yields a
+    // positive offset in microseconds.
+    let num = (th - p0).saturating_mul(dt);
+    let offset = num / dp;
+    let t = t0.saturating_add(offset);
+    Some(t.clamp(0, i64::from(u32::MAX)) as u32)
+}
+
 fn cp_find_first_consecutive_within_tol(
     samples: &[CpPerfSample],
     target_p_mw: u32,
     consecutive: usize,
-) -> Option<u16> {
+) -> Option<u32> {
     if consecutive == 0 || samples.is_empty() {
         return None;
     }
@@ -318,7 +376,7 @@ fn cp_find_first_consecutive_within_tol(
         if ok {
             run += 1;
             if run >= consecutive {
-                return Some(s.dt_ms);
+                return Some(s.dt_us);
             }
         } else {
             run = 0;
@@ -332,7 +390,7 @@ fn cp_find_first_consecutive_within_tol_smoothed(
     target_p_mw: u32,
     consecutive: usize,
     smooth_window: usize,
-) -> Option<u16> {
+) -> Option<u32> {
     if consecutive == 0 || samples.is_empty() {
         return None;
     }
@@ -371,7 +429,7 @@ fn cp_find_first_consecutive_within_tol_smoothed(
         if ok {
             run += 1;
             if run >= consecutive {
-                return Some(s.dt_ms);
+                return Some(s.dt_us);
             }
         } else {
             run = 0;
@@ -380,11 +438,11 @@ fn cp_find_first_consecutive_within_tol_smoothed(
     None
 }
 
-fn cp_find_t10_t90_ms(
+fn cp_find_t10_t90_us(
     samples: &[CpPerfSample],
     p0_mw: u32,
     target_p_mw: u32,
-) -> Option<(u16, u16)> {
+) -> Option<(u32, u32)> {
     if samples.is_empty() || p0_mw == target_p_mw {
         return None;
     }
@@ -401,26 +459,29 @@ fn cp_find_t10_t90_ms(
         p0_mw.saturating_sub((delta as u64 * 9 / 10) as u32)
     };
 
-    let mut t10: Option<u16> = None;
-    let mut t90: Option<u16> = None;
-    for s in samples {
-        let p = s.calc_p_mw;
-        if t10.is_none() {
-            let crossed = if rising { p >= p10 } else { p <= p10 };
-            if crossed {
-                t10 = Some(s.dt_ms);
+    let mut ta: Option<u32> = None;
+    let mut tb: Option<u32> = None;
+
+    // Use segment interpolation so "both thresholds crossed within one sample" does not
+    // degenerate into t10==t90 (0us).
+    for w in samples.windows(2) {
+        let a = w[0];
+        let b = w[1];
+
+        if ta.is_none() {
+            if let Some(t) = cp_interp_cross_us(a.dt_us, a.calc_p_mw, b.dt_us, b.calc_p_mw, p10) {
+                ta = Some(t);
             }
         }
-        if t10.is_some() && t90.is_none() {
-            let crossed = if rising { p >= p90 } else { p <= p90 };
-            if crossed {
-                t90 = Some(s.dt_ms);
+        if ta.is_some() && tb.is_none() {
+            if let Some(t) = cp_interp_cross_us(a.dt_us, a.calc_p_mw, b.dt_us, b.calc_p_mw, p90) {
+                tb = Some(t);
                 break;
             }
         }
     }
 
-    match (t10, t90) {
+    match (ta, tb) {
         (Some(a), Some(b)) => Some((a, b)),
         _ => None,
     }
@@ -429,14 +490,14 @@ fn cp_find_t10_t90_ms(
 #[embassy_executor::task]
 async fn cp_perf_sampler_task() {
     info!(
-        "cp_perf sampler task starting (period={}ms samples={})",
-        CP_PERF_PERIOD_MS, CP_PERF_SAMPLES
+        "cp_perf sampler task starting (period={}us samples={})",
+        CP_PERF_PERIOD_US, CP_PERF_SAMPLES
     );
 
     let mut last_arm_seq = CP_PERF_ARM_SEQ.load(Ordering::Relaxed);
 
     loop {
-        Timer::after_millis(CP_PERF_PERIOD_MS as u64).await;
+        Timer::after_micros(CP_PERF_PERIOD_US as u64).await;
 
         let arm_seq = CP_PERF_ARM_SEQ.load(Ordering::Acquire);
         if arm_seq != last_arm_seq {
@@ -446,10 +507,27 @@ async fn cp_perf_sampler_task() {
             if target_p_mw > 0 {
                 let start_ms = CP_PERF_ARM_MS.load(Ordering::Relaxed);
                 let p0_mw = CP_PERF_ARM_P0_MW.load(Ordering::Relaxed);
+                let v0_main_mv = CP_PERF_ARM_V_MAIN_MV.load(Ordering::Relaxed);
+                let i0_total_ma = CP_PERF_ARM_I_TOTAL_MA.load(Ordering::Relaxed);
+                let i0_target_ma = CP_PERF_ARM_TARGET_I_TOTAL_MA.load(Ordering::Relaxed);
                 CP_PERF_START_MS.store(start_ms, Ordering::Relaxed);
                 CP_PERF_TARGET_P_MW.store(target_p_mw, Ordering::Relaxed);
                 CP_PERF_P0_MW.store(p0_mw, Ordering::Relaxed);
-                CP_PERF_LEN.store(0, Ordering::Relaxed);
+
+                // Seed sample[0] with p0 at t=0 so that t10/t90 and enter_tol are measured
+                // relative to the moment of the setpoint step, not relative to the first
+                // periodic sampler tick.
+                unsafe {
+                    CP_PERF_BUF[0] = CpPerfSample {
+                        dt_us: 0,
+                        calc_p_mw: p0_mw,
+                        v_main_mv: v0_main_mv,
+                        i_total_ma: i0_total_ma,
+                        target_i_total_ma: i0_target_ma,
+                        flags: 0,
+                    };
+                }
+                CP_PERF_LEN.store(1, Ordering::Relaxed);
                 CP_PERF_DONE.store(false, Ordering::Relaxed);
                 CP_PERF_ACTIVE.store(true, Ordering::Relaxed);
             } else {
@@ -465,8 +543,8 @@ async fn cp_perf_sampler_task() {
 
         let idx = CP_PERF_LEN.load(Ordering::Relaxed) as usize;
         if idx < CP_PERF_SAMPLES {
-            // Use index-derived time to avoid ±1ms jitter from task scheduling/start alignment.
-            let dt_ms = (idx as u32).saturating_mul(CP_PERF_PERIOD_MS as u32);
+            // Use index-derived time to avoid jitter from task scheduling/start alignment.
+            let dt_us = (idx as u32).saturating_mul(CP_PERF_PERIOD_US);
 
             // Read a consistent "latest" snapshot published by the control loop.
             let mut latest_p_mw: u32 = 0;
@@ -496,7 +574,7 @@ async fn cp_perf_sampler_task() {
             }
 
             let sample = CpPerfSample {
-                dt_ms: (dt_ms.min(u16::MAX as u32)) as u16,
+                dt_us,
                 calc_p_mw: latest_p_mw,
                 v_main_mv: latest_v_main_mv,
                 i_total_ma: latest_i_total_ma,
@@ -1935,6 +2013,12 @@ async fn main(_spawner: Spawner) -> ! {
                             CP_PERF_ARM_MS.store(arm_ms, Ordering::Relaxed);
                             CP_PERF_ARM_TARGET_P_MW.store(new_target_p_mw, Ordering::Relaxed);
                             CP_PERF_ARM_P0_MW.store(calc_p_mw, Ordering::Relaxed);
+                            CP_PERF_ARM_V_MAIN_MV.store(v_main_mv, Ordering::Relaxed);
+                            CP_PERF_ARM_I_TOTAL_MA.store(i_total_ma, Ordering::Relaxed);
+                            CP_PERF_ARM_TARGET_I_TOTAL_MA.store(
+                                CP_PERF_LATEST_TARGET_I_MA.load(Ordering::Relaxed),
+                                Ordering::Relaxed,
+                            );
                             CP_PERF_ARM_SEQ.fetch_add(1, Ordering::Release);
                             info!(
                                 "cp_perf armed (control tick): target={}mW (prev={}mW) p0={}mW at_ms={}",
@@ -2323,7 +2407,7 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         // CP performance capture:
-        // - publish "latest" values for the 1ms sampler task (atomic, no awaits)
+        // - publish "latest" values for the 100us sampler task (atomic, no awaits)
         // - print/analysis happens here once capture finishes
         CP_PERF_LATEST_SEQ.fetch_add(1, Ordering::Release);
         CP_PERF_LATEST_P_MW.store(calc_p_mw, Ordering::Relaxed);
@@ -2371,7 +2455,7 @@ async fn main(_spawner: Spawner) -> ! {
                 CP_PERF_WINDOW_CONSECUTIVE,
                 CP_PERF_SMOOTH_WINDOW_SAMPLES,
             );
-            let t10t90 = cp_find_t10_t90_ms(samples, p0_mw, target_p_mw);
+            let t10t90 = cp_find_t10_t90_us(samples, p0_mw, target_p_mw);
 
             let mut any_current_limited = false;
             let mut any_power_limited = false;
@@ -2398,8 +2482,8 @@ async fn main(_spawner: Spawner) -> ! {
             let last = samples.last().unwrap_or(&samples[0]);
 
             info!(
-                "cp_perf: target={}mW tol={}mW p0={}mW samples={} window={} tick={}ms",
-                target_p_mw, tol_mw, p0_mw, len, CP_PERF_WINDOW_CONSECUTIVE, CP_PERF_PERIOD_MS,
+                "cp_perf: target={}mW tol={}mW p0={}mW samples={} window={} tick={}us",
+                target_p_mw, tol_mw, p0_mw, len, CP_PERF_WINDOW_CONSECUTIVE, CP_PERF_PERIOD_US,
             );
             info!(
                 "cp_perf: range p=[{}..{}]mW v_main=[{}..{}]mV i_total=[{}..{}]mA tgt_i=[{}..{}]mA last_p={}mW last_i={}mA last_tgt_i={}mA",
@@ -2452,23 +2536,23 @@ async fn main(_spawner: Spawner) -> ! {
             }
 
             match t_enter_1 {
-                Some(t) => info!("cp_perf: enter_tol(1)={}ms", t),
+                Some(t) => info!("cp_perf: enter_tol(1)={}us", t),
                 None => warn!("cp_perf: enter_tol(1)=n/a"),
             }
             match t_enter_3 {
-                Some(t) => info!("cp_perf: enter_tol({})={}ms", CP_PERF_WINDOW_CONSECUTIVE, t),
+                Some(t) => info!("cp_perf: enter_tol({})={}us", CP_PERF_WINDOW_CONSECUTIVE, t),
                 None => warn!("cp_perf: enter_tol({})=n/a", CP_PERF_WINDOW_CONSECUTIVE),
             }
             match t_enter_1_sm {
                 Some(t) => info!(
-                    "cp_perf: enter_tol_smoothed(1)={}ms window={}ms",
+                    "cp_perf: enter_tol_smoothed(1)={}us window={} samples",
                     t, CP_PERF_SMOOTH_WINDOW_SAMPLES
                 ),
                 None => warn!("cp_perf: enter_tol_smoothed(1)=n/a"),
             }
             match t_enter_3_sm {
                 Some(t) => info!(
-                    "cp_perf: enter_tol_smoothed({})={}ms window={}ms",
+                    "cp_perf: enter_tol_smoothed({})={}us window={} samples",
                     CP_PERF_WINDOW_CONSECUTIVE, t, CP_PERF_SMOOTH_WINDOW_SAMPLES
                 ),
                 None => warn!(
@@ -2479,14 +2563,14 @@ async fn main(_spawner: Spawner) -> ! {
             if let Some((t10, t90)) = t10t90 {
                 if target_p_mw >= p0_mw {
                     info!(
-                        "cp_perf: t10={}ms t90={}ms t10_90={}ms",
+                        "cp_perf: t10={}us t90={}us t10_90={}us",
                         t10,
                         t90,
                         t90 - t10
                     );
                 } else {
                     info!(
-                        "cp_perf: t90={}ms t10={}ms t90_10={}ms",
+                        "cp_perf: t90={}us t10={}us t90_10={}us",
                         t10,
                         t90,
                         t90 - t10
@@ -2497,24 +2581,30 @@ async fn main(_spawner: Spawner) -> ! {
             }
 
             if let Some(t) = t_enter_1 {
-                if t <= 5 {
-                    info!("cp_perf: quick_check pass (enter_tol(1)<=5ms)");
+                if t <= CP_PERF_ENTER_TOL_MAX_US {
+                    info!(
+                        "cp_perf: quick_check pass (enter_tol(1)<={}us)",
+                        CP_PERF_ENTER_TOL_MAX_US
+                    );
                 } else {
-                    warn!("cp_perf: quick_check fail (enter_tol(1)={}ms > 5ms)", t);
+                    warn!(
+                        "cp_perf: quick_check fail (enter_tol(1)={}us > {}us)",
+                        t, CP_PERF_ENTER_TOL_MAX_US
+                    );
                 }
             } else {
                 warn!("cp_perf: quick_check n/a (enter_tol(1))");
             }
             if let Some(t) = t_enter_3 {
-                if t <= 5 {
+                if t <= CP_PERF_ENTER_TOL_MAX_US {
                     info!(
-                        "cp_perf: quick_check pass (enter_tol({})<=5ms)",
-                        CP_PERF_WINDOW_CONSECUTIVE
+                        "cp_perf: quick_check pass (enter_tol({})<={}us)",
+                        CP_PERF_WINDOW_CONSECUTIVE, CP_PERF_ENTER_TOL_MAX_US
                     );
                 } else {
                     warn!(
-                        "cp_perf: quick_check fail (enter_tol({})={}ms > 5ms)",
-                        CP_PERF_WINDOW_CONSECUTIVE, t
+                        "cp_perf: quick_check fail (enter_tol({})={}us > {}us)",
+                        CP_PERF_WINDOW_CONSECUTIVE, t, CP_PERF_ENTER_TOL_MAX_US
                     );
                 }
             } else {
@@ -2522,6 +2612,33 @@ async fn main(_spawner: Spawner) -> ! {
                     "cp_perf: quick_check n/a (enter_tol({}))",
                     CP_PERF_WINDOW_CONSECUTIVE
                 );
+            }
+
+            if let Some((t10, t90)) = t10t90 {
+                let dt = t90.saturating_sub(t10);
+                if dt <= CP_PERF_T10_90_MAX_US {
+                    if target_p_mw >= p0_mw {
+                        info!(
+                            "cp_perf: quick_check pass (t10_90<={}us)",
+                            CP_PERF_T10_90_MAX_US
+                        );
+                    } else {
+                        info!(
+                            "cp_perf: quick_check pass (t90_10<={}us)",
+                            CP_PERF_T10_90_MAX_US
+                        );
+                    }
+                } else if target_p_mw >= p0_mw {
+                    warn!(
+                        "cp_perf: quick_check fail (t10_90={}us > {}us)",
+                        dt, CP_PERF_T10_90_MAX_US
+                    );
+                } else {
+                    warn!(
+                        "cp_perf: quick_check fail (t90_10={}us > {}us)",
+                        dt, CP_PERF_T10_90_MAX_US
+                    );
+                }
             }
         }
 
