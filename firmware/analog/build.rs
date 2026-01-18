@@ -12,6 +12,22 @@ use std::process::Command;
 //   - tmp/<crate>-fw-version.txt (relative to repo root)
 
 fn main() {
+    // Ensure essential linker args are present even when building from the repo root
+    // (so `firmware/analog/.cargo/config.toml` is not picked up).
+    //
+    // When building from `firmware/analog/`, these args already come from `.cargo/config.toml`;
+    // avoid emitting duplicates (they can cause duplicate `memory.x` definitions at link time).
+    let rustflags = std::env::var("CARGO_ENCODED_RUSTFLAGS").unwrap_or_default();
+    if !rustflags.contains("link.x") {
+        println!("cargo:rustc-link-arg=-Tlink.x");
+    }
+    if !rustflags.contains("defmt.x") {
+        println!("cargo:rustc-link-arg=-Tdefmt.x");
+    }
+    if !rustflags.contains("--nmagic") {
+        println!("cargo:rustc-link-arg=--nmagic");
+    }
+
     // Re-run when local sources or git HEAD change.
     println!("cargo:rerun-if-changed=src/");
     for path in git_watch_paths() {

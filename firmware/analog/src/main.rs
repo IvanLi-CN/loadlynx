@@ -157,8 +157,11 @@ const CP_I_BIAS_RESET_STEP_MW: u32 = 1_000;
 // CP P-term gain: feedforward already provides I≈P/V; keep the P correction
 // relatively gentle to avoid "double target" overshoot (notably on large down-steps).
 const CP_I_P_ERR_DIV: i32 = 4;
+// At low power (<=10W range), tolerance is tight; use a stronger P-term to reduce
+// "sitting below target" after large down-steps without increasing high-power overshoot.
+const CP_I_P_ERR_DIV_LOW_POWER: i32 = 2;
 const CP_I_P_STEP_MAX_MA: i32 = 3_000;
-const CP_I_SLEW_MAX_UP_MA_PER_TICK: i32 = 1_000;
+const CP_I_SLEW_MAX_UP_MA_PER_TICK: i32 = 2_000;
 const CP_I_SLEW_MAX_DN_MA_PER_TICK: i32 = 1_500;
 const CP_STEP_BOOST_DETECT_MW: u32 = 10_000;
 // Small positive bump during the post-downstep settling window to avoid
@@ -170,7 +173,6 @@ const CP_PERF_PERIOD_MS: u16 = 1;
 const CP_PERF_SAMPLES: usize = 512;
 const CP_PERF_WINDOW_CONSECUTIVE: usize = 3;
 const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
-const CP_PERF_MAX_MS: u32 = (CP_PERF_SAMPLES as u32) * (CP_PERF_PERIOD_MS as u32);
 const CP_FS_L_MW: u32 = 10_000;
 const CP_FS_H_MW: u32 = 100_000;
 
@@ -209,6 +211,7 @@ struct CpPerfSample {
 static CP_PERF_ARM_SEQ: AtomicU32 = AtomicU32::new(0);
 static CP_PERF_ARM_MS: AtomicU32 = AtomicU32::new(0);
 static CP_PERF_ARM_TARGET_P_MW: AtomicU32 = AtomicU32::new(0);
+static CP_PERF_ARM_P0_MW: AtomicU32 = AtomicU32::new(0);
 static CP_PERF_ACTIVE: AtomicBool = AtomicBool::new(false);
 static CP_PERF_DONE: AtomicBool = AtomicBool::new(false);
 static CP_PERF_START_MS: AtomicU32 = AtomicU32::new(0);
@@ -402,7 +405,7 @@ async fn cp_perf_sampler_task() {
             let target_p_mw = CP_PERF_ARM_TARGET_P_MW.load(Ordering::Relaxed);
             if target_p_mw > 0 {
                 let start_ms = CP_PERF_ARM_MS.load(Ordering::Relaxed);
-                let p0_mw = CP_PERF_LATEST_P_MW.load(Ordering::Relaxed);
+                let p0_mw = CP_PERF_ARM_P0_MW.load(Ordering::Relaxed);
                 CP_PERF_START_MS.store(start_ms, Ordering::Relaxed);
                 CP_PERF_TARGET_P_MW.store(target_p_mw, Ordering::Relaxed);
                 CP_PERF_P0_MW.store(p0_mw, Ordering::Relaxed);
@@ -420,12 +423,11 @@ async fn cp_perf_sampler_task() {
             continue;
         }
 
-        let now_ms = timestamp_ms() as u32;
-        let start_ms = CP_PERF_START_MS.load(Ordering::Relaxed);
-        let dt_ms = now_ms.wrapping_sub(start_ms);
-
         let idx = CP_PERF_LEN.load(Ordering::Relaxed) as usize;
         if idx < CP_PERF_SAMPLES {
+            // Use index-derived time to avoid ±1ms jitter from task scheduling/start alignment.
+            let dt_ms = (idx as u32).saturating_mul(CP_PERF_PERIOD_MS as u32);
+
             // Read a consistent "latest" snapshot published by the control loop.
             let mut latest_p_mw: u32 = 0;
             let mut latest_v_main_mv: i32 = 0;
@@ -467,7 +469,7 @@ async fn cp_perf_sampler_task() {
             CP_PERF_LEN.store((idx + 1) as u32, Ordering::Release);
         }
 
-        let done = dt_ms >= CP_PERF_MAX_MS || (idx + 1) >= CP_PERF_SAMPLES;
+        let done = (idx + 1) >= CP_PERF_SAMPLES;
         if done {
             CP_PERF_ACTIVE.store(false, Ordering::Relaxed);
             CP_PERF_DONE.store(true, Ordering::Release);
@@ -1872,6 +1874,25 @@ async fn main(_spawner: Spawner) -> ! {
                             prev_target_p_mw - new_target_p_mw
                         };
 
+                        // CP performance capture arm (best-effort internal self-test):
+                        // - arm on large CP target steps
+                        // - use the control tick timestamp + current power as p0 to avoid RX/control alignment jitter
+                        if prev_target_p_mw != 0
+                            && new_target_p_mw > 0
+                            && new_target_p_mw != prev_target_p_mw
+                            && delta_p_mw >= CP_STEP_BOOST_DETECT_MW
+                        {
+                            let arm_ms = timestamp_ms() as u32;
+                            CP_PERF_ARM_MS.store(arm_ms, Ordering::Relaxed);
+                            CP_PERF_ARM_TARGET_P_MW.store(new_target_p_mw, Ordering::Relaxed);
+                            CP_PERF_ARM_P0_MW.store(calc_p_mw, Ordering::Relaxed);
+                            CP_PERF_ARM_SEQ.fetch_add(1, Ordering::Release);
+                            info!(
+                                "cp_perf armed (control tick): target={}mW (prev={}mW) p0={}mW at_ms={}",
+                                new_target_p_mw, prev_target_p_mw, calc_p_mw, arm_ms
+                            );
+                        }
+
                         // Large setpoint steps are handled without the slew limiter (see below),
                         // to keep the CP loop responsive while still damping small dithers.
                         cp_large_step = delta_p_mw >= CP_STEP_BOOST_DETECT_MW;
@@ -1948,7 +1969,12 @@ async fn main(_spawner: Spawner) -> ! {
                             } else if cp_pterm_pos_freeze_ticks > 0 && i_err_clamped > 0 {
                                 0
                             } else {
-                                i_err_clamped / CP_I_P_ERR_DIV
+                                let p_div = if ctrl_snapshot.target_p_mw <= CP_FS_L_MW {
+                                    CP_I_P_ERR_DIV_LOW_POWER
+                                } else {
+                                    CP_I_P_ERR_DIV
+                                };
+                                i_err_clamped / p_div.max(1)
                             };
 
                             // Conservative integral trim: only integrate when we are not saturating
@@ -2901,8 +2927,6 @@ async fn uart_setpoint_rx_task(
 
                                             let prev_enabled =
                                                 ACTIVE_CTRL_OUTPUT_ENABLED.load(Ordering::Relaxed);
-                                            let prev_target_p_mw =
-                                                ACTIVE_CTRL_TARGET_P_MW.load(Ordering::Relaxed);
                                             let prev_uv_latched =
                                                 ACTIVE_CTRL_UV_LATCHED.load(Ordering::Relaxed);
 
@@ -2939,30 +2963,6 @@ async fn uart_setpoint_rx_task(
                                                     .store(false, Ordering::Relaxed);
                                             }
                                             ACTIVE_CTRL_SEQ.fetch_add(1, Ordering::Release);
-
-                                            // CP performance capture arm (best-effort internal self-test):
-                                            // - trigger only on CP target steps (not on output enable edges)
-                                            // - timestamp at RX time for better start alignment than the control tick
-                                            if cmd.mode == LoadMode::Cp
-                                                && cmd.output_enabled
-                                                && new_target_p_mw > 0
-                                                && new_target_p_mw != prev_target_p_mw
-                                            {
-                                                let arm_ms = timestamp_ms() as u32;
-                                                CP_PERF_ARM_MS.store(arm_ms, Ordering::Relaxed);
-                                                CP_PERF_ARM_TARGET_P_MW
-                                                    .store(new_target_p_mw, Ordering::Relaxed);
-                                                CP_PERF_ARM_SEQ.fetch_add(1, Ordering::Release);
-                                                info!(
-                                                    "cp_perf armed: preset_id={} target={}mW (prev={}mW) max_i_total={}mA max_p={}mW at_ms={}",
-                                                    cmd.preset_id,
-                                                    new_target_p_mw,
-                                                    prev_target_p_mw,
-                                                    cmd.max_i_ma_total,
-                                                    cmd.max_p_mw,
-                                                    arm_ms,
-                                                );
-                                            }
 
                                             ACTIVE_MODE_SEEN.store(true, Ordering::Relaxed);
 
