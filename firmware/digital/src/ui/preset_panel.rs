@@ -47,6 +47,7 @@ const COLOR_TEXT_DARK: u32 = 0x080f19;
 const COLOR_THEME: u32 = 0x4cc9f0;
 const COLOR_MODE_CV: u32 = 0xffb24a;
 const COLOR_MODE_CC: u32 = 0xff5252;
+const COLOR_MODE_CP: u32 = 0xb27bff;
 const COLOR_MODE_OFF: u32 = 0x7a7f8c;
 
 const COLOR_LOAD_TRACK_OFF: u32 = 0x4a1824;
@@ -80,6 +81,7 @@ pub enum PresetPanelHit {
     Tab(u8),
     ModeCv,
     ModeCc,
+    ModeCp,
     FieldLabel(PresetPanelField),
     FieldValue(PresetPanelField),
     LoadToggle,
@@ -146,11 +148,15 @@ pub fn hit_test_preset_panel(x: i32, y: i32, vm: &PresetPanelVm) -> Option<Prese
         mode_row_top + ROW_H,
     );
     if hit_in_rect(x, y, mode_hit) {
-        let sep = mode_pill.left + (mode_pill.right - mode_pill.left) / 2;
-        return if x < sep {
+        let w = (mode_pill.right - mode_pill.left).max(1);
+        let seg = (w / 3).max(1);
+        let rel = x - mode_pill.left;
+        return if rel < seg {
             Some(PresetPanelHit::ModeCv)
-        } else {
+        } else if rel < seg * 2 {
             Some(PresetPanelHit::ModeCc)
+        } else {
+            Some(PresetPanelHit::ModeCp)
         };
     }
 
@@ -207,7 +213,7 @@ pub fn pick_value_digit(field: PresetPanelField, x: i32, unit: char) -> PresetPa
         (rel / glyph_w, rel % glyph_w)
     };
 
-    let is_power = matches!(field, PresetPanelField::PLim);
+    let is_power = unit == 'W' || matches!(field, PresetPanelField::PLim);
     if is_power {
         match cell_idx {
             0 | 1 => PresetPanelDigit::Tens, // hundreds is non-selectable; snap to tens
@@ -335,7 +341,7 @@ fn draw_fields(canvas: &mut Canvas, vm: &PresetPanelVm) {
                     vm.target_text.as_str(),
                     vm.selected_field == *field,
                     vm.selected_digit,
-                    false,
+                    mode == LoadMode::Cp,
                 );
             }
             PresetPanelField::VLim => {
@@ -447,31 +453,42 @@ fn draw_mode_segmented(canvas: &mut Canvas, row_top: i32, mode: LoadMode, select
         draw_rect_outline(canvas, rect, rgb(COLOR_THEME));
     }
 
-    let sep = rect.left + (rect.right - rect.left) / 2;
-    canvas.fill_rect(
-        Rect::new(sep, rect.top + 2, sep + 1, rect.bottom - 2),
-        rgb(COLOR_DIVIDER),
-    );
+    let w = (rect.right - rect.left).max(1);
+    let seg_w = (w / 3).max(1);
+    let sep1 = rect.left + seg_w;
+    let sep2 = rect.left + seg_w * 2;
+    for sep in [sep1, sep2] {
+        canvas.fill_rect(
+            Rect::new(sep, rect.top + 2, sep + 1, rect.bottom - 2),
+            rgb(COLOR_DIVIDER),
+        );
+    }
 
-    let (cv_color, cc_color) = match mode {
-        LoadMode::Cv => (rgb(COLOR_MODE_CV), rgb(COLOR_MODE_OFF)),
-        LoadMode::Cc => (rgb(COLOR_MODE_OFF), rgb(COLOR_MODE_CC)),
-        LoadMode::Reserved(_) => (rgb(COLOR_MODE_OFF), rgb(COLOR_MODE_CC)),
+    let (cv_color, cc_color, cp_color) = match mode {
+        LoadMode::Cv => (rgb(COLOR_MODE_CV), rgb(COLOR_MODE_OFF), rgb(COLOR_MODE_OFF)),
+        LoadMode::Cc => (rgb(COLOR_MODE_OFF), rgb(COLOR_MODE_CC), rgb(COLOR_MODE_OFF)),
+        LoadMode::Cp => (rgb(COLOR_MODE_OFF), rgb(COLOR_MODE_OFF), rgb(COLOR_MODE_CP)),
+        LoadMode::Reserved(_) => (rgb(COLOR_MODE_OFF), rgb(COLOR_MODE_CC), rgb(COLOR_MODE_OFF)),
     };
 
     let cv_w = small_text_width("CV", 0);
     let cc_w = small_text_width("CC", 0);
+    let cp_w = small_text_width("CP", 0);
     let small_h = SMALL_FONT.height() as i32;
     let text_y = rect.top + ((rect.bottom - rect.top) - small_h).max(0) / 2;
 
-    let left_x0 = rect.left + 2;
-    let left_x1 = sep - 2;
-    let right_x0 = sep + 2;
-    let right_x1 = rect.right - 2;
-    let cv_x = left_x0 + ((left_x1 - left_x0) - cv_w).max(0) / 2;
-    let cc_x = right_x0 + ((right_x1 - right_x0) - cc_w).max(0) / 2;
+    let s0_x0 = rect.left + 2;
+    let s0_x1 = sep1 - 2;
+    let s1_x0 = sep1 + 2;
+    let s1_x1 = sep2 - 2;
+    let s2_x0 = sep2 + 2;
+    let s2_x1 = rect.right - 2;
+    let cv_x = s0_x0 + ((s0_x1 - s0_x0) - cv_w).max(0) / 2;
+    let cc_x = s1_x0 + ((s1_x1 - s1_x0) - cc_w).max(0) / 2;
+    let cp_x = s2_x0 + ((s2_x1 - s2_x0) - cp_w).max(0) / 2;
     super::draw_small_text(canvas, "CV", cv_x, text_y, cv_color, 0);
     super::draw_small_text(canvas, "CC", cc_x, text_y, cc_color, 0);
+    super::draw_small_text(canvas, "CP", cp_x, text_y, cp_color, 0);
 }
 
 fn draw_action_row(canvas: &mut Canvas, vm: &PresetPanelVm) {
@@ -730,6 +747,7 @@ fn row_value_hit_rect(field: PresetPanelField) -> Rect {
 fn normalize_mode(mode: LoadMode) -> LoadMode {
     match mode {
         LoadMode::Cv => LoadMode::Cv,
+        LoadMode::Cp => LoadMode::Cp,
         LoadMode::Cc => LoadMode::Cc,
         LoadMode::Reserved(_) => LoadMode::Cc,
     }

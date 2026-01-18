@@ -58,12 +58,14 @@ pub const PD_MAX_PPS_PDOS: usize = 4;
 /// Values not listed here are reserved for future expansion.
 pub const LOAD_MODE_CC: u8 = 1;
 pub const LOAD_MODE_CV: u8 = 2;
+pub const LOAD_MODE_CP: u8 = 3;
 
 /// FastStatus mode values.
 ///
 /// This mapping is intentionally identical to [`LOAD_MODE_CC`] / [`LOAD_MODE_CV`].
 pub const FAST_STATUS_MODE_CC: u8 = LOAD_MODE_CC;
 pub const FAST_STATUS_MODE_CV: u8 = LOAD_MODE_CV;
+pub const FAST_STATUS_MODE_CP: u8 = LOAD_MODE_CP;
 
 /// `FastStatus.state_flags` shared bit definitions.
 ///
@@ -155,12 +157,13 @@ pub struct FastStatus {
 
 /// Stable load mode contract carried in control frames and surfaced via telemetry.
 ///
-/// Only CC and CV are currently defined for protocol v1; other values are reserved.
+/// CC, CV and CP are currently defined for protocol v1; other values are reserved.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoadMode {
     Cc,
     Cv,
+    Cp,
     Reserved(u8),
 }
 
@@ -169,6 +172,7 @@ impl From<u8> for LoadMode {
         match value {
             LOAD_MODE_CC => LoadMode::Cc,
             LOAD_MODE_CV => LoadMode::Cv,
+            LOAD_MODE_CP => LoadMode::Cp,
             other => LoadMode::Reserved(other),
         }
     }
@@ -179,6 +183,7 @@ impl From<LoadMode> for u8 {
         match mode {
             LoadMode::Cc => LOAD_MODE_CC,
             LoadMode::Cv => LOAD_MODE_CV,
+            LoadMode::Cp => LOAD_MODE_CP,
             LoadMode::Reserved(raw) => raw,
         }
     }
@@ -240,6 +245,9 @@ pub struct SetMode {
     /// Power limit (mW).
     #[n(7)]
     pub max_p_mw: u32,
+    /// CP target power (mW). Ignored in CC/CV modes.
+    #[n(8)]
+    pub target_p_mw: Option<u32>,
 }
 
 /// Minimal control payload for adjusting the analog board's current setpoint.
@@ -1706,6 +1714,16 @@ mod tests {
     }
 
     #[test]
+    fn load_mode_u8_mapping_includes_cp() {
+        assert_eq!(LoadMode::from(LOAD_MODE_CC), LoadMode::Cc);
+        assert_eq!(LoadMode::from(LOAD_MODE_CV), LoadMode::Cv);
+        assert_eq!(LoadMode::from(LOAD_MODE_CP), LoadMode::Cp);
+        assert_eq!(u8::from(LoadMode::Cc), LOAD_MODE_CC);
+        assert_eq!(u8::from(LoadMode::Cv), LOAD_MODE_CV);
+        assert_eq!(u8::from(LoadMode::Cp), LOAD_MODE_CP);
+    }
+
+    #[test]
     fn set_mode_roundtrip_cc_and_header() {
         let cmd = SetMode {
             preset_id: 1,
@@ -1716,6 +1734,7 @@ mod tests {
             min_v_mv: 500,
             max_i_ma_total: 5000,
             max_p_mw: 60_000,
+            target_p_mw: None,
         };
 
         let mut raw = [0u8; 96];
@@ -1738,6 +1757,7 @@ mod tests {
             min_v_mv: 1000,
             max_i_ma_total: 3000,
             max_p_mw: 120_000,
+            target_p_mw: None,
         };
 
         let mut raw = [0u8; 96];
@@ -1745,6 +1765,74 @@ mod tests {
         let (_hdr, decoded) = decode_set_mode_frame(&raw[..len]).unwrap();
         assert_eq!(decoded.mode, LoadMode::Cv);
         assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn set_mode_roundtrip_cp() {
+        let cmd = SetMode {
+            preset_id: 2,
+            output_enabled: true,
+            mode: LoadMode::Cp,
+            target_i_ma: 0,
+            target_v_mv: 12_000,
+            min_v_mv: 0,
+            max_i_ma_total: 8_000,
+            max_p_mw: 100_000,
+            target_p_mw: Some(45_000),
+        };
+
+        let mut raw = [0u8; 96];
+        let len = encode_set_mode_frame(42, &cmd, &mut raw).unwrap();
+        let (_hdr, decoded) = decode_set_mode_frame(&raw[..len]).unwrap();
+        assert_eq!(decoded, cmd);
+    }
+
+    #[test]
+    fn set_mode_missing_target_p_defaults_to_none() {
+        // Craft a v1 SetMode payload without key=8 to ensure the decoder treats it as default.
+        let mut payload_buf = [0u8; 64];
+        let payload_len = {
+            let mut cursor = Cursor::new(&mut payload_buf[..]);
+            let mut encoder = minicbor::Encoder::new(&mut cursor);
+            encoder.map(8).unwrap();
+            encoder.u8(0).unwrap();
+            encoder.u8(1).unwrap(); // preset_id
+            encoder.u8(1).unwrap();
+            encoder.bool(true).unwrap(); // output_enabled
+            encoder.u8(2).unwrap();
+            encoder.u8(LOAD_MODE_CP).unwrap(); // mode
+            encoder.u8(3).unwrap();
+            encoder.i32(0).unwrap(); // target_i_ma
+            encoder.u8(4).unwrap();
+            encoder.i32(12_000).unwrap(); // target_v_mv
+            encoder.u8(5).unwrap();
+            encoder.i32(0).unwrap(); // min_v_mv
+            encoder.u8(6).unwrap();
+            encoder.i32(8_000).unwrap(); // max_i_ma_total
+            encoder.u8(7).unwrap();
+            encoder.u32(100_000).unwrap(); // max_p_mw
+            cursor.position()
+        };
+
+        let mut raw = [0u8; 96];
+        raw[0] = PROTOCOL_VERSION;
+        raw[1] = FLAG_ACK_REQ;
+        raw[2] = 1;
+        raw[3] = MSG_SET_MODE;
+        let len_bytes = (payload_len as u16).to_le_bytes();
+        raw[4] = len_bytes[0];
+        raw[5] = len_bytes[1];
+        raw[HEADER_LEN..HEADER_LEN + payload_len].copy_from_slice(&payload_buf[..payload_len]);
+        let frame_len_without_crc = HEADER_LEN + payload_len;
+        let crc = crc16_ccitt_false(&raw[..frame_len_without_crc]);
+        let crc_bytes = crc.to_le_bytes();
+        raw[frame_len_without_crc] = crc_bytes[0];
+        raw[frame_len_without_crc + 1] = crc_bytes[1];
+        let total_len = frame_len_without_crc + CRC_LEN;
+
+        let (_hdr, decoded) = decode_set_mode_frame(&raw[..total_len]).unwrap();
+        assert_eq!(decoded.mode, LoadMode::Cp);
+        assert_eq!(decoded.target_p_mw, None);
     }
 
     #[test]
@@ -1823,6 +1911,7 @@ mod tests {
             min_v_mv: 0,
             max_i_ma_total: 0,
             max_p_mw: 0,
+            target_p_mw: None,
         };
 
         let mut raw = [0u8; 96];
@@ -1983,7 +2072,7 @@ mod tests {
     fn limit_profile_roundtrip() {
         let profile = LimitProfile {
             max_i_ma: 5_000,
-            max_p_mw: 250_000,
+            max_p_mw: 100_000,
             ovp_mv: 55_000,
             temp_trip_mc: 100_000,
             thermal_derate_pct: 100,
