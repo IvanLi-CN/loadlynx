@@ -133,8 +133,9 @@ fn render_pd_toggle_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Er
     base.sink_core_temp = 18.0;
     base.sink_exhaust_temp = 17.8;
     base.mcu_temp = 35.0;
-    base.pd_desired_mv = 20_000;
-    base.pd_20v_available = true;
+    base.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
+    base.pd_target_mv = Some(20_000);
+    base.pd_target_available = true;
 
     let mut standby = base.clone();
     standby.pd_state = ui::PdButtonState::Standby;
@@ -159,16 +160,164 @@ fn render_pd_toggle_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+fn render_dashboard_pd_button_label_mocks_to_dir(
+    out_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(out_dir)?;
+
+    let mut base = ui::UiSnapshot::demo();
+    // Keep the base frame aligned with the documented design mocks so diffs are attributable
+    // to the PD button copy rules only.
+    base.set_control_overlay(2, true, LoadMode::Cc, false, true, false, true, None, None);
+    base.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
+
+    let mut detach = base.clone();
+    detach.pd_state = ui::PdButtonState::Standby;
+    detach.pd_display_mode = ui::PdButtonDisplayMode::Detach;
+    detach.pd_target_mv = None;
+    detach.pd_target_available = false;
+    render_snapshot(
+        &out_dir.join("dashboard-detach.png"),
+        &detach,
+        None,
+        None,
+        None,
+    )?;
+
+    let mut fixed = base.clone();
+    fixed.pd_state = ui::PdButtonState::Active;
+    fixed.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
+    fixed.pd_target_mv = Some(20_000);
+    fixed.pd_target_available = true;
+    render_snapshot(
+        &out_dir.join("dashboard-fixed-20v.png"),
+        &fixed,
+        None,
+        None,
+        None,
+    )?;
+
+    let mut pps = base.clone();
+    pps.pd_state = ui::PdButtonState::Active;
+    pps.pd_display_mode = ui::PdButtonDisplayMode::Pps;
+    pps.pd_target_mv = Some(20_000);
+    pps.pd_target_available = true;
+    render_snapshot(
+        &out_dir.join("dashboard-pps-20.0v.png"),
+        &pps,
+        None,
+        None,
+        None,
+    )?;
+
+    let mut fixed_unavail = base.clone();
+    fixed_unavail.pd_state = ui::PdButtonState::Active;
+    fixed_unavail.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
+    fixed_unavail.pd_target_mv = Some(20_000);
+    fixed_unavail.pd_target_available = false;
+    render_snapshot(
+        &out_dir.join("dashboard-fixed-unavail.png"),
+        &fixed_unavail,
+        None,
+        None,
+        None,
+    )?;
+
+    let mut pps_na = base;
+    pps_na.pd_state = ui::PdButtonState::Active;
+    pps_na.pd_display_mode = ui::PdButtonDisplayMode::Pps;
+    pps_na.pd_target_mv = None;
+    pps_na.pd_target_available = false;
+    render_snapshot(
+        &out_dir.join("dashboard-pps-na.png"),
+        &pps_na,
+        None,
+        None,
+        None,
+    )?;
+
+    // Build a simple 3×2 montage for quick visual inspection.
+    let tiles = [
+        out_dir.join("dashboard-detach.png"),
+        out_dir.join("dashboard-fixed-20v.png"),
+        out_dir.join("dashboard-pps-20.0v.png"),
+        out_dir.join("dashboard-fixed-unavail.png"),
+        out_dir.join("dashboard-pps-na.png"),
+    ];
+
+    let mut images = Vec::with_capacity(tiles.len());
+    for path in &tiles {
+        images.push(image::open(path)?.to_rgb8());
+    }
+
+    let tile_w = 320u32;
+    let tile_h = 240u32;
+    let cols = 3u32;
+    let rows = 2u32;
+    let mut montage: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::new(tile_w * cols, tile_h * rows);
+
+    let mut idx = 0usize;
+    for row in 0..rows {
+        for col in 0..cols {
+            if idx >= images.len() {
+                break;
+            }
+            let x0 = col * tile_w;
+            let y0 = row * tile_h;
+            for y in 0..tile_h {
+                for x in 0..tile_w {
+                    let px = images[idx].get_pixel(x, y);
+                    montage.put_pixel(x0 + x, y0 + y, *px);
+                }
+            }
+            idx += 1;
+        }
+    }
+
+    montage.save(out_dir.join("dashboard-pd-button-states.png"))?;
+    Ok(())
+}
+
+fn render_dashboard_pd_button_label_mocks(
+    repo_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    render_dashboard_pd_button_label_mocks_to_dir(
+        &repo_root.join("docs/assets/main-display/pd-button"),
+    )
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..");
     let mode = std::env::args().nth(1);
+    if mode.as_deref() == Some("pd-button") {
+        return render_dashboard_pd_button_label_mocks(&repo_root);
+    }
+    if mode.as_deref() == Some("pd-button-tmp") {
+        let out_dir = repo_root.join("tmp/ui-mock/pd-button");
+        return render_dashboard_pd_button_label_mocks_to_dir(&out_dir);
+    }
     if mode.as_deref() == Some("pd") {
         return render_pd_toggle_mocks(&repo_root);
     }
     if mode.as_deref() == Some("pd-settings") {
         return pd_settings_mock::render_pd_settings_mocks(&repo_root);
+    }
+    if mode.as_deref() == Some("main-display-cc") {
+        let out_dir = repo_root.join("tmp/ui-mock");
+        std::fs::create_dir_all(&out_dir)?;
+
+        let mut cc = ui::UiSnapshot::demo();
+        cc.set_control_overlay(2, true, LoadMode::Cc, false, true, false, true, None, None);
+        cc.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
+        // Match the shipped design mock for PD button appearance.
+        cc.pd_state = ui::PdButtonState::Active;
+        cc.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
+        cc.pd_target_mv = Some(20_000);
+        cc.pd_target_available = true;
+        render_snapshot(&out_dir.join("main-display-cc.png"), &cc, None, None, None)?;
+        return Ok(());
     }
     let out_dir = repo_root.join("docs/assets/main-display");
     let preset_dir = repo_root.join("docs/assets/on-device-preset-ui");

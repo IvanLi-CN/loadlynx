@@ -2,6 +2,7 @@ mod fonts;
 pub mod pd_settings;
 pub mod preset_panel;
 
+use core::fmt::Write;
 use embedded_graphics::pixelcolor::{
     Rgb565,
     raw::{RawData, RawU16},
@@ -194,12 +195,22 @@ const PD_BUTTON_RIGHT: i32 = LOAD_BUTTON_LEFT - PD_BUTTON_GAP_TO_POWER;
 const PD_BUTTON_BOTTOM: i32 = LOAD_BUTTON_BOTTOM;
 const PD_BUTTON_RADIUS: i32 = 6;
 
-#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug, defmt::Format)]
 pub enum PdButtonState {
     Standby,
     Negotiating,
     Active,
     Error,
+}
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum PdButtonDisplayMode {
+    /// Unattached / no PD source detected.
+    Detach,
+    /// Fixed PDO mode (label uses `PD`).
+    Fixed,
+    /// PPS APDO mode (label uses `PPS`).
+    Pps,
 }
 
 /// Bitmask describing which logical UI regions need to be updated for a frame.
@@ -904,9 +915,6 @@ fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
         PD_BUTTON_BOTTOM,
     );
 
-    let base_fill = rgb(0x1c2638);
-    let base_border = rgb(0x1c2a3f);
-
     let accent = match data.pd_state {
         PdButtonState::Standby => rgb(0x555f75),
         PdButtonState::Negotiating => rgb(0xffb347),
@@ -914,26 +922,11 @@ fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
         PdButtonState::Error => rgb(0xff5252),
     };
 
-    let border = if matches!(data.pd_state, PdButtonState::Standby) {
-        base_border
-    } else {
-        accent
-    };
-
-    canvas.fill_round_rect(rect, PD_BUTTON_RADIUS, border);
-    let inner = Rect::new(rect.left + 1, rect.top + 1, rect.right - 1, rect.bottom - 1);
-    canvas.fill_round_rect(inner, (PD_BUTTON_RADIUS - 1).max(0), base_fill);
-
-    let target = if data.pd_desired_mv >= 15_000 {
-        "20V"
-    } else {
-        "5V"
-    };
-    let target_color = if target == "20V" && !data.pd_20v_available {
-        rgb(0x555f75)
-    } else {
-        accent
-    };
+    // Match the existing design mock: solid fill, with small corner highlights only.
+    canvas.fill_round_rect(rect, PD_BUTTON_RADIUS, rgb(0x1c2638));
+    if !matches!(data.pd_state, PdButtonState::Standby) {
+        overlay_pd_button_corner_highlights(canvas, rect, accent);
+    }
 
     // Two-line layout: `SMALL_FONT` is 12px tall but has internal blank rows (no ascenders/descenders
     // for "PD"/"20V"). Use a slight overlap so the *visual* gap becomes ~2–3px.
@@ -942,14 +935,132 @@ fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
     let line2_y = line1_y + 11;
 
     let spacing = 0;
-    let line1 = "PD";
+    let line1 = match data.pd_display_mode {
+        PdButtonDisplayMode::Pps => "PPS",
+        PdButtonDisplayMode::Fixed | PdButtonDisplayMode::Detach => "PD",
+    };
     let line1_w = small_text_width(line1, spacing);
     let line1_x = rect.left + ((rect.right - rect.left - line1_w).max(0) / 2);
     draw_small_text(canvas, line1, line1_x, line1_y, accent, spacing);
 
-    let line2_w = small_text_width(target, spacing);
+    let mut line2_buf = String::<8>::new();
+    match data.pd_display_mode {
+        PdButtonDisplayMode::Detach => {
+            let _ = line2_buf.push_str("Detach");
+        }
+        PdButtonDisplayMode::Fixed => {
+            if let Some(mv) = data.pd_target_mv {
+                let _ = write!(&mut line2_buf, "{}V", mv / 1000);
+            } else {
+                let _ = line2_buf.push_str("N/A");
+            }
+        }
+        PdButtonDisplayMode::Pps => {
+            if let Some(mv) = data.pd_target_mv {
+                let v10 = mv / 100;
+                let _ = write!(&mut line2_buf, "{}.{}V", v10 / 10, v10 % 10);
+            } else {
+                let _ = line2_buf.push_str("N/A");
+            }
+        }
+    }
+
+    let line2_is_voltage =
+        data.pd_display_mode != PdButtonDisplayMode::Detach && data.pd_target_mv.is_some();
+    let line2_color = if line2_is_voltage && data.pd_target_available {
+        accent
+    } else {
+        rgb(0x555f75)
+    };
+
+    let line2 = line2_buf.as_str();
+    let line2_w = small_text_width(line2, spacing);
     let line2_x = rect.left + ((rect.right - rect.left - line2_w).max(0) / 2);
-    draw_small_text(canvas, target, line2_x, line2_y, target_color, spacing);
+    draw_small_text(canvas, line2, line2_x, line2_y, line2_color, spacing);
+}
+
+fn overlay_pd_button_corner_highlights(canvas: &mut Canvas, rect: Rect, color: Rgb565) {
+    // Pixel-perfect corner accents from the existing design mock:
+    // - 3px segments on each side near each corner
+    // - 1px diagonal dot in each corner pocket
+    //
+    // This is intentionally *not* a rounded-rect outline.
+    let left = rect.left;
+    let right = rect.right;
+    let top = rect.top;
+    let bottom = rect.bottom;
+
+    let x_l = left + 1;
+    let x_r = right - 2;
+    let y_t = top + 1;
+    let y_b = bottom - 2;
+
+    // Top/bottom short segments.
+    for x in (left + 3)..=(left + 5) {
+        canvas.set_pixel(x, y_t, color);
+        canvas.set_pixel(x, y_b, color);
+    }
+    for x in (right - 6)..=(right - 4) {
+        canvas.set_pixel(x, y_t, color);
+        canvas.set_pixel(x, y_b, color);
+    }
+
+    // Left/right short segments.
+    for y in (top + 3)..=(top + 5) {
+        canvas.set_pixel(x_l, y, color);
+        canvas.set_pixel(x_r, y, color);
+    }
+    for y in (bottom - 6)..=(bottom - 4) {
+        canvas.set_pixel(x_l, y, color);
+        canvas.set_pixel(x_r, y, color);
+    }
+
+    // Diagonal dots.
+    canvas.set_pixel(left + 2, top + 2, color);
+    canvas.set_pixel(right - 3, top + 2, color);
+    canvas.set_pixel(left + 2, bottom - 3, color);
+    canvas.set_pixel(right - 3, bottom - 3, color);
+}
+
+fn overlay_round_rect_corner_outline(canvas: &mut Canvas, rect: Rect, radius: i32, color: Rgb565) {
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if w <= 0 || h <= 0 {
+        return;
+    }
+    let mut r = radius.max(0);
+    r = r.min(w / 2).min(h / 2);
+    if r == 0 {
+        return;
+    }
+
+    let left_r = rect.left + r;
+    let right_r = rect.right - r;
+    let top_r = rect.top + r;
+    let bottom_r = rect.bottom - r;
+
+    for y in rect.top..rect.bottom {
+        for x in rect.left..rect.right {
+            let in_corner = (x < left_r && y < top_r)
+                || (x >= right_r && y < top_r)
+                || (x < left_r && y >= bottom_r)
+                || (x >= right_r && y >= bottom_r);
+            if !in_corner {
+                continue;
+            }
+            if !point_in_round_rect(rect, radius, x, y) {
+                continue;
+            }
+            // Single-outline highlight (avoid the "double arc" look from inner/outer rings).
+            let edge = !point_in_round_rect(rect, radius, x - 1, y)
+                || !point_in_round_rect(rect, radius, x + 1, y)
+                || !point_in_round_rect(rect, radius, x, y - 1)
+                || !point_in_round_rect(rect, radius, x, y + 1);
+            if edge {
+                canvas.set_pixel(x, y, color);
+            }
+        }
+    }
 }
 
 fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb565) {
@@ -1290,6 +1401,67 @@ fn rgb(hex: u32) -> Rgb565 {
     embedded_graphics::pixelcolor::Rgb888::new(r, g, b).into()
 }
 
+fn rgb888(r: u8, g: u8, b: u8) -> Rgb565 {
+    embedded_graphics::pixelcolor::Rgb888::new(r, g, b).into()
+}
+
+fn lerp_u8(a: u8, b: u8, t255: u32) -> u8 {
+    let a = a as u32;
+    let b = b as u32;
+    ((a * (255 - t255) + b * t255 + 127) / 255) as u8
+}
+
+fn point_in_round_rect(rect: Rect, radius: i32, x: i32, y: i32) -> bool {
+    if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
+        return false;
+    }
+    let w = rect.right - rect.left;
+    let h = rect.bottom - rect.top;
+    if w <= 0 || h <= 0 {
+        return false;
+    }
+    let mut r = radius.max(0);
+    r = r.min(w / 2).min(h / 2);
+    if r == 0 {
+        return true;
+    }
+    let r2 = r * r;
+
+    let tl_cx = rect.left + r;
+    let tl_cy = rect.top + r;
+    let tr_cx = rect.right - r - 1;
+    let tr_cy = rect.top + r;
+    let bl_cx = rect.left + r;
+    let bl_cy = rect.bottom - r - 1;
+    let br_cx = rect.right - r - 1;
+    let br_cy = rect.bottom - r - 1;
+
+    let left_r = rect.left + r;
+    let right_r = rect.right - r;
+    let top_r = rect.top + r;
+    let bottom_r = rect.bottom - r;
+
+    if x < left_r && y < top_r {
+        let dx = x - tl_cx;
+        let dy = y - tl_cy;
+        dx * dx + dy * dy <= r2
+    } else if x >= right_r && y < top_r {
+        let dx = x - tr_cx;
+        let dy = y - tr_cy;
+        dx * dx + dy * dy <= r2
+    } else if x < left_r && y >= bottom_r {
+        let dx = x - bl_cx;
+        let dy = y - bl_cy;
+        dx * dx + dy * dy <= r2
+    } else if x >= right_r && y >= bottom_r {
+        let dx = x - br_cx;
+        let dy = y - br_cy;
+        dx * dx + dy * dy <= r2
+    } else {
+        true
+    }
+}
+
 struct Canvas<'a> {
     bytes: &'a mut [u8],
     phys_width: usize,
@@ -1321,6 +1493,32 @@ impl<'a> Canvas<'a> {
         for yy in rect.top..rect.bottom {
             for xx in rect.left..rect.right {
                 self.set_pixel(xx, yy, color);
+            }
+        }
+    }
+
+    fn fill_round_rect_vgradient(
+        &mut self,
+        rect: Rect,
+        radius: i32,
+        top_rgb: (u8, u8, u8),
+        bottom_rgb: (u8, u8, u8),
+    ) {
+        let h = (rect.bottom - rect.top).max(1) as u32;
+        for y in rect.top..rect.bottom {
+            let t = if h <= 1 {
+                0
+            } else {
+                ((y - rect.top) as u32 * 255) / (h - 1)
+            };
+            let r = lerp_u8(top_rgb.0, bottom_rgb.0, t);
+            let g = lerp_u8(top_rgb.1, bottom_rgb.1, t);
+            let b = lerp_u8(top_rgb.2, bottom_rgb.2, t);
+            let row = rgb888(r, g, b);
+            for x in rect.left..rect.right {
+                if point_in_round_rect(rect, radius, x, y) {
+                    self.set_pixel(x, y, row);
+                }
             }
         }
     }
@@ -1441,8 +1639,9 @@ pub struct UiSnapshot {
     pub blocked_enable_abbrev: Option<&'static str>,
     pub blink_on: bool,
     pub pd_state: PdButtonState,
-    pub pd_desired_mv: u32,
-    pub pd_20v_available: bool,
+    pub pd_display_mode: PdButtonDisplayMode,
+    pub pd_target_mv: Option<u32>,
+    pub pd_target_available: bool,
     pub preset_preview_active: bool,
     pub preset_preview_target_text: String<8>,
     pub preset_preview_v_lim_text: String<8>,
@@ -1507,8 +1706,9 @@ impl UiSnapshot {
             blocked_enable_abbrev: None,
             blink_on: false,
             pd_state: PdButtonState::Standby,
-            pd_desired_mv: 5_000,
-            pd_20v_available: true,
+            pd_display_mode: PdButtonDisplayMode::Detach,
+            pd_target_mv: None,
+            pd_target_available: true,
             preset_preview_active: false,
             preset_preview_target_text: String::new(),
             preset_preview_v_lim_text: String::new(),
