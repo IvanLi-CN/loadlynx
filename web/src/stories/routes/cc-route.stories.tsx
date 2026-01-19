@@ -116,6 +116,7 @@ export const LimitViolationBlocked: Story = {
 
     await canvas.findByRole("heading", { name: /Device control/i });
     await canvas.findByRole("heading", { name: /Preset editor/i });
+    await canvas.findByText(/API version:/i);
 
     const modeSelect = await canvas.findByLabelText(/Mode/i);
     await userEvent.selectOptions(modeSelect, "cp");
