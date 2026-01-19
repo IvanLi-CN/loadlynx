@@ -3044,7 +3044,26 @@ async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
         PD_FORCE_SEND.store(true, Ordering::Release);
     }
     let mut guard = telemetry.lock().await;
+    let changed = match guard.last_pd_status.as_ref() {
+        None => true,
+        Some(prev) => {
+            prev.attached != status.attached
+                || prev.contract_mv != status.contract_mv
+                || prev.contract_ma != status.contract_ma
+        }
+    };
     guard.last_pd_status = Some(status);
+    if changed {
+        let s = guard.last_pd_status.as_ref().unwrap();
+        info!(
+            "PD_STATUS update: attached={} contract={}mV {}mA fixed_pdos={} pps_pdos={}",
+            s.attached,
+            s.contract_mv,
+            s.contract_ma,
+            s.fixed_pdos.len(),
+            s.pps_pdos.len()
+        );
+    }
 }
 
 struct DisplayResources {
@@ -3191,8 +3210,9 @@ impl TelemetryModel {
                 || prev.trip_alarm_abbrev != current.trip_alarm_abbrev
                 || prev.blocked_enable_abbrev != current.blocked_enable_abbrev
                 || prev.pd_state != current.pd_state
-                || prev.pd_desired_mv != current.pd_desired_mv
-                || prev.pd_20v_available != current.pd_20v_available
+                || prev.pd_display_mode != current.pd_display_mode
+                || prev.pd_target_mv != current.pd_target_mv
+                || prev.pd_target_available != current.pd_target_available
             {
                 mask.load_row = true;
             }
@@ -3738,7 +3758,7 @@ async fn display_task(
                 active_target_unit,
                 adjust_digit,
                 ui_view,
-                pd_desired_mv,
+                pd_saved,
                 pd_draft,
                 pd_focus,
                 pd_digit,
@@ -3799,7 +3819,7 @@ async fn display_task(
                     active_target_unit,
                     coerce_adjust_digit_for_mode(active_mode, guard.adjust_digit),
                     guard.ui_view,
-                    guard.pd_saved.target_mv,
+                    guard.pd_saved,
                     guard.pd_draft,
                     guard.pd_settings_focus,
                     guard.pd_settings_digit,
@@ -3855,46 +3875,135 @@ async fn display_task(
                 } else {
                     recent_enable_block_abbrev(now)
                 };
-                guard.snapshot.pd_desired_mv = pd_desired_mv;
-                let pd_20v_available = guard
-                    .last_pd_status
-                    .as_ref()
-                    .map(|s| s.fixed_pdos.iter().any(|pdo| pdo.mv == 20_000))
-                    .unwrap_or(true);
-                guard.snapshot.pd_20v_available = pd_20v_available;
-
-                let pd_attached = guard
-                    .last_pd_status
-                    .as_ref()
-                    .map(|s| s.attached)
-                    .unwrap_or(false);
-                let attached = guard
-                    .last_status
-                    .map(|s| s.v_local_mv >= 2_000)
-                    .unwrap_or(false)
-                    || pd_attached;
-                let reached = guard
-                    .last_status
-                    .map(|s| s.v_local_mv)
-                    .map(|v| {
-                        if pd_desired_mv >= 15_000 {
-                            v >= 18_000
-                        } else {
-                            v <= 7_000
+                let (pd_attached, pd_display_mode, pd_target_mv, pd_target_available) =
+                    if let Some(s) = guard.last_pd_status.as_ref() {
+                        fn pdo_pos(pos: u8, idx: usize) -> u8 {
+                            if pos != 0 {
+                                pos
+                            } else {
+                                (idx + 1).min(u8::MAX as usize) as u8
+                            }
                         }
-                    })
-                    .unwrap_or(false);
+
+                        let pd_attached = s.attached;
+                        let pd_display_mode = if !pd_attached {
+                            ui::PdButtonDisplayMode::Detach
+                        } else {
+                            match pd_saved.mode {
+                                control::PdMode::Fixed => ui::PdButtonDisplayMode::Fixed,
+                                control::PdMode::Pps => ui::PdButtonDisplayMode::Pps,
+                            }
+                        };
+                        let pd_target_mv = if pd_attached && s.contract_mv != 0 {
+                            Some(s.contract_mv)
+                        } else {
+                            None
+                        };
+                        let pd_target_available = if !pd_attached {
+                            false
+                        } else {
+                            match pd_saved.mode {
+                                control::PdMode::Fixed => {
+                                    let fixed_object_pos = if pd_saved.fixed_object_pos != 0 {
+                                        pd_saved.fixed_object_pos
+                                    } else {
+                                        s.fixed_pdos
+                                            .iter()
+                                            .enumerate()
+                                            .find(|(_idx, pdo)| pdo.mv == pd_saved.target_mv)
+                                            .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))
+                                            .unwrap_or(0)
+                                    };
+
+                                    let fixed_selected = if fixed_object_pos != 0 {
+                                        s.fixed_pdos
+                                            .iter()
+                                            .enumerate()
+                                            .find(|(idx, pdo)| {
+                                                pdo_pos(pdo.pos, *idx) == fixed_object_pos
+                                            })
+                                            .map(|(_idx, pdo)| *pdo)
+                                    } else {
+                                        None
+                                    };
+
+                                    match fixed_selected {
+                                        Some(pdo) => {
+                                            pd_saved.i_req_ma >= 50
+                                                && pd_saved.i_req_ma <= pdo.max_ma
+                                        }
+                                        None => false,
+                                    }
+                                }
+                                control::PdMode::Pps => {
+                                    if pd_saved.pps_object_pos == 0 {
+                                        false
+                                    } else {
+                                        let pps_selected = s
+                                            .pps_pdos
+                                            .iter()
+                                            .enumerate()
+                                            .find(|(idx, pdo)| {
+                                                pdo_pos(pdo.pos, *idx) == pd_saved.pps_object_pos
+                                            })
+                                            .map(|(_idx, pdo)| *pdo);
+                                        match pps_selected {
+                                            Some(pdo) => {
+                                                pd_saved.target_mv >= pdo.min_mv
+                                                    && pd_saved.target_mv <= pdo.max_mv
+                                                    && pd_saved.i_req_ma >= 50
+                                                    && pd_saved.i_req_ma <= pdo.max_ma
+                                            }
+                                            None => false,
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        (
+                            pd_attached,
+                            pd_display_mode,
+                            pd_target_mv,
+                            pd_target_available,
+                        )
+                    } else {
+                        (
+                            false,
+                            ui::PdButtonDisplayMode::Detach,
+                            None,
+                            true, // No caps; default to "available" to avoid false gray.
+                        )
+                    };
+
+                guard.snapshot.pd_display_mode = pd_display_mode;
+                guard.snapshot.pd_target_mv = pd_target_mv;
+                guard.snapshot.pd_target_available = pd_target_available;
+
+                let attached = pd_attached;
+                let contract_mv = pd_target_mv.unwrap_or(0);
                 let last_apply_ms = PD_LAST_APPLY_MS.load(Ordering::Relaxed);
                 let in_window = last_apply_ms != 0 && now.wrapping_sub(last_apply_ms) <= PD_T_PD_MS;
+                let prev_pd_state = guard.snapshot.pd_state;
                 guard.snapshot.pd_state = if !link_up || !attached {
                     ui::PdButtonState::Standby
-                } else if reached {
+                } else if contract_mv != 0 {
                     ui::PdButtonState::Active
                 } else if in_window || last_apply_ms == 0 {
                     ui::PdButtonState::Negotiating
                 } else {
                     ui::PdButtonState::Error
                 };
+                if prev_pd_state != guard.snapshot.pd_state {
+                    info!(
+                        "pd_button: state {:?}->{:?} attached={} contract={}mV last_apply_ms={} in_window={}",
+                        prev_pd_state,
+                        guard.snapshot.pd_state,
+                        attached,
+                        contract_mv,
+                        last_apply_ms,
+                        in_window
+                    );
+                }
                 guard.snapshot.set_control_overlay(
                     overlay_preset_id,
                     output_enabled,

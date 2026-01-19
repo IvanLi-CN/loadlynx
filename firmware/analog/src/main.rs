@@ -26,13 +26,13 @@ use loadlynx_protocol::{
     CRC_LEN, CalKind, Error as ProtocolError, FAST_STATUS_MODE_CC, FAST_STATUS_MODE_CP,
     FAST_STATUS_MODE_CV, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
     FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello, LoadMode,
-    MSG_CAL_MODE, MSG_SET_MODE, MSG_SET_POINT, STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED,
-    STATE_FLAG_LINK_GOOD, STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE,
+    MSG_CAL_MODE, MSG_SET_MODE, MSG_SET_POINT, PdStatus, STATE_FLAG_CURRENT_LIMITED,
+    STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD, STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE,
     STATE_FLAG_UV_LATCHED, SlipDecoder, SoftReset, SoftResetReason, decode_cal_mode_frame,
     decode_cal_write_frame, decode_frame, decode_limit_profile_frame, decode_pd_sink_request_frame,
     decode_set_enable_frame, decode_set_mode_frame, decode_set_point_frame,
     decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame,
-    encode_soft_reset_frame, slip_encode,
+    encode_pd_status_frame, encode_soft_reset_frame, slip_encode,
 };
 use static_cell::StaticCell;
 
@@ -722,6 +722,9 @@ async fn fast_status_tx_task(
 
     let mut raw_frame = [0u8; 192];
     let mut slip_frame = [0u8; 384];
+    let mut pd_raw = [0u8; 256];
+    let mut pd_slip = [0u8; 512];
+    let mut pd_beat = 0u8;
 
     loop {
         let status = FAST_STATUS_TX_CH.receive().await;
@@ -742,9 +745,46 @@ async fn fast_status_tx_task(
             }
         };
 
+        // Send a PD_STATUS heartbeat (~1 Hz) so the digital side can recover the PD
+        // attach/contract state after a reboot without requiring a renegotiation edge.
+        pd_beat = pd_beat.wrapping_add(1);
+        let pd_status: Option<PdStatus> = if pd_beat >= 20 {
+            pd_beat = 0;
+            pd::cached_pd_status().await
+        } else {
+            None
+        };
+        let pd_slip_len = if let Some(ref s) = pd_status {
+            let seq = TX_SEQ.fetch_add(1, Ordering::Relaxed);
+            let pd_len = match encode_pd_status_frame(seq, s, &mut pd_raw) {
+                Ok(len) => len,
+                Err(err) => {
+                    warn!("pd_status encode error: {:?}", err);
+                    0
+                }
+            };
+            if pd_len == 0 {
+                0
+            } else {
+                match slip_encode(&pd_raw[..pd_len], &mut pd_slip) {
+                    Ok(len) => len,
+                    Err(err) => {
+                        warn!("pd_status slip encode error: {:?}", err);
+                        0
+                    }
+                }
+            }
+        } else {
+            0
+        };
+
         let mut tx = uart_tx.lock().await;
         if let Err(_err) = tx.write(&slip_frame[..slip_len]).await {
             warn!("uart tx error; dropping fast_status");
+            continue;
+        }
+        if pd_slip_len != 0 {
+            let _ = tx.write(&pd_slip[..pd_slip_len]).await;
         }
     }
 }
@@ -1289,6 +1329,7 @@ async fn main(_spawner: Spawner) -> ! {
     )) {
         warn!("failed to spawn pd_task: {:?}", e);
     }
+    // PD_STATUS is periodically re-sent by the FAST_STATUS TX task.
 
     // ADC1/ADC2：控制环需要较高更新速率；外部通道使用较短采样时间，
     // 内部温度传感器/参考电压在读取时临时切换到长采样时间。

@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-16
-- Last: 2026-01-16
+- Last: 2026-01-19
 
 ## 背景 / 问题陈述
 
@@ -164,3 +164,7 @@
   - PPS：`docs/assets/main-display/pd-button/dashboard-pps-20.0v.png`
   - Fixed（unavailable 灰显）：`docs/assets/main-display/pd-button/dashboard-fixed-unavail.png`
   - PPS（缺失值 N/A）：`docs/assets/main-display/pd-button/dashboard-pps-na.png`
+
+## Change log
+
+- 2026-01-19: Dashboard PD button uses active PD contract for voltage display, and pd_state derives from protocol/contract presence (no v_local-based inference; fixes false Error/red when the contract is established).

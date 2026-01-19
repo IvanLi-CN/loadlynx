@@ -40,6 +40,41 @@ pub static PD_DESIRED_I_REQ_MA: AtomicU32 = AtomicU32::new(3_000);
 pub static PD_RENEGOTIATE_SIGNAL: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 static PD_STATUS_SEQ: AtomicU8 = AtomicU8::new(0);
+static PD_STATUS_CACHE: Mutex<CriticalSectionRawMutex, Option<PdStatus>> = Mutex::new(None);
+
+pub async fn cached_pd_status() -> Option<PdStatus> {
+    PD_STATUS_CACHE.lock().await.clone()
+}
+
+async fn send_pd_status_frame(
+    uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
+    status: &PdStatus,
+) {
+    let mut raw = [0u8; 256];
+    let mut slip = [0u8; 512];
+
+    let seq = PD_STATUS_SEQ.fetch_add(1, Ordering::Relaxed);
+    let frame_len = match encode_pd_status_frame(seq, status, &mut raw) {
+        Ok(len) => len,
+        Err(err) => {
+            warn!("PD_STATUS encode failed: {:?}", defmt::Debug2Format(&err));
+            return;
+        }
+    };
+
+    let slip_len = match slip_encode(&raw[..frame_len], &mut slip) {
+        Ok(len) => len,
+        Err(e) => {
+            warn!("PD_STATUS SLIP encode failed: {:?}", e);
+            return;
+        }
+    };
+
+    let mut tx = uart_tx.lock().await;
+    if let Err(e) = tx.write(&slip[..slip_len]).await {
+        warn!("PD_STATUS UART write failed: {:?}", e);
+    }
+}
 
 fn is_detached(cc1: CcVState, cc2: CcVState) -> bool {
     cc1 == CcVState::LOWEST && cc2 == CcVState::LOWEST
@@ -446,30 +481,11 @@ impl AnalogDpm {
             }
         };
 
-        let mut raw = [0u8; 256];
-        let mut slip = [0u8; 512];
-
-        let seq = PD_STATUS_SEQ.fetch_add(1, Ordering::Relaxed);
-        let frame_len = match encode_pd_status_frame(seq, &status, &mut raw) {
-            Ok(len) => len,
-            Err(err) => {
-                warn!("PD_STATUS encode failed: {:?}", defmt::Debug2Format(&err));
-                return;
-            }
-        };
-
-        let slip_len = match slip_encode(&raw[..frame_len], &mut slip) {
-            Ok(len) => len,
-            Err(e) => {
-                warn!("PD_STATUS SLIP encode failed: {:?}", e);
-                return;
-            }
-        };
-
-        let mut tx = self.uart_tx.lock().await;
-        if let Err(e) = tx.write(&slip[..slip_len]).await {
-            warn!("PD_STATUS UART write failed: {:?}", e);
+        {
+            let mut guard = PD_STATUS_CACHE.lock().await;
+            *guard = Some(status.clone());
         }
+        send_pd_status_frame(self.uart_tx, &status).await;
     }
 }
 
