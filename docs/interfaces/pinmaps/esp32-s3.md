@@ -113,7 +113,7 @@
 | 16 | GPIO11 | MOSI | 已用 | 同上。 |
 | 17 | GPIO12 | SCLK | 已用 | 同上。 |
 | 18 | GPIO13 | CS | 已用 | 同上。 |
-| 19 | GPIO14 | — | 空 | 可用 IO。 |
+| 19 | GPIO14 | TOUCH_SPRING | 规划 | Touch Sensor：`TouchPad14`；电极为触摸弹簧，顶住亚克力背面（0.8–1.0 mm）；注意与 RGB PWM 走线隔离（Plan #0021）。 |
 | 20 | VDD3P3_RTC | 3V3 | 已用 | RTC 供电。 |
 | 21 | GPIO15 | BLK | 已用 | 背光使能/PWM。 |
 | 22 | GPIO16 | — | 空 | 预留 IO。 |
@@ -134,9 +134,9 @@
 | 37 | SPICLK_P | — | 保留 | [FLASH] 差分。 |
 | 38 | GPIO33 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 39 | GPIO34 | ALG_EN | 已用 | 电源开关使能；位于 29–42 范围内；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
-| 40 | GPIO35 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
-| 41 | GPIO36 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
-| 42 | GPIO37 | — | 空 | 可用 IO；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
+| 40 | GPIO35 | RGB_R_PWM | 规划 | RGB（共阳/COM=3V3）红通道 PWM，GPIO 灌电流（active-low）；未被内置 Flash/PSRAM 占用（Plan #0021）。 |
+| 41 | GPIO36 | RGB_G_PWM | 规划 | RGB（共阳/COM=3V3）绿通道 PWM，GPIO 灌电流（active-low）；未被内置 Flash/PSRAM 占用（Plan #0021）。 |
+| 42 | GPIO37 | RGB_B_PWM | 规划 | RGB（共阳/COM=3V3）蓝通道 PWM，GPIO 灌电流（active-low）；未被内置 Flash/PSRAM 占用（Plan #0021）。 |
 | 43 | GPIO38 | — | 空 | 可用 IO。 |
 | 44 | MTCK / GPIO39 | FAN_PWM | 已用 | 默认 JTAG TCK；需禁用 PAD-JTAG。 |
 | 45 | MTDO / GPIO40 | FAN_TACH | 已用 | 默认 JTAG TDO；需禁用 PAD-JTAG。 |
