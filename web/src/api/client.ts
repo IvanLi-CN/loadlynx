@@ -404,6 +404,7 @@ function createInitialPresets(): Preset[] {
       mode: "cc",
       target_i_ma: 1_500 + (idx - 1) * 250,
       target_v_mv: 12_000,
+      target_p_mw: 10_000 + (idx - 1) * 2_000,
       min_v_mv: 0,
       max_i_ma_total: 10_000,
       max_p_mw: 150_000,
@@ -414,6 +415,8 @@ function createInitialPresets(): Preset[] {
 
 function createInitialIdentity(baseUrl: string, index: number): Identity {
   const deviceId = `llx-mock-${String(index).padStart(3, "0")}`;
+  const normalized = baseUrl.toLowerCase();
+  const cpSupported = !normalized.includes("no-cp");
 
   return {
     device_id: deviceId,
@@ -435,7 +438,7 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
     capabilities: {
       cc_supported: true,
       cv_supported: true,
-      cp_supported: false,
+      cp_supported: cpSupported,
       presets_supported: true,
       preset_count: 5,
       api_version: "2.0.0-mock",
@@ -656,11 +659,41 @@ function mockMakeControlView(state: MockDeviceState): ControlView {
   };
 }
 
+function mockRequireControlReady(state: MockDeviceState): void {
+  if (!state.status.link_up) {
+    throw new HttpApiError({
+      status: 503,
+      code: "LINK_DOWN",
+      message: "UART link is down",
+      retryable: true,
+      details: null,
+    });
+  }
+  if (state.status.analog_state === "cal_missing") {
+    throw new HttpApiError({
+      status: 503,
+      code: "ANALOG_NOT_READY",
+      message: "Analog is not ready (calibration missing)",
+      retryable: true,
+      details: null,
+    });
+  }
+  if (state.status.analog_state === "faulted") {
+    throw new HttpApiError({
+      status: 409,
+      code: "ANALOG_FAULTED",
+      message: "Analog is faulted",
+      retryable: false,
+      details: null,
+    });
+  }
+}
+
 function mockUpdateStatusFromControl(state: MockDeviceState) {
   const preset = mockGetActivePreset(state);
   const next = { ...state.status, raw: { ...state.status.raw } };
 
-  next.raw.mode = preset.mode === "cc" ? 1 : 2;
+  next.raw.mode = preset.mode === "cc" ? 1 : preset.mode === "cv" ? 2 : 3;
   next.raw.enable = state.output_enabled;
 
   const vMv = next.raw.v_remote_mv ?? 0;
@@ -685,7 +718,7 @@ function mockUpdateStatusFromControl(state: MockDeviceState) {
     next.raw.i_local_ma = Math.round(iMa * 0.9);
     next.raw.i_remote_ma = iMa - next.raw.i_local_ma;
     next.raw.calc_p_mw = Math.round((iMa * vMv) / 1000);
-  } else {
+  } else if (preset.mode === "cv") {
     // Extremely simple CV approximation: track target voltage, draw a small current.
     next.raw.v_remote_mv = Math.max(0, preset.target_v_mv);
     next.raw.v_local_mv = next.raw.v_remote_mv + 50;
@@ -694,6 +727,18 @@ function mockUpdateStatusFromControl(state: MockDeviceState) {
     next.raw.i_local_ma = Math.round(iMa * 0.9);
     next.raw.i_remote_ma = iMa - next.raw.i_local_ma;
     next.raw.calc_p_mw = Math.round((iMa * next.raw.v_remote_mv) / 1000);
+  } else {
+    // Extremely simple CP approximation: I ~= P/V, with max_i/max_p gating.
+    const unclampedPMw = Math.max(0, preset.target_p_mw);
+    const pLimitMw = Math.max(0, preset.max_p_mw);
+    const targetPMw = Math.min(unclampedPMw, pLimitMw);
+    const unclampedIMa = vMv > 0 ? Math.floor((targetPMw * 1000) / vMv) : 0;
+    const iLimit = Math.max(0, preset.max_i_ma_total);
+    const iMa = Math.min(unclampedIMa, iLimit);
+    next.raw.target_value = iMa;
+    next.raw.i_local_ma = Math.round(iMa * 0.9);
+    next.raw.i_remote_ma = iMa - next.raw.i_local_ma;
+    next.raw.calc_p_mw = Math.round((iMa * vMv) / 1000);
   }
 
   state.status = next;
@@ -701,6 +746,7 @@ function mockUpdateStatusFromControl(state: MockDeviceState) {
 
 async function mockGetPresets(baseUrl: string): Promise<{ presets: Preset[] }> {
   const state = getOrCreateMockDevice(baseUrl);
+  mockRequireControlReady(state);
   return { presets: structuredClone(state.presets) };
 }
 
@@ -709,6 +755,7 @@ async function mockUpdatePreset(
   payload: Preset,
 ): Promise<Preset> {
   const state = getOrCreateMockDevice(baseUrl);
+  mockRequireControlReady(state);
   const presetId = assertPresetId(payload.preset_id);
 
   const idx = state.presets.findIndex((p) => p.preset_id === presetId);
@@ -716,11 +763,46 @@ async function mockUpdatePreset(
     mockInvalidRequest("preset not found");
   }
 
+  if (payload.mode === "cp") {
+    const targetPMw = Number.isFinite(payload.target_p_mw)
+      ? payload.target_p_mw
+      : 0;
+    const maxPMw = Number.isFinite(payload.max_p_mw) ? payload.max_p_mw : 0;
+    if (targetPMw < 0) {
+      throw new HttpApiError({
+        status: 422,
+        code: "LIMIT_VIOLATION",
+        message: "target_p_mw must be >= 0",
+        retryable: false,
+        details: { target_p_mw: targetPMw },
+      });
+    }
+    if (maxPMw < 0) {
+      throw new HttpApiError({
+        status: 422,
+        code: "LIMIT_VIOLATION",
+        message: "max_p_mw must be >= 0",
+        retryable: false,
+        details: { max_p_mw: maxPMw },
+      });
+    }
+    if (targetPMw > maxPMw) {
+      throw new HttpApiError({
+        status: 422,
+        code: "LIMIT_VIOLATION",
+        message: "target_p_mw exceeds max_p_mw",
+        retryable: false,
+        details: { target_p_mw: targetPMw, max_p_mw: maxPMw },
+      });
+    }
+  }
+
   const nextPreset: Preset = {
     preset_id: presetId,
     mode: payload.mode,
     target_i_ma: Number.isFinite(payload.target_i_ma) ? payload.target_i_ma : 0,
     target_v_mv: Number.isFinite(payload.target_v_mv) ? payload.target_v_mv : 0,
+    target_p_mw: Number.isFinite(payload.target_p_mw) ? payload.target_p_mw : 0,
     min_v_mv: Number.isFinite(payload.min_v_mv) ? payload.min_v_mv : 0,
     max_i_ma_total: Number.isFinite(payload.max_i_ma_total)
       ? payload.max_i_ma_total
@@ -738,6 +820,7 @@ async function mockApplyPreset(
   preset_id: number,
 ): Promise<ControlView> {
   const state = getOrCreateMockDevice(baseUrl);
+  mockRequireControlReady(state);
   const presetId = assertPresetId(preset_id);
 
   state.active_preset_id = presetId;
@@ -750,6 +833,7 @@ async function mockApplyPreset(
 
 async function mockGetControl(baseUrl: string): Promise<ControlView> {
   const state = getOrCreateMockDevice(baseUrl);
+  mockRequireControlReady(state);
   mockUpdateStatusFromControl(state);
   return mockMakeControlView(state);
 }
@@ -825,33 +909,7 @@ function mockRequirePdSupported(state: MockDeviceState): PdView {
 }
 
 function mockRequirePdReady(state: MockDeviceState): void {
-  if (!state.status.link_up) {
-    throw new HttpApiError({
-      status: 503,
-      code: "LINK_DOWN",
-      message: "UART link is down",
-      retryable: true,
-      details: null,
-    });
-  }
-  if (state.status.analog_state === "cal_missing") {
-    throw new HttpApiError({
-      status: 503,
-      code: "ANALOG_NOT_READY",
-      message: "Analog is not ready (calibration missing)",
-      retryable: true,
-      details: null,
-    });
-  }
-  if (state.status.analog_state === "faulted") {
-    throw new HttpApiError({
-      status: 409,
-      code: "ANALOG_FAULTED",
-      message: "Analog is faulted",
-      retryable: false,
-      details: null,
-    });
-  }
+  mockRequireControlReady(state);
 }
 
 async function mockGetPd(baseUrl: string): Promise<PdView> {

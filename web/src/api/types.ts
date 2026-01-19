@@ -221,7 +221,7 @@ export interface CcUpdateRequest {
 
 // Preset/Control (docs/interfaces/network-http-api.md §2.5)
 
-export type LoadMode = "cc" | "cv";
+export type LoadMode = "cc" | "cv" | "cp";
 
 export type PresetId = 1 | 2 | 3 | 4 | 5;
 
@@ -230,6 +230,7 @@ export interface Preset {
   mode: LoadMode;
   target_i_ma: number; // mA (used when mode="cc")
   target_v_mv: number; // mV (used when mode="cv")
+  target_p_mw: number; // mW (used when mode="cp")
   min_v_mv: number; // mV (undervoltage latch threshold)
   max_i_ma_total: number; // mA
   max_p_mw: number; // mW
