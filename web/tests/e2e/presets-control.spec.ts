@@ -88,4 +88,24 @@ test.describe("Presets + Unified Control (mock://)", () => {
 
     await expect(page.getByTestId("control-active-mode")).toContainText("cc");
   });
+
+  test("switching a preset to CP and applying reflects in ControlView", async ({
+    page,
+  }) => {
+    await page.getByRole("button", { name: "#4" }).click();
+
+    await page.locator("#preset-mode").selectOption("cp");
+    await page.locator("#preset-target-p").fill("25000");
+    await page.locator("#preset-min-v").fill("0");
+    await page.locator("#preset-max-i").fill("8000");
+    await page.locator("#preset-max-p").fill("120000");
+    await page.getByRole("button", { name: "Save preset" }).click();
+
+    await page
+      .getByRole("button", { name: "Apply preset (forces output off)" })
+      .click();
+
+    await expect(page.getByTestId("control-active-preset")).toContainText("4");
+    await expect(page.getByTestId("control-active-mode")).toContainText("cp");
+  });
 });

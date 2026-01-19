@@ -71,6 +71,6 @@
 | 0015 | 数字板：屏幕自动调暗与熄屏（背光省电） | 已完成 | `0015:auto-screen-dim-off/PLAN.md` | 2026-01-13 | HIL: verify 2min/5min + wake |
 | 0016 | PD 设置：触屏友好的目标值编辑（无 +/-；点击/滑动选位；旋钮调节） | 已完成 | `0016:pd-settings-touch-value-editor/PLAN.md` | 2026-01-16 | PR #46 |
 | 0017 | CP 模式：本机屏幕界面 + HTTP API | 已完成 | `0017:cp-mode-ui-http-api/PLAN.md` | 2026-01-18 | HIL (internal): CP multi-level + large-step: cp_perf t10_90/t90_10<=1ms AND peak_err<=max(0.1*Δ, tol) within 1ms; script: `scripts/cp-acceptance.sh` |
-| 0018 | Web：CP 模式控制页 | 待实现 | `0018:web-cp-mode-ui/PLAN.md` | 2026-01-16 | Entry: /$deviceId/cc |
+| 0018 | Web：CP 模式控制页 | 已完成 | `0018:web-cp-mode-ui/PLAN.md` | 2026-01-19 | Entry: /$deviceId/cc |
 | 0019 | 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed） | 待实现 | `0019:dashboard-pd-button-label/PLAN.md` | 2026-01-16 | - |
 | 0020 | Web：仪器风格主界面（左监右控） | 待实现 | `0020:web-instrument-control-ui/PLAN.md` | 2026-01-16 | - |

@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-15
-- Last: 2026-01-16
+- Last: 2026-01-19
 
 ## 背景 / 问题陈述
 
@@ -124,10 +124,10 @@
 
 ## 里程碑（Milestones）
 
-- [ ] M1: 冻结 Web 信息架构（入口/路由/页面布局）与组件拆分
-- [ ] M2: API client + mock:// 支持 CP 数据与错误路径
-- [ ] M3: 页面实现 + Storybook stories
-- [ ] M4: E2E 覆盖主路径与关键错误态
+- [x] M1: 冻结 Web 信息架构（入口/路由/页面布局）与组件拆分
+- [x] M2: API client + mock:// 支持 CP 数据与错误路径
+- [x] M3: 页面实现 + Storybook stories
+- [x] M4: E2E 覆盖主路径与关键错误态
 
 ## 方案概述（Approach, high-level）
 

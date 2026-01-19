@@ -121,6 +121,7 @@ export function DeviceCcRoute() {
   const [draftPresetMode, setDraftPresetMode] = useState<LoadMode>("cc");
   const [draftPresetTargetIMa, setDraftPresetTargetIMa] = useState(0);
   const [draftPresetTargetVMv, setDraftPresetTargetVMv] = useState(0);
+  const [draftPresetTargetPMw, setDraftPresetTargetPMw] = useState(0);
   const [draftPresetMinVMv, setDraftPresetMinVMv] = useState(0);
   const [draftPresetMaxIMaTotal, setDraftPresetMaxIMaTotal] = useState(0);
   const [draftPresetMaxPMw, setDraftPresetMaxPMw] = useState(0);
@@ -146,6 +147,7 @@ export function DeviceCcRoute() {
     setDraftPresetMode(preset.mode);
     setDraftPresetTargetIMa(preset.target_i_ma);
     setDraftPresetTargetVMv(preset.target_v_mv);
+    setDraftPresetTargetPMw(preset.target_p_mw);
     setDraftPresetMinVMv(preset.min_v_mv);
     setDraftPresetMaxIMaTotal(preset.max_i_ma_total);
     setDraftPresetMaxPMw(preset.max_p_mw);
@@ -338,7 +340,12 @@ export function DeviceCcRoute() {
   const control = controlQuery.data;
   const presets = presetsQuery.data ?? null;
 
-  const activeLoadModeBadge = control?.preset.mode === "cv" ? "CV" : "CC";
+  const activeLoadModeBadge =
+    control?.preset.mode === "cv"
+      ? "CV"
+      : control?.preset.mode === "cp"
+        ? "CP"
+        : "CC";
 
   const statusLocalMa = status?.raw.i_local_ma ?? null;
   const statusRemoteMa = status?.raw.i_remote_ma ?? null;
@@ -379,8 +386,11 @@ export function DeviceCcRoute() {
   const controlTargetMilli =
     controlMode === "cv"
       ? (control?.preset.target_v_mv ?? 0)
-      : (control?.preset.target_i_ma ?? 0);
-  const controlTargetUnit = controlMode === "cv" ? "V" : "A";
+      : controlMode === "cp"
+        ? (control?.preset.target_p_mw ?? 0)
+        : (control?.preset.target_i_ma ?? 0);
+  const controlTargetUnit =
+    controlMode === "cv" ? "V" : controlMode === "cp" ? "W" : "A";
   const remoteActive = Boolean(status?.link_up);
   const analogState = status?.analog_state ?? "offline";
   const faultFlags = status?.raw.fault_flags ?? 0;
@@ -391,6 +401,7 @@ export function DeviceCcRoute() {
       mode: draftPresetMode,
       target_i_ma: draftPresetTargetIMa,
       target_v_mv: draftPresetTargetVMv,
+      target_p_mw: draftPresetTargetPMw,
       min_v_mv: draftPresetMinVMv,
       max_i_ma_total: draftPresetMaxIMaTotal,
       max_p_mw: draftPresetMaxPMw,
@@ -401,6 +412,29 @@ export function DeviceCcRoute() {
 
   const handleApplyPreset = () => {
     applyPresetMutation.mutate(selectedPresetId);
+  };
+
+  const cpSupported = identity?.capabilities.cp_supported ?? false;
+
+  const cpDraftOutOfRange =
+    draftPresetMode === "cp" && draftPresetTargetPMw > draftPresetMaxPMw;
+
+  const savePresetDisabled =
+    !baseUrl || updatePresetMutation.isPending || cpDraftOutOfRange;
+
+  const explainHttpError = (error: HttpApiError): string | null => {
+    switch (error.code) {
+      case "LINK_DOWN":
+        return "UART 链路掉线：请检查 analog↔digital 连接与供电。";
+      case "ANALOG_NOT_READY":
+        return "Analog 未就绪：常见原因是校准缺失或仍在初始化。";
+      case "ANALOG_FAULTED":
+        return "Analog 处于故障态：请先排查过流/过温/硬件异常。";
+      case "LIMIT_VIOLATION":
+        return "输入超出限值：例如 CP 模式需要 target_p_mw <= max_p_mw。";
+      default:
+        return null;
+    }
   };
 
   return (
@@ -672,7 +706,9 @@ export function DeviceCcRoute() {
                         <td className="font-mono text-xs">
                           {preset.mode === "cc"
                             ? `${preset.target_i_ma} mA`
-                            : `${preset.target_v_mv} mV`}
+                            : preset.mode === "cp"
+                              ? `${(preset.target_p_mw / 1_000).toFixed(2)} W`
+                              : `${preset.target_v_mv} mV`}
                         </td>
                         <td className="font-mono text-xs">
                           min_v={preset.min_v_mv} · max_i=
@@ -707,7 +743,13 @@ export function DeviceCcRoute() {
               >
                 <option value="cc">cc</option>
                 <option value="cv">cv</option>
+                {cpSupported ? <option value="cp">cp</option> : null}
               </select>
+              {identityQuery.isSuccess && !cpSupported ? (
+                <div className="mt-2 text-xs text-base-content/60">
+                  CP: 固件不支持（identity.capabilities.cp_supported=false）
+                </div>
+              ) : null}
             </div>
 
             {draftPresetMode === "cc" ? (
@@ -727,7 +769,7 @@ export function DeviceCcRoute() {
                   }
                 />
               </div>
-            ) : (
+            ) : draftPresetMode === "cv" ? (
               <div className="form-control">
                 <label className="label" htmlFor="preset-target-v">
                   <span className="label-text">Target voltage (mV)</span>
@@ -743,6 +785,31 @@ export function DeviceCcRoute() {
                     )
                   }
                 />
+              </div>
+            ) : (
+              <div className="form-control">
+                <label className="label" htmlFor="preset-target-p">
+                  <span className="label-text">Target power (mW)</span>
+                </label>
+                <input
+                  id="preset-target-p"
+                  type="number"
+                  className={[
+                    "input input-bordered input-sm",
+                    cpDraftOutOfRange ? "input-error" : "",
+                  ].join(" ")}
+                  value={draftPresetTargetPMw}
+                  onChange={(event) =>
+                    setDraftPresetTargetPMw(
+                      Number.parseInt(event.target.value || "0", 10),
+                    )
+                  }
+                />
+                {cpDraftOutOfRange ? (
+                  <div className="mt-2 text-xs text-error">
+                    target_p_mw must be ≤ max_p_mw
+                  </div>
+                ) : null}
               </div>
             )}
 
@@ -801,7 +868,7 @@ export function DeviceCcRoute() {
               <button
                 type="button"
                 className="btn btn-sm"
-                disabled={!baseUrl || updatePresetMutation.isPending}
+                disabled={savePresetDisabled}
                 onClick={handleSavePreset}
               >
                 {updatePresetMutation.isPending ? (
@@ -831,6 +898,12 @@ export function DeviceCcRoute() {
                       ? updatePresetMutation.error.message
                       : "Unknown error"}
                 </span>
+                {isHttpApiError(updatePresetMutation.error) &&
+                explainHttpError(updatePresetMutation.error) ? (
+                  <span className="opacity-90">
+                    {explainHttpError(updatePresetMutation.error)}
+                  </span>
+                ) : null}
               </div>
             ) : null}
 
@@ -843,6 +916,12 @@ export function DeviceCcRoute() {
                       ? applyPresetMutation.error.message
                       : "Unknown error"}
                 </span>
+                {isHttpApiError(applyPresetMutation.error) &&
+                explainHttpError(applyPresetMutation.error) ? (
+                  <span className="opacity-90">
+                    {explainHttpError(applyPresetMutation.error)}
+                  </span>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -882,7 +961,7 @@ export interface MainDisplayCanvasProps {
   totalPowerW: number;
   controlMode: LoadMode;
   controlTargetMilli: number;
-  controlTargetUnit: "A" | "V";
+  controlTargetUnit: "A" | "V" | "W";
   uptimeSeconds: number;
   tempCoreC: number | undefined;
   tempSinkC: number | undefined;
@@ -1191,7 +1270,7 @@ export function MainDisplayCanvas({
     const formatPairValue = (value: number, unit: "V" | "A") =>
       `${formatFixed2dp(value)}${unit}`;
 
-    const formatSetpointMilli = (valueMilli: number, unit: "V" | "A") => {
+    const formatSetpointMilli = (valueMilli: number, unit: "V" | "A" | "W") => {
       let v = Math.max(0, Math.trunc(valueMilli));
       v = Math.floor((v + 5) / 10) * 10;
       const centi = Math.floor(v / 10);
@@ -1294,10 +1373,14 @@ export function MainDisplayCanvas({
     );
     fillRect({ left: 225, top: 12, right: 226, bottom: 36 }, COLOR_RIGHT_BASE);
 
-    const ccColor = controlMode === "cc" ? COLOR_CURRENT : COLOR_RIGHT_LABEL;
-    const cvColor = controlMode === "cv" ? COLOR_VOLTAGE : COLOR_RIGHT_LABEL;
-    drawSmallText("CC", 204, 18, ccColor);
-    drawSmallText("CV", 230, 18, cvColor);
+    if (controlMode === "cp") {
+      drawSmallText("CP", 204, 18, COLOR_POWER);
+    } else {
+      const ccColor = controlMode === "cc" ? COLOR_CURRENT : COLOR_RIGHT_LABEL;
+      const cvColor = controlMode === "cv" ? COLOR_VOLTAGE : COLOR_RIGHT_LABEL;
+      drawSmallText("CC", 204, 18, ccColor);
+      drawSmallText("CV", 230, 18, cvColor);
+    }
 
     const targetText = formatSetpointMilli(
       controlTargetMilli,
