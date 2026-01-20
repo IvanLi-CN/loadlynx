@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 部分完成（1/3）
 - Created: 2026-01-19
-- Last: 2026-01-19
+- Last: 2026-01-20
 
 ## 背景 / 问题陈述
 
@@ -130,6 +130,9 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
     - 触摸触发计数递增且无明显误触发
     - `load_enabled` 切换与 UI/遥测一致
     - RGB LED 行为与定义一致
+  - 记录（2026-01-20）：
+    - 启动日志出现 `touch spring calibrated: baseline=...`，且 `stats` 中 `touch_spring_reads` 持续递增（证明触摸采样在跑）。
+    - 当前硬件未完成（触摸弹簧/RGB 连接未就绪），因此暂无法验证：触摸短触 toggle、异常黄闪、红/绿常亮等行为；后续补 HIL。
 
 ### Quality checks
 
@@ -144,7 +147,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 
 - [ ] M1: 数字板：接入 `GPIO14` TouchPad，完成校准+去抖，并能稳定切换 `load_enabled`
 - [ ] M2: 数字板：接入 RGB 三路 LEDC PWM + 状态映射（颜色/闪烁）并通过 HIL 验证
-- [ ] M3: 文档：更新 ESP32‑S3 pinmap 与 HIL 验证记录（日志片段/结论）
+- [x] M3: 文档：更新 ESP32‑S3 pinmap 与 HIL 验证记录（日志片段/结论）
 
 ## 方案概述（Approach, high-level）
 
@@ -194,6 +197,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 - 2026-01-19: 创建计划 #0021
 - 2026-01-19: 补齐硬件约束：亚克力 0.8–1.0mm、弹簧顶到背面、RGB 共阳端接 3V3
 - 2026-01-19: 冻结范围与验收：状态映射（绿/红/黄）、异常判定与闪烁优先级
+- 2026-01-20: 实现 digital：GPIO14 触摸弹簧采样+校准+cooldown → toggle `load_enabled`；GPIO35/36/37 LEDC PWM（active-low）用于红/绿/黄闪状态指示；补充 HIL 记录与 pinmap 占用（HIL: 待硬件就绪再验证）
 
 ## 参考（References）
 

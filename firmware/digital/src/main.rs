@@ -82,6 +82,18 @@ const SCREEN_DIM_AFTER_MS: u32 = 2 * 60 * 1000;
 const SCREEN_OFF_AFTER_MS: u32 = 5 * 60 * 1000;
 const SCREEN_DIM_MAX_PCT: u8 = 10;
 
+// Plan #0021: touch spring (GPIO14 TouchPad14) + RGB status LED (GPIO35/36/37).
+const TOUCH_SPRING_STARTUP_DELAY_MS: u32 = 300;
+const TOUCH_SPRING_CAL_SAMPLES: u32 = 64;
+const TOUCH_SPRING_POLL_MS: u32 = 10;
+const TOUCH_SPRING_COOLDOWN_MS: u32 = 350;
+const TOUCH_SPRING_BASELINE_EMA_DIV: i32 = 64; // larger = slower drift compensation
+
+const RGB_STATUS_PWM_FREQUENCY_KHZ: u32 = 5; // avoid visible flicker
+const RGB_STATUS_SOLID_BRIGHTNESS_PCT: u8 = 35;
+const RGB_STATUS_BLINK_BRIGHTNESS_PCT: u8 = 35;
+const RGB_STATUS_BLINK_TOGGLE_MS: u32 = 250; // 2 Hz: toggle every 250ms
+
 const SCREEN_POWER_STATE_ACTIVE: u8 = 0;
 const SCREEN_POWER_STATE_DIM: u8 = 1;
 const SCREEN_POWER_STATE_OFF: u8 = 2;
@@ -122,6 +134,26 @@ fn backlight_pwm_disconnect(backlight_pin: &'static OutputSignalPin<'static>) {
     GpioOutputSignal::LEDC_LS_SIG0.disconnect_from(backlight_pin);
     // Force gate high when disconnected to ensure the PMOS high-side switch stays off.
     backlight_pin.set_output_high(true);
+}
+
+#[inline]
+fn rgb_hw_duty_pct(logical_pct: u8) -> u8 {
+    // RGB channels are active-low (common anode on 3V3, GPIO sinks current).
+    100u8.saturating_sub(logical_pct.min(100))
+}
+
+#[inline]
+fn set_rgb_pct(
+    r: &'static ledc_channel::Channel<'static, LowSpeed>,
+    g: &'static ledc_channel::Channel<'static, LowSpeed>,
+    b: &'static ledc_channel::Channel<'static, LowSpeed>,
+    r_pct: u8,
+    g_pct: u8,
+    b_pct: u8,
+) {
+    r.set_duty(rgb_hw_duty_pct(r_pct)).expect("rgb r duty");
+    g.set_duty(rgb_hw_duty_pct(g_pct)).expect("rgb g duty");
+    b.set_duty(rgb_hw_duty_pct(b_pct)).expect("rgb b duty");
 }
 
 mod control;
@@ -255,6 +287,13 @@ static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell:
 static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static BUZZER_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BUZZER_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static RGB_STATUS_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
+static RGB_STATUS_R_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
+    StaticCell::new();
+static RGB_STATUS_G_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
+    StaticCell::new();
+static RGB_STATUS_B_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
+    StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
@@ -365,6 +404,10 @@ static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+static TOUCH_SPRING_READ_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_TOUCHDOWN_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_ENABLE_BLOCK_TOTAL: AtomicU32 = AtomicU32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
 static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
@@ -1183,6 +1226,252 @@ async fn encoder_task(
         for _ in 0..ENCODER_POLL_YIELD_LOOPS {
             yield_now().await;
         }
+    }
+}
+
+#[embassy_executor::task]
+async fn touch_spring_task(
+    _touch_pin: esp_hal::peripherals::GPIO14<'static>,
+    control: &'static ControlMutex,
+    rgb_r: &'static ledc_channel::Channel<'static, LowSpeed>,
+    rgb_g: &'static ledc_channel::Channel<'static, LowSpeed>,
+    rgb_b: &'static ledc_channel::Channel<'static, LowSpeed>,
+) {
+    info!(
+        "touch spring task starting (GPIO14=TouchPad14, poll={}ms, cooldown={}ms, rgb_pwm={}kHz)",
+        TOUCH_SPRING_POLL_MS, TOUCH_SPRING_COOLDOWN_MS, RGB_STATUS_PWM_FREQUENCY_KHZ
+    );
+
+    // Keep RGB dark until touch calibration completes.
+    set_rgb_pct(rgb_r, rgb_g, rgb_b, 0, 0, 0);
+
+    // NOTE: esp-hal 1.0.0 does not currently expose `esp_hal::touch` for ESP32-S3
+    // (cfg(touch) is not set), so we configure + read the S3 touch controller via
+    // PAC registers (RTC_CNTL + RTC_IO + SENS).
+    fn init_touch_spring_gpio14() {
+        // Configure RTC pad14 (GPIO14) for touch mode.
+        let rtcio = esp_hal::peripherals::RTC_IO::regs();
+        rtcio.touch_pad(14).write(|w| {
+            w.fun_ie().clear_bit(); // disable digital input path
+            w.slp_oe().clear_bit();
+            w.slp_ie().clear_bit();
+            w.slp_sel().clear_bit();
+            // Select RTC function and enable analog touch domain.
+            unsafe { w.fun_sel().bits(0) };
+            w.mux_sel().set_bit();
+            w.xpd().set_bit();
+            w.tie_opt().clear_bit();
+            w.rue().clear_bit();
+            w.rde().clear_bit();
+            // Enable touch pad measurement.
+            w.start().set_bit();
+            w
+        });
+
+        // Configure touch controller scan map to include pad14.
+        let rtccntl = esp_hal::peripherals::LPWR::regs();
+        rtccntl
+            .touch_scan_ctrl()
+            .modify(|_, w| unsafe { w.touch_scan_pad_map().bits(1 << 14) });
+        // Keep timing close to reset defaults (documented as 8MHz touch clock units).
+        rtccntl.touch_ctrl1().modify(|_, w| unsafe {
+            w.touch_sleep_cycles().bits(0x0100);
+            w.touch_meas_num().bits(0x1000)
+        });
+        // Enable touch FSM + timer.
+        rtccntl.touch_ctrl2().modify(|_, w| {
+            w.touch_start_fsm_en().set_bit();
+            w.touch_start_en().set_bit();
+            w.touch_start_force().clear_bit();
+            w.touch_slp_timer_en().set_bit();
+            w.touch_clkgate_en().set_bit()
+        });
+
+        // Select raw touch data and clear stale status.
+        let sens = esp_hal::peripherals::SENS::regs();
+        sens.sar_touch_conf().modify(|_, w| unsafe {
+            w.sar_touch_data_sel().bits(0);
+            w.sar_touch_status_clr().set_bit()
+        });
+    }
+
+    #[inline]
+    fn touch14_read_raw() -> u32 {
+        let sens = esp_hal::peripherals::SENS::regs();
+        sens.sar_touch_status14().read().data().bits()
+    }
+
+    init_touch_spring_gpio14();
+
+    cooperative_delay_ms(TOUCH_SPRING_STARTUP_DELAY_MS).await;
+
+    // Baseline calibration window: collect N samples for avg + noise span.
+    let mut sum: u64 = 0;
+    let mut min: u32 = u32::MAX;
+    let mut max: u32 = 0;
+    let mut samples: u32 = 0;
+    while samples < TOUCH_SPRING_CAL_SAMPLES {
+        let v = touch14_read_raw();
+        TOUCH_SPRING_READ_TOTAL.fetch_add(1, Ordering::Relaxed);
+        sum = sum.saturating_add(v as u64);
+        min = min.min(v);
+        max = max.max(v);
+        samples += 1;
+        cooperative_delay_ms(TOUCH_SPRING_POLL_MS).await;
+    }
+    let baseline0 = (sum / samples.max(1) as u64) as u32;
+    let noise_span = max.saturating_sub(min) as u32;
+    // Heuristic: threshold delta based on observed noise + a small baseline fraction.
+    let baseline_frac = (baseline0 / 40).max(1);
+    let noise_delta = noise_span.saturating_mul(4);
+    let down_delta = noise_delta.max(baseline_frac).max(25);
+    let up_delta = (down_delta / 2).max(10);
+
+    let mut baseline: i32 = baseline0 as i32;
+    let mut touched: bool = false;
+    let mut last_action_ms: u32 = now_ms32().wrapping_sub(TOUCH_SPRING_COOLDOWN_MS);
+    let mut last_touch_block_ms: Option<u32> = None;
+
+    info!(
+        "touch spring calibrated: baseline={} (min={}, max={}, span={}), delta_down={}, delta_up={}, th_down<={} th_up>={}",
+        baseline0,
+        min,
+        max,
+        noise_span,
+        down_delta,
+        up_delta,
+        baseline0.saturating_sub(down_delta),
+        baseline0.saturating_sub(up_delta),
+    );
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct Rgb {
+        r: u8,
+        g: u8,
+        b: u8,
+    }
+    let mut last_rgb = Rgb { r: 0, g: 0, b: 0 };
+    let mut blink_on: bool = false;
+    let mut last_blink_toggle_ms: u32 = now_ms32();
+
+    loop {
+        let now = now_ms32();
+
+        let v = touch14_read_raw();
+        TOUCH_SPRING_READ_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+        let baseline_u32 = baseline.max(0) as u32;
+        let th_down = baseline_u32.saturating_sub(down_delta);
+        let th_up = baseline_u32.saturating_sub(up_delta);
+
+        if !touched {
+            // Drift compensation: only update baseline while clearly not touched.
+            if v > th_up {
+                baseline += ((v as i32) - baseline) / TOUCH_SPRING_BASELINE_EMA_DIV.max(1);
+            }
+
+            if v <= th_down {
+                // Touch-down edge candidate.
+                if now.wrapping_sub(last_action_ms) < TOUCH_SPRING_COOLDOWN_MS {
+                    TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    touched = true;
+                    last_action_ms = now;
+                    TOUCH_SPRING_TOUCHDOWN_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+                    // Dedicated load switch input: treat as user activity (wake screen),
+                    // but do NOT consume (this is intended to work without the UI).
+                    note_user_activity();
+
+                    let mut guard = control.lock().await;
+                    let preset = guard.active_preset();
+                    let setpoint_zero = match preset.mode {
+                        LoadMode::Cp => preset.target_p_mw == 0,
+                        LoadMode::Cv => preset.target_v_mv == 0,
+                        LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+                    };
+
+                    if guard.output_enabled {
+                        guard.output_enabled = false;
+                        bump_control_rev();
+                        prompt_tone::enqueue_ui_ok();
+                        info!(
+                            "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
+                            guard.active_preset_id, preset.mode
+                        );
+                    } else if setpoint_zero {
+                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        last_touch_block_ms = Some(now);
+                        prompt_tone::enqueue_ui_fail();
+                        info!(
+                            "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                            guard.active_preset_id, preset.mode
+                        );
+                    } else if let Some(reason) = current_load_enable_block_abbrev(preset.min_v_mv) {
+                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        last_touch_block_ms = Some(now);
+                        prompt_tone::enqueue_ui_fail();
+                        record_enable_block(reason);
+                        info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                    } else {
+                        guard.output_enabled = true;
+                        bump_control_rev();
+                        prompt_tone::enqueue_ui_ok();
+                        info!(
+                            "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                            guard.active_preset_id, preset.mode
+                        );
+                    }
+                }
+            }
+        } else if v >= th_up {
+            // Release edge
+            touched = false;
+        }
+
+        // Status LED mapping (frozen by Plan #0021):
+        // abnormal (yellow blink) > load_enabled=ON (green) > load_enabled=OFF (red).
+        let output_enabled = { control.lock().await.output_enabled };
+        let abnormal = current_load_block_abbrev().is_some()
+            || recent_enable_block_abbrev(now).is_some()
+            || last_touch_block_ms
+                .map(|t| now.wrapping_sub(t) <= ENABLE_BLOCK_TTL_MS)
+                .unwrap_or(false);
+
+        let desired = if abnormal {
+            if now.wrapping_sub(last_blink_toggle_ms) >= RGB_STATUS_BLINK_TOGGLE_MS {
+                blink_on = !blink_on;
+                last_blink_toggle_ms = now;
+            }
+            if blink_on {
+                Rgb {
+                    r: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                    g: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                    b: 0,
+                }
+            } else {
+                Rgb { r: 0, g: 0, b: 0 }
+            }
+        } else if output_enabled {
+            Rgb {
+                r: 0,
+                g: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
+                b: 0,
+            }
+        } else {
+            Rgb {
+                r: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
+                g: 0,
+                b: 0,
+            }
+        };
+
+        if desired != last_rgb {
+            set_rgb_pct(rgb_r, rgb_g, rgb_b, desired.r, desired.g, desired.b);
+            last_rgb = desired;
+        }
+
+        cooperative_delay_ms(TOUCH_SPRING_POLL_MS).await;
     }
 }
 
@@ -4933,6 +5222,53 @@ async fn main(spawner: Spawner) {
     let buzzer_channel = BUZZER_CHANNEL.init(buzzer_channel);
     buzzer_channel.set_duty(0).expect("buzzer duty init");
 
+    // RGB status LED (Plan #0021): low-speed LEDC Timer3 + Channel3/4/5.
+    let mut rgb_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer3);
+    rgb_timer
+        .configure(ledc_timer::config::Config {
+            duty: ledc_timer::config::Duty::Duty10Bit,
+            clock_source: ledc_timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(RGB_STATUS_PWM_FREQUENCY_KHZ),
+        })
+        .expect("rgb timer");
+    let rgb_timer = RGB_STATUS_TIMER.init(rgb_timer);
+
+    let mut rgb_r_channel =
+        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel3, peripherals.GPIO35);
+    rgb_r_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*rgb_timer,
+            duty_pct: 100, // active-low: 100% HIGH == OFF
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("rgb r channel");
+    let rgb_r_channel = RGB_STATUS_R_CHANNEL.init(rgb_r_channel);
+    rgb_r_channel.set_duty(100).expect("rgb r duty init");
+
+    let mut rgb_g_channel =
+        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel4, peripherals.GPIO36);
+    rgb_g_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*rgb_timer,
+            duty_pct: 100, // active-low: 100% HIGH == OFF
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("rgb g channel");
+    let rgb_g_channel = RGB_STATUS_G_CHANNEL.init(rgb_g_channel);
+    rgb_g_channel.set_duty(100).expect("rgb g duty init");
+
+    let mut rgb_b_channel =
+        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel5, peripherals.GPIO37);
+    rgb_b_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*rgb_timer,
+            duty_pct: 100, // active-low: 100% HIGH == OFF
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("rgb b channel");
+    let rgb_b_channel = RGB_STATUS_B_CHANNEL.init(rgb_b_channel);
+    rgb_b_channel.set_duty(100).expect("rgb b duty init");
+
     let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
     #[cfg(not(feature = "net_http"))]
     let prev_framebuffer = &mut PREVIOUS_FRAMEBUFFER
@@ -5103,6 +5439,16 @@ async fn main(spawner: Spawner) {
             .spawn(mock_setpoint_task())
             .expect("mock_setpoint_task spawn");
     }
+    info!("spawning touch spring task");
+    spawner
+        .spawn(touch_spring_task(
+            peripherals.GPIO14,
+            control,
+            rgb_r_channel,
+            rgb_g_channel,
+            rgb_b_channel,
+        ))
+        .expect("touch_spring_task spawn");
     info!("spawning display task");
     spawner
         .spawn(display_task(
@@ -5254,8 +5600,12 @@ async fn stats_task() {
             let touch_int = touch::TOUCH_INT_COUNT.load(Ordering::Relaxed);
             let touch_i2c = touch::TOUCH_I2C_READ_COUNT.load(Ordering::Relaxed);
             let touch_parse_fail = touch::TOUCH_PARSE_FAIL_COUNT.load(Ordering::Relaxed);
+            let ts_reads = TOUCH_SPRING_READ_TOTAL.load(Ordering::Relaxed);
+            let ts_down = TOUCH_SPRING_TOUCHDOWN_TOTAL.load(Ordering::Relaxed);
+            let ts_suppress = TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL.load(Ordering::Relaxed);
+            let ts_block = TOUCH_SPRING_ENABLE_BLOCK_TOTAL.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}",
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}",
                 ok,
                 de,
                 df,
@@ -5266,7 +5616,11 @@ async fn stats_task() {
                 sp_timeout,
                 touch_int,
                 touch_i2c,
-                touch_parse_fail
+                touch_parse_fail,
+                ts_reads,
+                ts_down,
+                ts_suppress,
+                ts_block
             );
         }
     }
