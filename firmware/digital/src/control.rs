@@ -9,7 +9,7 @@ pub const HARD_MAX_I_MA_TOTAL: i32 = 10_000;
 pub const HARD_MAX_V_MV: i32 = 55_000;
 pub const DEFAULT_MIN_V_MV: i32 = 0;
 pub const DEFAULT_MAX_I_MA_TOTAL: i32 = HARD_MAX_I_MA_TOTAL;
-pub const DEFAULT_MAX_P_MW: u32 = 100_000;
+pub const DEFAULT_MAX_P_MW: u32 = crate::HARD_MAX_P_MW;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]
 pub enum AdjustDigit {
