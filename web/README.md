@@ -12,6 +12,13 @@ the `paste-preset` project conventions.
 - Playwright for end-to-end tests
 - Lefthook for local Git hooks
 
+## Lockfile policy
+
+- Single source of truth: `web/bun.lock` (must be committed).
+- Do not use or commit `web/package-lock.json` (npm lockfile). If it exists locally, delete it.
+- After changing dependencies in `web/package.json`, run `bun install` and commit the updated `web/bun.lock`.
+- CI uses `bun ci` and will fail if the lockfile is out of date.
+
 ## Usage
 
 From the `web/` directory:

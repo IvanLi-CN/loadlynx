@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 部分完成（2/4）
 - Created: 2026-01-20
 - Last: 2026-01-20
 
@@ -76,8 +76,8 @@
 
 ## 里程碑（Milestones）
 
-- [ ] 对齐 Bun 版本与依赖安装命令（`web-pages` / `web-check` 一致；推荐使用 `bun ci` 或继续使用 `bun install --frozen-lockfile`）
-- [ ] 明确并落地 lockfile 策略（仅保留并维护一种 lockfile；避免自动迁移/双锁不一致）
+- [x] 对齐 Bun 版本与依赖安装命令（`web-pages` / `web-check` 一致；推荐使用 `bun ci` 或继续使用 `bun install --frozen-lockfile`）
+- [x] 明确并落地 lockfile 策略（仅保留并维护一种 lockfile；避免自动迁移/双锁不一致）
 - [ ] GitHub Actions 验证：`web-check` + `web-pages` 在 `main` 上均成功
 - [ ] GitHub Pages 验证：部署 commit 与 `main` HEAD 对齐（通过 `head_sha`）
 
