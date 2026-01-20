@@ -74,4 +74,4 @@
 | 0018 | Web：CP 模式控制页 | 已完成 | `0018:web-cp-mode-ui/PLAN.md` | 2026-01-19 | Entry: /$deviceId/cc |
 | 0019 | 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed） | 已完成 | `0019:dashboard-pd-button-label/PLAN.md` | 2026-01-19 | HIL: pd_button Active from contract |
 | 0020 | Web：仪器风格主界面（左监右控） | 已完成 | `0020:web-instrument-control-ui/PLAN.md` | 2026-01-20 | - |
-| 0021 | 触摸弹簧（GPIO14）负载开关 + RGB PWM 指示灯 | 待设计 | `0021:touch-spring-load-switch-rgb-led/PLAN.md` | 2026-01-20 | - |
+| 0021 | 触摸弹簧（GPIO14）负载开关 + RGB PWM 指示灯 | 待实现 | `0021:touch-spring-load-switch-rgb-led/PLAN.md` | 2026-01-19 | - |
