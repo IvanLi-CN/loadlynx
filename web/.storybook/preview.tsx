@@ -35,7 +35,7 @@ const LOADLYNX_VIEWPORTS = {
   },
 } as const;
 
-const withDarkTheme: Decorator = (Story) => {
+const withDarkTheme: Decorator = (Story, context) => {
   document.documentElement.setAttribute("data-theme", "dark");
   document.body.classList.add(
     "bg-base-100",
@@ -43,15 +43,33 @@ const withDarkTheme: Decorator = (Story) => {
     "antialiased",
   );
 
+  const showBreakpointCard = !!context.globals.loadlynxShowBreakpointCard;
+
   return (
     <div className="min-h-screen bg-base-100 p-0 text-base-content antialiased">
-      <BreakpointRulerOverlay />
+      {showBreakpointCard ? <BreakpointRulerOverlay /> : null}
       <Story />
     </div>
   );
 };
 
 const preview: Preview = {
+  globalTypes: {
+    loadlynxShowBreakpointCard: {
+      description: "Show BreakpointRulerOverlay info card (Storybook only)",
+      defaultValue: false,
+      toolbar: {
+        title: "Breakpoint card",
+        items: [
+          { value: false, title: "Off" },
+          { value: true, title: "On" },
+        ],
+      },
+    },
+  },
+  initialGlobals: {
+    loadlynxShowBreakpointCard: false,
+  },
   decorators: [withDarkTheme],
   parameters: {
     layout: "fullscreen",
