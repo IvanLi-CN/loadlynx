@@ -126,6 +126,10 @@ const OV_LIMIT_MV: i32 = 55_000; // 过压阈值（与文档 55V 对齐）
 const MCU_TEMP_LIMIT_MC: i32 = 110_000; // 110 °C
 const SINK_TEMP_LIMIT_MC: i32 = 100_000; // 100 °C
 
+// Software hard power limit (mW) used for default profiles / scaling.
+// NOTE: Hardware/thermal constraints may still require derating at runtime.
+const HARD_MAX_P_MW: u32 = 200_000;
+
 // 通道调度阈值：总目标电流 < 2 A 时仅驱动通道 1；≥ 2 A 时两通道近似均分。
 const I_SHARE_THRESHOLD_MA: i32 = 2_000;
 
@@ -218,7 +222,7 @@ const CP_PERF_SAMPLES: usize = 512;
 const CP_PERF_WINDOW_CONSECUTIVE: usize = 3;
 const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
-const CP_FS_H_MW: u32 = 100_000;
+const CP_FS_H_MW: u32 = HARD_MAX_P_MW;
 const CP_PERF_T10_90_MAX_US: u32 = 1_000;
 const CP_PERF_PEAK_WINDOW_US: u32 = 1_000;
 const CP_PERF_ACCEPT_BUCKETS: usize = 3;
@@ -1140,7 +1144,7 @@ struct LimitProfileLocal {
 static LIMIT_PROFILE: Mutex<CriticalSectionRawMutex, LimitProfileLocal> =
     Mutex::new(LimitProfileLocal {
         max_i_ma: TARGET_I_MAX_MA,
-        max_p_mw: 100_000,
+        max_p_mw: HARD_MAX_P_MW,
         ovp_mv: OV_LIMIT_MV,
         temp_trip_mc: SINK_TEMP_LIMIT_MC,
         thermal_derate_pct: 100,
