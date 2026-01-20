@@ -24,6 +24,10 @@ docs/assets/usb-pd-settings-panel-rendered/**
 **/playwright-report/
 **/test-results/
 
+# Local dev server pid/log files
+.static-*.pid
+.static-*.log
+
 # Local lefthook example config at repo root (not tracked)
 /lefthook.yml
 

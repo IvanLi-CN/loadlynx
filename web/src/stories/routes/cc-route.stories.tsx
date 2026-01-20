@@ -21,9 +21,8 @@ export const Default: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole("heading", { name: /Device control/i });
-    await canvas.findByRole("heading", { name: /Presets/i });
-    await canvas.findByText(/1500\s*mA/);
+    await canvas.findByText(/MODE & OUTPUT/i);
+    await canvas.findByText(/PRESETS/i);
 
     const outputToggle = await canvas.findByRole("checkbox", {
       name: /Output enabled/i,
@@ -68,13 +67,10 @@ export const CpUnsupported: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: /Device control/i });
-    await canvas.findByText(/CP: 固件不支持/i);
-    const modeSelect = await canvas.findByLabelText(/Mode/i);
-    if ((modeSelect as HTMLSelectElement).querySelector('option[value="cp"]')) {
-      throw new Error(
-        "Expected CP option to be hidden when cp_supported=false",
-      );
+    await canvas.findByText(/MODE & OUTPUT/i);
+    const cpBtn = await canvas.findByRole("button", { name: "CP" });
+    if (!(cpBtn as HTMLButtonElement).disabled) {
+      throw new Error("Expected CP button to be disabled when cp_supported=false");
     }
   },
 };
@@ -85,7 +81,6 @@ export const LinkDown: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: /Device control/i });
     await canvas.findByText(/HTTP error: LINK_DOWN/i);
   },
 };
@@ -99,7 +94,6 @@ export const AnalogNotReady: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: /Device control/i });
     await canvas.findByText(/HTTP error: ANALOG_NOT_READY/i);
   },
 };
@@ -114,9 +108,9 @@ export const LimitViolationBlocked: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole("heading", { name: /Device control/i });
-    await canvas.findByRole("heading", { name: /Preset editor/i });
-    await canvas.findByText(/API version:/i);
+    await canvas.findByText(/PRESETS/i);
+
+    await userEvent.click(await canvas.findByRole("button", { name: /Advanced/i }));
 
     const modeSelect = await canvas.findByLabelText(/Mode/i);
     await userEvent.selectOptions(modeSelect, "cp");
@@ -129,9 +123,11 @@ export const LimitViolationBlocked: Story = {
 
     await canvas.findByText(/target_p_mw must be ≤ max_p_mw/i);
 
-    const saveBtn = await canvas.findByRole("button", { name: /Save preset/i });
+    const advancedRegion = await canvas.findByRole("region", { name: /Advanced/i });
+    const advanced = within(advancedRegion);
+    const saveBtn = await advanced.findByRole("button", { name: /Save Draft/i });
     if (!(saveBtn as HTMLButtonElement).disabled) {
-      throw new Error("Expected Save preset to be disabled on limit violation");
+      throw new Error("Expected Save Draft to be disabled on limit violation");
     }
   },
 };

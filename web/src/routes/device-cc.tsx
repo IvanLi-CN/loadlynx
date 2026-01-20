@@ -7,6 +7,7 @@ import {
   ENABLE_MOCK_DEVTOOLS,
   getControl,
   getIdentity,
+  getPd,
   getPresets,
   getStatus,
   isHttpApiError,
@@ -21,9 +22,26 @@ import type {
   FastStatusView,
   Identity,
   LoadMode,
+  PdView,
   Preset,
   PresetId,
 } from "../api/types.ts";
+import {
+  formatUptimeSeconds,
+  formatWithUnit,
+} from "../components/instrument/format.ts";
+import { AdvancedPanel } from "../components/instrument/advanced-panel.tsx";
+import { ControlModePanel } from "../components/instrument/control-mode-panel.tsx";
+import { DiagnosticsPanel } from "../components/instrument/diagnostics-panel.tsx";
+import { HealthTiles } from "../components/instrument/health-tiles.tsx";
+import { InstrumentStatusBar } from "../components/instrument/instrument-status-bar.tsx";
+import { LimitsPanel } from "../components/instrument/limits-panel.tsx";
+import { MainDisplayPanel } from "../components/instrument/main-display-panel.tsx";
+import { MonitorReadouts } from "../components/instrument/monitor-readouts.tsx";
+import { PdSummaryPanel } from "../components/instrument/pd-summary-panel.tsx";
+import { PresetsPanel } from "../components/instrument/presets-panel.tsx";
+import { SetpointsPanel } from "../components/instrument/setpoints-panel.tsx";
+import { ThermalPanel } from "../components/instrument/thermal-panel.tsx";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import {
   isSevenSegPixel,
@@ -40,8 +58,19 @@ import {
 import { useDeviceContext } from "../layouts/device-layout.tsx";
 
 const FAST_STATUS_REFETCH_MS = 400;
+const PD_REFETCH_MS = 1500;
 const RETRY_DELAY_MS = 500;
 const jitterRetryDelay = () => 200 + Math.random() * 300;
+const TREND_MAX_POINTS = 96;
+
+function pushTrendPoint(prev: number[], value: number | null): number[] {
+  if (value == null || !Number.isFinite(value)) {
+    return prev;
+  }
+  const next = prev.length >= TREND_MAX_POINTS ? prev.slice(1) : prev.slice();
+  next.push(value);
+  return next;
+}
 
 export function DeviceCcRoute() {
   const { deviceId, device, baseUrl } = useDeviceContext();
@@ -117,6 +146,9 @@ export function DeviceCcRoute() {
 
   const [selectedPresetId, setSelectedPresetId] = useState<PresetId>(1);
   const selectedPresetInitializedRef = useRef(false);
+  const applyOutputWasEnabledRef = useRef(false);
+  const [showOutputReenableHint, setShowOutputReenableHint] = useState(false);
+  const [advancedCollapsed, setAdvancedCollapsed] = useState(true);
 
   const [draftPresetMode, setDraftPresetMode] = useState<LoadMode>("cc");
   const [draftPresetTargetIMa, setDraftPresetTargetIMa] = useState(0);
@@ -200,6 +232,11 @@ export function DeviceCcRoute() {
         nextControl,
       );
       setSelectedPresetId(nextControl.active_preset_id);
+      if (applyOutputWasEnabledRef.current && !nextControl.output_enabled) {
+        setShowOutputReenableHint(true);
+      } else {
+        setShowOutputReenableHint(false);
+      }
       queryClient.invalidateQueries({
         queryKey: ["device", deviceId, "status"],
       });
@@ -222,6 +259,25 @@ export function DeviceCcRoute() {
         queryKey: ["device", deviceId, "status"],
       });
     },
+  });
+
+  const writesInFlight =
+    updatePresetMutation.isPending ||
+    applyPresetMutation.isPending ||
+    updateControlMutation.isPending;
+
+  const pdQuery = useQuery<PdView, HttpApiError>({
+    queryKey: ["device", deviceId, "pd"],
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getPd(baseUrl);
+    },
+    enabled: Boolean(baseUrl) && identityQuery.isSuccess && !writesInFlight,
+    refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
+    refetchIntervalInBackground: false,
+    retryDelay: RETRY_DELAY_MS,
   });
 
   const debugUvMutation = useMutation({
@@ -252,11 +308,7 @@ export function DeviceCcRoute() {
     enabled:
       Boolean(baseUrl) &&
       identityQuery.isSuccess &&
-      !(
-        updatePresetMutation.isPending ||
-        applyPresetMutation.isPending ||
-        updateControlMutation.isPending
-      ) &&
+      !writesInFlight &&
       streamStatus === null,
     refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
     refetchIntervalInBackground: false,
@@ -338,7 +390,7 @@ export function DeviceCcRoute() {
   const identity = identityQuery.data;
   const status = streamStatus ?? statusQuery.data;
   const control = controlQuery.data;
-  const presets = presetsQuery.data ?? null;
+  const pd = pdQuery.data ?? null;
 
   const activeLoadModeBadge =
     control?.preset.mode === "cv"
@@ -351,36 +403,34 @@ export function DeviceCcRoute() {
   const statusRemoteMa = status?.raw.i_remote_ma ?? null;
 
   const remoteVoltageV =
-    status?.raw.v_remote_mv != null ? status.raw.v_remote_mv / 1_000 : 0;
+    status?.raw.v_remote_mv != null ? status.raw.v_remote_mv / 1_000 : null;
   const localVoltageV =
     status?.raw.v_local_mv != null
       ? status.raw.v_local_mv / 1_000
       : remoteVoltageV;
-  const localCurrentA = statusLocalMa != null ? statusLocalMa / 1_000 : 0;
-  const remoteCurrentA = statusRemoteMa != null ? statusRemoteMa / 1_000 : 0;
+  const localCurrentA = statusLocalMa != null ? statusLocalMa / 1_000 : null;
+  const remoteCurrentA = statusRemoteMa != null ? statusRemoteMa / 1_000 : null;
   const totalCurrentA =
     statusLocalMa != null && statusRemoteMa != null
       ? (statusLocalMa + statusRemoteMa) / 1_000
-      : 0;
+      : null;
   const totalPowerW =
-    status?.raw.calc_p_mw != null ? status.raw.calc_p_mw / 1_000 : 0;
+    status?.raw.calc_p_mw != null ? status.raw.calc_p_mw / 1_000 : null;
 
   const uptimeSeconds =
     status?.raw.uptime_ms != null
       ? Math.floor(status.raw.uptime_ms / 1_000)
-      : 0;
+      : null;
   const tempCoreC =
     status?.raw.sink_core_temp_mc != null
       ? status.raw.sink_core_temp_mc / 1_000
-      : undefined;
+      : null;
   const tempSinkC =
     status?.raw.sink_exhaust_temp_mc != null
       ? status.raw.sink_exhaust_temp_mc / 1_000
-      : undefined;
+      : null;
   const tempMcuC =
-    status?.raw.mcu_temp_mc != null
-      ? status.raw.mcu_temp_mc / 1_000
-      : undefined;
+    status?.raw.mcu_temp_mc != null ? status.raw.mcu_temp_mc / 1_000 : null;
 
   const controlMode: LoadMode = control?.preset.mode ?? "cc";
   const controlTargetMilli =
@@ -391,9 +441,46 @@ export function DeviceCcRoute() {
         : (control?.preset.target_i_ma ?? 0);
   const controlTargetUnit =
     controlMode === "cv" ? "V" : controlMode === "cp" ? "W" : "A";
-  const remoteActive = Boolean(status?.link_up);
+  const remoteActive = status?.link_up === true;
   const analogState = status?.analog_state ?? "offline";
   const faultFlags = status?.raw.fault_flags ?? 0;
+
+  const resistanceOhms =
+    localVoltageV != null && totalCurrentA != null && totalCurrentA > 0.0001
+      ? localVoltageV / totalCurrentA
+      : null;
+
+  const lastTrendUptimeMsRef = useRef<number | null>(null);
+  const [trend, setTrend] = useState<{
+    v: number[];
+    i: number[];
+    p: number[];
+    t: number[];
+  }>({ v: [], i: [], p: [], t: [] });
+
+  useEffect(() => {
+    const uptimeMs = status?.raw.uptime_ms ?? null;
+    if (uptimeMs == null) {
+      return;
+    }
+    if (lastTrendUptimeMsRef.current === uptimeMs) {
+      return;
+    }
+    lastTrendUptimeMsRef.current = uptimeMs;
+
+    setTrend((prev) => ({
+      v: pushTrendPoint(prev.v, localVoltageV),
+      i: pushTrendPoint(prev.i, totalCurrentA),
+      p: pushTrendPoint(prev.p, totalPowerW),
+      t: pushTrendPoint(prev.t, tempCoreC),
+    }));
+  }, [
+    localVoltageV,
+    status?.raw.uptime_ms,
+    totalCurrentA,
+    totalPowerW,
+    tempCoreC,
+  ]);
 
   const handleSavePreset = () => {
     const payload: Preset = {
@@ -411,6 +498,8 @@ export function DeviceCcRoute() {
   };
 
   const handleApplyPreset = () => {
+    applyOutputWasEnabledRef.current = control?.output_enabled ?? false;
+    setShowOutputReenableHint(false);
     applyPresetMutation.mutate(selectedPresetId);
   };
 
@@ -437,517 +526,644 @@ export function DeviceCcRoute() {
     }
   };
 
+  const telemetryStale = Boolean(firstHttpError);
+
+  const faultList = status?.fault_flags_decoded ?? [];
+  const faultSummary = faultList.length > 0 ? faultList.join(", ") : null;
+
+  const linkState: "up" | "down" | "unknown" = status
+    ? status.link_up
+      ? "up"
+      : "down"
+    : "unknown";
+
+  const protectionState = (() => {
+    if (faultList.length > 0 || analogState === "faulted") {
+      return { summary: "FAULT", level: "danger" } as const;
+    }
+    if (analogState === "cal_missing") {
+      return { summary: "CAL_MISSING", level: "warn" } as const;
+    }
+    if (control?.uv_latched) {
+      return { summary: "UV_LATCH", level: "warn" } as const;
+    }
+    if (!remoteActive) {
+      return { summary: "LINK_DOWN", level: "warn" } as const;
+    }
+    return { summary: "OK", level: "ok" } as const;
+  })();
+
+  const activeSetpointLabel = (() => {
+    if (!control) {
+      return null;
+    }
+    if (controlMode === "cv") {
+      return `${(control.preset.target_v_mv / 1000).toFixed(3)} V`;
+    }
+    if (controlMode === "cp") {
+      return `${(control.preset.target_p_mw / 1000).toFixed(2)} W`;
+    }
+    return `${(control.preset.target_i_ma / 1000).toFixed(3)} A`;
+  })();
+
+  const headline = (() => {
+    if (controlMode === "cv") {
+      return { value: localVoltageV, unit: "V" as const };
+    }
+    if (controlMode === "cp") {
+      return { value: totalPowerW, unit: "W" as const };
+    }
+    return { value: totalCurrentA, unit: "A" as const };
+  })();
+
+  const activeTrendPoints =
+    controlMode === "cv" ? trend.v : controlMode === "cp" ? trend.p : trend.i;
+  const trendMin =
+    activeTrendPoints.length > 0 ? Math.min(...activeTrendPoints) : 0;
+  const trendMax =
+    activeTrendPoints.length > 0 ? Math.max(...activeTrendPoints) : 1;
+  const trendPad = trendMax > trendMin ? (trendMax - trendMin) * 0.05 : 1;
+
+  const thermalTrendPoints = trend.t;
+  const thermalTrendMin =
+    thermalTrendPoints.length > 0 ? Math.min(...thermalTrendPoints) : 0;
+  const thermalTrendMax =
+    thermalTrendPoints.length > 0 ? Math.max(...thermalTrendPoints) : 1;
+  const thermalTrendPad =
+    thermalTrendMax > thermalTrendMin
+      ? (thermalTrendMax - thermalTrendMin) * 0.05
+      : 1;
+
+  const pdPanel = (() => {
+    if (pd) {
+      const attached = pd.attached;
+      const contractText =
+        attached && pd.contract_mv != null && pd.contract_ma != null
+          ? `Contract: ${(pd.contract_mv / 1000).toFixed(1)} V @ ${pd.contract_ma} mA`
+          : attached
+            ? "Contract: unknown"
+            : "Contract: detached";
+
+      const ppsText = (() => {
+        const first = pd.pps_pdos[0];
+        if (!first) {
+          return "PPS: —";
+        }
+        return `PPS: ${(first.min_mv / 1000).toFixed(1)}–${(first.max_mv / 1000).toFixed(1)}V (${pd.pps_pdos.length} APDO)`;
+      })();
+
+      const savedText =
+        pd.saved.mode === "fixed"
+          ? `Saved: Fixed · PDO #${pd.saved.fixed_object_pos} · ${pd.saved.i_req_ma} mA`
+          : `Saved: PPS · APDO #${pd.saved.pps_object_pos} · ${pd.saved.target_mv} mV · ${pd.saved.i_req_ma} mA`;
+
+      return {
+        visible: true,
+        contractText,
+        ppsText,
+        savedText,
+      } as const;
+    }
+
+    const err = pdQuery.error;
+    if (
+      err &&
+      isHttpApiError(err) &&
+      err.status === 404 &&
+      err.code === "UNSUPPORTED_OPERATION"
+    ) {
+      return {
+        visible: true,
+        contractText: "PD: unsupported",
+        ppsText: null,
+        savedText: null,
+      } as const;
+    }
+
+    return {
+      visible: true,
+      contractText: "Contract: —",
+      ppsText: "PPS: —",
+      savedText: "Saved: —",
+    } as const;
+  })();
+
+  const availableModes: Array<"CC" | "CV" | "CP" | "CR"> = ["CC", "CV"];
+  if (cpSupported) {
+    availableModes.push("CP");
+  }
+
+  const draftModeLabel: "CC" | "CV" | "CP" | "CR" =
+    draftPresetMode === "cc" ? "CC" : draftPresetMode === "cv" ? "CV" : "CP";
+
+  const presetsButtons = Array.from({ length: 8 }, (_, idx) => {
+    const id = idx + 1;
+    const supported = id >= 1 && id <= 5;
+    return {
+      id,
+      label: `#${id}`,
+      active: supported ? control?.active_preset_id === id : false,
+      disabled: !supported,
+    };
+  });
+
+  const outputToggleDisabled =
+    !control || updateControlMutation.isPending || applyPresetMutation.isPending;
+
+  const setpoints = [
+    {
+      label: "Target Current",
+      value: formatWithUnit(draftPresetTargetIMa / 1000, 3, "A"),
+      readback: `Read: ${formatWithUnit(totalCurrentA, 3, "A")}`,
+      active: draftPresetMode === "cc",
+    },
+    {
+      label: "Target Voltage",
+      value: formatWithUnit(draftPresetTargetVMv / 1000, 3, "V"),
+      readback: `Read: ${formatWithUnit(localVoltageV, 3, "V")}`,
+      active: draftPresetMode === "cv",
+    },
+  ];
+
+  const limits = [
+    {
+      label: "Min Voltage",
+      value: control ? formatWithUnit(draftPresetMinVMv / 1000, 3, "V") : "— V",
+      tone: control?.uv_latched ? ("warn" as const) : ("ok" as const),
+    },
+    {
+      label: "Max Current",
+      value: control
+        ? formatWithUnit(draftPresetMaxIMaTotal / 1000, 3, "A")
+        : "— A",
+    },
+    {
+      label: "Max Power",
+      value: control ? formatWithUnit(draftPresetMaxPMw / 1000, 2, "W") : "— W",
+    },
+    {
+      label: "UV Latch",
+      value: control ? (control.uv_latched ? "Latched" : "Ready") : "—",
+      tone: control?.uv_latched ? ("warn" as const) : ("ok" as const),
+    },
+  ];
+
+  const diagnostics = {
+    analogLinkText: `Analog Link: ${remoteActive ? "Stable" : "Down"}`,
+    loopText: "Loop: —",
+    lastApplyText: "Last Apply: —",
+  } as const;
+
   return (
-    <PageContainer className="flex flex-col gap-6 font-mono tabular-nums">
-      {/* Top context: device + mode strip + link status */}
-      <header className="flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <h2 className="text-lg font-bold">Device control</h2>
-          <p className="mt-1 text-sm text-base-content/70">
-            Shared control surface for all operating modes. This view focuses on
-            CC behaviour while keeping the layout aligned with the hardware main
-            display.
-          </p>
-          <p className="mt-1 text-xs text-base-content/60">
-            Device name:{" "}
-            <strong className="font-medium text-base-content">
-              {device.name}
-            </strong>
-            {identity ? (
-              <>
-                {" "}
-                · IP:{" "}
-                <code className="font-mono bg-base-200 px-1 rounded text-xs">
-                  {identity.network.ip}
-                </code>
-              </>
-            ) : null}
-          </p>
-        </div>
-        <div className="flex flex-col items-end gap-2 text-xs text-base-content/70">
-          <div className="flex items-center gap-2">
-            <span className="uppercase tracking-wider text-base-content/50 text-[10px]">
-              Mode
-            </span>
-            <div className="flex gap-1">
-              {["CC", "CV", "CP", "CR"].map((mode) => {
-                const isActive = mode === activeLoadModeBadge;
-                return (
-                  <span
-                    key={mode}
-                    className={`badge badge-sm ${isActive ? "badge-primary" : "badge-ghost opacity-50"}`}
-                  >
-                    {mode}
-                  </span>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="flex flex-col gap-1 text-right">
-            <div>
-              Link:{" "}
-              <span
-                className={
-                  status?.link_up
-                    ? "text-success font-medium"
-                    : "text-error font-medium"
+    <PageContainer variant="full" className="font-mono tabular-nums">
+      <div className="instrument-viewport rounded-[28px] p-4 sm:p-6 md:p-8">
+        <div className="mx-auto max-w-[1600px]">
+          <div className="instrument-frame p-3 sm:p-4 md:p-5">
+            <div className="instrument-frame-inner p-4 sm:p-5 md:p-6">
+              <InstrumentStatusBar
+                deviceName={device.name}
+                deviceIp={identity?.network.ip ?? null}
+                firmwareVersion={identity?.digital_fw_version ?? null}
+                modeLabel={
+                  activeLoadModeBadge as "CC" | "CV" | "CP" | "CR" | "UNKNOWN"
                 }
-              >
-                {status?.link_up ? "up" : "down"}
-              </span>
-            </div>
-            <div>
-              Analog state: <span>{status?.analog_state ?? "unknown"}</span>
-            </div>
-            {identity ? (
-              <div>
-                API version:{" "}
-                <span className="font-mono">
-                  {identity.capabilities.api_version}
-                </span>
-              </div>
-            ) : null}
-            {status && status.fault_flags_decoded.length > 0 ? (
-              <div className="text-error font-medium">
-                Faults: {status.fault_flags_decoded.join(", ")}
-              </div>
-            ) : null}
-          </div>
-        </div>
-      </header>
+                linkState={linkState}
+                outputState={{
+                  enabled: control?.output_enabled ?? false,
+                  setpointLabel: activeSetpointLabel,
+                }}
+                protectionState={protectionState}
+                faultSummary={faultSummary}
+                stale={telemetryStale}
+              />
 
-      {topError ? (
-        <section
-          aria-label="HTTP error"
-          className="alert alert-error shadow-lg rounded-lg"
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            className="stroke-current shrink-0 h-6 w-6"
-            fill="none"
-            viewBox="0 0 24 24"
-            role="img"
-            aria-label="Error icon"
-          >
-            <title>Error</title>
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth="2"
-              d="M10 14l2-2m0 0l2-2m-2 2l-2-2m2 2l2 2m7-2a9 9 0 11-18 0 9 9 0 0118 0z"
-            />
-          </svg>
-          <div className="text-sm">
-            <div className="font-bold">HTTP error: {topError.summary}</div>
-            {topError.hint ? (
-              <div className="mt-1 opacity-90">{topError.hint}</div>
-            ) : null}
-            {isLinkDownLike ? (
-              <div className="mt-1 opacity-90">
-                Link down / Wi‑Fi unavailable — telemetry and control updates
-                may be stale until connectivity recovers.
-              </div>
-            ) : null}
-          </div>
-        </section>
-      ) : null}
-
-      <section
-        aria-label="Presets and control"
-        className="grid grid-cols-1 lg:grid-cols-3 gap-6 items-start"
-      >
-        <div className="card bg-base-100 shadow-sm border border-base-200 lg:col-span-2">
-          <div className="card-body p-6 space-y-4">
-            <div className="flex flex-wrap items-start justify-between gap-4">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 h-auto min-h-0">
-                Presets
-              </h3>
-              <div className="text-xs text-base-content/60 space-y-1 text-right">
-                <div data-testid="control-active-preset">
-                  Active preset:{" "}
-                  <span className="font-mono">
-                    {control?.active_preset_id ?? "—"}
-                  </span>
-                </div>
-                <div data-testid="control-active-mode">
-                  Active mode:{" "}
-                  <span className="font-mono">
-                    {control?.preset.mode ?? "—"}
-                  </span>
-                </div>
-                <div data-testid="control-output-enabled">
-                  Output enabled:{" "}
-                  <span className="font-mono">
-                    {control?.output_enabled ? "true" : "false"}
-                  </span>
-                </div>
-                <div data-testid="control-uv-latched">
-                  UV latched:{" "}
-                  <span className="font-mono">
-                    {control?.uv_latched ? "true" : "false"}
-                  </span>
-                </div>
-                <div className="text-[10px]">
-                  Hint: Toggle output off → on to clear UV latch.
-                </div>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2 items-center">
-              <label className="label cursor-pointer justify-start gap-3 p-0">
-                <input
-                  type="checkbox"
-                  className="toggle toggle-primary"
-                  checked={control?.output_enabled ?? false}
-                  disabled={
-                    !control ||
-                    updateControlMutation.isPending ||
-                    applyPresetMutation.isPending
-                  }
-                  onChange={(event) => {
-                    updateControlMutation.mutate({
-                      output_enabled: event.target.checked,
-                    });
-                  }}
-                />
-                <div className="flex flex-col">
-                  <span className="label-text font-semibold">
-                    Output enabled
-                  </span>
-                  <span className="label-text-alt text-base-content/60">
-                    Preset apply forces this off; toggle on to start the load.
-                  </span>
-                </div>
-              </label>
-
-              {ENABLE_MOCK_DEVTOOLS && baseUrl && isMockBaseUrl(baseUrl) ? (
-                <button
-                  type="button"
-                  className="btn btn-xs"
-                  disabled={!control || debugUvMutation.isPending}
-                  onClick={() => {
-                    debugUvMutation.mutate(!(control?.uv_latched ?? false));
-                  }}
+              {topError ? (
+                <section
+                  aria-label="HTTP error"
+                  className="mt-5 rounded-2xl border border-red-400/15 bg-red-500/10 px-4 py-3 text-[12px] text-red-200"
                 >
-                  Toggle UV latch (mock)
-                </button>
-              ) : null}
-            </div>
-
-            {updateControlMutation.isError && updateControlMutation.error ? (
-              <div className="alert alert-error text-xs p-2">
-                <span>
-                  {isHttpApiError(updateControlMutation.error)
-                    ? `${updateControlMutation.error.code ?? "HTTP_ERROR"} — ${updateControlMutation.error.message}`
-                    : updateControlMutation.error instanceof Error
-                      ? updateControlMutation.error.message
-                      : "Unknown error"}
-                </span>
-              </div>
-            ) : null}
-
-            <div className="overflow-x-auto">
-              <table className="table table-zebra table-sm">
-                <thead>
-                  <tr>
-                    <th>Preset</th>
-                    <th>Mode</th>
-                    <th>Target</th>
-                    <th>Limits</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {presetsQuery.isLoading ? (
-                    <tr>
-                      <td colSpan={4} className="text-xs text-base-content/60">
-                        Loading presets…
-                      </td>
-                    </tr>
-                  ) : (presets ?? []).length === 0 ? (
-                    <tr>
-                      <td colSpan={4} className="text-xs text-base-content/60">
-                        No presets yet.
-                      </td>
-                    </tr>
-                  ) : (
-                    (presets ?? []).map((preset) => (
-                      <tr
-                        key={preset.preset_id}
-                        data-testid="preset-row"
-                        className={
-                          preset.preset_id === selectedPresetId
-                            ? "bg-base-200/60"
-                            : undefined
-                        }
-                      >
-                        <td className="whitespace-nowrap">
-                          <button
-                            type="button"
-                            className={[
-                              "btn btn-xs",
-                              preset.preset_id === selectedPresetId
-                                ? "btn-primary"
-                                : "btn-ghost",
-                            ].join(" ")}
-                            onClick={() =>
-                              setSelectedPresetId(preset.preset_id)
-                            }
-                          >
-                            #{preset.preset_id}
-                          </button>
-                          {preset.preset_id === control?.active_preset_id ? (
-                            <span className="ml-2 badge badge-xs badge-outline">
-                              active
-                            </span>
-                          ) : null}
-                        </td>
-                        <td className="font-mono text-xs">{preset.mode}</td>
-                        <td className="font-mono text-xs">
-                          {preset.mode === "cc"
-                            ? `${preset.target_i_ma} mA`
-                            : preset.mode === "cp"
-                              ? `${(preset.target_p_mw / 1_000).toFixed(2)} W`
-                              : `${preset.target_v_mv} mV`}
-                        </td>
-                        <td className="font-mono text-xs">
-                          min_v={preset.min_v_mv} · max_i=
-                          {preset.max_i_ma_total} · max_p={preset.max_p_mw}
-                        </td>
-                      </tr>
-                    ))
-                  )}
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-6 space-y-4">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 h-auto min-h-0">
-              Preset editor
-            </h3>
-
-            <div className="form-control">
-              <label className="label" htmlFor="preset-mode">
-                <span className="label-text">Mode</span>
-              </label>
-              <select
-                id="preset-mode"
-                className="select select-bordered select-sm"
-                value={draftPresetMode}
-                onChange={(event) =>
-                  setDraftPresetMode(event.target.value as LoadMode)
-                }
-              >
-                <option value="cc">cc</option>
-                <option value="cv">cv</option>
-                {cpSupported ? <option value="cp">cp</option> : null}
-              </select>
-              {identityQuery.isSuccess && !cpSupported ? (
-                <div className="mt-2 text-xs text-base-content/60">
-                  CP: 固件不支持（identity.capabilities.cp_supported=false）
-                </div>
-              ) : null}
-            </div>
-
-            {draftPresetMode === "cc" ? (
-              <div className="form-control">
-                <label className="label" htmlFor="preset-target-i">
-                  <span className="label-text">Target current (mA)</span>
-                </label>
-                <input
-                  id="preset-target-i"
-                  type="number"
-                  className="input input-bordered input-sm"
-                  value={draftPresetTargetIMa}
-                  onChange={(event) =>
-                    setDraftPresetTargetIMa(
-                      Number.parseInt(event.target.value || "0", 10),
-                    )
-                  }
-                />
-              </div>
-            ) : draftPresetMode === "cv" ? (
-              <div className="form-control">
-                <label className="label" htmlFor="preset-target-v">
-                  <span className="label-text">Target voltage (mV)</span>
-                </label>
-                <input
-                  id="preset-target-v"
-                  type="number"
-                  className="input input-bordered input-sm"
-                  value={draftPresetTargetVMv}
-                  onChange={(event) =>
-                    setDraftPresetTargetVMv(
-                      Number.parseInt(event.target.value || "0", 10),
-                    )
-                  }
-                />
-              </div>
-            ) : (
-              <div className="form-control">
-                <label className="label" htmlFor="preset-target-p">
-                  <span className="label-text">Target power (mW)</span>
-                </label>
-                <input
-                  id="preset-target-p"
-                  type="number"
-                  className={[
-                    "input input-bordered input-sm",
-                    cpDraftOutOfRange ? "input-error" : "",
-                  ].join(" ")}
-                  value={draftPresetTargetPMw}
-                  onChange={(event) =>
-                    setDraftPresetTargetPMw(
-                      Number.parseInt(event.target.value || "0", 10),
-                    )
-                  }
-                />
-                {cpDraftOutOfRange ? (
-                  <div className="mt-2 text-xs text-error">
-                    target_p_mw must be ≤ max_p_mw
+                  <div className="font-semibold">
+                    HTTP error: {topError.summary}
                   </div>
-                ) : null}
+                  {topError.hint ? (
+                    <div className="mt-1 text-red-200/80">{topError.hint}</div>
+                  ) : null}
+                  {isLinkDownLike ? (
+                    <div className="mt-1 text-red-200/70">
+                      Link down / Wi‑Fi unavailable — telemetry and control
+                      updates may be stale until connectivity recovers.
+                    </div>
+                  ) : null}
+                </section>
+              ) : null}
+
+              <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-[3fr_2fr] xl:items-start">
+                <div className="flex min-w-0 flex-col gap-6">
+                  <MonitorReadouts
+                    voltage={{
+                      read: localVoltageV,
+                      local: localVoltageV,
+                      remote: remoteVoltageV,
+                    }}
+                    current={{
+                      read: totalCurrentA,
+                      local: localCurrentA,
+                      remote: remoteCurrentA,
+                    }}
+                    power={{ read: totalPowerW }}
+                    resistance={{ read: resistanceOhms }}
+                  />
+
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                    <MainDisplayPanel
+                      headline={headline}
+                      modeLabel={activeLoadModeBadge as "CC" | "CV" | "CP" | "CR"}
+                      setpointLabel={activeSetpointLabel ?? "—"}
+                      uptimeLabel={formatUptimeSeconds(uptimeSeconds)}
+                      trend={{
+                        points: activeTrendPoints,
+                        min: trendMin - trendPad,
+                        max: trendMax + trendPad,
+                      }}
+                      stale={telemetryStale}
+                    />
+                    <ThermalPanel
+                      sinkCoreC={tempCoreC}
+                      sinkExhaustC={tempSinkC}
+                      mcuC={tempMcuC}
+                      faults={faultList}
+                      trend={{
+                        points: thermalTrendPoints,
+                        min: thermalTrendMin - thermalTrendPad,
+                        max: thermalTrendMax + thermalTrendPad,
+                      }}
+                    />
+                  </div>
+
+                  <HealthTiles
+                    analogState={analogState}
+                    faultLabel={
+                      faultList.length > 0
+                        ? "FAULT"
+                        : control?.uv_latched
+                          ? "UV_LATCH"
+                          : remoteActive
+                            ? "OK"
+                            : "LINK_DOWN"
+                    }
+                    linkLatencyMs={null}
+                  />
+
+                  <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
+                    <PdSummaryPanel
+                      visible={pdPanel.visible}
+                      contractText={pdPanel.contractText}
+                      ppsText={pdPanel.ppsText}
+                      savedText={pdPanel.savedText}
+                    />
+                    <DiagnosticsPanel
+                      analogLinkText={diagnostics.analogLinkText}
+                      loopText={diagnostics.loopText}
+                      lastApplyText={diagnostics.lastApplyText}
+                      to={{ to: "/$deviceId/status", params: { deviceId } }}
+                    />
+                  </div>
+                </div>
+
+                <div className="flex min-w-0 flex-col gap-6">
+                  <ControlModePanel
+                    availableModes={availableModes}
+                    activeMode={draftModeLabel}
+                    onModeChange={(mode) => {
+                      if (mode === "CR") {
+                        return;
+                      }
+                      setDraftPresetMode(mode.toLowerCase() as LoadMode);
+                    }}
+                    outputEnabled={control?.output_enabled ?? false}
+                    outputToggleDisabled={outputToggleDisabled}
+                    onOutputToggle={(nextEnabled) => {
+                      if (nextEnabled) {
+                        setShowOutputReenableHint(false);
+                      }
+                      updateControlMutation.mutate({ output_enabled: nextEnabled });
+                    }}
+                    outputHint={
+                      control?.output_enabled
+                        ? "Apply preset turns output off"
+                        : "Toggle on to start the load"
+                    }
+                    showOutputReenableHint={showOutputReenableHint}
+                  />
+
+                  {updateControlMutation.isError && updateControlMutation.error ? (
+                    <div className="rounded-2xl border border-red-400/15 bg-red-500/10 px-4 py-3 text-[12px] text-red-200">
+                      {isHttpApiError(updateControlMutation.error)
+                        ? `${updateControlMutation.error.code ?? "HTTP_ERROR"} — ${updateControlMutation.error.message}`
+                        : updateControlMutation.error instanceof Error
+                          ? updateControlMutation.error.message
+                          : "Unknown error"}
+                    </div>
+                  ) : null}
+
+                  <SetpointsPanel setpoints={setpoints} />
+                  <LimitsPanel limits={limits} />
+
+                  <div className="sr-only">
+                    <div data-testid="control-active-preset">
+                      Active preset: {control?.active_preset_id ?? "—"}
+                    </div>
+                    <div data-testid="control-active-mode">
+                      Active mode: {control?.preset.mode ?? "—"}
+                    </div>
+                    <div data-testid="control-output-enabled">
+                      Output enabled: {control?.output_enabled ? "true" : "false"}
+                    </div>
+                    <div data-testid="control-uv-latched">
+                      UV latched: {control?.uv_latched ? "true" : "false"}
+                    </div>
+                  </div>
+
+                  <PresetsPanel
+                    presets={presetsButtons}
+                    selectedPresetId={selectedPresetId}
+                    onPresetSelect={(id) => {
+                      if (id >= 1 && id <= 5) {
+                        setSelectedPresetId(id as PresetId);
+                      }
+                    }}
+                    onApply={handleApplyPreset}
+                    onSave={handleSavePreset}
+                    applyDisabled={!baseUrl || applyPresetMutation.isPending}
+                    saveDisabled={savePresetDisabled}
+                    applying={applyPresetMutation.isPending}
+                    saving={updatePresetMutation.isPending}
+                  />
+
+                  <AdvancedPanel
+                    summary="Transient · List · Battery · Trigger"
+                    collapsed={advancedCollapsed}
+                    onToggle={setAdvancedCollapsed}
+                  >
+                    <div className="grid gap-4">
+                      <div>
+                        <div className="instrument-label">Preset editor</div>
+                        <div className="mt-3 grid gap-3">
+                          <div>
+                            <label
+                              htmlFor="preset-mode"
+                              className="block text-[11px] text-slate-200/60"
+                            >
+                              Mode
+                            </label>
+                            <select
+                              id="preset-mode"
+                              className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
+                              value={draftPresetMode}
+                              onChange={(event) =>
+                                setDraftPresetMode(event.target.value as LoadMode)
+                              }
+                            >
+                              <option value="cc">cc</option>
+                              <option value="cv">cv</option>
+                              {cpSupported ? <option value="cp">cp</option> : null}
+                            </select>
+                            {identityQuery.isSuccess && !cpSupported ? (
+                              <div className="mt-2 text-[11px] text-slate-200/55">
+                                CP: 固件不支持（identity.capabilities.cp_supported=false）
+                              </div>
+                            ) : null}
+                          </div>
+
+                          {draftPresetMode === "cc" ? (
+                            <div>
+                              <label
+                                htmlFor="preset-target-i"
+                                className="block text-[11px] text-slate-200/60"
+                              >
+                                Target current (mA)
+                              </label>
+                              <input
+                                id="preset-target-i"
+                                type="number"
+                                className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
+                                value={draftPresetTargetIMa}
+                                onChange={(event) =>
+                                  setDraftPresetTargetIMa(
+                                    Number.parseInt(event.target.value || "0", 10),
+                                  )
+                                }
+                              />
+                            </div>
+                          ) : draftPresetMode === "cv" ? (
+                            <div>
+                              <label
+                                htmlFor="preset-target-v"
+                                className="block text-[11px] text-slate-200/60"
+                              >
+                                Target voltage (mV)
+                              </label>
+                              <input
+                                id="preset-target-v"
+                                type="number"
+                                className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
+                                value={draftPresetTargetVMv}
+                                onChange={(event) =>
+                                  setDraftPresetTargetVMv(
+                                    Number.parseInt(event.target.value || "0", 10),
+                                  )
+                                }
+                              />
+                            </div>
+                          ) : (
+                            <div>
+                              <label
+                                htmlFor="preset-target-p"
+                                className="block text-[11px] text-slate-200/60"
+                              >
+                                Target power (mW)
+                              </label>
+                              <input
+                                id="preset-target-p"
+                                type="number"
+                                className={[
+                                  "mt-1 w-full rounded-lg border bg-black/20 px-3 py-2 text-[12px] text-slate-100",
+                                  cpDraftOutOfRange
+                                    ? "border-red-400/25"
+                                    : "border-slate-400/10",
+                                ].join(" ")}
+                                value={draftPresetTargetPMw}
+                                onChange={(event) =>
+                                  setDraftPresetTargetPMw(
+                                    Number.parseInt(event.target.value || "0", 10),
+                                  )
+                                }
+                              />
+                              {cpDraftOutOfRange ? (
+                                <div className="mt-2 text-[11px] text-red-200/85">
+                                  target_p_mw must be ≤ max_p_mw
+                                </div>
+                              ) : null}
+                            </div>
+                          )}
+
+                          <div>
+                            <label
+                              htmlFor="preset-min-v"
+                              className="block text-[11px] text-slate-200/60"
+                            >
+                              Min voltage (mV)
+                            </label>
+                            <input
+                              id="preset-min-v"
+                              type="number"
+                              className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
+                              value={draftPresetMinVMv}
+                              onChange={(event) =>
+                                setDraftPresetMinVMv(
+                                  Number.parseInt(event.target.value || "0", 10),
+                                )
+                              }
+                            />
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="preset-max-i"
+                              className="block text-[11px] text-slate-200/60"
+                            >
+                              Max current total (mA)
+                            </label>
+                            <input
+                              id="preset-max-i"
+                              type="number"
+                              className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
+                              value={draftPresetMaxIMaTotal}
+                              onChange={(event) =>
+                                setDraftPresetMaxIMaTotal(
+                                  Number.parseInt(event.target.value || "0", 10),
+                                )
+                              }
+                            />
+                          </div>
+
+                          <div>
+                            <label
+                              htmlFor="preset-max-p"
+                              className="block text-[11px] text-slate-200/60"
+                            >
+                              Max power (mW)
+                            </label>
+                            <input
+                              id="preset-max-p"
+                              type="number"
+                              className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
+                              value={draftPresetMaxPMw}
+                              onChange={(event) =>
+                                setDraftPresetMaxPMw(
+                                  Number.parseInt(event.target.value || "0", 10),
+                                )
+                              }
+                            />
+                          </div>
+
+                          <div className="mt-2 flex flex-col gap-2">
+                            <button
+                              type="button"
+                              className="h-9 rounded-lg border border-amber-400/25 bg-amber-500/10 px-3 text-xs font-semibold tracking-[0.14em] text-amber-100 uppercase disabled:opacity-50"
+                              disabled={savePresetDisabled}
+                              onClick={handleSavePreset}
+                            >
+                              {updatePresetMutation.isPending ? "Saving…" : "Save Draft"}
+                            </button>
+                            <button
+                              type="button"
+                              className="h-9 rounded-lg border border-sky-400/25 bg-sky-500/10 px-3 text-xs font-semibold tracking-[0.14em] text-sky-100 uppercase disabled:opacity-50"
+                              disabled={!baseUrl || applyPresetMutation.isPending}
+                              onClick={handleApplyPreset}
+                            >
+                              {applyPresetMutation.isPending ? "Applying…" : "Apply Preset"}
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {ENABLE_MOCK_DEVTOOLS && baseUrl && isMockBaseUrl(baseUrl) ? (
+                        <button
+                          type="button"
+                          className="h-9 rounded-lg border border-slate-400/10 bg-black/20 px-3 text-xs font-semibold text-slate-200/70 disabled:opacity-50"
+                          disabled={!control || debugUvMutation.isPending}
+                          onClick={() => {
+                            debugUvMutation.mutate(!(control?.uv_latched ?? false));
+                          }}
+                        >
+                          Toggle UV latch (mock)
+                        </button>
+                      ) : null}
+
+                      {updatePresetMutation.isError && updatePresetMutation.error ? (
+                        <div className="rounded-2xl border border-red-400/15 bg-red-500/10 px-4 py-3 text-[12px] text-red-200">
+                          {isHttpApiError(updatePresetMutation.error)
+                            ? `${updatePresetMutation.error.code ?? "HTTP_ERROR"} — ${updatePresetMutation.error.message}`
+                            : updatePresetMutation.error instanceof Error
+                              ? updatePresetMutation.error.message
+                              : "Unknown error"}
+                          {isHttpApiError(updatePresetMutation.error) &&
+                          explainHttpError(updatePresetMutation.error) ? (
+                            <div className="mt-1 text-red-200/70">
+                              {explainHttpError(updatePresetMutation.error)}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      {applyPresetMutation.isError && applyPresetMutation.error ? (
+                        <div className="rounded-2xl border border-red-400/15 bg-red-500/10 px-4 py-3 text-[12px] text-red-200">
+                          {isHttpApiError(applyPresetMutation.error)
+                            ? `${applyPresetMutation.error.code ?? "HTTP_ERROR"} — ${applyPresetMutation.error.message}`
+                            : applyPresetMutation.error instanceof Error
+                              ? applyPresetMutation.error.message
+                              : "Unknown error"}
+                          {isHttpApiError(applyPresetMutation.error) &&
+                          explainHttpError(applyPresetMutation.error) ? (
+                            <div className="mt-1 text-red-200/70">
+                              {explainHttpError(applyPresetMutation.error)}
+                            </div>
+                          ) : null}
+                        </div>
+                      ) : null}
+
+                      <section aria-label="Hardware main display">
+                        <div className="instrument-label">Hardware display</div>
+                        <div className="mt-3 flex justify-center">
+                          <MainDisplayCanvas
+                            remoteVoltageV={remoteVoltageV ?? 0}
+                            localVoltageV={localVoltageV ?? 0}
+                            localCurrentA={localCurrentA ?? 0}
+                            remoteCurrentA={remoteCurrentA ?? 0}
+                            totalCurrentA={totalCurrentA ?? 0}
+                            totalPowerW={totalPowerW ?? 0}
+                            controlMode={controlMode}
+                            controlTargetMilli={controlTargetMilli}
+                            controlTargetUnit={controlTargetUnit}
+                            uptimeSeconds={uptimeSeconds ?? 0}
+                            tempCoreC={tempCoreC ?? undefined}
+                            tempSinkC={tempSinkC ?? undefined}
+                            tempMcuC={tempMcuC ?? undefined}
+                            remoteActive={remoteActive}
+                            analogState={analogState}
+                            faultFlags={faultFlags}
+                          />
+                        </div>
+                      </section>
+                    </div>
+                  </AdvancedPanel>
+                </div>
               </div>
-            )}
-
-            <div className="form-control">
-              <label className="label" htmlFor="preset-min-v">
-                <span className="label-text">Min voltage (mV)</span>
-              </label>
-              <input
-                id="preset-min-v"
-                type="number"
-                className="input input-bordered input-sm"
-                value={draftPresetMinVMv}
-                onChange={(event) =>
-                  setDraftPresetMinVMv(
-                    Number.parseInt(event.target.value || "0", 10),
-                  )
-                }
-              />
             </div>
-
-            <div className="form-control">
-              <label className="label" htmlFor="preset-max-i">
-                <span className="label-text">Max current total (mA)</span>
-              </label>
-              <input
-                id="preset-max-i"
-                type="number"
-                className="input input-bordered input-sm"
-                value={draftPresetMaxIMaTotal}
-                onChange={(event) =>
-                  setDraftPresetMaxIMaTotal(
-                    Number.parseInt(event.target.value || "0", 10),
-                  )
-                }
-              />
-            </div>
-
-            <div className="form-control">
-              <label className="label" htmlFor="preset-max-p">
-                <span className="label-text">Max power (mW)</span>
-              </label>
-              <input
-                id="preset-max-p"
-                type="number"
-                className="input input-bordered input-sm"
-                value={draftPresetMaxPMw}
-                onChange={(event) =>
-                  setDraftPresetMaxPMw(
-                    Number.parseInt(event.target.value || "0", 10),
-                  )
-                }
-              />
-            </div>
-
-            <div className="flex flex-col gap-2 pt-2">
-              <button
-                type="button"
-                className="btn btn-sm"
-                disabled={savePresetDisabled}
-                onClick={handleSavePreset}
-              >
-                {updatePresetMutation.isPending ? (
-                  <span className="loading loading-spinner loading-xs" />
-                ) : null}
-                Save preset
-              </button>
-              <button
-                type="button"
-                className="btn btn-sm btn-primary"
-                disabled={!baseUrl || applyPresetMutation.isPending}
-                onClick={handleApplyPreset}
-              >
-                {applyPresetMutation.isPending ? (
-                  <span className="loading loading-spinner loading-xs" />
-                ) : null}
-                Apply preset (forces output off)
-              </button>
-            </div>
-
-            {updatePresetMutation.isError && updatePresetMutation.error ? (
-              <div className="alert alert-error text-xs p-2">
-                <span>
-                  {isHttpApiError(updatePresetMutation.error)
-                    ? `${updatePresetMutation.error.code ?? "HTTP_ERROR"} — ${updatePresetMutation.error.message}`
-                    : updatePresetMutation.error instanceof Error
-                      ? updatePresetMutation.error.message
-                      : "Unknown error"}
-                </span>
-                {isHttpApiError(updatePresetMutation.error) &&
-                explainHttpError(updatePresetMutation.error) ? (
-                  <span className="opacity-90">
-                    {explainHttpError(updatePresetMutation.error)}
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
-
-            {applyPresetMutation.isError && applyPresetMutation.error ? (
-              <div className="alert alert-error text-xs p-2">
-                <span>
-                  {isHttpApiError(applyPresetMutation.error)
-                    ? `${applyPresetMutation.error.code ?? "HTTP_ERROR"} — ${applyPresetMutation.error.message}`
-                    : applyPresetMutation.error instanceof Error
-                      ? applyPresetMutation.error.message
-                      : "Unknown error"}
-                </span>
-                {isHttpApiError(applyPresetMutation.error) &&
-                explainHttpError(applyPresetMutation.error) ? (
-                  <span className="opacity-90">
-                    {explainHttpError(applyPresetMutation.error)}
-                  </span>
-                ) : null}
-              </div>
-            ) : null}
           </div>
         </div>
-      </section>
-
-      <section aria-label="Main display" className="flex justify-center">
-        <MainDisplayCanvas
-          remoteVoltageV={remoteVoltageV}
-          localVoltageV={localVoltageV}
-          localCurrentA={localCurrentA}
-          remoteCurrentA={remoteCurrentA}
-          totalCurrentA={totalCurrentA}
-          totalPowerW={totalPowerW}
-          controlMode={controlMode}
-          controlTargetMilli={controlTargetMilli}
-          controlTargetUnit={controlTargetUnit}
-          uptimeSeconds={uptimeSeconds}
-          tempCoreC={tempCoreC}
-          tempSinkC={tempSinkC}
-          tempMcuC={tempMcuC}
-          remoteActive={remoteActive}
-          analogState={analogState}
-          faultFlags={faultFlags}
-        />
-      </section>
+      </div>
     </PageContainer>
   );
 }

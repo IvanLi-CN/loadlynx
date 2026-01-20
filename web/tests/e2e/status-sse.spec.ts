@@ -199,8 +199,8 @@ test("status SSE stream drives CC page without extra polling", async ({
 
   await page.goto("/dev-sse/cc");
 
-  await expect(page.getByText(/Link:\s*up/i)).toBeVisible();
-  await expect(page.getByText(/Analog state:\s*ready/i)).toBeVisible();
+  await expect(page.getByText(/LINK UP/i)).toBeVisible();
+  await expect(page.getByText(/Online/i)).toBeVisible();
 
   await page.waitForFunction(
     () =>
