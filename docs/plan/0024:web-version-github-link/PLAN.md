@@ -24,6 +24,7 @@
 ### Non-goals
 
 - 不在本计划内新增“更新提示/自动刷新”等功能（若需要可另立计划）。
+- 不在本计划内修改 `version.json` 的字段契约与内容来源（它仍可作为外部核对的辅助信息，但 UI 的主来源为构建期注入）。
 - 不改变现有路由结构与页面布局信息架构（只在现有布局中增加一个轻量入口）。
 - 不引入新依赖（维持当前 React + TanStack Router + DaisyUI/Tailwind 栈）。
 
@@ -54,13 +55,11 @@
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| `web/public/version.json` | File format | internal | Modify | ./contracts/file-formats.md | Web | External checks | 增加 GitHub 溯源所需元数据（向后兼容；非 UI 主来源） |
 | `AppVersionLink` | UI Component | internal | New | ./contracts/ui-components.md | Web | `web/src/layouts/console-layout.tsx` | 版本展示位（可点击） |
 | `VITE_APP_VERSION` / `VITE_APP_GIT_*` / `VITE_GITHUB_REPO` | Config | internal | New | ./contracts/config.md | Web | Web runtime | 构建期注入（编译进 bundle），用于版本展示与 GitHub 跳转 |
 
 ### 契约文档（按 Kind 拆分）
 
-- [contracts/file-formats.md](./contracts/file-formats.md)
 - [contracts/ui-components.md](./contracts/ui-components.md)
 - [contracts/config.md](./contracts/config.md)
 
@@ -83,7 +82,6 @@
 ## 里程碑（Milestones）
 
 - [ ] 构建期注入：将版本/溯源信息编译进 Vite bundle（`VITE_APP_VERSION` / `VITE_APP_GIT_*` / `VITE_GITHUB_REPO`）
-- [ ] `version.json` 契约扩展（加入 repo / sha / tag 等溯源信息，向后兼容；用于外部核对，不作为 UI 主来源）
 - [ ] 在 `ConsoleLayout` 增加 `AppVersionLink` 展示位（并在 Storybook runtime 隐藏；数据主来源为构建期注入）
 - [ ] 本地预览与 Pages 验证：版本展示正常、GitHub 跳转正确
 
