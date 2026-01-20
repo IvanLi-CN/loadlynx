@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-16
-- Last: 2026-01-16
+- Last: 2026-01-20
 
 ## 背景 / 问题陈述
 
@@ -136,9 +136,19 @@
 
 ## 里程碑（Milestones）
 
-- [ ] M1: 需求冻结（读数优先级与主读数策略确认）
-- [ ] M2: 组件与布局方案确定（UI 结构与信息层级）
-- [ ] M3: 验收标准冻结（含异常与响应式）
+- [x] M1: 需求冻结（读数优先级与主读数策略确认）
+- [x] M2: 组件与布局方案确定（UI 结构与信息层级）
+- [x] M3: 验收标准冻结（含异常与响应式）
+- [x] M4: 仪器面板 UI 实现（Storybook 可预览）
+- [x] M5: 高保真样式对齐设计图 + E2E 绿灯
+
+## Change log
+
+- 2026-01-19: Implemented instrument-style “left monitor / right control” layout for `device-cc` (UI-only; API semantics unchanged).
+- 2026-01-19: Polished high-fidelity instrument panel styling and module layout; updated Storybook play + E2E selectors.
+- 2026-01-20: Tuned instrument palette + pill bar layout and adjusted numeric decimal separators for closer match with the mock design.
+- 2026-01-20: Increased instrument label weight and narrowed decimal dot spacing.
+- 2026-01-20: Web e2e (Playwright) green — 13 passed, 1 skipped.
 
 ## 方案概述（Approach, high-level）
 

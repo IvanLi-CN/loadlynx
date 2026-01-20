@@ -39,3 +39,138 @@
 
 /* Fix for range input in daisyUI 5 + Tailwind 4 if needed, 
    but standard range-primary should work with the mapped colors */
+
+@layer components {
+    .instrument-viewport {
+        background:
+            radial-gradient(
+                1200px 600px at 50% 0%,
+                rgba(111, 234, 249, 0.10),
+                transparent 55%
+            ),
+            radial-gradient(
+                900px 520px at 50% 85%,
+                rgba(131, 255, 210, 0.06),
+                transparent 60%
+            ),
+            radial-gradient(
+                1600px 900px at 50% 65%,
+                rgba(0, 0, 0, 0.35),
+                rgba(0, 0, 0, 0.72) 72%,
+                rgba(0, 0, 0, 0.85) 100%
+            ),
+            linear-gradient(180deg, #0b1017 0%, #050a19 100%);
+    }
+
+    .instrument-frame {
+        border-radius: 1.5rem;
+        border: 1px solid rgba(149, 168, 163, 0.18);
+        background: linear-gradient(180deg, rgba(18, 24, 34, 0.94) 0%, rgba(11, 16, 23, 0.94) 100%);
+        box-shadow:
+            0 0 0 1px rgba(149, 168, 163, 0.05),
+            0 60px 140px rgba(0, 0, 0, 0.72);
+    }
+
+    .instrument-frame-inner {
+        border-radius: 1.125rem;
+        border: 1px solid rgba(149, 168, 163, 0.12);
+        background:
+            radial-gradient(
+                1100px 380px at 50% 0%,
+                rgba(79, 151, 158, 0.14),
+                transparent 62%
+            ),
+            linear-gradient(
+                180deg,
+                rgba(11, 16, 23, 0.35) 0%,
+                rgba(5, 10, 25, 0.70) 100%
+            );
+    }
+
+    .instrument-card {
+        border-radius: 0.95rem;
+        border: 1px solid rgba(149, 168, 163, 0.12);
+        background: linear-gradient(
+            180deg,
+            rgba(18, 24, 34, 0.62) 0%,
+            rgba(11, 16, 23, 0.74) 100%
+        );
+        box-shadow:
+            inset 0 1px 0 rgba(255, 255, 255, 0.04),
+            inset 0 -16px 36px rgba(0, 0, 0, 0.35);
+    }
+
+    .instrument-label {
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: rgba(106, 120, 137, 0.90);
+    }
+
+    .instrument-number {
+        display: inline-flex;
+        align-items: baseline;
+    }
+
+    .instrument-number-dot {
+        display: inline-flex;
+        justify-content: center;
+        width: 0.65ch;
+        opacity: 0.9;
+    }
+
+    .instrument-glow-cyan {
+        color: #6feaf9;
+        text-shadow: 0 0 18px rgba(111, 234, 249, 0.32);
+    }
+
+    .instrument-glow-green {
+        color: #83ffd2;
+        text-shadow: 0 0 20px rgba(131, 255, 210, 0.28);
+    }
+
+    .instrument-glow-amber {
+        color: #fdd45e;
+        text-shadow: 0 0 18px rgba(253, 212, 94, 0.26);
+    }
+
+    .instrument-pill {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 9999px;
+        border: 1px solid rgba(149, 168, 163, 0.20);
+        background: rgba(0, 0, 0, 0.18);
+        padding: 0.25rem 0.75rem;
+        font-size: 10px;
+        font-weight: 600;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: rgba(149, 168, 163, 0.78);
+    }
+
+    .instrument-pill-cyan {
+        border-color: rgba(111, 234, 249, 0.28);
+        background: rgba(111, 234, 249, 0.10);
+        color: #6feaf9;
+    }
+
+    .instrument-pill-green {
+        border-color: rgba(138, 224, 100, 0.28);
+        background: rgba(138, 224, 100, 0.10);
+        color: #8ae064;
+    }
+
+    .instrument-pill-amber {
+        border-color: rgba(246, 201, 90, 0.28);
+        background: rgba(246, 201, 90, 0.10);
+        color: #f6c95a;
+    }
+
+    .instrument-pill-danger {
+        border-color: rgba(239, 68, 68, 0.25);
+        background: rgba(239, 68, 68, 0.10);
+        color: rgba(254, 202, 202, 0.95);
+    }
+}

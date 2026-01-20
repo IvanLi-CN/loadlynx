@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { within } from "@testing-library/dom";
+import { waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import type { StoredDevice } from "../../devices/device-store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
@@ -21,21 +21,50 @@ export const Default: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole("heading", { name: /Device control/i });
-    await canvas.findByRole("heading", { name: /Presets/i });
-    await canvas.findByText(/1500\s*mA/);
+    await canvas.findByText(/MODE & OUTPUT/i);
+    await canvas.findByText(/PRESETS/i);
+
+    await waitFor(
+      () => {
+        const activePreset = canvas.getByTestId("control-active-preset");
+        if ((activePreset.textContent ?? "").includes("—")) {
+          throw new Error("Expected control state to be loaded");
+        }
+      },
+      { timeout: 5_000 },
+    );
 
     const outputToggle = await canvas.findByRole("checkbox", {
       name: /Output enabled/i,
     });
 
+    await waitFor(
+      () => {
+        const toggle = canvas.getByRole("checkbox", {
+          name: /Output enabled/i,
+        }) as HTMLInputElement;
+        if (toggle.disabled) {
+          throw new Error("Expected Output enabled toggle to be enabled");
+        }
+      },
+      { timeout: 5_000 },
+    );
+
     if ((outputToggle as HTMLInputElement).checked) {
       throw new Error("Expected Output enabled to start unchecked");
     }
     await userEvent.click(outputToggle);
-    if (!(outputToggle as HTMLInputElement).checked) {
-      throw new Error("Expected Output enabled to be checked after click");
-    }
+    await waitFor(
+      () => {
+        const toggled = canvas.getByRole("checkbox", {
+          name: /Output enabled/i,
+        }) as HTMLInputElement;
+        if (!toggled.checked) {
+          throw new Error("Expected Output enabled to be checked after click");
+        }
+      },
+      { timeout: 5_000 },
+    );
   },
 };
 
@@ -68,12 +97,11 @@ export const CpUnsupported: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: /Device control/i });
-    await canvas.findByText(/CP: 固件不支持/i);
-    const modeSelect = await canvas.findByLabelText(/Mode/i);
-    if ((modeSelect as HTMLSelectElement).querySelector('option[value="cp"]')) {
+    await canvas.findByText(/MODE & OUTPUT/i);
+    const cpBtn = await canvas.findByRole("button", { name: "CP" });
+    if (!(cpBtn as HTMLButtonElement).disabled) {
       throw new Error(
-        "Expected CP option to be hidden when cp_supported=false",
+        "Expected CP button to be disabled when cp_supported=false",
       );
     }
   },
@@ -85,7 +113,6 @@ export const LinkDown: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: /Device control/i });
     await canvas.findByText(/HTTP error: LINK_DOWN/i);
   },
 };
@@ -99,7 +126,6 @@ export const AnalogNotReady: Story = {
   ),
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: /Device control/i });
     await canvas.findByText(/HTTP error: ANALOG_NOT_READY/i);
   },
 };
@@ -114,11 +140,13 @@ export const LimitViolationBlocked: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole("heading", { name: /Device control/i });
-    await canvas.findByRole("heading", { name: /Preset editor/i });
-    await canvas.findByText(/API version:/i);
+    await canvas.findByText(/PRESETS/i);
 
-    const modeSelect = await canvas.findByLabelText(/Mode/i);
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Advanced/i }),
+    );
+
+    const modeSelect = await canvas.findByRole("combobox", { name: /^Mode$/i });
     await userEvent.selectOptions(modeSelect, "cp");
 
     await userEvent.clear(await canvas.findByLabelText(/Max power/i));
@@ -129,9 +157,15 @@ export const LimitViolationBlocked: Story = {
 
     await canvas.findByText(/target_p_mw must be ≤ max_p_mw/i);
 
-    const saveBtn = await canvas.findByRole("button", { name: /Save preset/i });
+    const advancedRegion = await canvas.findByRole("region", {
+      name: /Advanced/i,
+    });
+    const advanced = within(advancedRegion);
+    const saveBtn = await advanced.findByRole("button", {
+      name: /Save Draft/i,
+    });
     if (!(saveBtn as HTMLButtonElement).disabled) {
-      throw new Error("Expected Save preset to be disabled on limit violation");
+      throw new Error("Expected Save Draft to be disabled on limit violation");
     }
   },
 };

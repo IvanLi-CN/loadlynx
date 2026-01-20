@@ -73,6 +73,6 @@
 | 0017 | CP 模式：本机屏幕界面 + HTTP API | 已完成 | `0017:cp-mode-ui-http-api/PLAN.md` | 2026-01-18 | HIL (internal): CP multi-level + large-step: cp_perf t10_90/t90_10<=1ms AND peak_err<=max(0.1*Δ, tol) within 1ms; script: `scripts/cp-acceptance.sh` |
 | 0018 | Web：CP 模式控制页 | 已完成 | `0018:web-cp-mode-ui/PLAN.md` | 2026-01-19 | Entry: /$deviceId/cc |
 | 0019 | 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed） | 已完成 | `0019:dashboard-pd-button-label/PLAN.md` | 2026-01-19 | HIL: pd_button Active from contract |
-| 0020 | Web：仪器风格主界面（左监右控） | 待实现 | `0020:web-instrument-control-ui/PLAN.md` | 2026-01-16 | - |
+| 0020 | Web：仪器风格主界面（左监右控） | 已完成 | `0020:web-instrument-control-ui/PLAN.md` | 2026-01-20 | - |
 | 0021 | 触摸弹簧（GPIO14）负载开关 + RGB PWM 指示灯 | 待实现 | `0021:touch-spring-load-switch-rgb-led/PLAN.md` | 2026-01-19 | - |
 | 0022 | Storybook：隐藏断点竖线标尺（768/1024） | 待实现 | `0022:storybook-hide-breakpoint-guides/PLAN.md` | 2026-01-20 | - |
