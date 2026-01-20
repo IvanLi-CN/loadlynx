@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { within } from "@testing-library/dom";
+import { waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import type { StoredDevice } from "../../devices/device-store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
@@ -24,17 +24,47 @@ export const Default: Story = {
     await canvas.findByText(/MODE & OUTPUT/i);
     await canvas.findByText(/PRESETS/i);
 
+    await waitFor(
+      () => {
+        const activePreset = canvas.getByTestId("control-active-preset");
+        if ((activePreset.textContent ?? "").includes("—")) {
+          throw new Error("Expected control state to be loaded");
+        }
+      },
+      { timeout: 5_000 },
+    );
+
     const outputToggle = await canvas.findByRole("checkbox", {
       name: /Output enabled/i,
     });
+
+    await waitFor(
+      () => {
+        const toggle = canvas.getByRole("checkbox", {
+          name: /Output enabled/i,
+        }) as HTMLInputElement;
+        if (toggle.disabled) {
+          throw new Error("Expected Output enabled toggle to be enabled");
+        }
+      },
+      { timeout: 5_000 },
+    );
 
     if ((outputToggle as HTMLInputElement).checked) {
       throw new Error("Expected Output enabled to start unchecked");
     }
     await userEvent.click(outputToggle);
-    if (!(outputToggle as HTMLInputElement).checked) {
-      throw new Error("Expected Output enabled to be checked after click");
-    }
+    await waitFor(
+      () => {
+        const toggled = canvas.getByRole("checkbox", {
+          name: /Output enabled/i,
+        }) as HTMLInputElement;
+        if (!toggled.checked) {
+          throw new Error("Expected Output enabled to be checked after click");
+        }
+      },
+      { timeout: 5_000 },
+    );
   },
 };
 
@@ -116,7 +146,7 @@ export const LimitViolationBlocked: Story = {
       await canvas.findByRole("button", { name: /Advanced/i }),
     );
 
-    const modeSelect = await canvas.findByLabelText(/Mode/i);
+    const modeSelect = await canvas.findByRole("combobox", { name: /^Mode$/i });
     await userEvent.selectOptions(modeSelect, "cp");
 
     await userEvent.clear(await canvas.findByLabelText(/Max power/i));
