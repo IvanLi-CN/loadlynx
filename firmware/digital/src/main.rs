@@ -207,10 +207,17 @@ const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
 pub(crate) const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 pub(crate) const TARGET_I_MIN_MA: i32 = 0;
 pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
+// Default is conservative (100W continuous); enable `pmax_200w_test` to raise the software hard
+// limit for stress testing.
+pub(crate) const HARD_MAX_P_MW: u32 = if cfg!(feature = "pmax_200w_test") {
+    200_000
+} else {
+    100_000
+};
 // 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
 pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     max_i_ma: TARGET_I_MAX_MA,
-    max_p_mw: 100_000,
+    max_p_mw: HARD_MAX_P_MW,
     ovp_mv: 40_000,
     temp_trip_mc: 100_000,
     thermal_derate_pct: 100,

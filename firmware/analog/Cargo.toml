@@ -58,3 +58,8 @@ panic = 'abort'
 
 [package.metadata.docs.rs]
 targets = ["thumbv7em-none-eabihf"]
+
+[features]
+default = []
+# Temporary bring-up / stress-test knob: raise software hard power limit to 200W.
+pmax_200w_test = []
