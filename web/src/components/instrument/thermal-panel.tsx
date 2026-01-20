@@ -1,5 +1,5 @@
-import { formatFixed } from "./format.ts";
 import { FixedNumber } from "./fixed-number.tsx";
+import { formatFixed } from "./format.ts";
 import { Sparkline } from "./sparkline.tsx";
 
 export type ThermalPanelProps = {
@@ -19,10 +19,7 @@ export function ThermalPanel({
 }: ThermalPanelProps) {
   const hasFaults = faults.length > 0;
   return (
-    <section
-      aria-label="Thermal and faults"
-      className="instrument-card p-5"
-    >
+    <section aria-label="Thermal and faults" className="instrument-card p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className="instrument-label">Thermal / Faults</div>

@@ -24,4 +24,3 @@ export function FixedNumber({ value, digits }: FixedNumberProps) {
     </span>
   );
 }
-

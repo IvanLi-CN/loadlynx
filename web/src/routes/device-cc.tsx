@@ -26,13 +26,13 @@ import type {
   Preset,
   PresetId,
 } from "../api/types.ts";
+import { AdvancedPanel } from "../components/instrument/advanced-panel.tsx";
+import { ControlModePanel } from "../components/instrument/control-mode-panel.tsx";
+import { DiagnosticsPanel } from "../components/instrument/diagnostics-panel.tsx";
 import {
   formatUptimeSeconds,
   formatWithUnit,
 } from "../components/instrument/format.ts";
-import { AdvancedPanel } from "../components/instrument/advanced-panel.tsx";
-import { ControlModePanel } from "../components/instrument/control-mode-panel.tsx";
-import { DiagnosticsPanel } from "../components/instrument/diagnostics-panel.tsx";
 import { HealthTiles } from "../components/instrument/health-tiles.tsx";
 import { InstrumentStatusBar } from "../components/instrument/instrument-status-bar.tsx";
 import { LimitsPanel } from "../components/instrument/limits-panel.tsx";
@@ -668,7 +668,9 @@ export function DeviceCcRoute() {
   });
 
   const outputToggleDisabled =
-    !control || updateControlMutation.isPending || applyPresetMutation.isPending;
+    !control ||
+    updateControlMutation.isPending ||
+    applyPresetMutation.isPending;
 
   const setpoints = [
     {
@@ -777,7 +779,9 @@ export function DeviceCcRoute() {
                   <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                     <MainDisplayPanel
                       headline={headline}
-                      modeLabel={activeLoadModeBadge as "CC" | "CV" | "CP" | "CR"}
+                      modeLabel={
+                        activeLoadModeBadge as "CC" | "CV" | "CP" | "CR"
+                      }
                       setpointLabel={activeSetpointLabel ?? "—"}
                       uptimeLabel={formatUptimeSeconds(uptimeSeconds)}
                       trend={{
@@ -846,7 +850,9 @@ export function DeviceCcRoute() {
                       if (nextEnabled) {
                         setShowOutputReenableHint(false);
                       }
-                      updateControlMutation.mutate({ output_enabled: nextEnabled });
+                      updateControlMutation.mutate({
+                        output_enabled: nextEnabled,
+                      });
                     }}
                     outputHint={
                       control?.output_enabled
@@ -856,7 +862,8 @@ export function DeviceCcRoute() {
                     showOutputReenableHint={showOutputReenableHint}
                   />
 
-                  {updateControlMutation.isError && updateControlMutation.error ? (
+                  {updateControlMutation.isError &&
+                  updateControlMutation.error ? (
                     <div className="rounded-2xl border border-red-400/15 bg-red-500/10 px-4 py-3 text-[12px] text-red-200">
                       {isHttpApiError(updateControlMutation.error)
                         ? `${updateControlMutation.error.code ?? "HTTP_ERROR"} — ${updateControlMutation.error.message}`
@@ -877,7 +884,8 @@ export function DeviceCcRoute() {
                       Active mode: {control?.preset.mode ?? "—"}
                     </div>
                     <div data-testid="control-output-enabled">
-                      Output enabled: {control?.output_enabled ? "true" : "false"}
+                      Output enabled:{" "}
+                      {control?.output_enabled ? "true" : "false"}
                     </div>
                     <div data-testid="control-uv-latched">
                       UV latched: {control?.uv_latched ? "true" : "false"}
@@ -921,16 +929,21 @@ export function DeviceCcRoute() {
                               className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
                               value={draftPresetMode}
                               onChange={(event) =>
-                                setDraftPresetMode(event.target.value as LoadMode)
+                                setDraftPresetMode(
+                                  event.target.value as LoadMode,
+                                )
                               }
                             >
                               <option value="cc">cc</option>
                               <option value="cv">cv</option>
-                              {cpSupported ? <option value="cp">cp</option> : null}
+                              {cpSupported ? (
+                                <option value="cp">cp</option>
+                              ) : null}
                             </select>
                             {identityQuery.isSuccess && !cpSupported ? (
                               <div className="mt-2 text-[11px] text-slate-200/55">
-                                CP: 固件不支持（identity.capabilities.cp_supported=false）
+                                CP:
+                                固件不支持（identity.capabilities.cp_supported=false）
                               </div>
                             ) : null}
                           </div>
@@ -950,7 +963,10 @@ export function DeviceCcRoute() {
                                 value={draftPresetTargetIMa}
                                 onChange={(event) =>
                                   setDraftPresetTargetIMa(
-                                    Number.parseInt(event.target.value || "0", 10),
+                                    Number.parseInt(
+                                      event.target.value || "0",
+                                      10,
+                                    ),
                                   )
                                 }
                               />
@@ -970,7 +986,10 @@ export function DeviceCcRoute() {
                                 value={draftPresetTargetVMv}
                                 onChange={(event) =>
                                   setDraftPresetTargetVMv(
-                                    Number.parseInt(event.target.value || "0", 10),
+                                    Number.parseInt(
+                                      event.target.value || "0",
+                                      10,
+                                    ),
                                   )
                                 }
                               />
@@ -995,7 +1014,10 @@ export function DeviceCcRoute() {
                                 value={draftPresetTargetPMw}
                                 onChange={(event) =>
                                   setDraftPresetTargetPMw(
-                                    Number.parseInt(event.target.value || "0", 10),
+                                    Number.parseInt(
+                                      event.target.value || "0",
+                                      10,
+                                    ),
                                   )
                                 }
                               />
@@ -1021,7 +1043,10 @@ export function DeviceCcRoute() {
                               value={draftPresetMinVMv}
                               onChange={(event) =>
                                 setDraftPresetMinVMv(
-                                  Number.parseInt(event.target.value || "0", 10),
+                                  Number.parseInt(
+                                    event.target.value || "0",
+                                    10,
+                                  ),
                                 )
                               }
                             />
@@ -1041,7 +1066,10 @@ export function DeviceCcRoute() {
                               value={draftPresetMaxIMaTotal}
                               onChange={(event) =>
                                 setDraftPresetMaxIMaTotal(
-                                  Number.parseInt(event.target.value || "0", 10),
+                                  Number.parseInt(
+                                    event.target.value || "0",
+                                    10,
+                                  ),
                                 )
                               }
                             />
@@ -1061,7 +1089,10 @@ export function DeviceCcRoute() {
                               value={draftPresetMaxPMw}
                               onChange={(event) =>
                                 setDraftPresetMaxPMw(
-                                  Number.parseInt(event.target.value || "0", 10),
+                                  Number.parseInt(
+                                    event.target.value || "0",
+                                    10,
+                                  ),
                                 )
                               }
                             />
@@ -1074,34 +1105,45 @@ export function DeviceCcRoute() {
                               disabled={savePresetDisabled}
                               onClick={handleSavePreset}
                             >
-                              {updatePresetMutation.isPending ? "Saving…" : "Save Draft"}
+                              {updatePresetMutation.isPending
+                                ? "Saving…"
+                                : "Save Draft"}
                             </button>
                             <button
                               type="button"
                               className="h-9 rounded-lg border border-sky-400/25 bg-sky-500/10 px-3 text-xs font-semibold tracking-[0.14em] text-sky-100 uppercase disabled:opacity-50"
-                              disabled={!baseUrl || applyPresetMutation.isPending}
+                              disabled={
+                                !baseUrl || applyPresetMutation.isPending
+                              }
                               onClick={handleApplyPreset}
                             >
-                              {applyPresetMutation.isPending ? "Applying…" : "Apply Preset"}
+                              {applyPresetMutation.isPending
+                                ? "Applying…"
+                                : "Apply Preset"}
                             </button>
                           </div>
                         </div>
                       </div>
 
-                      {ENABLE_MOCK_DEVTOOLS && baseUrl && isMockBaseUrl(baseUrl) ? (
+                      {ENABLE_MOCK_DEVTOOLS &&
+                      baseUrl &&
+                      isMockBaseUrl(baseUrl) ? (
                         <button
                           type="button"
                           className="h-9 rounded-lg border border-slate-400/10 bg-black/20 px-3 text-xs font-semibold text-slate-200/70 disabled:opacity-50"
                           disabled={!control || debugUvMutation.isPending}
                           onClick={() => {
-                            debugUvMutation.mutate(!(control?.uv_latched ?? false));
+                            debugUvMutation.mutate(
+                              !(control?.uv_latched ?? false),
+                            );
                           }}
                         >
                           Toggle UV latch (mock)
                         </button>
                       ) : null}
 
-                      {updatePresetMutation.isError && updatePresetMutation.error ? (
+                      {updatePresetMutation.isError &&
+                      updatePresetMutation.error ? (
                         <div className="rounded-2xl border border-red-400/15 bg-red-500/10 px-4 py-3 text-[12px] text-red-200">
                           {isHttpApiError(updatePresetMutation.error)
                             ? `${updatePresetMutation.error.code ?? "HTTP_ERROR"} — ${updatePresetMutation.error.message}`
@@ -1117,7 +1159,8 @@ export function DeviceCcRoute() {
                         </div>
                       ) : null}
 
-                      {applyPresetMutation.isError && applyPresetMutation.error ? (
+                      {applyPresetMutation.isError &&
+                      applyPresetMutation.error ? (
                         <div className="rounded-2xl border border-red-400/15 bg-red-500/10 px-4 py-3 text-[12px] text-red-200">
                           {isHttpApiError(applyPresetMutation.error)
                             ? `${applyPresetMutation.error.code ?? "HTTP_ERROR"} — ${applyPresetMutation.error.message}`

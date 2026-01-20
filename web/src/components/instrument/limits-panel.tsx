@@ -15,10 +15,7 @@ function toneClass(tone: LimitsPanelProps["limits"][number]["tone"]): string {
 
 export function LimitsPanel({ limits }: LimitsPanelProps) {
   return (
-    <section
-      aria-label="Limits"
-      className="instrument-card p-5"
-    >
+    <section aria-label="Limits" className="instrument-card p-5">
       <div className="instrument-label">Limits</div>
       <div className="mt-4 grid grid-cols-2 gap-3">
         {limits.map((row) => (
@@ -29,7 +26,9 @@ export function LimitsPanel({ limits }: LimitsPanelProps) {
             <div className="text-[10px] tracking-[0.14em] uppercase text-slate-200/50">
               {row.label}
             </div>
-            <div className={`mt-2 text-sm font-semibold ${toneClass(row.tone)}`}>
+            <div
+              className={`mt-2 text-sm font-semibold ${toneClass(row.tone)}`}
+            >
               {row.value}
             </div>
           </div>

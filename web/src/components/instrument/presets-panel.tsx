@@ -1,5 +1,10 @@
 export type PresetsPanelProps = {
-  presets: Array<{ id: number; label: string; active: boolean; disabled?: boolean }>;
+  presets: Array<{
+    id: number;
+    label: string;
+    active: boolean;
+    disabled?: boolean;
+  }>;
   selectedPresetId: number | null;
   onPresetSelect: (id: number) => void;
   onApply: () => void;

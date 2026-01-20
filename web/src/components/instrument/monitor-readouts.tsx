@@ -1,5 +1,5 @@
-import { formatFixed } from "./format.ts";
 import { FixedNumber } from "./fixed-number.tsx";
+import { formatFixed } from "./format.ts";
 
 export type MonitorReadoutsProps = {
   voltage: {
@@ -80,7 +80,12 @@ export function MonitorReadouts({
         unit="A"
         subline={iSub}
       />
-      <ReadoutTile label="Power (read)" value={power.read} digits={2} unit="W" />
+      <ReadoutTile
+        label="Power (read)"
+        value={power.read}
+        digits={2}
+        unit="W"
+      />
       <ReadoutTile
         label="Resistance (read)"
         value={resistance.read}

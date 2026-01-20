@@ -9,10 +9,7 @@ export type SetpointsPanelProps = {
 
 export function SetpointsPanel({ setpoints }: SetpointsPanelProps) {
   return (
-    <section
-      aria-label="Setpoints"
-      className="instrument-card p-5"
-    >
+    <section aria-label="Setpoints" className="instrument-card p-5">
       <div className="instrument-label">Setpoints</div>
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
         {setpoints.map((row) => {

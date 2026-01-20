@@ -21,10 +21,7 @@ export function MainDisplayPanel({
   const digits = headline.unit === "W" ? 2 : 3;
 
   return (
-    <section
-      aria-label="Main display"
-      className="instrument-card p-5"
-    >
+    <section aria-label="Main display" className="instrument-card p-5">
       <div className="flex items-start justify-between gap-4">
         <div>
           <div className="instrument-label">Main display</div>
@@ -46,10 +43,14 @@ export function MainDisplayPanel({
               Mode: <span className="text-slate-100/90">{modeLabel}</span>
             </span>
             <span>
-              Set: <span className="font-mono text-slate-100/90">{setpointLabel}</span>
+              Set:{" "}
+              <span className="font-mono text-slate-100/90">
+                {setpointLabel}
+              </span>
             </span>
             <span>
-              Uptime: <span className="font-mono text-slate-100/90">{uptimeLabel}</span>
+              Uptime:{" "}
+              <span className="font-mono text-slate-100/90">{uptimeLabel}</span>
             </span>
           </div>
         </div>

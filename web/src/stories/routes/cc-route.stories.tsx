@@ -70,7 +70,9 @@ export const CpUnsupported: Story = {
     await canvas.findByText(/MODE & OUTPUT/i);
     const cpBtn = await canvas.findByRole("button", { name: "CP" });
     if (!(cpBtn as HTMLButtonElement).disabled) {
-      throw new Error("Expected CP button to be disabled when cp_supported=false");
+      throw new Error(
+        "Expected CP button to be disabled when cp_supported=false",
+      );
     }
   },
 };
@@ -110,7 +112,9 @@ export const LimitViolationBlocked: Story = {
 
     await canvas.findByText(/PRESETS/i);
 
-    await userEvent.click(await canvas.findByRole("button", { name: /Advanced/i }));
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Advanced/i }),
+    );
 
     const modeSelect = await canvas.findByLabelText(/Mode/i);
     await userEvent.selectOptions(modeSelect, "cp");
@@ -123,9 +127,13 @@ export const LimitViolationBlocked: Story = {
 
     await canvas.findByText(/target_p_mw must be ≤ max_p_mw/i);
 
-    const advancedRegion = await canvas.findByRole("region", { name: /Advanced/i });
+    const advancedRegion = await canvas.findByRole("region", {
+      name: /Advanced/i,
+    });
     const advanced = within(advancedRegion);
-    const saveBtn = await advanced.findByRole("button", { name: /Save Draft/i });
+    const saveBtn = await advanced.findByRole("button", {
+      name: /Save Draft/i,
+    });
     if (!(saveBtn as HTMLButtonElement).disabled) {
       throw new Error("Expected Save Draft to be disabled on limit violation");
     }
