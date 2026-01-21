@@ -22,16 +22,22 @@ const PORT_MAX = 65535;
 function parsePort(rawValue: string, envVar: string): number {
   const trimmed = rawValue.trim();
   if (trimmed.length === 0) {
-    throw new Error(`[ports] Invalid ${envVar}="${rawValue}": expected integer ${PORT_MIN}..${PORT_MAX}`);
+    throw new Error(
+      `[ports] Invalid ${envVar}="${rawValue}": expected integer ${PORT_MIN}..${PORT_MAX}`,
+    );
   }
 
   if (!/^\d+$/.test(trimmed)) {
-    throw new Error(`[ports] Invalid ${envVar}="${rawValue}": expected integer ${PORT_MIN}..${PORT_MAX}`);
+    throw new Error(
+      `[ports] Invalid ${envVar}="${rawValue}": expected integer ${PORT_MIN}..${PORT_MAX}`,
+    );
   }
 
   const parsed = Number.parseInt(trimmed, 10);
   if (!Number.isSafeInteger(parsed) || parsed < PORT_MIN || parsed > PORT_MAX) {
-    throw new Error(`[ports] Invalid ${envVar}="${rawValue}": expected integer ${PORT_MIN}..${PORT_MAX}`);
+    throw new Error(
+      `[ports] Invalid ${envVar}="${rawValue}": expected integer ${PORT_MIN}..${PORT_MAX}`,
+    );
   }
 
   return parsed;
