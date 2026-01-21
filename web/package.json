@@ -4,18 +4,18 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "node scripts/write-version.mjs && vite",
+    "dev": "node scripts/write-version.mjs && bun scripts/ports.ts check webDev && vite",
     "build": "tsc -b && vite build && node scripts/write-version.mjs",
     "test:e2e": "playwright test",
     "test:e2e:ui": "playwright test --ui",
-    "storybook": "storybook dev -p 6006",
+    "storybook": "STORYBOOK_PORT=$(bun scripts/ports.ts print storybook) && storybook dev -p $STORYBOOK_PORT --exact-port",
     "build-storybook": "storybook build",
     "test:storybook": "test-storybook --failOnConsole --disable-telemetry",
-    "test:storybook:ci": "STORYBOOK_TEST_PORT=$(bun -e 'import getPort from \"get-port\"; console.log(await getPort({ port: 6006 }));') && concurrently -k -s first -n \"SB,TEST\" -c \"magenta,blue\" \"bun run build-storybook --quiet && http-server storybook-static --port $STORYBOOK_TEST_PORT --silent\" \"wait-on tcp:127.0.0.1:$STORYBOOK_TEST_PORT && bun run test:storybook --url http://127.0.0.1:$STORYBOOK_TEST_PORT\"",
+    "test:storybook:ci": "STORYBOOK_TEST_PORT=$(bun scripts/ports.ts print storybookTest) && concurrently -k -s first -n \"SB,TEST\" -c \"magenta,blue\" \"bun run build-storybook --quiet && http-server storybook-static -a 127.0.0.1 --port $STORYBOOK_TEST_PORT --silent\" \"wait-on tcp:127.0.0.1:$STORYBOOK_TEST_PORT && bun run test:storybook --url http://127.0.0.1:$STORYBOOK_TEST_PORT\"",
     "lint": "biome lint .",
     "format": "biome format --write .",
     "check": "biome check .",
-    "preview": "vite preview"
+    "preview": "bun scripts/ports.ts check webPreview && vite preview"
   },
   "dependencies": {
     "@iconify-icons/mdi-light": "^1.2.5",
@@ -42,7 +42,6 @@
     "autoprefixer": "^10.4.22",
     "concurrently": "^9.2.1",
     "daisyui": "^5.5.8",
-    "get-port": "^7.1.0",
     "http-server": "^14.1.1",
     "lefthook": "^2.0.4",
     "playwright": "^1.57.0",
