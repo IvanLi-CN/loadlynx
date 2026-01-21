@@ -77,5 +77,5 @@
 | 0021 | 触摸弹簧（GPIO14）负载开关 + RGB PWM 指示灯 | 待实现 | `0021:touch-spring-load-switch-rgb-led/PLAN.md` | 2026-01-19 | - |
 | 0022 | Storybook：隐藏断点竖线标尺（768/1024） | 已完成 | `0022:storybook-hide-breakpoint-guides/PLAN.md` | 2026-01-20 | - |
 | 0023 | GitHub Pages：Web Deploy 失败修复（lockfile/CI） | 已完成 | `0023:web-pages-deploy-lockfile/PLAN.md` | 2026-01-21 | Actions: web-pages#16 / web-check#105 |
-| 0024 | Web：版本号展示 + GitHub 分支跳转 | 待实现 | `0024:web-version-github-link/PLAN.md` | 2026-01-20 | - |
+| 0024 | Web：版本号展示 + GitHub 分支跳转 | 已完成 | `0024:web-version-github-link/PLAN.md` | 2026-01-21 | - |
 | 0025 | 服务端口规范化（高位端口 + 禁止自动换端口） | 已完成 | `0025:service-ports-avoid-defaults/PLAN.md` | 2026-01-21 | PR #62 |
