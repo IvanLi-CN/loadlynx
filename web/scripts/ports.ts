@@ -93,7 +93,7 @@ if (isExecutedDirectly) {
     process.exit(2);
   }
 
-  if (!(key in LOADLYNX_PORT_REGISTRY)) {
+  if (!Object.hasOwn(LOADLYNX_PORT_REGISTRY, key)) {
     console.error(`[ports] Unknown key "${key}"`);
     console.error(usage());
     process.exit(2);
