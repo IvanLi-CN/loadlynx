@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 部分完成（2/4）
+- Status: 已完成
 - Created: 2026-01-20
-- Last: 2026-01-20
+- Last: 2026-01-21
 
 ## 背景 / 问题陈述
 
@@ -78,8 +78,15 @@
 
 - [x] 对齐 Bun 版本与依赖安装命令（`web-pages` / `web-check` 一致；推荐使用 `bun ci` 或继续使用 `bun install --frozen-lockfile`）
 - [x] 明确并落地 lockfile 策略（仅保留并维护一种 lockfile；避免自动迁移/双锁不一致）
-- [ ] GitHub Actions 验证：`web-check` + `web-pages` 在 `main` 上均成功
-- [ ] GitHub Pages 验证：部署 commit 与 `main` HEAD 对齐（通过 `head_sha`）
+- [x] GitHub Actions 验证：`web-check` + `web-pages` 在 `main` 上均成功
+- [x] GitHub Pages 验证：部署 commit 与 `main` HEAD 对齐（通过 `head_sha`）
+
+## 验证记录
+
+- GitHub Actions (2026-01-21):
+  - `Web Check` #105: success
+  - `Web Deploy (GitHub Pages)` #16: success (`build` + `deploy`)
+  - `head_sha`: `93e86974e960dbd61ca1cb4b651f42e63bd89635`（= `main` HEAD）
 
 ## 已确认口径（Decisions）
 
