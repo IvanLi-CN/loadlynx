@@ -78,4 +78,4 @@
 | 0022 | Storybook：隐藏断点竖线标尺（768/1024） | 已完成 | `0022:storybook-hide-breakpoint-guides/PLAN.md` | 2026-01-20 | - |
 | 0023 | GitHub Pages：Web Deploy 失败修复（lockfile/CI） | 部分完成（2/4） | `0023:web-pages-deploy-lockfile/PLAN.md` | 2026-01-20 | branch: `feat/0023-web-pages-deploy-lockfile` |
 | 0024 | Web：版本号展示 + GitHub 分支跳转 | 待实现 | `0024:web-version-github-link/PLAN.md` | 2026-01-20 | - |
-| 0025 | 服务端口规范化（高位端口 + 禁止自动换端口） | 已完成 | `0025:service-ports-avoid-defaults/PLAN.md` | 2026-01-21 | branch: `feat/0025-service-ports-avoid-defaults` |
+| 0025 | 服务端口规范化（高位端口 + 禁止自动换端口） | 已完成 | `0025:service-ports-avoid-defaults/PLAN.md` | 2026-01-21 | PR #62 |
