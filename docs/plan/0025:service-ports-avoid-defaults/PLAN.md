@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-20
 - Last: 2026-01-21
 
@@ -148,10 +148,10 @@
 
 ## 实现里程碑（Milestones）
 
-- [ ] M1: Vite dev/preview 端口契约化 + strict port（占用即失败）
-- [ ] M2: Storybook dev 端口契约化 + exact port（占用即失败）
-- [ ] M3: Storybook CI 静态站点改为固定端口（移除 `get-port`）
-- [ ] M4: Playwright baseURL/webServer.url 与端口来源一致；补齐文档与 CI 断言
+- [x] M1: Vite dev/preview 端口契约化 + strict port（占用即失败）
+- [x] M2: Storybook dev 端口契约化 + exact port（占用即失败）
+- [x] M3: Storybook CI 静态站点改为固定端口（移除 `get-port`）
+- [x] M4: Playwright baseURL/webServer.url 与端口来源一致；补齐文档与 CI 断言
 
 ## 方案概述（Approach, high-level）
 
@@ -171,6 +171,7 @@
 - `web/playwright.config.ts`
 - `web/package.json`
 - `web/README.md`
+- `web/scripts/ports.ts`
 
 ## 开放问题（需要主人回答）
 
