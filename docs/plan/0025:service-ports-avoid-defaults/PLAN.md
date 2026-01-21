@@ -181,3 +181,7 @@ None.
 ## 假设（需主人确认）
 
 None.
+
+## 变更记录 / Change log
+
+- 2026-01-21: 修复 `web/scripts/ports.ts` CLI key 校验，避免 `toString` 等原型属性被误判为有效 key（PR #62 review fix）。
