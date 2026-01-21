@@ -184,4 +184,4 @@ None.
 
 ## 变更记录 / Change log
 
-- 2026-01-21: 修复 `web/scripts/ports.ts` CLI key 校验，避免 `toString` 等原型属性被误判为有效 key（PR #62 review fix）。
+- 2026-01-21: 修复 `web/scripts/ports.ts` CLI key 校验，避免 `toString` 等原型属性被误判为有效 key；并按 Biome 要求格式化以通过 CI `bun run check`（PR #62 review fix）。
