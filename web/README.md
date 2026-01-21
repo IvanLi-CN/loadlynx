@@ -37,6 +37,25 @@ Core scripts:
 - `bun run format` – run `biome format --write .`.
 - `bun run check` – run `biome check .`.
 - `bun run test:e2e` – run Playwright E2E tests.
+- `bun run storybook` – start the Storybook dev server.
+- `bun run test:storybook:ci` – build Storybook and run Storybook tests against a static site server.
+
+## Ports
+
+To avoid common default ports and accidental “port drift”, LoadLynx uses fixed high ports by default and
+fails fast on conflicts (no automatic port fallback).
+
+Default ports (override via env vars):
+
+- Vite dev server: `LOADLYNX_WEB_DEV_PORT` (default: `25219`)
+- Vite preview server: `LOADLYNX_WEB_PREVIEW_PORT` (default: `22848`)
+- Storybook dev server: `LOADLYNX_STORYBOOK_PORT` (default: `32931`)
+- Storybook test static server: `LOADLYNX_STORYBOOK_TEST_PORT` (default: `34033`)
+
+Examples:
+
+- `LOADLYNX_WEB_DEV_PORT=39999 bun run dev`
+- `LOADLYNX_STORYBOOK_PORT=39998 bun run storybook`
 
 ## USB‑PD Settings
 
