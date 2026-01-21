@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-20
-- Last: 2026-01-20
+- Last: 2026-01-21
 
 ## 背景 / 问题陈述
 
@@ -81,9 +81,9 @@
 
 ## 里程碑（Milestones）
 
-- [ ] 构建期注入：将版本/溯源信息编译进 Vite bundle（`VITE_APP_VERSION` / `VITE_APP_GIT_*` / `VITE_GITHUB_REPO`）
-- [ ] 在 `ConsoleLayout` 增加 `AppVersionLink` 展示位（并在 Storybook runtime 隐藏；数据主来源为构建期注入）
-- [ ] 本地预览与 Pages 验证：版本展示正常、GitHub 跳转正确
+- [x] 构建期注入：将版本/溯源信息编译进 Vite bundle（`VITE_APP_VERSION` / `VITE_APP_GIT_*` / `VITE_GITHUB_REPO`）
+- [x] 在 `ConsoleLayout` 增加 `AppVersionLink` 展示位（并在 Storybook runtime 隐藏；数据主来源为构建期注入）
+- [x] 本地预览与 Pages 验证：版本展示正常、GitHub 跳转正确
 
 ## 开放问题（需要主人回答）
 

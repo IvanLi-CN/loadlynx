@@ -83,3 +83,22 @@ Examples:
 
 - GitHub Actions calls `.github/scripts/compute-version.sh` to emit `APP_EFFECTIVE_VERSION` (from `APP_BASE_VERSION` or `package.json` plus git metadata).
 - `scripts/write-version.mjs` consumes `APP_EFFECTIVE_VERSION` during `bun run build` to write `dist/public/version.json`.
+
+## UI version + GitHub source link
+
+The main Console UI surfaces build metadata directly from build-time injected Vite env vars (compiled into the client bundle via `import.meta.env`), so it does not rely on runtime `fetch("/version.json")`.
+
+- Display: `VITE_APP_VERSION`
+- GitHub target (clickable):
+  - Prefer stable tag (`VITE_APP_GIT_TAG` matching `v*`) → `https://github.com/<repo>/tree/<tag>`
+  - Fallback to commit (`VITE_APP_GIT_SHA`) → `https://github.com/<repo>/commit/<sha>`
+- Repo base: `VITE_GITHUB_REPO` (`Owner/Repo`, defaults to `IvanLi-CN/loadlynx` when unset)
+
+CI injects these vars in `.github/workflows/web-pages.yml` and `.github/workflows/web-check.yml`. For local builds you can set them manually (optional):
+
+```bash
+VITE_APP_VERSION="$(../.github/scripts/compute-version.sh | cut -d= -f2)" \
+VITE_APP_GIT_SHA="$(git rev-parse HEAD)" \
+VITE_GITHUB_REPO="IvanLi-CN/loadlynx" \
+bun run build
+```

@@ -17,6 +17,7 @@ import {
   NAV_ICON_SETTINGS,
   NAV_ICON_STATUS,
 } from "../components/icons/nav-icons.ts";
+import { AppVersionLink } from "../components/layout/app-version-link.tsx";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
 type DeviceTab = "cc" | "status" | "pd" | "settings" | "calibration";
@@ -31,8 +32,13 @@ function isDeviceTab(value: string): value is DeviceTab {
   );
 }
 
+function isStorybookRuntime(): boolean {
+  return globalThis.__LOADLYNX_STORYBOOK__ === true;
+}
+
 export function ConsoleLayout() {
   const navigate = useNavigate();
+  const storybookRuntime = isStorybookRuntime();
 
   const { deviceId } = useParams({ strict: false }) as {
     deviceId?: string;
@@ -51,6 +57,17 @@ export function ConsoleLayout() {
   const [isMediumSidebarExpanded, setIsMediumSidebarExpanded] = useState(false);
 
   const closeDrawer = () => setIsDrawerOpen(false);
+
+  const appVersion = import.meta.env.VITE_APP_VERSION?.trim() || null;
+  const appGitSha = import.meta.env.VITE_APP_GIT_SHA?.trim() || null;
+  const appGitTag = import.meta.env.VITE_APP_GIT_TAG?.trim() || null;
+  const githubRepo =
+    import.meta.env.VITE_GITHUB_REPO?.trim() || "IvanLi-CN/loadlynx";
+
+  const shouldShowVersionLink = !storybookRuntime && appVersion != null;
+  const sidebarVersionVisibilityClass = isMediumSidebarExpanded
+    ? ""
+    : "md:hidden lg:block";
 
   useEffect(() => {
     if (!isDrawerOpen) return;
@@ -357,7 +374,7 @@ export function ConsoleLayout() {
       <div className="flex flex-1 overflow-hidden">
         <aside
           className={[
-            "hidden md:flex flex-col bg-base-200/50 border-r border-base-300 overflow-y-auto",
+            "hidden md:flex flex-col bg-base-200/50 border-r border-base-300 overflow-hidden",
             isMediumSidebarExpanded ? "md:w-64" : "md:w-20",
             "lg:w-64",
           ].join(" ")}
@@ -388,7 +405,27 @@ export function ConsoleLayout() {
             </button>
           </div>
 
-          <SidebarNav variant="sidebar" />
+          <div className="flex-1 overflow-y-auto">
+            <SidebarNav variant="sidebar" />
+          </div>
+
+          {shouldShowVersionLink ? (
+            <div
+              className={[
+                "border-t border-base-300 bg-base-200/50",
+                sidebarVersionVisibilityClass,
+              ].join(" ")}
+            >
+              <div className="px-3 py-3 flex items-center">
+                <AppVersionLink
+                  version={appVersion}
+                  repo={githubRepo}
+                  sha={appGitSha}
+                  tag={appGitTag}
+                />
+              </div>
+            </div>
+          ) : null}
         </aside>
 
         <main className="flex-1 p-3 sm:p-4 md:p-6 overflow-y-auto bg-base-100">
@@ -462,6 +499,17 @@ export function ConsoleLayout() {
                     </button>
                   </div>
                 </div>
+
+                {shouldShowVersionLink ? (
+                  <div className="border-t border-base-300 px-4 py-2 flex items-center justify-end">
+                    <AppVersionLink
+                      version={appVersion}
+                      repo={githubRepo}
+                      sha={appGitSha}
+                      tag={appGitTag}
+                    />
+                  </div>
+                ) : null}
               </div>
             </div>
           </div>
