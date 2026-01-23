@@ -4,14 +4,14 @@ This log captures the current-stability troubleshooting for the analog board **C
 
 ## Hardware context (from netlist)
 
-- Driver / error amp: `U18 = OPA2365` (U18_OUT = `$1N356`)
-- MOSFET: `Q1 = IRFP4468PBF` (Gate = `$1N395`, Source / shunt-top = `$1N151181`)
-- Shunt: `R42 = 50mΩ` between `VLOAD_N` and `$1N151181`
+- Driver / error amp: `U18 = OPA2365` (U18_OUT = OPA output node)
+- MOSFET: `Q1 = IRFP4468PBF` (Gate = Q1 gate node, Source = shunt-top node)
+- Shunt: `R42 = 50mΩ` between `VLOAD_N` and the shunt-top node (Q1 source)
 - Current sense filter: `R9 = 100Ω` (`CUR1_SNS` ↔ `I_SENSE_CH1`), `C48 = 10nF` (`CUR1_SNS` ↔ `GND`)
 - Compensation network:
-  - `C14`: `$1N356` ↔ `CUR1_SNS`
-  - `R17`: `CUR1_SNS` ↔ `$1N91324`
-  - `C13`: `$1N91324` ↔ `$1N356`
+  - `C14`: OPA output node ↔ `CUR1_SNS`
+  - `R17`: `CUR1_SNS` ↔ (R17/C13 junction)
+  - `C13`: (R17/C13 junction) ↔ OPA output node
 
 ## Firmware guardrail (single-channel validation)
 
@@ -56,7 +56,7 @@ To avoid cross-coupling between channels during debugging, the analog firmware h
 
 ## Observations (2025-12-17)
 
-Assuming these screenshots are taken at the shunt-top node (`$1N151181`) to ground:
+Assuming these screenshots are taken at the shunt-top node (Q1 source / top of `R42`) to ground:
 
 - Up to ~`4.2 A`: ripple is small (a few mVpp), no dominant sinusoid.
 - At `≥4.2 A`: a clean sinusoidal oscillation appears and persists up to higher currents with similar shape (limit-cycle / self-oscillation):
@@ -276,7 +276,7 @@ Hardware change: install series RC across the DC-jack input net:
 
 - `R64 = 2.2Ω` (series)
 - `C58 = 10µF` (to VLOAD_N)
-- Topology in netlist: `VLOAD_P1 — R64 — $1N220151 — C58 — VLOAD_N` (series RC across VLOAD_P1↔VLOAD_N)
+- Topology in netlist: `VLOAD_P1 — R64 — (R64/C58 junction) — C58 — VLOAD_N` (series RC across VLOAD_P1↔VLOAD_N)
 
 Scope captures (local): `pastepreset-batch-20251217-190812/` (5 A)
 
@@ -350,7 +350,7 @@ Result / interpretation:
 
 Hardware change:
 
-- Install `C56 = 47nF` between `Q1_G ($1N395)` and shunt-top / source (`$1N151181`).
+- Install `C56 = 47nF` between Q1 gate node and the shunt-top / source node.
 
 Scope captures (local): `pastepreset-batch-20251217-234717/` (5 A)
 
@@ -478,5 +478,5 @@ Validation (one capture):
 Note (netlist updated 2025-12-17):
 
 - After replacing the analog netlist with `Netlist_Power_rev4_1_2025-12-17.enet`, the reserved damper is present:
-  - `R64` + `C58` form a **series RC** from `VLOAD_P1` → `VLOAD_N` (`VLOAD_P1` — `R64` — `$1N220151` — `C58` — `VLOAD_N`).
+  - `R64` + `C58` form a **series RC** from `VLOAD_P1` → `VLOAD_N` (`VLOAD_P1` — `R64` — (R64/C58 junction) — `C58` — `VLOAD_N`).
   - `R44` links `VLOAD_P` ↔ `VLOAD_P1`, so if `R44` is populated/shorted, the RC damper also effectively sits across `VLOAD_P` ↔ `VLOAD_N`.
