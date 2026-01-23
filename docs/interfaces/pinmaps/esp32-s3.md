@@ -63,7 +63,7 @@
 | 11 | GPIO6 | TFT_RST | TFT 模块复位。 |
 | 15 | GPIO10 | DC | TFT Data/Command 选择。 |
 | 27 | GPIO21 | BUZZER | 驱动蜂鸣器。 |
-| 38 | GPIO33 | ALG_EN | 电源开关使能输出（默认低，按所用器件要求配置上拉/下拉）。 |
+| 38 | GPIO33 | ALG_EN | 电源开关使能输出（默认低）。注意：`GPIO33` 经 `R1=100Ω` 串联后命名为 `ALG_EN` 并通过 FPC 输出（见网表 `docs/power/netlists/digital-board-netlist.enet:gge433` / `gge419_1`）。 |
 | 39 | GPIO34 | AMP_SD_MODE | MAX98357A：`SD_MODE`（shutdown + channel select）；固件可用作 AMP_EN（低=shutdown；高=Left）。 |
 | 40 | GPIO35 | I2S_BCLK | MAX98357A I²S：位时钟（BCLK）。 |
 | 41 | GPIO36 | I2S_LRCLK | MAX98357A I²S：字选择/左右时钟（LRCLK）。 |
@@ -138,7 +138,7 @@
 | 35 | SPID | — | 保留 | [FLASH]。 |
 | 36 | SPICLK_N | — | 保留 | [FLASH] 差分。 |
 | 37 | SPICLK_P | — | 保留 | [FLASH] 差分。 |
-| 38 | GPIO33 | ALG_EN | 已用 | 电源开关使能；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
+| 38 | GPIO33 | ALG_EN | 已用 | 电源开关使能；`GPIO33` 经 `R1=100Ω` 串联后为 `ALG_EN` 并通过 FPC 输出；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
 | 39 | GPIO34 | AMP_SD_MODE | 规划 | MAX98357A：`SD_MODE`（shutdown + channel select）；固件可用作 AMP_EN（低=shutdown；高=Left）（Plan #0021）。 |
 | 40 | GPIO35 | I2S_BCLK | 规划 | MAX98357A I²S：位时钟（BCLK）；三线占用需连续封装引脚（Plan #0021）。 |
 | 41 | GPIO36 | I2S_LRCLK | 规划 | MAX98357A I²S：字选择/左右时钟（LRCLK）；三线占用需连续封装引脚（Plan #0021）。 |
