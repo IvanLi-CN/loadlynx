@@ -271,7 +271,7 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 
 ### 风扇控制职责（ESP 主导）
 
-- **硬件归属**：PWM（`FAN_PWM`）与转速反馈（`FAN_TACH`）均接在 ESP32‑S3（`GPIO39/40`，参考 `docs/interfaces/pinmaps/esp32-s3.md:81-82`），STM32G431 仅通过温度/功率遥测提供输入。
+- **硬件归属**：PWM（`FAN_PWM`）与转速反馈（`FAN_TACH`）均接在 ESP32‑S3（`GPIO41/42`，参考 `docs/interfaces/pinmaps/esp32-s3.md`），STM32G431 仅通过温度/功率遥测提供输入。
 - **控制路径**：
   1. G431 在 `FAST_STATUS` 内上报 `sink_core_temp_mc`、`sink_exhaust_temp_mc`、功率与负载信息。
   2. S3 根据这些数据执行风扇曲线（或闭环 PID），直接生成 PWM、占空比与 `thermal_derate`（0–100%，写入 `LIMIT_PROFILE`）并保存在自身 EEPROM。其中风扇控制主要依据 CORE NTC（Tag1 / TS2 / R40，对应 `sink_core_temp_mc`）；EXHAUST NTC（Tag2 / TS1 / R39，对应 `sink_exhaust_temp_mc`）用于判断风道/壳体散热情况（例如风道堵塞或风扇异常等扩展逻辑）。
@@ -280,7 +280,7 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
   - STM32 不再上报 `fan_pwm`/`fan_rpm` 字段；此类数据由 ESP32 本地记录，可通过 UI 或上位机直接读取 ESP 端日志。
   - `SLOW_HOUSEKEEPING` 中亦不包含风扇配置 ID，相关配置完全由 ESP 侧管理。
 - **容错**：ESP 负责风扇供电/报警逻辑（例如检测 Tach 丢失并提示用户），G431 若检测到高温仍会触发本地热保护并失能功率级，形成双重保护（当前实现通过 `fault_flags` 反映相关状态，独立 `FAULT_EVENT` 帧尚未启用）。
-- **当前固件状态**：截至 v0，ESP32‑S3 固件尚未在代码中初始化 `FAN_PWM/FAN_TACH` 引脚，也未实现风扇调速/转速监测任务；本小节描述的风扇控制职责与 `LIMIT_PROFILE/thermal_derate` 协议字段仍处于预留阶段。
+- **当前固件状态**：截至当前版本，ESP32‑S3 固件已初始化 `FAN_PWM`（PWM 输出）；`FAN_TACH` 仍预留为后续转速反馈输入。本小节中“风扇曲线/闭环调速 + tach 监测 + thermal_derate 联动”仍处于规划阶段。
 
 ### 标定数据主存与上电同步
 

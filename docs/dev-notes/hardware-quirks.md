@@ -27,8 +27,8 @@
 
 ## 2. ESP32‑S3 启动相关易混点
 
-- PAD‑JTAG 复用：`MTCK/GPIO39` 与 `MTDO/GPIO40` 默认占用，若用作风扇 `FAN_PWM/TACH` 需在启动早期禁用 PAD‑JTAG。
-  - 参考：`docs/interfaces/pinmaps/esp32-s3.md:93` 起（风扇引脚与 JTAG 提示）。
+- PAD‑JTAG 复用：`MTCK/GPIO39`、`MTDO/GPIO40`、`MTDI/GPIO41`、`MTMS/GPIO42` 默认占用；若用于 RGB PWM 与风扇 `FAN_PWM/TACH` 需在启动早期禁用 PAD‑JTAG。
+  - 参考：`docs/interfaces/pinmaps/esp32-s3.md`（JTAG 提示与相关引脚）。
 
 - FSPI 组上电脉冲：`GPIO8–GPIO13` 等在上电数十微秒内会有低脉冲；作为复位脚（如 `CTP_RST/TFT_RST`）需评估容忍度或增加 RC 延时。
   - 参考：`docs/interfaces/pinmaps/esp32-s3.md`（引脚注意事项）。

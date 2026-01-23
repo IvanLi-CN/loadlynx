@@ -74,7 +74,7 @@
 | 0018 | Web：CP 模式控制页 | 已完成 | `0018:web-cp-mode-ui/PLAN.md` | 2026-01-19 | Entry: /$deviceId/cc |
 | 0019 | 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed） | 已完成 | `0019:dashboard-pd-button-label/PLAN.md` | 2026-01-19 | HIL: pd_button Active from contract |
 | 0020 | Web：仪器风格主界面（左监右控） | 已完成 | `0020:web-instrument-control-ui/PLAN.md` | 2026-01-20 | - |
-| 0021 | 触摸弹簧（GPIO14）负载开关 + RGB PWM 指示灯 | 待实现 | `0021:touch-spring-load-switch-rgb-led/PLAN.md` | 2026-01-19 | - |
+| 0021 | 触摸弹簧（GPIO14）负载开关 + RGB 指示 + 语音播放（MAX98357A/I²S） | 待实现 | `0021:touch-spring-load-switch-rgb-led/PLAN.md` | 2026-01-21 | - |
 | 0022 | Storybook：隐藏断点竖线标尺（768/1024） | 已完成 | `0022:storybook-hide-breakpoint-guides/PLAN.md` | 2026-01-20 | - |
 | 0023 | GitHub Pages：Web Deploy 失败修复（lockfile/CI） | 部分完成（2/4） | `0023:web-pages-deploy-lockfile/PLAN.md` | 2026-01-20 | branch: `feat/0023-web-pages-deploy-lockfile` |
 | 0024 | Web：版本号展示 + GitHub 分支跳转 | 待实现 | `0024:web-version-github-link/PLAN.md` | 2026-01-20 | - |
