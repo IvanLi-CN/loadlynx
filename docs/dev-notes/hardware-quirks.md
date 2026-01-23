@@ -9,7 +9,7 @@
   - 模拟板（STM32G431）命名：`5V_EN`
   - 方向/电平：有效高；数字侧固件上电延时 10 ms 拉高。
   - 参考：
-    - 数字板网表：`docs/power/netlists/digital-board-netlist.enet:1681`（FPC1 第 3 脚 `ALG_EN`）。
+    - 数字板网表：`docs/power/netlists/digital-board-netlist.enet:gge419_1`（FPC1 第 3 脚 `ALG_EN`，且经 R1 串联到 MCU `GPIO33`）。
     - 模拟板网表：`docs/power/netlists/analog-board-netlist.enet:5092`（FPC1 第 14 脚 `5V_EN`）。
     - 固件：`firmware/digital/src/main.rs:257`, `firmware/digital/src/main.rs:258`, `firmware/digital/src/main.rs:322`。
 
@@ -21,14 +21,14 @@
     - STM32G431：`USART3` → `PC10=TX`、`PC11=RX`（`loadlynx.ioc:204-206`，`firmware/analog/src/main.rs:34-45`）。
   - 参考：
     - 模拟板网表示例：隔离器 U13 `pins 6/7 → ESP_RX/ESP_TX`，FPC1 `pins 15/16 → ESP_TX/ESP_RX`（`docs/power/netlists/analog-board-netlist.enet:5032-5094`）。
-    - 数字板网表 FPC1：`docs/power/netlists/digital-board-netlist.enet:1640-1687`（`RX`/`TX`）。
+    - 数字板网表 FPC1：`docs/power/netlists/digital-board-netlist.enet:gge419_1`（Pin 1=`RX`，Pin 2=`TX`）。
 
 > 提示：FPC 连接器在两板上的朝向不同，针脚编号不对号（例：数字侧 `3=ALG_EN`，模拟侧 `14=5V_EN`）。以“网络名”对齐连线，不以“针号”映射。
 
 ## 2. ESP32‑S3 启动相关易混点
 
-- PAD‑JTAG 复用：`MTCK/GPIO39` 与 `MTDO/GPIO40` 默认占用，若用作风扇 `FAN_PWM/TACH` 需在启动早期禁用 PAD‑JTAG。
-  - 参考：`docs/interfaces/pinmaps/esp32-s3.md:93` 起（风扇引脚与 JTAG 提示）。
+- PAD‑JTAG 复用：`MTCK/GPIO39`、`MTDO/GPIO40`、`MTDI/GPIO41`、`MTMS/GPIO42` 默认占用；若用于 RGB PWM 与风扇 `FAN_PWM/TACH` 需在启动早期禁用 PAD‑JTAG。
+  - 参考：`docs/interfaces/pinmaps/esp32-s3.md`（JTAG 提示与相关引脚）。
 
 - FSPI 组上电脉冲：`GPIO8–GPIO13` 等在上电数十微秒内会有低脉冲；作为复位脚（如 `CTP_RST/TFT_RST`）需评估容忍度或增加 RC 延时。
   - 参考：`docs/interfaces/pinmaps/esp32-s3.md`（引脚注意事项）。
