@@ -411,7 +411,9 @@ static TOUCH_SPRING_READ_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_TOUCHDOWN_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_ENABLE_BLOCK_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_MEAS_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_LAST_RAW: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_LAST_MEAS_OK_RAW: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_LAST_BASELINE: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_LAST_DELTA_ABS: AtomicU32 = AtomicU32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
@@ -617,21 +619,18 @@ fn log_wifi_config() {
     );
 }
 
-/// Hook to release PAD‑JTAG so MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) can be used
-/// for reclaimed board IO (RGB PWM + FAN_PWM/FAN_TACH).
+/// Note about reclaimed PAD‑JTAG pins (MTCK/MTDO/MTDI/MTMS = GPIO39–GPIO42).
 ///
-/// On ESP32‑S3, the recommended way in ESP‑IDF is to disable the PAD‑JTAG
-/// mapping (e.g. via esp_apptrace APIs or EFUSE_DIS_PAD_JTAG). This firmware
-/// currently runs directly on `esp-hal` without linking the full ESP‑IDF
-/// runtime, so we rely on the GPIO/LEDC configuration below to re‑purpose
-/// GPIO41 as a PWM output and keep GPIO42 reserved for future tach input.
+/// This firmware runs directly on `esp-hal` (no full ESP‑IDF runtime), and does
+/// not attempt to permanently disable PAD‑JTAG in software (that may require
+/// ESP‑IDF APIs, strapping, or eFuse configuration on the board).
 ///
-/// If the project later adopts `esp-idf-sys`, a proper IDF call can be wired
-/// in here so that all unsafe interaction stays confined to this function.
-fn disable_pad_jtag_for_reclaimed_pins() {
+/// We still configure the GPIOs below for RGB PWM and FAN IO. If PAD‑JTAG is
+/// still actively mapped, those reclaimed pins may not behave as expected.
+fn note_pad_jtag_reclaimed_pins() {
     info!(
-        "PAD-JTAG: preparing MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) for reclaimed IO use; \
-         relying on GPIO reconfiguration (no esp-idf runtime linked)"
+        "PAD-JTAG note: using MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) as reclaimed IO; \
+         firmware does not explicitly disable PAD-JTAG"
     );
 }
 
@@ -1405,7 +1404,9 @@ async fn touch_spring_task(
                 .sar_touch_meas_done()
                 .bit_is_set();
             if done {
-                break;
+                let v = touch14_read_raw();
+                TOUCH_SPRING_LAST_MEAS_OK_RAW.store(v, Ordering::Relaxed);
+                return v;
             }
             if now_ms32().wrapping_sub(start) >= 20 {
                 break;
@@ -1413,7 +1414,15 @@ async fn touch_spring_task(
             cooperative_delay_ms(1).await;
         }
 
-        touch14_read_raw()
+        // Timeout: do NOT blindly trust the status register (it may be stale if
+        // the touch FSM stalled). Prefer the last value observed with meas_done.
+        TOUCH_SPRING_MEAS_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let last_ok = TOUCH_SPRING_LAST_MEAS_OK_RAW.load(Ordering::Relaxed);
+        if last_ok != 0 {
+            last_ok
+        } else {
+            touch14_read_raw()
+        }
     }
 
     init_touch_spring_gpio14();
@@ -5167,9 +5176,8 @@ async fn main(spawner: Spawner) {
     // same serial monitor path as the ROM/bootloader output.
     esp_println::println!("digital-log-probe: main() started, peripherals initialized");
 
-    // 禁用 PAD‑JTAG，将 MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) 释放为普通 GPIO，
-    // 以便下文配置 RGB PWM 与 FAN_PWM/FAN_TACH。
-    disable_pad_jtag_for_reclaimed_pins();
+    // Note: these pins are PAD‑JTAG by default on ESP32‑S3 modules; see note above.
+    note_pad_jtag_reclaimed_pins();
 
     // GPIO33 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
     let alg_en_pin = peripherals.GPIO33;
@@ -5300,7 +5308,7 @@ async fn main(spawner: Spawner) {
     let dc_pin = peripherals.GPIO10;
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
-    let fan_pwm_pin = peripherals.GPIO41; // MTDI / FAN_PWM（PAD‑JTAG 已在启动早期释放）
+    let fan_pwm_pin = peripherals.GPIO41; // MTDI / FAN_PWM (reclaimed PAD‑JTAG pin)
     let buzzer_pin = peripherals.GPIO21; // BUZZER (prompt tone manager)
     let amp_sd_mode_pin = peripherals.GPIO34; // MAX98357A SD_MODE (AMP_EN)
     let i2s_bclk_pin = peripherals.GPIO35; // I2S_BCLK
@@ -5807,13 +5815,14 @@ async fn stats_task() {
             let ts_down = TOUCH_SPRING_TOUCHDOWN_TOTAL.load(Ordering::Relaxed);
             let ts_suppress = TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL.load(Ordering::Relaxed);
             let ts_block = TOUCH_SPRING_ENABLE_BLOCK_TOTAL.load(Ordering::Relaxed);
+            let ts_meas_to = TOUCH_SPRING_MEAS_TIMEOUT_TOTAL.load(Ordering::Relaxed);
             let ts_raw = TOUCH_SPRING_LAST_RAW.load(Ordering::Relaxed);
             let ts_base = TOUCH_SPRING_LAST_BASELINE.load(Ordering::Relaxed);
             let ts_da = TOUCH_SPRING_LAST_DELTA_ABS.load(Ordering::Relaxed);
             let spk_play = speaker::SPEAKER_PLAY_TOTAL.load(Ordering::Relaxed);
             let spk_drop = speaker::SPEAKER_ENQUEUE_DROPS.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}",
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}",
                 ok,
                 de,
                 df,
@@ -5829,6 +5838,7 @@ async fn stats_task() {
                 ts_down,
                 ts_suppress,
                 ts_block,
+                ts_meas_to,
                 ts_raw,
                 ts_base,
                 ts_da,
