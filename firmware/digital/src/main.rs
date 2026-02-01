@@ -11,9 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
-#[cfg(feature = "net_http")]
-use embassy_sync::channel::Channel;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
@@ -165,6 +163,7 @@ use ui::{AnalogState, UiSnapshot};
 mod eeprom;
 mod i2c0;
 mod prompt_tone;
+mod speaker;
 mod touch;
 
 // Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
@@ -1509,6 +1508,7 @@ async fn touch_spring_task(
                         guard.output_enabled = false;
                         bump_control_rev();
                         prompt_tone::enqueue_ui_ok();
+                        speaker::enqueue(speaker::SpeakerSound::UiOk);
                         info!(
                             "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
                             guard.active_preset_id, preset.mode
@@ -1517,6 +1517,7 @@ async fn touch_spring_task(
                         TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
                         last_touch_block_ms = Some(now);
                         prompt_tone::enqueue_ui_fail();
+                        speaker::enqueue(speaker::SpeakerSound::UiFail);
                         info!(
                             "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
                             guard.active_preset_id, preset.mode
@@ -1525,12 +1526,14 @@ async fn touch_spring_task(
                         TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
                         last_touch_block_ms = Some(now);
                         prompt_tone::enqueue_ui_fail();
+                        speaker::enqueue(speaker::SpeakerSound::UiFail);
                         record_enable_block(reason);
                         info!("touch_spring: LOAD enable blocked (reason={})", reason);
                     } else {
                         guard.output_enabled = true;
                         bump_control_rev();
                         prompt_tone::enqueue_ui_ok();
+                        speaker::enqueue(speaker::SpeakerSound::UiOk);
                         info!(
                             "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
                             guard.active_preset_id, preset.mode
@@ -5290,6 +5293,10 @@ async fn main(spawner: Spawner) {
     let backlight_pin = peripherals.GPIO15;
     let fan_pwm_pin = peripherals.GPIO41; // MTDI / FAN_PWM（PAD‑JTAG 已在启动早期释放）
     let buzzer_pin = peripherals.GPIO21; // BUZZER (prompt tone manager)
+    let amp_sd_mode_pin = peripherals.GPIO34; // MAX98357A SD_MODE (AMP_EN)
+    let i2s_bclk_pin = peripherals.GPIO35; // I2S_BCLK
+    let i2s_lrclk_pin = peripherals.GPIO36; // I2S_LRCLK
+    let i2s_din_pin = peripherals.GPIO37; // I2S_DIN (ESP -> AMP)
     // NOTE: GPIO42 (MTMS) is wired to FAN_TACH and intentionally left unused here;
     // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
@@ -5647,6 +5654,17 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(prompt_tone::prompt_tone_task(buzzer_channel))
         .expect("prompt_tone_task spawn");
+    info!("spawning speaker task");
+    spawner
+        .spawn(speaker::speaker_task(
+            peripherals.I2S0,
+            peripherals.DMA_CH2,
+            amp_sd_mode_pin,
+            i2s_bclk_pin,
+            i2s_lrclk_pin,
+            i2s_din_pin,
+        ))
+        .expect("speaker_task spawn");
     info!("spawning fan task");
     spawner
         .spawn(fan_task(telemetry, fan_channel))
@@ -5783,8 +5801,10 @@ async fn stats_task() {
             let ts_raw = TOUCH_SPRING_LAST_RAW.load(Ordering::Relaxed);
             let ts_base = TOUCH_SPRING_LAST_BASELINE.load(Ordering::Relaxed);
             let ts_da = TOUCH_SPRING_LAST_DELTA_ABS.load(Ordering::Relaxed);
+            let spk_play = speaker::SPEAKER_PLAY_TOTAL.load(Ordering::Relaxed);
+            let spk_drop = speaker::SPEAKER_ENQUEUE_DROPS.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}",
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}",
                 ok,
                 de,
                 df,
@@ -5803,6 +5823,8 @@ async fn stats_task() {
                 ts_raw,
                 ts_base,
                 ts_da,
+                spk_play,
+                spk_drop,
             );
         }
     }
