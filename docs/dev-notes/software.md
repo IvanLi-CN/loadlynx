@@ -9,7 +9,7 @@
 1. **芯片与时钟上电（ROM → 应用入口）**
    - 运行 HAL 默认流程，完成最小化时钟、复用及电源域配置。
 2. **关断模拟 5 V 控制路径**
-   - GPIO34 立即设为推挽输出并保持低电平，确保 FPC Pin 14 (`ALG_EN`) 在 MCU 接管后仍保持关断（参考 `docs/power/netlists/digital-board-netlist.enet:1665-1694` 与 `docs/power/netlists/analog-board-netlist.enet:5074-5094`）。
+   - GPIO33 立即设为推挽输出并保持低电平，确保数字板 FPC1 Pin 3（`ALG_EN`）在 MCU 接管后仍保持关断（参考 `docs/power/netlists/digital-board-netlist.enet:gge419_1`、`docs/power/netlists/digital-board-netlist.enet:gge433` 与 `docs/power/netlists/analog-board-netlist.enet:5074-5094`）。
    - 注意：真正的上电抖动抑制依赖 TPS82130 内部 400 kΩ 下拉与板上 RC；固件仅保证“接管后的默认关断”。
 3. **本地数字外设初始化**
    - 完成 SPI2、显示控制 GPIO、背光 PWM 以及执行框架所需的缓冲区/资源配置，此时尚未调度任何任务。
@@ -42,7 +42,9 @@
 1. 构建：`(cd firmware/digital && cargo +esp build)`。
 2. 烧录：`just agentd flash digital`。
 3. 观察日志：`just agentd monitor digital --reset`，应依次看到系统上电、数字外设就绪、TPS82130 5 V 使能确认等信息。
-4. 同时测量 FPC Pin 14/`ALG_EN`，确认延时后由 0 V 拉至 3.3 V，并验证模拟板 5 V 轨启动顺序。
+4. 同时测量跨板使能线，确认延时后由 0 V 拉至 3.3 V，并验证模拟板 5 V 轨启动顺序。
+   - 数字板侧：FPC1 Pin 3=`ALG_EN`（串联电阻 R1 后到 MCU GPIO33）。
+   - 模拟板侧：FPC1 Pin 14=`5V_EN`（被 `ALG_EN` 驱动后使能 TPS82130 EN）。
 
 以上流程为当前 ESP32-S3 固件的权威初始化记录；若固件或硬件改版，请同步修订本笔记。
 

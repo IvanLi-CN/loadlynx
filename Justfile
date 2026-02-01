@@ -17,9 +17,14 @@ fmt:
 a-build:
   set -eu; \
   PROFILE="${PROFILE:-release}"; \
+  FEATURES="${FEATURES:-}"; \
   DEFMT_LOG="${DEFMT_LOG:-info}"; \
   if [ "$PROFILE" = "release" ]; then CARGO_FLAGS="--release"; else CARGO_FLAGS=""; fi; \
-  (cd firmware/analog && DEFMT_LOG="$DEFMT_LOG" cargo build $CARGO_FLAGS --target thumbv7em-none-eabihf)
+  if [ -n "$FEATURES" ]; then \
+  (cd firmware/analog && DEFMT_LOG="$DEFMT_LOG" cargo build $CARGO_FLAGS --features "$FEATURES" --target thumbv7em-none-eabihf); \
+  else \
+  (cd firmware/analog && DEFMT_LOG="$DEFMT_LOG" cargo build $CARGO_FLAGS --target thumbv7em-none-eabihf); \
+  fi
 
 a-info:
   set -eu; \

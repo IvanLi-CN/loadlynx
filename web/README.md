@@ -12,6 +12,13 @@ the `paste-preset` project conventions.
 - Playwright for end-to-end tests
 - Lefthook for local Git hooks
 
+## Lockfile policy
+
+- Single source of truth: `web/bun.lock` (must be committed).
+- Do not use or commit `web/package-lock.json` (npm lockfile). If it exists locally, delete it.
+- After changing dependencies in `web/package.json`, run `bun install` and commit the updated `web/bun.lock`.
+- CI uses `bun ci` and will fail if the lockfile is out of date.
+
 ## Usage
 
 From the `web/` directory:
@@ -30,6 +37,25 @@ Core scripts:
 - `bun run format` – run `biome format --write .`.
 - `bun run check` – run `biome check .`.
 - `bun run test:e2e` – run Playwright E2E tests.
+- `bun run storybook` – start the Storybook dev server.
+- `bun run test:storybook:ci` – build Storybook and run Storybook tests against a static site server.
+
+## Ports
+
+To avoid common default ports and accidental “port drift”, LoadLynx uses fixed high ports by default and
+fails fast on conflicts (no automatic port fallback).
+
+Default ports (override via env vars):
+
+- Vite dev server: `LOADLYNX_WEB_DEV_PORT` (default: `25219`)
+- Vite preview server: `LOADLYNX_WEB_PREVIEW_PORT` (default: `22848`)
+- Storybook dev server: `LOADLYNX_STORYBOOK_PORT` (default: `32931`)
+- Storybook test static server: `LOADLYNX_STORYBOOK_TEST_PORT` (default: `34033`)
+
+Examples:
+
+- `LOADLYNX_WEB_DEV_PORT=39999 bun run dev`
+- `LOADLYNX_STORYBOOK_PORT=39998 bun run storybook`
 
 ## USB‑PD Settings
 
@@ -57,3 +83,22 @@ Core scripts:
 
 - GitHub Actions calls `.github/scripts/compute-version.sh` to emit `APP_EFFECTIVE_VERSION` (from `APP_BASE_VERSION` or `package.json` plus git metadata).
 - `scripts/write-version.mjs` consumes `APP_EFFECTIVE_VERSION` during `bun run build` to write `dist/public/version.json`.
+
+## UI version + GitHub source link
+
+The main Console UI surfaces build metadata directly from build-time injected Vite env vars (compiled into the client bundle via `import.meta.env`), so it does not rely on runtime `fetch("/version.json")`.
+
+- Display: `VITE_APP_VERSION`
+- GitHub target (clickable):
+  - Prefer stable tag (`VITE_APP_GIT_TAG` matching `v*`) → `https://github.com/<repo>/tree/<tag>`
+  - Fallback to commit (`VITE_APP_GIT_SHA`) → `https://github.com/<repo>/commit/<sha>`
+- Repo base: `VITE_GITHUB_REPO` (`Owner/Repo`, defaults to `IvanLi-CN/loadlynx` when unset)
+
+CI injects these vars in `.github/workflows/web-pages.yml` and `.github/workflows/web-check.yml`. For local builds you can set them manually (optional):
+
+```bash
+VITE_APP_VERSION="$(../.github/scripts/compute-version.sh | cut -d= -f2)" \
+VITE_APP_GIT_SHA="$(git rev-parse HEAD)" \
+VITE_GITHUB_REPO="IvanLi-CN/loadlynx" \
+bun run build
+```

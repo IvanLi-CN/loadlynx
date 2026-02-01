@@ -239,10 +239,13 @@ const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
 pub(crate) const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 pub(crate) const TARGET_I_MIN_MA: i32 = 0;
 pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
+// Software hard power limit (mW) used to clamp presets / API requests.
+// NOTE: Hardware/thermal constraints may still require derating at runtime.
+pub(crate) const HARD_MAX_P_MW: u32 = 200_000;
 // 静态 LimitProfile v0：与当前硬保护阈值一致或略更保守。
 pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     max_i_ma: TARGET_I_MAX_MA,
-    max_p_mw: 100_000,
+    max_p_mw: HARD_MAX_P_MW,
     ovp_mv: 40_000,
     temp_trip_mc: 100_000,
     thermal_derate_pct: 100,
@@ -611,19 +614,20 @@ fn log_wifi_config() {
     );
 }
 
-/// Hook to release PAD‑JTAG so MTCK/MTDO (GPIO39/40) can be used for FAN_PWM/FAN_TACH.
+/// Hook to release PAD‑JTAG so MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) can be used
+/// for reclaimed board IO (RGB PWM + FAN_PWM/FAN_TACH).
 ///
 /// On ESP32‑S3, the recommended way in ESP‑IDF is to disable the PAD‑JTAG
 /// mapping (e.g. via esp_apptrace APIs or EFUSE_DIS_PAD_JTAG). This firmware
 /// currently runs directly on `esp-hal` without linking the full ESP‑IDF
 /// runtime, so we rely on the GPIO/LEDC configuration below to re‑purpose
-/// GPIO39 as a PWM output and keep GPIO40 reserved for future tach input.
+/// GPIO41 as a PWM output and keep GPIO42 reserved for future tach input.
 ///
 /// If the project later adopts `esp-idf-sys`, a proper IDF call can be wired
 /// in here so that all unsafe interaction stays confined to this function.
-fn disable_pad_jtag_for_fan_pins() {
+fn disable_pad_jtag_for_reclaimed_pins() {
     info!(
-        "PAD-JTAG: preparing MTCK/MTDO (GPIO39/40) for FAN_PWM/FAN_TACH use; \
+        "PAD-JTAG: preparing MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) for reclaimed IO use; \
          relying on GPIO reconfiguration (no esp-idf runtime linked)"
     );
 }
@@ -4980,12 +4984,12 @@ async fn main(spawner: Spawner) {
     // same serial monitor path as the ROM/bootloader output.
     esp_println::println!("digital-log-probe: main() started, peripherals initialized");
 
-    // 禁用 PAD‑JTAG，将 MTCK/MTDO (GPIO39/40) 释放为普通 GPIO，
-    // 以便下文配置 FAN_PWM/FAN_TACH（GPIO40 仅预留，不在本任务中使用）。
-    disable_pad_jtag_for_fan_pins();
+    // 禁用 PAD‑JTAG，将 MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) 释放为普通 GPIO，
+    // 以便下文配置 RGB PWM 与 FAN_PWM/FAN_TACH。
+    disable_pad_jtag_for_reclaimed_pins();
 
-    // GPIO34 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
-    let alg_en_pin = peripherals.GPIO34;
+    // GPIO33 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
+    let alg_en_pin = peripherals.GPIO33;
     let mut alg_en = Output::new(alg_en_pin, Level::Low, OutputConfig::default());
 
     // External I2C EEPROM (M24C64-FMC6TG) on GPIO8=SDA / GPIO9=SCL, 7-bit addr 0x50.
@@ -5113,9 +5117,9 @@ async fn main(spawner: Spawner) {
     let dc_pin = peripherals.GPIO10;
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
-    let fan_pwm_pin = peripherals.GPIO39; // MTCK / FAN_PWM（PAD‑JTAG 已在启动早期释放）
+    let fan_pwm_pin = peripherals.GPIO41; // MTDI / FAN_PWM（PAD‑JTAG 已在启动早期释放）
     let buzzer_pin = peripherals.GPIO21; // BUZZER (prompt tone manager)
-    // NOTE: GPIO40 (MTDO) is wired to FAN_TACH and intentionally left unused here;
+    // NOTE: GPIO42 (MTMS) is wired to FAN_TACH and intentionally left unused here;
     // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
 
