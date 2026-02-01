@@ -5,13 +5,13 @@
 ## 快速新增一个计划
 
 1. 生成一个新的计划 `ID`（推荐 5 个字符的 nanoId 风格，降低并行建计划时的冲突概率；历史四位数字 `0001`–`9999` 允许继续共存）。
-2. 新建目录：`docs/plan/<id>:<title>/`（`<title>` 用简短 slug，建议 kebab-case）。
+2. 新建目录：`docs/plan/<id>-<title>/`（`<title>` 用简短 slug，建议 kebab-case；历史 `<id>:<title>` 目录命名允许共存）。
 3. 在该目录下创建 `PLAN.md`（模板见下方“PLAN.md 写法（简要）”）。
 4. 在下方 Index 表新增一行，并把 `Status` 设为 `待设计` 或 `待实现`（取决于是否已冻结验收标准），并填入 `Last`（通常为当天）。
 
 ## 目录与命名规则
 
-- 每个计划一个目录：`docs/plan/<id>:<title>/`
+- 每个计划一个目录：`docs/plan/<id>-<title>/`（历史 `<id>:<title>` 目录命名允许共存）
 - `<id>`：推荐 5 个字符的 nanoId 风格，一经分配不要变更。
   - 推荐字符集（小写 + 避免易混淆字符）：`23456789abcdefghjkmnpqrstuvwxyz`
   - 正则：`[23456789abcdefghjkmnpqrstuvwxyz]{5}`
@@ -84,3 +84,4 @@
 | 0024 | Web：版本号展示 + GitHub 分支跳转 | 已完成 | `0024:web-version-github-link/PLAN.md` | 2026-01-21 | - |
 | 0025 | 服务端口规范化（高位端口 + 禁止自动换端口） | 已完成 | `0025:service-ports-avoid-defaults/PLAN.md` | 2026-01-21 | PR #62 |
 | 6mre7 | 触摸电源按键：睡眠待机白光低频呼吸 | 待实现 | `6mre7:touch-power-button-standby-breathing-white/PLAN.md` | 2026-02-01 | - |
+| shkmx | 音频：蜂鸣器 → 扬声器（MAX98357A/I²S） | 待实现 | `shkmx-buzzer-to-speaker-audio/PLAN.md` | 2026-02-01 | - |
