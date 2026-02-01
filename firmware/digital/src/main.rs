@@ -86,6 +86,7 @@ const TOUCH_SPRING_CAL_SAMPLES: u32 = 64;
 const TOUCH_SPRING_POLL_MS: u32 = 10;
 const TOUCH_SPRING_COOLDOWN_MS: u32 = 350;
 const TOUCH_SPRING_BASELINE_EMA_DIV: i32 = 64; // larger = slower drift compensation
+const TOUCH_SPRING_DOWN_STREAK_MIN: u8 = 3; // consecutive samples above threshold to trigger
 
 const RGB_STATUS_PWM_FREQUENCY_KHZ: u32 = 5; // avoid visible flicker
 const RGB_STATUS_SOLID_BRIGHTNESS_PCT: u8 = 35;
@@ -1439,15 +1440,16 @@ async fn touch_spring_task(
     //
     // IMPORTANT (HIL): Touch delta direction can be board/layout dependent, so
     // runtime detection is based on abs(v-baseline) rather than assuming "touch => smaller".
-    let baseline_frac = (baseline0 / 1024).max(1);
-    let noise_delta = noise_span.saturating_mul(8);
-    let down_delta = noise_delta.max(baseline_frac).max(100);
-    let up_delta = (down_delta / 2).max(50);
+    let baseline_frac = (baseline0 / 512).max(1);
+    let noise_delta = noise_span.saturating_mul(12);
+    let down_delta = noise_delta.max(baseline_frac).max(220);
+    let up_delta = (down_delta / 2).max(120);
 
     let mut baseline: i32 = baseline0 as i32;
     let mut touched: bool = false;
     let mut last_action_ms: u32 = now_ms32().wrapping_sub(TOUCH_SPRING_COOLDOWN_MS);
     let mut last_touch_block_ms: Option<u32> = None;
+    let mut down_streak: u8 = 0;
 
     info!(
         "touch spring calibrated: baseline={} (min={}, max={}, span={}), delta_abs_down={}, delta_abs_up={}",
@@ -1484,6 +1486,13 @@ async fn touch_spring_task(
             }
 
             if delta_abs >= down_delta {
+                down_streak = down_streak.saturating_add(1);
+            } else {
+                down_streak = 0;
+            }
+
+            if down_streak >= TOUCH_SPRING_DOWN_STREAK_MIN {
+                down_streak = 0;
                 // Touch-down edge candidate.
                 if now.wrapping_sub(last_action_ms) < TOUCH_SPRING_COOLDOWN_MS {
                     TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL.fetch_add(1, Ordering::Relaxed);
