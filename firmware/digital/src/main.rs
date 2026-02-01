@@ -1288,20 +1288,32 @@ async fn touch_spring_task(
 
         // Configure touch controller scan map to include pad14.
         let rtccntl = esp_hal::peripherals::LPWR::regs();
+        // Match ESP-IDF defaults: idle pads connected to GND (not High-Z).
+        rtccntl
+            .touch_scan_ctrl()
+            .modify(|_, w| w.touch_inactive_connection().set_bit());
         // Enable only TouchPad14 (GPIO14).
         rtccntl
             .touch_scan_ctrl()
             .modify(|_, w| unsafe { w.touch_scan_pad_map().bits(1 << 14) });
-        // Keep timing close to reset defaults (documented as 8MHz touch clock units).
+        // Match ESP-IDF defaults for non-ESP32 targets:
+        // - sleep cycles (RTC_SLOW_CLK units): 0x000f
+        // - measurement cycles (8MHz units): 500
         rtccntl.touch_ctrl1().modify(|_, w| unsafe {
-            w.touch_sleep_cycles().bits(0x0100);
-            w.touch_meas_num().bits(0x1000)
+            w.touch_sleep_cycles().bits(0x000f);
+            w.touch_meas_num().bits(500)
         });
         // Enable touch FSM. For now we use SW-triggered measurements (start_force=1).
         rtccntl.touch_ctrl2().modify(|_, w| {
             // Match ESP-IDF defaults more closely (xpd wait cycles + self-bias).
             unsafe { w.touch_xpd_wait().bits(0xff) };
             w.touch_dbias().set_bit();
+            // Voltage defaults: HIGH=2.7V, LOW=0.5V, ATTEN=0.5V.
+            unsafe {
+                w.touch_drefh().bits(3);
+                w.touch_drefl().bits(0);
+                w.touch_drange().bits(2);
+            }
 
             w.touch_start_fsm_en().set_bit();
             w.touch_start_en().clear_bit();
@@ -1311,6 +1323,20 @@ async fn touch_spring_task(
             w.touch_clk_fo().set_bit();
             w.touch_clkgate_en().set_bit()
         });
+
+        // Touch slope (charge/discharge speed). Reset value is 0, and slope=0 can stall readings.
+        // Match ESP-IDF default: TOUCH_PAD_SLOPE_DEFAULT = 7 (fast).
+        rtccntl
+            .touch_dac1()
+            .modify(|_, w| unsafe { w.touch_pad14_dac().bits(7) });
+
+        // Clear sleep benchmark state (ESP-IDF `touch_ll_sleep_reset_benchmark()`).
+        rtccntl
+            .touch_approach()
+            .modify(|_, w| w.touch_slp_channel_clr().set_bit());
+        rtccntl
+            .touch_approach()
+            .modify(|_, w| w.touch_slp_channel_clr().clear_bit());
         // Pulse timer-force-done, matching ESP-IDF's `touch_ll_timer_force_done()`.
         rtccntl
             .touch_ctrl2()
@@ -1318,7 +1344,10 @@ async fn touch_spring_task(
         rtccntl
             .touch_ctrl2()
             .modify(|_, w| unsafe { w.touch_timer_force_done().bits(0x0) });
-        // Pulse a controller reset to avoid latched/stale state across warm boots.
+        // Reset touch sensor FSM (ESP-IDF `touch_ll_reset()`): 0 -> 1 -> 0.
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| w.touch_reset().clear_bit());
         rtccntl
             .touch_ctrl2()
             .modify(|_, w| w.touch_reset().set_bit());
@@ -1342,15 +1371,14 @@ async fn touch_spring_task(
         // Reset benchmark/raw for all channels so the controller starts producing fresh readings,
         // matching ESP-IDF's `touch_ll_reset_benchmark(TOUCH_PAD_MAX)`.
         sens.sar_touch_chn_st()
-            .modify(|_, w| unsafe { w.sar_touch_channel_clr().bits(1 << 14) });
+            .modify(|_, w| unsafe { w.sar_touch_channel_clr().bits(0x7fff) });
     }
 
     #[inline]
     fn touch14_read_raw() -> u32 {
         let sens = esp_hal::peripherals::SENS::regs();
-        // ESP-IDF's `touch_ll_read_raw_data(touch_num)` indexes as
-        // `sar_touch_status[touch_num - 1]`. For touch_num=14, that is STATUS13.
-        sens.sar_touch_status13().read().data().bits()
+        // Touch channel mask uses bit 14 for pad14, which corresponds to SAR_TOUCH_STATUS14.
+        sens.sar_touch_status14().read().data().bits()
     }
 
     #[inline]
@@ -1364,6 +1392,30 @@ async fn touch_spring_task(
             .modify(|_, w| w.touch_start_en().set_bit());
     }
 
+    async fn touch14_read_measured_raw() -> u32 {
+        touch14_trigger_sw_meas();
+
+        // Wait for measurement done (ESP-IDF `touch_ll_is_measure_done()`), otherwise we may
+        // repeatedly read stale status registers.
+        let start = now_ms32();
+        loop {
+            let done = esp_hal::peripherals::SENS::regs()
+                .sar_touch_chn_st()
+                .read()
+                .sar_touch_meas_done()
+                .bit_is_set();
+            if done {
+                break;
+            }
+            if now_ms32().wrapping_sub(start) >= 20 {
+                break;
+            }
+            cooperative_delay_ms(1).await;
+        }
+
+        touch14_read_raw()
+    }
+
     init_touch_spring_gpio14();
 
     cooperative_delay_ms(TOUCH_SPRING_STARTUP_DELAY_MS).await;
@@ -1374,9 +1426,7 @@ async fn touch_spring_task(
     let mut max: u32 = 0;
     let mut samples: u32 = 0;
     while samples < TOUCH_SPRING_CAL_SAMPLES {
-        touch14_trigger_sw_meas();
-        cooperative_delay_ms(1).await;
-        let v = touch14_read_raw();
+        let v = touch14_read_measured_raw().await;
         TOUCH_SPRING_READ_TOTAL.fetch_add(1, Ordering::Relaxed);
         sum = sum.saturating_add(v as u64);
         min = min.min(v);
@@ -1419,9 +1469,7 @@ async fn touch_spring_task(
     loop {
         let now = now_ms32();
 
-        touch14_trigger_sw_meas();
-        cooperative_delay_ms(1).await;
-        let v = touch14_read_raw();
+        let v = touch14_read_measured_raw().await;
         TOUCH_SPRING_READ_TOTAL.fetch_add(1, Ordering::Relaxed);
 
         let baseline_u32 = baseline.max(0) as u32;
