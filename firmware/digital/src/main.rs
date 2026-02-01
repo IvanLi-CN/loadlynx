@@ -11,9 +11,7 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
-#[cfg(feature = "net_http")]
-use embassy_sync::channel::Channel;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
@@ -82,6 +80,19 @@ const SCREEN_DIM_AFTER_MS: u32 = 2 * 60 * 1000;
 const SCREEN_OFF_AFTER_MS: u32 = 5 * 60 * 1000;
 const SCREEN_DIM_MAX_PCT: u8 = 10;
 
+// Plan #0021: touch spring (GPIO14 TouchPad14) + RGB status LED (GPIO38/39/40).
+const TOUCH_SPRING_STARTUP_DELAY_MS: u32 = 300;
+const TOUCH_SPRING_CAL_SAMPLES: u32 = 64;
+const TOUCH_SPRING_POLL_MS: u32 = 10;
+const TOUCH_SPRING_COOLDOWN_MS: u32 = 350;
+const TOUCH_SPRING_BASELINE_EMA_DIV: i32 = 64; // larger = slower drift compensation
+const TOUCH_SPRING_DOWN_STREAK_MIN: u8 = 3; // consecutive samples above threshold to trigger
+
+const RGB_STATUS_PWM_FREQUENCY_KHZ: u32 = 5; // avoid visible flicker
+const RGB_STATUS_SOLID_BRIGHTNESS_PCT: u8 = 35;
+const RGB_STATUS_BLINK_BRIGHTNESS_PCT: u8 = 35;
+const RGB_STATUS_BLINK_TOGGLE_MS: u32 = 250; // 2 Hz: toggle every 250ms
+
 const SCREEN_POWER_STATE_ACTIVE: u8 = 0;
 const SCREEN_POWER_STATE_DIM: u8 = 1;
 const SCREEN_POWER_STATE_OFF: u8 = 2;
@@ -124,6 +135,26 @@ fn backlight_pwm_disconnect(backlight_pin: &'static OutputSignalPin<'static>) {
     backlight_pin.set_output_high(true);
 }
 
+#[inline]
+fn rgb_hw_duty_pct(logical_pct: u8) -> u8 {
+    // RGB channels are active-low (common anode on 3V3, GPIO sinks current).
+    100u8.saturating_sub(logical_pct.min(100))
+}
+
+#[inline]
+fn set_rgb_pct(
+    r: &'static ledc_channel::Channel<'static, LowSpeed>,
+    g: &'static ledc_channel::Channel<'static, LowSpeed>,
+    b: &'static ledc_channel::Channel<'static, LowSpeed>,
+    r_pct: u8,
+    g_pct: u8,
+    b_pct: u8,
+) {
+    r.set_duty(rgb_hw_duty_pct(r_pct)).expect("rgb r duty");
+    g.set_duty(rgb_hw_duty_pct(g_pct)).expect("rgb g duty");
+    b.set_duty(rgb_hw_duty_pct(b_pct)).expect("rgb b duty");
+}
+
 mod control;
 use control::{ControlState, PresetsBlobError};
 
@@ -133,6 +164,7 @@ use ui::{AnalogState, UiSnapshot};
 mod eeprom;
 mod i2c0;
 mod prompt_tone;
+mod speaker;
 mod touch;
 
 // Optional Wi‑Fi + HTTP support; compiled only when `net_http` feature is set.
@@ -258,6 +290,13 @@ static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell:
 static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static BUZZER_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BUZZER_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
+static RGB_STATUS_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
+static RGB_STATUS_R_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
+    StaticCell::new();
+static RGB_STATUS_G_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
+    StaticCell::new();
+static RGB_STATUS_B_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
+    StaticCell::new();
 static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
@@ -368,6 +407,15 @@ static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
+static TOUCH_SPRING_READ_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_TOUCHDOWN_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_ENABLE_BLOCK_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_MEAS_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_LAST_RAW: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_LAST_MEAS_OK_RAW: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_LAST_BASELINE: AtomicU32 = AtomicU32::new(0);
+static TOUCH_SPRING_LAST_DELTA_ABS: AtomicU32 = AtomicU32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
 static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
@@ -571,21 +619,18 @@ fn log_wifi_config() {
     );
 }
 
-/// Hook to release PAD‑JTAG so MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) can be used
-/// for reclaimed board IO (RGB PWM + FAN_PWM/FAN_TACH).
+/// Note about reclaimed PAD‑JTAG pins (MTCK/MTDO/MTDI/MTMS = GPIO39–GPIO42).
 ///
-/// On ESP32‑S3, the recommended way in ESP‑IDF is to disable the PAD‑JTAG
-/// mapping (e.g. via esp_apptrace APIs or EFUSE_DIS_PAD_JTAG). This firmware
-/// currently runs directly on `esp-hal` without linking the full ESP‑IDF
-/// runtime, so we rely on the GPIO/LEDC configuration below to re‑purpose
-/// GPIO41 as a PWM output and keep GPIO42 reserved for future tach input.
+/// This firmware runs directly on `esp-hal` (no full ESP‑IDF runtime), and does
+/// not attempt to permanently disable PAD‑JTAG in software (that may require
+/// ESP‑IDF APIs, strapping, or eFuse configuration on the board).
 ///
-/// If the project later adopts `esp-idf-sys`, a proper IDF call can be wired
-/// in here so that all unsafe interaction stays confined to this function.
-fn disable_pad_jtag_for_reclaimed_pins() {
+/// We still configure the GPIOs below for RGB PWM and FAN IO. If PAD‑JTAG is
+/// still actively mapped, those reclaimed pins may not behave as expected.
+fn note_pad_jtag_reclaimed_pins() {
     info!(
-        "PAD-JTAG: preparing MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) for reclaimed IO use; \
-         relying on GPIO reconfiguration (no esp-idf runtime linked)"
+        "PAD-JTAG note: using MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) as reclaimed IO; \
+         firmware does not explicitly disable PAD-JTAG"
     );
 }
 
@@ -1187,6 +1232,442 @@ async fn encoder_task(
         for _ in 0..ENCODER_POLL_YIELD_LOOPS {
             yield_now().await;
         }
+    }
+}
+
+#[embassy_executor::task]
+async fn touch_spring_task(
+    _touch_pin: esp_hal::peripherals::GPIO14<'static>,
+    control: &'static ControlMutex,
+    rgb_r: &'static ledc_channel::Channel<'static, LowSpeed>,
+    rgb_g: &'static ledc_channel::Channel<'static, LowSpeed>,
+    rgb_b: &'static ledc_channel::Channel<'static, LowSpeed>,
+) {
+    info!(
+        "touch spring task starting (GPIO14=TouchPad14, poll={}ms, cooldown={}ms, rgb_pwm={}kHz)",
+        TOUCH_SPRING_POLL_MS, TOUCH_SPRING_COOLDOWN_MS, RGB_STATUS_PWM_FREQUENCY_KHZ
+    );
+
+    // Keep RGB dark until touch calibration completes.
+    set_rgb_pct(rgb_r, rgb_g, rgb_b, 0, 0, 0);
+
+    // NOTE: esp-hal 1.0.0 does not currently expose `esp_hal::touch` for ESP32-S3
+    // (cfg(touch) is not set), so we configure + read the S3 touch controller via
+    // PAC registers (RTC_CNTL + RTC_IO + SENS).
+    fn init_touch_spring_gpio14() {
+        // Configure RTC pad14 (GPIO14) for touch mode.
+        let rtcio = esp_hal::peripherals::RTC_IO::regs();
+        rtcio.touch_pad(14).modify(|_, w| {
+            w.fun_ie().clear_bit(); // disable digital input path
+            w.slp_oe().clear_bit();
+            w.slp_ie().clear_bit();
+            w.slp_sel().clear_bit();
+            // Select RTC function and enable analog touch domain.
+            unsafe { w.fun_sel().bits(0) };
+            w.mux_sel().set_bit();
+            w.xpd().set_bit();
+            w.tie_opt().clear_bit();
+            w.rue().clear_bit();
+            w.rde().clear_bit();
+            // Keep the default drive strength (reset value is 0b10).
+            unsafe { w.drv().bits(0b10) };
+            // In continuous/FSM mode, START/XPD are controlled by the touch FSM.
+            // Still set them here to ensure the pad is powered/connected; the FSM will
+            // override/toggle as needed when `touch_start_fsm_en=1`.
+            w.start().set_bit();
+            w.xpd().set_bit();
+            w
+        });
+
+        // Touch sensor on ESP32-S3 is implemented via the RTC/SAR domain and
+        // depends on the SARADC clock. Ensure it is not gated.
+        let sens = esp_hal::peripherals::SENS::regs();
+        sens.sar_peri_clk_gate_conf()
+            .modify(|_, w| w.saradc_clk_en().set_bit());
+
+        // Configure touch controller scan map to include pad14.
+        let rtccntl = esp_hal::peripherals::LPWR::regs();
+        // Match ESP-IDF defaults: idle pads connected to GND (not High-Z).
+        rtccntl
+            .touch_scan_ctrl()
+            .modify(|_, w| w.touch_inactive_connection().set_bit());
+        // Enable only TouchPad14 (GPIO14).
+        rtccntl
+            .touch_scan_ctrl()
+            .modify(|_, w| unsafe { w.touch_scan_pad_map().bits(1 << 14) });
+        // Match ESP-IDF defaults for non-ESP32 targets:
+        // - sleep cycles (RTC_SLOW_CLK units): 0x000f
+        // - measurement cycles (8MHz units): 500
+        rtccntl.touch_ctrl1().modify(|_, w| unsafe {
+            w.touch_sleep_cycles().bits(0x000f);
+            w.touch_meas_num().bits(500)
+        });
+        // Enable touch FSM. For now we use SW-triggered measurements (start_force=1).
+        rtccntl.touch_ctrl2().modify(|_, w| {
+            // Match ESP-IDF defaults more closely (xpd wait cycles + self-bias).
+            unsafe { w.touch_xpd_wait().bits(0xff) };
+            w.touch_dbias().set_bit();
+            // Voltage defaults: HIGH=2.7V, LOW=0.5V, ATTEN=0.5V.
+            unsafe {
+                w.touch_drefh().bits(3);
+                w.touch_drefl().bits(0);
+                w.touch_drange().bits(2);
+            }
+
+            w.touch_start_fsm_en().set_bit();
+            w.touch_start_en().clear_bit();
+            w.touch_start_force().set_bit();
+            // In SW-triggered mode the IDF keeps the sleep-timer gate disabled.
+            w.touch_slp_timer_en().clear_bit();
+            w.touch_clk_fo().set_bit();
+            w.touch_clkgate_en().set_bit()
+        });
+
+        // Touch slope (charge/discharge speed). Reset value is 0, and slope=0 can stall readings.
+        // Match ESP-IDF default: TOUCH_PAD_SLOPE_DEFAULT = 7 (fast).
+        rtccntl
+            .touch_dac1()
+            .modify(|_, w| unsafe { w.touch_pad14_dac().bits(7) });
+
+        // Clear sleep benchmark state (ESP-IDF `touch_ll_sleep_reset_benchmark()`).
+        rtccntl
+            .touch_approach()
+            .modify(|_, w| w.touch_slp_channel_clr().set_bit());
+        rtccntl
+            .touch_approach()
+            .modify(|_, w| w.touch_slp_channel_clr().clear_bit());
+        // Pulse timer-force-done, matching ESP-IDF's `touch_ll_timer_force_done()`.
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| unsafe { w.touch_timer_force_done().bits(0x3) });
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| unsafe { w.touch_timer_force_done().bits(0x0) });
+        // Reset touch sensor FSM (ESP-IDF `touch_ll_reset()`): 0 -> 1 -> 0.
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| w.touch_reset().clear_bit());
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| w.touch_reset().set_bit());
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| w.touch_reset().clear_bit());
+
+        // Select raw touch data and clear stale status.
+        sens.sar_touch_conf().modify(|_, w| unsafe {
+            // Enable only TouchPad14 (bit 14), mirroring ESP-IDF's channel-mask convention.
+            let outen = 1 << 14;
+            w.sar_touch_outen().bits(outen);
+            w.sar_touch_data_sel().bits(0);
+            w.sar_touch_status_clr().set_bit()
+        });
+        // `sar_touch_status_clr` behaves like a clear pulse; ensure it is not
+        // left asserted, otherwise touch status registers may stop updating.
+        sens.sar_touch_conf()
+            .modify(|_, w| w.sar_touch_status_clr().clear_bit());
+
+        // Reset benchmark/raw for all channels so the controller starts producing fresh readings,
+        // matching ESP-IDF's `touch_ll_reset_benchmark(TOUCH_PAD_MAX)`.
+        sens.sar_touch_chn_st()
+            .modify(|_, w| unsafe { w.sar_touch_channel_clr().bits(0x7fff) });
+    }
+
+    #[inline]
+    fn touch14_read_raw() -> u32 {
+        let sens = esp_hal::peripherals::SENS::regs();
+        // Touch channel mask uses bit 14 for pad14, which corresponds to SAR_TOUCH_STATUS14.
+        sens.sar_touch_status14().read().data().bits()
+    }
+
+    #[inline]
+    fn touch14_trigger_sw_meas() {
+        let rtccntl = esp_hal::peripherals::LPWR::regs();
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| w.touch_start_en().clear_bit());
+        rtccntl
+            .touch_ctrl2()
+            .modify(|_, w| w.touch_start_en().set_bit());
+    }
+
+    async fn touch14_read_measured_raw() -> u32 {
+        touch14_trigger_sw_meas();
+
+        // Wait for measurement done (ESP-IDF `touch_ll_is_measure_done()`), otherwise we may
+        // repeatedly read stale status registers.
+        let start = now_ms32();
+        loop {
+            let done = esp_hal::peripherals::SENS::regs()
+                .sar_touch_chn_st()
+                .read()
+                .sar_touch_meas_done()
+                .bit_is_set();
+            if done {
+                let v = touch14_read_raw();
+                TOUCH_SPRING_LAST_MEAS_OK_RAW.store(v, Ordering::Relaxed);
+                return v;
+            }
+            if now_ms32().wrapping_sub(start) >= 20 {
+                break;
+            }
+            cooperative_delay_ms(1).await;
+        }
+
+        // Timeout: do NOT blindly trust the status register (it may be stale if
+        // the touch FSM stalled). Prefer the last value observed with meas_done.
+        TOUCH_SPRING_MEAS_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
+        let last_ok = TOUCH_SPRING_LAST_MEAS_OK_RAW.load(Ordering::Relaxed);
+        if last_ok != 0 {
+            last_ok
+        } else {
+            touch14_read_raw()
+        }
+    }
+
+    init_touch_spring_gpio14();
+
+    cooperative_delay_ms(TOUCH_SPRING_STARTUP_DELAY_MS).await;
+
+    // Baseline calibration window: collect N samples for avg + noise span.
+    let mut sum: u64 = 0;
+    let mut min: u32 = u32::MAX;
+    let mut max: u32 = 0;
+    let mut samples: u32 = 0;
+    while samples < TOUCH_SPRING_CAL_SAMPLES {
+        let v = touch14_read_measured_raw().await;
+        TOUCH_SPRING_READ_TOTAL.fetch_add(1, Ordering::Relaxed);
+        sum = sum.saturating_add(v as u64);
+        min = min.min(v);
+        max = max.max(v);
+        samples += 1;
+        cooperative_delay_ms(TOUCH_SPRING_POLL_MS).await;
+    }
+    let baseline0 = (sum / samples.max(1) as u64) as u32;
+    let noise_span = max.saturating_sub(min) as u32;
+    // Heuristic: threshold based on observed noise + a small baseline fraction.
+    //
+    // IMPORTANT (HIL): Touch delta direction can be board/layout dependent, so
+    // runtime detection is based on abs(v-baseline) rather than assuming "touch => smaller".
+    let baseline_frac = (baseline0 / 512).max(1);
+    let noise_delta = noise_span.saturating_mul(12);
+    let down_delta = noise_delta.max(baseline_frac).max(220);
+    let up_delta = (down_delta / 2).max(120);
+
+    let mut baseline: i32 = baseline0 as i32;
+    let mut touched: bool = false;
+    let mut last_action_ms: u32 = now_ms32().wrapping_sub(TOUCH_SPRING_COOLDOWN_MS);
+    let mut last_touch_block_ms: Option<u32> = None;
+    let mut down_streak: u8 = 0;
+
+    info!(
+        "touch spring calibrated: baseline={} (min={}, max={}, span={}), delta_abs_down={}, delta_abs_up={}",
+        baseline0, min, max, noise_span, down_delta, up_delta
+    );
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    struct Rgb {
+        r: u8,
+        g: u8,
+        b: u8,
+    }
+    let mut last_rgb = Rgb { r: 0, g: 0, b: 0 };
+    let mut blink_on: bool = false;
+    let mut last_blink_toggle_ms: u32 = now_ms32();
+    let mut last_dbg_ms: u32 = now_ms32();
+
+    loop {
+        let now = now_ms32();
+
+        let v = touch14_read_measured_raw().await;
+        TOUCH_SPRING_READ_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+        let baseline_u32 = baseline.max(0) as u32;
+        let delta_abs = v.abs_diff(baseline_u32);
+        TOUCH_SPRING_LAST_RAW.store(v, Ordering::Relaxed);
+        TOUCH_SPRING_LAST_BASELINE.store(baseline_u32, Ordering::Relaxed);
+        TOUCH_SPRING_LAST_DELTA_ABS.store(delta_abs, Ordering::Relaxed);
+
+        if !touched {
+            // Drift compensation: only update baseline while clearly not touched.
+            if delta_abs <= up_delta {
+                baseline += ((v as i32) - baseline) / TOUCH_SPRING_BASELINE_EMA_DIV.max(1);
+            }
+
+            if delta_abs >= down_delta {
+                down_streak = down_streak.saturating_add(1);
+            } else {
+                down_streak = 0;
+            }
+
+            if down_streak >= TOUCH_SPRING_DOWN_STREAK_MIN {
+                down_streak = 0;
+                // Touch-down edge candidate.
+                if now.wrapping_sub(last_action_ms) < TOUCH_SPRING_COOLDOWN_MS {
+                    TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL.fetch_add(1, Ordering::Relaxed);
+                } else {
+                    touched = true;
+                    last_action_ms = now;
+                    TOUCH_SPRING_TOUCHDOWN_TOTAL.fetch_add(1, Ordering::Relaxed);
+
+                    // Dedicated load switch input: treat as user activity (wake screen),
+                    // but do NOT consume (this is intended to work without the UI).
+                    note_user_activity();
+
+                    let mut guard = control.lock().await;
+                    let preset = guard.active_preset();
+                    let setpoint_zero = match preset.mode {
+                        LoadMode::Cp => preset.target_p_mw == 0,
+                        LoadMode::Cv => preset.target_v_mv == 0,
+                        LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+                    };
+
+                    if guard.output_enabled {
+                        guard.output_enabled = false;
+                        bump_control_rev();
+                        prompt_tone::enqueue_ui_ok();
+                        speaker::enqueue(speaker::SpeakerSound::UiOk);
+                        info!(
+                            "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
+                            guard.active_preset_id, preset.mode
+                        );
+                    } else if setpoint_zero {
+                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        last_touch_block_ms = Some(now);
+                        prompt_tone::enqueue_ui_fail();
+                        speaker::enqueue(speaker::SpeakerSound::UiFail);
+                        info!(
+                            "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                            guard.active_preset_id, preset.mode
+                        );
+                    } else if let Some(reason) = current_load_enable_block_abbrev(preset.min_v_mv) {
+                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        last_touch_block_ms = Some(now);
+                        prompt_tone::enqueue_ui_fail();
+                        speaker::enqueue(speaker::SpeakerSound::UiFail);
+                        record_enable_block(reason);
+                        info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                    } else {
+                        guard.output_enabled = true;
+                        bump_control_rev();
+                        prompt_tone::enqueue_ui_ok();
+                        speaker::enqueue(speaker::SpeakerSound::UiOk);
+                        info!(
+                            "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                            guard.active_preset_id, preset.mode
+                        );
+                    }
+                }
+            }
+        } else {
+            // Release edge: require the signal to settle back close to the baseline.
+            if delta_abs <= up_delta {
+                touched = false;
+            }
+        }
+
+        // Status LED mapping (frozen by Plan #0021):
+        // abnormal (yellow blink) > load_enabled=ON (green) > load_enabled=OFF (red).
+        let output_enabled = { control.lock().await.output_enabled };
+        let abnormal = current_load_block_abbrev().is_some()
+            || recent_enable_block_abbrev(now).is_some()
+            || last_touch_block_ms
+                .map(|t| now.wrapping_sub(t) <= ENABLE_BLOCK_TTL_MS)
+                .unwrap_or(false);
+
+        let desired = if abnormal {
+            if now.wrapping_sub(last_blink_toggle_ms) >= RGB_STATUS_BLINK_TOGGLE_MS {
+                blink_on = !blink_on;
+                last_blink_toggle_ms = now;
+            }
+            if blink_on {
+                Rgb {
+                    r: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                    g: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                    b: 0,
+                }
+            } else {
+                Rgb { r: 0, g: 0, b: 0 }
+            }
+        } else if output_enabled {
+            Rgb {
+                r: 0,
+                g: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
+                b: 0,
+            }
+        } else {
+            Rgb {
+                r: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
+                g: 0,
+                b: 0,
+            }
+        };
+
+        if desired != last_rgb {
+            set_rgb_pct(rgb_r, rgb_g, rgb_b, desired.r, desired.g, desired.b);
+            last_rgb = desired;
+        }
+
+        if now.wrapping_sub(last_dbg_ms) >= 1000 {
+            last_dbg_ms = now;
+            let sens = esp_hal::peripherals::SENS::regs();
+            let rtccntl = esp_hal::peripherals::LPWR::regs();
+            let rtcio = esp_hal::peripherals::RTC_IO::regs();
+
+            let outen = sens.sar_touch_conf().read().sar_touch_outen().bits();
+            let unit_done = sens
+                .sar_touch_conf()
+                .read()
+                .sar_touch_unit_end()
+                .bit_is_set();
+            let saradc_clk_en = sens
+                .sar_peri_clk_gate_conf()
+                .read()
+                .saradc_clk_en()
+                .bit_is_set();
+            let ctrl2 = rtccntl.touch_ctrl2().read();
+            let pad14 = rtcio.touch_pad(14).read();
+            let scan_curr = sens
+                .sar_touch_scan_status()
+                .read()
+                .sar_touch_scan_curr()
+                .bits();
+            let meas_done = sens
+                .sar_touch_chn_st()
+                .read()
+                .sar_touch_meas_done()
+                .bit_is_set();
+            let pad_active = sens.sar_touch_chn_st().read().sar_touch_pad_active().bits();
+            let pad_map = rtccntl.touch_scan_ctrl().read().touch_scan_pad_map().bits();
+
+            let v13 = sens.sar_touch_status13().read().data().bits();
+            let v14 = sens.sar_touch_status14().read().data().bits();
+
+            info!(
+                "touch_spring dbg: pad_map=0x{:04x}, outen=0x{:04x}, saradc_clk_en={}, ctrl2(start_fsm={}, start_en={}, start_force={}, slp_timer={}, clk_fo={}, clkgate={}, reset={}), pad14(mux_sel={}, start={}, xpd={}), scan_curr={}, unit_done={}, meas_done={}, pad_active=0x{:04x}, status13={}, status14={}",
+                pad_map,
+                outen,
+                saradc_clk_en,
+                ctrl2.touch_start_fsm_en().bit_is_set(),
+                ctrl2.touch_start_en().bit_is_set(),
+                ctrl2.touch_start_force().bit_is_set(),
+                ctrl2.touch_slp_timer_en().bit_is_set(),
+                ctrl2.touch_clk_fo().bit_is_set(),
+                ctrl2.touch_clkgate_en().bit_is_set(),
+                ctrl2.touch_reset().bit_is_set(),
+                pad14.mux_sel().bit_is_set(),
+                pad14.start().bit_is_set(),
+                pad14.xpd().bit_is_set(),
+                scan_curr,
+                unit_done,
+                meas_done,
+                pad_active,
+                v13,
+                v14
+            );
+        }
+
+        cooperative_delay_ms(TOUCH_SPRING_POLL_MS).await;
     }
 }
 
@@ -4695,9 +5176,8 @@ async fn main(spawner: Spawner) {
     // same serial monitor path as the ROM/bootloader output.
     esp_println::println!("digital-log-probe: main() started, peripherals initialized");
 
-    // 禁用 PAD‑JTAG，将 MTCK/MTDO/MTDI/MTMS (GPIO39–GPIO42) 释放为普通 GPIO，
-    // 以便下文配置 RGB PWM 与 FAN_PWM/FAN_TACH。
-    disable_pad_jtag_for_reclaimed_pins();
+    // Note: these pins are PAD‑JTAG by default on ESP32‑S3 modules; see note above.
+    note_pad_jtag_reclaimed_pins();
 
     // GPIO33 → FPC → 5V_EN, which drives the TPS82130SILR buck (docs/power/netlists/analog-board-netlist.enet).
     let alg_en_pin = peripherals.GPIO33;
@@ -4828,8 +5308,12 @@ async fn main(spawner: Spawner) {
     let dc_pin = peripherals.GPIO10;
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
-    let fan_pwm_pin = peripherals.GPIO41; // MTDI / FAN_PWM（PAD‑JTAG 已在启动早期释放）
+    let fan_pwm_pin = peripherals.GPIO41; // MTDI / FAN_PWM (reclaimed PAD‑JTAG pin)
     let buzzer_pin = peripherals.GPIO21; // BUZZER (prompt tone manager)
+    let amp_sd_mode_pin = peripherals.GPIO34; // MAX98357A SD_MODE (AMP_EN)
+    let i2s_bclk_pin = peripherals.GPIO35; // I2S_BCLK
+    let i2s_lrclk_pin = peripherals.GPIO36; // I2S_LRCLK
+    let i2s_din_pin = peripherals.GPIO37; // I2S_DIN (ESP -> AMP)
     // NOTE: GPIO42 (MTMS) is wired to FAN_TACH and intentionally left unused here;
     // a future task will configure it for tachometer feedback.
     let ledc_peripheral = peripherals.LEDC;
@@ -4936,6 +5420,54 @@ async fn main(spawner: Spawner) {
         .expect("buzzer channel");
     let buzzer_channel = BUZZER_CHANNEL.init(buzzer_channel);
     buzzer_channel.set_duty(0).expect("buzzer duty init");
+
+    // RGB status LED (Plan #0021): low-speed LEDC Timer3 + Channel3/4/5.
+    // Pin map (digital board netlist): R=GPIO38, G=GPIO39(MTCK), B=GPIO40(MTDO).
+    let mut rgb_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer3);
+    rgb_timer
+        .configure(ledc_timer::config::Config {
+            duty: ledc_timer::config::Duty::Duty10Bit,
+            clock_source: ledc_timer::LSClockSource::APBClk,
+            frequency: Rate::from_khz(RGB_STATUS_PWM_FREQUENCY_KHZ),
+        })
+        .expect("rgb timer");
+    let rgb_timer = RGB_STATUS_TIMER.init(rgb_timer);
+
+    let mut rgb_r_channel =
+        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel3, peripherals.GPIO38);
+    rgb_r_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*rgb_timer,
+            duty_pct: 100, // active-low: 100% HIGH == OFF
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("rgb r channel");
+    let rgb_r_channel = RGB_STATUS_R_CHANNEL.init(rgb_r_channel);
+    rgb_r_channel.set_duty(100).expect("rgb r duty init");
+
+    let mut rgb_g_channel =
+        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel4, peripherals.GPIO39);
+    rgb_g_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*rgb_timer,
+            duty_pct: 100, // active-low: 100% HIGH == OFF
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("rgb g channel");
+    let rgb_g_channel = RGB_STATUS_G_CHANNEL.init(rgb_g_channel);
+    rgb_g_channel.set_duty(100).expect("rgb g duty init");
+
+    let mut rgb_b_channel =
+        ledc.channel::<LowSpeed>(ledc_channel::Number::Channel5, peripherals.GPIO40);
+    rgb_b_channel
+        .configure(ledc_channel::config::Config {
+            timer: &*rgb_timer,
+            duty_pct: 100, // active-low: 100% HIGH == OFF
+            drive_mode: DriveMode::PushPull,
+        })
+        .expect("rgb b channel");
+    let rgb_b_channel = RGB_STATUS_B_CHANNEL.init(rgb_b_channel);
+    rgb_b_channel.set_duty(100).expect("rgb b duty init");
 
     let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
     #[cfg(not(feature = "net_http"))]
@@ -5107,6 +5639,16 @@ async fn main(spawner: Spawner) {
             .spawn(mock_setpoint_task())
             .expect("mock_setpoint_task spawn");
     }
+    info!("spawning touch spring task");
+    spawner
+        .spawn(touch_spring_task(
+            peripherals.GPIO14,
+            control,
+            rgb_r_channel,
+            rgb_g_channel,
+            rgb_b_channel,
+        ))
+        .expect("touch_spring_task spawn");
     info!("spawning display task");
     spawner
         .spawn(display_task(
@@ -5129,6 +5671,17 @@ async fn main(spawner: Spawner) {
     spawner
         .spawn(prompt_tone::prompt_tone_task(buzzer_channel))
         .expect("prompt_tone_task spawn");
+    info!("spawning speaker task");
+    spawner
+        .spawn(speaker::speaker_task(
+            peripherals.I2S0,
+            peripherals.DMA_CH2,
+            amp_sd_mode_pin,
+            i2s_bclk_pin,
+            i2s_lrclk_pin,
+            i2s_din_pin,
+        ))
+        .expect("speaker_task spawn");
     info!("spawning fan task");
     spawner
         .spawn(fan_task(telemetry, fan_channel))
@@ -5258,8 +5811,18 @@ async fn stats_task() {
             let touch_int = touch::TOUCH_INT_COUNT.load(Ordering::Relaxed);
             let touch_i2c = touch::TOUCH_I2C_READ_COUNT.load(Ordering::Relaxed);
             let touch_parse_fail = touch::TOUCH_PARSE_FAIL_COUNT.load(Ordering::Relaxed);
+            let ts_reads = TOUCH_SPRING_READ_TOTAL.load(Ordering::Relaxed);
+            let ts_down = TOUCH_SPRING_TOUCHDOWN_TOTAL.load(Ordering::Relaxed);
+            let ts_suppress = TOUCH_SPRING_SUPPRESS_COOLDOWN_TOTAL.load(Ordering::Relaxed);
+            let ts_block = TOUCH_SPRING_ENABLE_BLOCK_TOTAL.load(Ordering::Relaxed);
+            let ts_meas_to = TOUCH_SPRING_MEAS_TIMEOUT_TOTAL.load(Ordering::Relaxed);
+            let ts_raw = TOUCH_SPRING_LAST_RAW.load(Ordering::Relaxed);
+            let ts_base = TOUCH_SPRING_LAST_BASELINE.load(Ordering::Relaxed);
+            let ts_da = TOUCH_SPRING_LAST_DELTA_ABS.load(Ordering::Relaxed);
+            let spk_play = speaker::SPEAKER_PLAY_TOTAL.load(Ordering::Relaxed);
+            let spk_drop = speaker::SPEAKER_ENQUEUE_DROPS.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}",
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}",
                 ok,
                 de,
                 df,
@@ -5270,7 +5833,17 @@ async fn stats_task() {
                 sp_timeout,
                 touch_int,
                 touch_i2c,
-                touch_parse_fail
+                touch_parse_fail,
+                ts_reads,
+                ts_down,
+                ts_suppress,
+                ts_block,
+                ts_meas_to,
+                ts_raw,
+                ts_base,
+                ts_da,
+                spk_play,
+                spk_drop,
             );
         }
     }
