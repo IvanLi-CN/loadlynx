@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 待实现
+- Status: 已完成
 - Created: 2026-01-19
-- Last: 2026-01-21
+- Last: 2026-02-02
 
 ## 背景 / 问题陈述
 
@@ -125,6 +125,7 @@
 - 音频数据格式基线（实现基线，可在不破坏接口的前提下调整）：
   - 标准 I²S（Philips），`16-bit` 或 `32-bit` 采样宽度；
   - `mono`（单声道），采样率优先在 `16kHz/22.05kHz/44.1kHz/48kHz` 中选择（以存储与听感折中为准）。
+  - 当前固件实现基线：`8kHz`（WAV PCM16LE mono 资产；固件侧做 mono→stereo duplication 输出）。
 - 连接 `SD_MODE` 作为 **AMP_EN/Shutdown**：
   - `GPIO34=AMP_SD_MODE`（封装 Pin 39）→ MAX98357A `SD_MODE`
   - 运行语义（I²S/LJ）：低=shutdown；高=Left（本计划输出 mono PCM，因此固定用“高=Left”即可）。
@@ -186,7 +187,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 
 - [x] M1: 数字板：接入 `GPIO14` TouchPad，完成校准+去抖，并能稳定切换 `load_enabled`
 - [x] M2: 数字板：接入 RGB 三路 LEDC PWM + 状态映射（颜色/闪烁）并通过 HIL 验证
-- [ ] M3: 数字板：接入 I²S（MAX98357A）语音播放最小闭环（可触发播放 + 基础日志 + 不影响主循环）
+- [x] M3: 数字板：接入 I²S（MAX98357A）语音播放最小闭环（可触发播放 + 基础日志 + 不影响主循环）
 - [x] M4: 文档：更新 ESP32‑S3 pinmap 与 HIL 验证记录（日志片段/结论）
 
 ## 方案概述（Approach, high-level）
@@ -247,6 +248,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 - 2026-01-21: 扩充语音播放（MAX98357A / I²S），并按“连续封装引脚”重排 GPIO（AMP_SD_MODE=GPIO34；I²S=GPIO35/36/37；RGB=GPIO38/39/40）
 - 2026-02-01: HIL：触摸弹簧 + RGB 已跑通；新增 I²S/MAX98357A 输出任务与启动自检音（用于后续语音片段落地）
 - 2026-02-01: HIL：降低“未触碰即触发”的误触风险（提高阈值 + 连续采样判定）
+- 2026-02-02: 数字板：扬声器启动自检改为 WAV(PCM16LE mono, 8kHz) 资产播放（I²S=8kHz, mono→stereo duplication；固件侧 PCM digital gain +6dB）；boot playlist: 440/554/659/880 + test melody；PC 可直接预览 `firmware/digital/assets/audio/*.wav`
 
 ## 参考（References）
 
