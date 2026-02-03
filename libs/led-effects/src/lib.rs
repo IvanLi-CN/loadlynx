@@ -48,13 +48,15 @@ pub mod breathing {
     /// Returns value in the range 0..=max_value.
     #[inline]
     pub fn triangle_breathe_u16(now_ms: u32, period_ms: u32, max_value: u16) -> u16 {
-        let max = max_value as u32;
+        // Use u64 intermediates to avoid overflow when `period_ms` is large.
+        let max = max_value as u64;
         if max == 0 || period_ms < 2 {
             return 0;
         }
 
-        let phase = now_ms % period_ms; // 0..period-1
-        let half = period_ms / 2;
+        let period = period_ms as u64;
+        let phase = (now_ms as u64) % period; // 0..period-1
+        let half = period / 2;
         if half == 0 {
             return 0;
         }
@@ -63,7 +65,7 @@ pub mod breathing {
         let lin = if phase <= half {
             (max * phase) / half
         } else {
-            (max * (period_ms - phase)) / half
+            (max * (period - phase)) / half
         };
 
         lin.min(max) as u16
@@ -128,5 +130,13 @@ mod tests {
     fn triangle_breathe_u16_handles_zero_period() {
         assert_eq!(triangle_breathe_u16(123, 0, 512), 0);
         assert_eq!(triangle_breathe_u16(123, 1, 512), 0);
+    }
+
+    #[test]
+    fn triangle_breathe_u16_large_period_no_overflow() {
+        let period = u32::MAX;
+        let max: u16 = 65535;
+        assert_eq!(triangle_breathe_u16(0, period, max), 0);
+        assert_eq!(triangle_breathe_u16(period / 2, period, max), max);
     }
 }
