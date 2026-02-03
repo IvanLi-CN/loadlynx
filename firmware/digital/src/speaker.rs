@@ -168,26 +168,42 @@ fn ensure_next_op(assets: &AudioAssets, kind: PlaylistKind, state: &mut StreamSt
         return;
     }
 
-    match assets.item(kind, state.idx) {
-        Some(PlaylistItem::SilenceMs(ms)) => {
-            state.idx = state.idx.saturating_add(1);
-            let samples = ms_to_samples(ms);
-            // Keep DMA writes 32-bit aligned.
-            let bytes = (samples * BYTES_PER_SAMPLE + 3) & !0x3;
-            state.cur = Some(StreamOp::Silence {
-                remaining_bytes: bytes,
-            });
+    // Note: we must never leave `state.cur == None` when more playlist items exist,
+    // because `fill_stream_bytes()` treats `None` as "fill rest with silence and return".
+    loop {
+        match assets.item(kind, state.idx) {
+            Some(PlaylistItem::SilenceMs(ms)) => {
+                state.idx = state.idx.saturating_add(1);
+                let samples = ms_to_samples(ms);
+                // Keep DMA writes 32-bit aligned.
+                let bytes = (samples * BYTES_PER_SAMPLE + 3) & !0x3;
+                if bytes == 0 {
+                    continue;
+                }
+                state.cur = Some(StreamOp::Silence {
+                    remaining_bytes: bytes,
+                });
+                break;
+            }
+            Some(PlaylistItem::Audio { label, pcm }) => {
+                state.idx = state.idx.saturating_add(1);
+                if pcm.is_empty() {
+                    warn!("speaker: playlist item {} empty; skipping", label);
+                    continue;
+                }
+                info!("speaker: playlist item {} ({=usize}B)", label, pcm.len());
+                state.cur = Some(StreamOp::Audio {
+                    label,
+                    pcm_mono_s16le: pcm,
+                    offset_bytes: 0,
+                });
+                break;
+            }
+            None => {
+                state.done = true;
+                break;
+            }
         }
-        Some(PlaylistItem::Audio { label, pcm }) => {
-            state.idx = state.idx.saturating_add(1);
-            info!("speaker: playlist item {} ({=usize}B)", label, pcm.len());
-            state.cur = Some(StreamOp::Audio {
-                label,
-                pcm_mono_s16le: pcm,
-                offset_bytes: 0,
-            });
-        }
-        None => state.done = true,
     }
 }
 
@@ -216,11 +232,17 @@ fn fill_stream_bytes(
             StreamOp::Silence {
                 mut remaining_bytes,
             } => {
+                if remaining_bytes == 0 {
+                    state.cur = None;
+                    continue;
+                }
                 let mut take = core::cmp::min(want - out, remaining_bytes);
                 take &= !0x3;
                 let take_bytes = take;
                 if take_bytes == 0 {
-                    break;
+                    // Avoid returning 0 bytes to DMA (can corrupt descriptor ownership state).
+                    state.cur = None;
+                    continue;
                 }
 
                 out_buf[out..out + take_bytes].fill(0);
@@ -238,6 +260,10 @@ fn fill_stream_bytes(
                 mut offset_bytes,
             } => {
                 let remaining_bytes = pcm_mono_s16le.len().saturating_sub(offset_bytes);
+                if remaining_bytes == 0 {
+                    state.cur = None;
+                    continue;
+                }
                 let mut take = core::cmp::min(want - out, remaining_bytes);
                 if take < 4 && remaining_bytes != 0 {
                     // Pad the final odd bytes (rare) to keep DMA writes aligned.
@@ -269,7 +295,9 @@ fn fill_stream_bytes(
                 }
                 take &= !0x3;
                 if take == 0 {
-                    break;
+                    // Avoid returning 0 bytes to DMA (can corrupt descriptor ownership state).
+                    state.cur = None;
+                    continue;
                 }
 
                 // Copy + apply gain.
@@ -474,7 +502,9 @@ async fn play_playlist(
     // Tail: keep the DMA fed with silence for ~one ring duration so any queued
     // audio can fully play out, while avoiding circular-DMA underrun (`Late`).
     let bytes_per_second = core::cmp::max(1usize, (SAMPLE_RATE_HZ as usize) * BYTES_PER_SAMPLE);
-    let ring_ms = ((tx_capacity.saturating_add(bytes_per_second - 1)) / bytes_per_second) * 1_000;
+    let ring_ms = (((tx_capacity as u64) * 1000)
+        .saturating_add((bytes_per_second as u64).saturating_sub(1)))
+        / (bytes_per_second as u64);
     let tail_timeout = Duration::from_millis((ring_ms as u64).saturating_add(500));
     let deadline = Instant::now() + tail_timeout;
 
