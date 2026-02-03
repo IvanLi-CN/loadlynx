@@ -32,7 +32,7 @@ use esp_hal::{
     gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
-        channel::{self as ledc_channel, ChannelIFace as _},
+        channel::{self as ledc_channel, ChannelHW as _, ChannelIFace as _},
         timer::{self as ledc_timer, TimerIFace as _},
     },
     spi::{
@@ -95,9 +95,13 @@ const RGB_STATUS_BLINK_TOGGLE_MS: u32 = 250; // 2 Hz: toggle every 250ms
 
 // Plan #6mre7: when the device is in "sleep standby" (ScreenPowerState::Off),
 // show a low-tempo white breathing indicator on the touch power button LED.
-const STANDBY_BREATH_PERIOD_MS: u32 = 3_000;
+const STANDBY_BREATH_PERIOD_MS: u32 = 14_000; // 7s up + 7s down
 const STANDBY_BREATH_MAX_BRIGHTNESS_PCT: u8 = 12;
-const STANDBY_BREATH_UPDATE_MS: u32 = 25;
+const STANDBY_BREATH_UPDATE_MS: u32 = 10;
+
+// RGB status LEDC uses Timer3 configured at Duty13Bit (see init below).
+// esp-hal defines max duty cycle as 2^bits (e.g. 13-bit => 8192).
+const RGB_STATUS_DUTY_MAX: u16 = 8192;
 
 const SCREEN_POWER_STATE_ACTIVE: u8 = 0;
 const SCREEN_POWER_STATE_DIM: u8 = 1;
@@ -142,23 +146,30 @@ fn backlight_pwm_disconnect(backlight_pin: &'static OutputSignalPin<'static>) {
 }
 
 #[inline]
-fn rgb_hw_duty_pct(logical_pct: u8) -> u8 {
+fn rgb_hw_duty(logical_duty: u16) -> u32 {
     // RGB channels are active-low (common anode on 3V3, GPIO sinks current).
-    100u8.saturating_sub(logical_pct.min(100))
+    // Map "logical brightness" (low-time) to "HW duty" (high-time).
+    (RGB_STATUS_DUTY_MAX.saturating_sub(logical_duty.min(RGB_STATUS_DUTY_MAX))) as u32
 }
 
 #[inline]
-fn set_rgb_pct(
+fn pct_to_rgb_duty(logical_pct: u8) -> u16 {
+    let pct = logical_pct.min(100) as u32;
+    ((RGB_STATUS_DUTY_MAX as u32) * pct / 100) as u16
+}
+
+#[inline]
+fn set_rgb_duty(
     r: &'static ledc_channel::Channel<'static, LowSpeed>,
     g: &'static ledc_channel::Channel<'static, LowSpeed>,
     b: &'static ledc_channel::Channel<'static, LowSpeed>,
-    r_pct: u8,
-    g_pct: u8,
-    b_pct: u8,
+    r_duty: u16,
+    g_duty: u16,
+    b_duty: u16,
 ) {
-    r.set_duty(rgb_hw_duty_pct(r_pct)).expect("rgb r duty");
-    g.set_duty(rgb_hw_duty_pct(g_pct)).expect("rgb g duty");
-    b.set_duty(rgb_hw_duty_pct(b_pct)).expect("rgb b duty");
+    r.set_duty_hw(rgb_hw_duty(r_duty));
+    g.set_duty_hw(rgb_hw_duty(g_duty));
+    b.set_duty_hw(rgb_hw_duty(b_duty));
 }
 
 mod control;
@@ -1255,7 +1266,7 @@ async fn touch_spring_task(
     );
 
     // Keep RGB dark until touch calibration completes.
-    set_rgb_pct(rgb_r, rgb_g, rgb_b, 0, 0, 0);
+    set_rgb_duty(rgb_r, rgb_g, rgb_b, 0, 0, 0);
 
     // NOTE: esp-hal 1.0.0 does not currently expose `esp_hal::touch` for ESP32-S3
     // (cfg(touch) is not set), so we configure + read the S3 touch controller via
@@ -1471,11 +1482,15 @@ async fn touch_spring_task(
         baseline0, min, max, noise_span, down_delta, up_delta
     );
 
+    let standby_max_duty = pct_to_rgb_duty(STANDBY_BREATH_MAX_BRIGHTNESS_PCT);
+    let solid_duty = pct_to_rgb_duty(RGB_STATUS_SOLID_BRIGHTNESS_PCT);
+    let blink_duty = pct_to_rgb_duty(RGB_STATUS_BLINK_BRIGHTNESS_PCT);
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Rgb {
-        r: u8,
-        g: u8,
-        b: u8,
+        r: u16,
+        g: u16,
+        b: u16,
     }
     let mut last_rgb = Rgb { r: 0, g: 0, b: 0 };
     let mut blink_on: bool = false;
@@ -1605,15 +1620,15 @@ async fn touch_spring_task(
         let desired = if screen_off {
             if now.wrapping_sub(last_breath_update_ms) >= STANDBY_BREATH_UPDATE_MS {
                 last_breath_update_ms = now;
-                let pct = loadlynx_led_effects::breathing::triangle_breathe_pct(
+                let duty = loadlynx_led_effects::breathing::triangle_breathe_u16(
                     now,
                     STANDBY_BREATH_PERIOD_MS,
-                    STANDBY_BREATH_MAX_BRIGHTNESS_PCT,
+                    standby_max_duty,
                 );
                 Rgb {
-                    r: pct,
-                    g: pct,
-                    b: pct,
+                    r: duty,
+                    g: duty,
+                    b: duty,
                 }
             } else {
                 last_rgb
@@ -1633,8 +1648,8 @@ async fn touch_spring_task(
                 }
                 if blink_on {
                     Rgb {
-                        r: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
-                        g: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                        r: blink_duty,
+                        g: blink_duty,
                         b: 0,
                     }
                 } else {
@@ -1643,12 +1658,12 @@ async fn touch_spring_task(
             } else if output_enabled {
                 Rgb {
                     r: 0,
-                    g: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
+                    g: solid_duty,
                     b: 0,
                 }
             } else {
                 Rgb {
-                    r: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
+                    r: solid_duty,
                     g: 0,
                     b: 0,
                 }
@@ -1656,7 +1671,7 @@ async fn touch_spring_task(
         };
 
         if desired != last_rgb {
-            set_rgb_pct(rgb_r, rgb_g, rgb_b, desired.r, desired.g, desired.b);
+            set_rgb_duty(rgb_r, rgb_g, rgb_b, desired.r, desired.g, desired.b);
             last_rgb = desired;
         }
 
@@ -5478,7 +5493,7 @@ async fn main(spawner: Spawner) {
     let mut rgb_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer3);
     rgb_timer
         .configure(ledc_timer::config::Config {
-            duty: ledc_timer::config::Duty::Duty10Bit,
+            duty: ledc_timer::config::Duty::Duty13Bit,
             clock_source: ledc_timer::LSClockSource::APBClk,
             frequency: Rate::from_khz(RGB_STATUS_PWM_FREQUENCY_KHZ),
         })

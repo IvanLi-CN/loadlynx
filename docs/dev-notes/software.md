@@ -281,8 +281,8 @@
 - **状态源**：`ScreenPowerState::Off`（`firmware/digital/src/main.rs` 中的 `SCREEN_POWER_STATE` 原子变量）。
 - **硬件**：`TOUCH_SPRING`（GPIO14/TouchPad14）作为触摸电源键；RGB 指示灯为 `RGB_R/G/B_PWM`（GPIO38/39/40，active-low）。
 - **灯效参数（当前固件默认值）**
-  - 呼吸周期：`STANDBY_BREATH_PERIOD_MS = 3000 ms`
+  - 呼吸周期：`STANDBY_BREATH_PERIOD_MS = 14000 ms`（7s 上升 + 7s 下降）
   - 亮度上限：`STANDBY_BREATH_MAX_BRIGHTNESS_PCT = 12 %`
-  - 更新步进：`STANDBY_BREATH_UPDATE_MS = 25 ms`
+  - 更新步进：`STANDBY_BREATH_UPDATE_MS = 10 ms`
 - **输入语义**：在熄屏状态下，触摸电源键输入仅用于唤醒且会被消费，不会改变业务状态（例如不切换 `output_enabled`）。
 - **日志**：进入/退出熄屏时会打印 `standby_led: enabled/disabled ...`，便于 HIL 验收与调参记录。
