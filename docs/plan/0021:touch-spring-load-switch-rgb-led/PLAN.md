@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-01-19
-- Last: 2026-02-02
+- Last: 2026-02-03
 
 ## 背景 / 问题陈述
 
@@ -249,6 +249,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 - 2026-02-01: HIL：触摸弹簧 + RGB 已跑通；新增 I²S/MAX98357A 输出任务与启动自检音（用于后续语音片段落地）
 - 2026-02-01: HIL：降低“未触碰即触发”的误触风险（提高阈值 + 连续采样判定）
 - 2026-02-02: 数字板：扬声器启动自检改为 WAV(PCM16LE mono, 8kHz) 资产播放（I²S=8kHz, mono→stereo duplication；固件侧 PCM digital gain +6dB）；boot playlist: 440/554/659/880 + test melody；PC 可直接预览 `firmware/digital/assets/audio/*.wav`
+- 2026-02-03: 数字板：扬声器播放尾部等待改为按 playlist 时长（避免 UI 音效额外阻塞多秒）
 
 ## 参考（References）
 

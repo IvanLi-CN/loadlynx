@@ -45,6 +45,10 @@ const PCM_GAIN_Q8: i32 = 512;
 // We rely on tight refill (`yield_now` instead of millisecond sleeps) to avoid underflow.
 const TX_RING_BYTES: usize = 12 * 4092;
 
+// Keep a small post-playback margin so we stop on silence even if
+// the actual DMA start time differs slightly from our timestamp.
+const STOP_MARGIN_MS: u64 = 20;
+
 const SPEAKER_WAV_UI_OK: &[u8] = include_bytes!("../assets/audio/speaker-ui-ok-8k.wav");
 const SPEAKER_WAV_UI_FAIL: &[u8] = include_bytes!("../assets/audio/speaker-ui-fail-8k.wav");
 const SPEAKER_WAV_DIAG_440: &[u8] = include_bytes!("../assets/audio/speaker-diag-440-8k.wav");
@@ -445,12 +449,48 @@ impl AudioAssets {
     }
 }
 
+fn bytes_per_second() -> u64 {
+    core::cmp::max(1u64, (SAMPLE_RATE_HZ as u64) * (BYTES_PER_SAMPLE as u64))
+}
+
+fn duration_ms_for_playlist(assets: &AudioAssets, kind: PlaylistKind) -> u64 {
+    let mut total_bytes: u64 = 0;
+    let mut idx = 0usize;
+    loop {
+        let Some(item) = assets.item(kind, idx) else {
+            break;
+        };
+        match item {
+            PlaylistItem::SilenceMs(ms) => {
+                let samples = ms_to_samples(ms);
+                // Keep DMA writes 32-bit aligned.
+                let bytes = (samples * BYTES_PER_SAMPLE + 3) & !0x3;
+                total_bytes = total_bytes.saturating_add(bytes as u64);
+            }
+            PlaylistItem::Audio { pcm, .. } => {
+                // Align the final block just like `fill_stream_bytes()` does.
+                let bytes = (pcm.len() + 3) & !0x3;
+                total_bytes = total_bytes.saturating_add(bytes as u64);
+            }
+        }
+        idx = idx.saturating_add(1);
+    }
+
+    let bps = bytes_per_second();
+    (total_bytes
+        .saturating_mul(1000)
+        .saturating_add(bps.saturating_sub(1)))
+        / bps
+}
+
 async fn play_playlist(
     tx: &mut esp_hal::i2s::master::I2sTx<'_, esp_hal::Blocking>,
     tx_ring: &mut [u8],
     assets: &AudioAssets,
     kind: PlaylistKind,
 ) {
+    let play_ms = duration_ms_for_playlist(assets, kind);
+
     // Pre-fill the ring with the first chunk of the stream so playback starts immediately.
     let mut state = StreamState {
         idx: 0,
@@ -460,7 +500,6 @@ async fn play_playlist(
     let _ = fill_stream_bytes(assets, kind, &mut state, tx_ring);
 
     // Circular DMA transfer (stable, avoids buffer-boundary clicks).
-    let tx_capacity = tx_ring.len();
     let mut transfer = match tx.write_dma_circular(&tx_ring) {
         Ok(t) => t,
         Err(err) => {
@@ -468,6 +507,8 @@ async fn play_playlist(
             return;
         }
     };
+    let started_at = Instant::now();
+    let deadline = started_at + Duration::from_millis(play_ms.saturating_add(STOP_MARGIN_MS));
 
     // Keep pushing until all playlist items are queued.
     while !state.done {
@@ -499,15 +540,8 @@ async fn play_playlist(
         }
     }
 
-    // Tail: keep the DMA fed with silence for ~one ring duration so any queued
-    // audio can fully play out, while avoiding circular-DMA underrun (`Late`).
-    let bytes_per_second = core::cmp::max(1usize, (SAMPLE_RATE_HZ as usize) * BYTES_PER_SAMPLE);
-    let ring_ms = (((tx_capacity as u64) * 1000)
-        .saturating_add((bytes_per_second as u64).saturating_sub(1)))
-        / (bytes_per_second as u64);
-    let tail_timeout = Duration::from_millis((ring_ms as u64).saturating_add(500));
-    let deadline = Instant::now() + tail_timeout;
-
+    // Tail: keep the DMA fed with silence until the playlist duration elapses.
+    // This prevents `Late` while avoiding multi-second UI sound latency.
     while Instant::now() < deadline {
         let wrote = match transfer.push_with(|buf| {
             let want = buf.len() & !0x3;
