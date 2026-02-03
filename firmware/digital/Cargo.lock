@@ -284,6 +284,7 @@ dependencies = [
  "heapless 0.8.0",
  "lcd-async",
  "loadlynx-calibration-format",
+ "loadlynx-led-effects",
  "loadlynx-protocol",
  "loadlynx-screen-power",
  "minicbor",
@@ -1264,6 +1265,10 @@ dependencies = [
  "heapless 0.8.0",
  "loadlynx-protocol",
 ]
+
+[[package]]
+name = "loadlynx-led-effects"
+version = "0.1.0"
 
 [[package]]
 name = "loadlynx-protocol"

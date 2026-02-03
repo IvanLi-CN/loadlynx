@@ -93,6 +93,12 @@ const RGB_STATUS_SOLID_BRIGHTNESS_PCT: u8 = 35;
 const RGB_STATUS_BLINK_BRIGHTNESS_PCT: u8 = 35;
 const RGB_STATUS_BLINK_TOGGLE_MS: u32 = 250; // 2 Hz: toggle every 250ms
 
+// Plan #6mre7: when the device is in "sleep standby" (ScreenPowerState::Off),
+// show a low-tempo white breathing indicator on the touch power button LED.
+const STANDBY_BREATH_PERIOD_MS: u32 = 3_000;
+const STANDBY_BREATH_MAX_BRIGHTNESS_PCT: u8 = 12;
+const STANDBY_BREATH_UPDATE_MS: u32 = 25;
+
 const SCREEN_POWER_STATE_ACTIVE: u8 = 0;
 const SCREEN_POWER_STATE_DIM: u8 = 1;
 const SCREEN_POWER_STATE_OFF: u8 = 2;
@@ -1474,6 +1480,8 @@ async fn touch_spring_task(
     let mut last_rgb = Rgb { r: 0, g: 0, b: 0 };
     let mut blink_on: bool = false;
     let mut last_blink_toggle_ms: u32 = now_ms32();
+    let mut last_breath_update_ms: u32 = now_ms32();
+    let mut last_screen_off: bool = false;
     let mut last_dbg_ms: u32 = now_ms32();
 
     loop {
@@ -1510,52 +1518,61 @@ async fn touch_spring_task(
                     last_action_ms = now;
                     TOUCH_SPRING_TOUCHDOWN_TOTAL.fetch_add(1, Ordering::Relaxed);
 
-                    // Dedicated load switch input: treat as user activity (wake screen),
-                    // but do NOT consume (this is intended to work without the UI).
-                    note_user_activity();
+                    // Touch power button:
+                    // - always counts as user activity (wakes screen),
+                    // - BUT when the screen is OFF, the first touch is consumed (Plan #0015/#6mre7),
+                    //   i.e. it must not toggle LOAD / change business state.
+                    let consume = note_user_activity_and_should_consume_off();
+                    if consume {
+                        info!("touch_spring: wake screen (consumed because screen_power=off)");
+                    }
 
-                    let mut guard = control.lock().await;
-                    let preset = guard.active_preset();
-                    let setpoint_zero = match preset.mode {
-                        LoadMode::Cp => preset.target_p_mw == 0,
-                        LoadMode::Cv => preset.target_v_mv == 0,
-                        LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
-                    };
+                    if !consume {
+                        let mut guard = control.lock().await;
+                        let preset = guard.active_preset();
+                        let setpoint_zero = match preset.mode {
+                            LoadMode::Cp => preset.target_p_mw == 0,
+                            LoadMode::Cv => preset.target_v_mv == 0,
+                            LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+                        };
 
-                    if guard.output_enabled {
-                        guard.output_enabled = false;
-                        bump_control_rev();
-                        prompt_tone::enqueue_ui_ok();
-                        speaker::enqueue(speaker::SpeakerSound::UiOk);
-                        info!(
-                            "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
-                            guard.active_preset_id, preset.mode
-                        );
-                    } else if setpoint_zero {
-                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                        last_touch_block_ms = Some(now);
-                        prompt_tone::enqueue_ui_fail();
-                        speaker::enqueue(speaker::SpeakerSound::UiFail);
-                        info!(
-                            "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
-                            guard.active_preset_id, preset.mode
-                        );
-                    } else if let Some(reason) = current_load_enable_block_abbrev(preset.min_v_mv) {
-                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                        last_touch_block_ms = Some(now);
-                        prompt_tone::enqueue_ui_fail();
-                        speaker::enqueue(speaker::SpeakerSound::UiFail);
-                        record_enable_block(reason);
-                        info!("touch_spring: LOAD enable blocked (reason={})", reason);
-                    } else {
-                        guard.output_enabled = true;
-                        bump_control_rev();
-                        prompt_tone::enqueue_ui_ok();
-                        speaker::enqueue(speaker::SpeakerSound::UiOk);
-                        info!(
-                            "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
-                            guard.active_preset_id, preset.mode
-                        );
+                        if guard.output_enabled {
+                            guard.output_enabled = false;
+                            bump_control_rev();
+                            prompt_tone::enqueue_ui_ok();
+                            speaker::enqueue(speaker::SpeakerSound::UiOk);
+                            info!(
+                                "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
+                        } else if setpoint_zero {
+                            TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                            last_touch_block_ms = Some(now);
+                            prompt_tone::enqueue_ui_fail();
+                            speaker::enqueue(speaker::SpeakerSound::UiFail);
+                            info!(
+                                "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
+                        } else if let Some(reason) =
+                            current_load_enable_block_abbrev(preset.min_v_mv)
+                        {
+                            TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                            last_touch_block_ms = Some(now);
+                            prompt_tone::enqueue_ui_fail();
+                            speaker::enqueue(speaker::SpeakerSound::UiFail);
+                            record_enable_block(reason);
+                            info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                        } else {
+                            guard.output_enabled = true;
+                            bump_control_rev();
+                            prompt_tone::enqueue_ui_ok();
+                            speaker::enqueue(speaker::SpeakerSound::UiOk);
+                            info!(
+                                "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
+                        }
                     }
                 }
             }
@@ -1566,40 +1583,75 @@ async fn touch_spring_task(
             }
         }
 
-        // Status LED mapping (frozen by Plan #0021):
-        // abnormal (yellow blink) > load_enabled=ON (green) > load_enabled=OFF (red).
-        let output_enabled = { control.lock().await.output_enabled };
-        let abnormal = current_load_block_abbrev().is_some()
-            || recent_enable_block_abbrev(now).is_some()
-            || last_touch_block_ms
-                .map(|t| now.wrapping_sub(t) <= ENABLE_BLOCK_TTL_MS)
-                .unwrap_or(false);
-
-        let desired = if abnormal {
-            if now.wrapping_sub(last_blink_toggle_ms) >= RGB_STATUS_BLINK_TOGGLE_MS {
-                blink_on = !blink_on;
-                last_blink_toggle_ms = now;
+        // Status LED policy:
+        // - Standby indicator (Plan #6mre7): ScreenPowerState::Off => low-tempo white breathing.
+        // - Otherwise, mapping frozen by Plan #0021:
+        //   abnormal (yellow blink) > load_enabled=ON (green) > load_enabled=OFF (red).
+        let screen_off = screen_power_state_is_off();
+        if screen_off != last_screen_off {
+            last_screen_off = screen_off;
+            if screen_off {
+                // Force a prompt update on entry to ensure the LED starts within 1s.
+                last_breath_update_ms = now.wrapping_sub(STANDBY_BREATH_UPDATE_MS);
+                info!(
+                    "standby_led: enabled (screen_power=off, period_ms={}, max_brightness={}%)",
+                    STANDBY_BREATH_PERIOD_MS, STANDBY_BREATH_MAX_BRIGHTNESS_PCT
+                );
+            } else {
+                info!("standby_led: disabled (screen_power!=off)");
             }
-            if blink_on {
+        }
+
+        let desired = if screen_off {
+            if now.wrapping_sub(last_breath_update_ms) >= STANDBY_BREATH_UPDATE_MS {
+                last_breath_update_ms = now;
+                let pct = loadlynx_led_effects::breathing::triangle_breathe_pct(
+                    now,
+                    STANDBY_BREATH_PERIOD_MS,
+                    STANDBY_BREATH_MAX_BRIGHTNESS_PCT,
+                );
                 Rgb {
-                    r: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
-                    g: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                    r: pct,
+                    g: pct,
+                    b: pct,
+                }
+            } else {
+                last_rgb
+            }
+        } else {
+            let output_enabled = { control.lock().await.output_enabled };
+            let abnormal = current_load_block_abbrev().is_some()
+                || recent_enable_block_abbrev(now).is_some()
+                || last_touch_block_ms
+                    .map(|t| now.wrapping_sub(t) <= ENABLE_BLOCK_TTL_MS)
+                    .unwrap_or(false);
+
+            if abnormal {
+                if now.wrapping_sub(last_blink_toggle_ms) >= RGB_STATUS_BLINK_TOGGLE_MS {
+                    blink_on = !blink_on;
+                    last_blink_toggle_ms = now;
+                }
+                if blink_on {
+                    Rgb {
+                        r: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                        g: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                        b: 0,
+                    }
+                } else {
+                    Rgb { r: 0, g: 0, b: 0 }
+                }
+            } else if output_enabled {
+                Rgb {
+                    r: 0,
+                    g: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
                     b: 0,
                 }
             } else {
-                Rgb { r: 0, g: 0, b: 0 }
-            }
-        } else if output_enabled {
-            Rgb {
-                r: 0,
-                g: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
-                b: 0,
-            }
-        } else {
-            Rgb {
-                r: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
-                g: 0,
-                b: 0,
+                Rgb {
+                    r: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
+                    g: 0,
+                    b: 0,
+                }
             }
         };
 
