@@ -38,6 +38,7 @@ static WAKE: Signal<CriticalSectionRawMutex, ()> = Signal::new();
 
 static FAULT_FLAGS: AtomicU32 = AtomicU32::new(0);
 static UV_LATCHED_ACTIVE: AtomicBool = AtomicBool::new(false);
+static WARN_FLAGS: AtomicU32 = AtomicU32::new(0);
 
 static LINK_UP: AtomicBool = AtomicBool::new(false);
 static LINK_ALARM_LATCHED: AtomicBool = AtomicBool::new(false);
@@ -100,6 +101,15 @@ pub fn set_fault_flags(flags: u32) {
 ///   link alarms, and explicit trip latches.
 pub fn set_uv_latched(active: bool) {
     UV_LATCHED_ACTIVE.store(active, Ordering::Relaxed);
+    WAKE.signal(());
+}
+
+/// Update the latest warning-class flags.
+///
+/// This is intended for non-fatal "still working" events (e.g. power/current limiting).
+/// The prompt tone task will emit a periodic warning beep while the load remains enabled.
+pub fn set_warn_flags(flags: u32) {
+    WARN_FLAGS.store(flags, Ordering::Relaxed);
     WAKE.signal(());
 }
 
@@ -264,6 +274,11 @@ const UI_TICK_PLAY_MS: u32 = 14; // ~= 12ms clip + small margin (fast rotation f
 const UI_OK_PLAY_MS: u32 = 160; // ~= 150ms playlist (including pre/post silence)
 const UI_LOAD_OFF_OK_PLAY_MS: u32 = 160; // ~= load-off ok playlist (including pre/post silence)
 const UI_FAIL_PLAY_MS: u32 = 240; // ~= 220ms playlist (including pre/post silence)
+const UI_WARN_PLAY_MS: u32 = 180; // ~= warning beep clip + small margin
+
+// Warning cadence: while load is enabled and we are in a non-fatal limiting state,
+// play a short warning beep every few seconds.
+const WARN_BEEP_INTERVAL_MS: u32 = 4_000;
 
 // Primary alarm cadence (protection-class).
 const PRIMARY_ALARM_ON_MS: u32 = 300;
@@ -307,6 +322,11 @@ const STEPS_UI_LOAD_OFF_OK: &[Step] = &[Step {
 const STEPS_UI_FAIL: &[Step] = &[Step {
     duty_pct: 0,
     duration_ms: UI_FAIL_PLAY_MS,
+}];
+
+const STEPS_UI_WARN: &[Step] = &[Step {
+    duty_pct: 0,
+    duration_ms: UI_WARN_PLAY_MS,
 }];
 
 const STEPS_PRIMARY_ALARM: &[Step] = &[
@@ -371,6 +391,7 @@ enum ActiveSound {
     UiOk,
     UiLoadOffOk,
     UiFail,
+    UiWarn,
     UiTickClip,
     PrimaryAlarm,
     SecondaryAlarm,
@@ -390,6 +411,7 @@ impl Player {
             ActiveSound::UiOk => STEPS_UI_OK,
             ActiveSound::UiLoadOffOk => STEPS_UI_LOAD_OFF_OK,
             ActiveSound::UiFail => STEPS_UI_FAIL,
+            ActiveSound::UiWarn => STEPS_UI_WARN,
             ActiveSound::UiTickClip => STEPS_UI_TICK_CLIP,
             ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
             ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
@@ -441,6 +463,7 @@ fn start_player(sound: ActiveSound) -> Player {
         ActiveSound::UiOk => STEPS_UI_OK,
         ActiveSound::UiLoadOffOk => STEPS_UI_LOAD_OFF_OK,
         ActiveSound::UiFail => STEPS_UI_FAIL,
+        ActiveSound::UiWarn => STEPS_UI_WARN,
         ActiveSound::UiTickClip => STEPS_UI_TICK_CLIP,
         ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
         ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
@@ -460,6 +483,10 @@ fn start_player(sound: ActiveSound) -> Player {
         ActiveSound::UiFail => {
             // Rendered via WAV clip (speaker backend).
             speaker::enqueue(speaker::SpeakerSound::UiFail);
+        }
+        ActiveSound::UiWarn => {
+            // Rendered via WAV clip (speaker backend).
+            speaker::enqueue(speaker::SpeakerSound::UiWarn);
         }
         ActiveSound::UiTickClip => {
             // Deterministic, single "pip" tick via WAV clip (speaker backend).
@@ -525,14 +552,30 @@ pub async fn prompt_tone_task() {
 
     let mut player: Option<Player> = None;
     let mut last_alarm_active: bool = false;
+    let mut last_warn_flags: u32 = 0;
+    let mut warn_next_ms: u32 = now_ms32();
 
     loop {
         let fault_flags = FAULT_FLAGS.load(Ordering::Relaxed);
         let link_latched = LINK_ALARM_LATCHED.load(Ordering::Relaxed);
         let link_up = LINK_UP.load(Ordering::Relaxed);
         let trip_latched = TRIP_ALARM_LATCHED.load(Ordering::Relaxed);
+        let warn_flags = WARN_FLAGS.load(Ordering::Relaxed);
 
         let primary_condition_active = fault_flags != 0;
+
+        // Warning edge bookkeeping (non-fatal, periodic).
+        if warn_flags != last_warn_flags {
+            let now = now_ms32();
+            if last_warn_flags == 0 && warn_flags != 0 {
+                info!("prompt_tone: warning entered (flags=0x{:08x})", warn_flags);
+                // Start beeping promptly on entry.
+                warn_next_ms = now;
+            } else if last_warn_flags != 0 && warn_flags == 0 {
+                info!("prompt_tone: warning cleared");
+            }
+            last_warn_flags = warn_flags;
+        }
 
         // Edge bookkeeping for logging + ack gating.
         if fault_flags != last_fault_flags {
@@ -766,6 +809,12 @@ pub async fn prompt_tone_task() {
                         player = Some(start_player(ActiveSound::UiOk));
                     } else if try_take_one_tick() {
                         player = Some(start_player(ActiveSound::UiTickClip));
+                    } else if warn_flags != 0 {
+                        let now = now_ms32();
+                        if (now.wrapping_sub(warn_next_ms) as i32) >= 0 {
+                            player = Some(start_player(ActiveSound::UiWarn));
+                            warn_next_ms = now.wrapping_add(WARN_BEEP_INTERVAL_MS);
+                        }
                     }
                 }
             }

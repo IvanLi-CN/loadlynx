@@ -73,6 +73,8 @@ use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over
 pub(crate) const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
+const STATE_FLAG_POWER_LIMITED: u32 = 1 << 4;
+const STATE_FLAG_CURRENT_LIMITED: u32 = 1 << 5;
 
 const PD_T_PD_MS: u32 = 2_000;
 
@@ -4112,6 +4114,15 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Uvlo);
     }
     let enabled = status.enable;
+    // Non-fatal warning class: while the load is still enabled, the analog side may report
+    // that it is power-limited or current-limited. Emit a periodic warning beep so the user
+    // can notice the limiting condition without stopping the load.
+    let warn_flags = if enabled {
+        status.state_flags & (STATE_FLAG_POWER_LIMITED | STATE_FLAG_CURRENT_LIMITED)
+    } else {
+        0
+    };
+    prompt_tone::set_warn_flags(warn_flags);
     let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
 
     // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
