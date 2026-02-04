@@ -140,6 +140,8 @@ pub enum UiView {
     PresetPanel,
     PresetPanelBlocked,
     PdSettings,
+    #[cfg(feature = "audio_menu")]
+    AudioMenu,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, defmt::Format)]

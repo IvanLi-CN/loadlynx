@@ -15,13 +15,14 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
-use defmt::{info, warn};
+use defmt::info;
 use embassy_futures::select::{Either, select};
 use embassy_sync::{
     blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, signal::Signal,
 };
 use embassy_time::Timer;
-use esp_hal::ledc::channel::{self as ledc_channel, ChannelIFace as _};
+
+use crate::speaker;
 
 // --- Public event API -------------------------------------------------------
 
@@ -45,6 +46,8 @@ static TRIP_REASON: AtomicU32 = AtomicU32::new(0);
 
 static LOCAL_ACTIVITY: AtomicU32 = AtomicU32::new(0);
 static PENDING_TICKS: AtomicU32 = AtomicU32::new(0);
+pub static TICKS_ENQUEUE_TOTAL: AtomicU32 = AtomicU32::new(0);
+pub static TICKS_PLAY_TOTAL: AtomicU32 = AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TripReason {
@@ -185,8 +188,12 @@ pub fn enqueue_ticks(count: u32) {
         return;
     }
 
+    TICKS_ENQUEUE_TOTAL.fetch_add(count, Ordering::Relaxed);
+
     // Saturate to keep the counter bounded under pathological input.
-    const MAX_PENDING_TICKS: u32 = 10_000;
+    // Keep small: detent ticks are UI feedback. A large backlog sounds like a delayed burst
+    // after the user stops rotating, which is worse than dropping excess ticks at high speed.
+    const MAX_PENDING_TICKS: u32 = 16;
 
     let mut cur = PENDING_TICKS.load(Ordering::Relaxed);
     loop {
@@ -199,6 +206,10 @@ pub fn enqueue_ticks(count: u32) {
 
     // Wake the prompt tone task so it can start draining ticks promptly.
     WAKE.signal(());
+}
+
+pub fn pending_ticks() -> u32 {
+    PENDING_TICKS.load(Ordering::Relaxed)
 }
 
 fn try_take_one_tick() -> bool {
@@ -221,25 +232,21 @@ fn try_take_one_tick() -> bool {
 
 pub const BUZZER_FREQ_HZ: u32 = 2_200;
 
-// Low-volume UI feedback (duty controls loudness).
-const UI_DUTY_PCT: u8 = 3;
-// Stronger duty for "fail" so it feels clearly negative/distinct.
-const UI_FAIL_DUTY_PCT: u8 = 6;
+// UI feedback sounds (ok/fail/tick) are rendered as short WAV clips by the speaker backend.
+// This avoids aliasing/harshness from synthesizing a high-frequency square wave at 8kHz.
 const PRIMARY_ALARM_DUTY_PCT: u8 = 6;
 const SECONDARY_ALARM_DUTY_PCT: u8 = 6;
 
-// UI tick: keep short so normal rotation does not backlog.
-const UI_TICK_TONE_MS: u32 = 12;
-const UI_TICK_GAP_MS: u32 = 8;
+// UI tick: rendered as a short WAV clip by the speaker backend (more reliable
+// than duty-pulsing a synthetic tone on the I2S path).
+//
+// IMPORTANT: keep this small to avoid "delayed burst" if ticks accumulate.
+const UI_TICK_PLAY_MS: u32 = 14; // ~= 12ms clip + small margin (fast rotation feels immediate)
 
-// UI ok/fail patterns.
-const UI_OK_MS: u32 = 25;
-// Make "fail" clearly distinct *and* emotionally negative:
-// a short "pip" followed by a longer "buuu" and a pause.
-const UI_FAIL_ON1_MS: u32 = 30;
-const UI_FAIL_GAP_MS: u32 = 45;
-const UI_FAIL_ON2_MS: u32 = 160;
-const UI_FAIL_TAIL_MS: u32 = 120;
+// UI ok/fail clips are longer than ticks; these values are only used to keep the
+// prompt-tone scheduler from starting a large backlog while a clip is still playing.
+const UI_OK_PLAY_MS: u32 = 160; // ~= 150ms playlist (including pre/post silence)
+const UI_FAIL_PLAY_MS: u32 = 240; // ~= 220ms playlist (including pre/post silence)
 
 // Primary alarm cadence (protection-class).
 const PRIMARY_ALARM_ON_MS: u32 = 300;
@@ -265,40 +272,20 @@ struct Step {
     duration_ms: u32,
 }
 
-const STEPS_UI_TICK: &[Step] = &[
-    Step {
-        duty_pct: UI_DUTY_PCT,
-        duration_ms: UI_TICK_TONE_MS,
-    },
-    Step {
-        duty_pct: 0,
-        duration_ms: UI_TICK_GAP_MS,
-    },
-];
-
-const STEPS_UI_OK: &[Step] = &[Step {
-    duty_pct: UI_DUTY_PCT,
-    duration_ms: UI_OK_MS,
+const STEPS_UI_TICK_CLIP: &[Step] = &[Step {
+    duty_pct: 0,
+    duration_ms: UI_TICK_PLAY_MS,
 }];
 
-const STEPS_UI_FAIL: &[Step] = &[
-    Step {
-        duty_pct: UI_FAIL_DUTY_PCT,
-        duration_ms: UI_FAIL_ON1_MS,
-    },
-    Step {
-        duty_pct: 0,
-        duration_ms: UI_FAIL_GAP_MS,
-    },
-    Step {
-        duty_pct: UI_FAIL_DUTY_PCT,
-        duration_ms: UI_FAIL_ON2_MS,
-    },
-    Step {
-        duty_pct: 0,
-        duration_ms: UI_FAIL_TAIL_MS,
-    },
-];
+const STEPS_UI_OK: &[Step] = &[Step {
+    duty_pct: 0,
+    duration_ms: UI_OK_PLAY_MS,
+}];
+
+const STEPS_UI_FAIL: &[Step] = &[Step {
+    duty_pct: 0,
+    duration_ms: UI_FAIL_PLAY_MS,
+}];
 
 const STEPS_PRIMARY_ALARM: &[Step] = &[
     Step {
@@ -361,7 +348,7 @@ const STEPS_TRIP_ALARM: &[Step] = &[
 enum ActiveSound {
     UiOk,
     UiFail,
-    UiTick,
+    UiTickClip,
     PrimaryAlarm,
     SecondaryAlarm,
     TripAlarm,
@@ -379,7 +366,7 @@ impl Player {
         match self.sound {
             ActiveSound::UiOk => STEPS_UI_OK,
             ActiveSound::UiFail => STEPS_UI_FAIL,
-            ActiveSound::UiTick => STEPS_UI_TICK,
+            ActiveSound::UiTickClip => STEPS_UI_TICK_CLIP,
             ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
             ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
             ActiveSound::TripAlarm => STEPS_TRIP_ALARM,
@@ -393,13 +380,9 @@ fn now_ms32() -> u32 {
 }
 
 #[inline]
-fn buzzer_apply(
-    channel: &'static ledc_channel::Channel<'static, esp_hal::ledc::LowSpeed>,
-    duty_pct: u8,
-) {
-    if let Err(err) = channel.set_duty(duty_pct) {
-        warn!("buzzer set_duty failed: {:?}", err);
-    }
+fn buzzer_apply(duty_pct: u8) {
+    // Speaker backend (MAX98357A/I2S). Duty-like values are mapped to a safe PCM amplitude.
+    speaker::set_prompt_tone_duty_pct(duty_pct);
 }
 
 fn drain_ui_sounds(pending_ok: &mut u8, pending_fail: &mut u8, suppress: bool) {
@@ -420,21 +403,36 @@ fn drain_ui_sounds(pending_ok: &mut u8, pending_fail: &mut u8, suppress: bool) {
     }
 }
 
-fn start_player(
-    sound: ActiveSound,
-    channel: &'static ledc_channel::Channel<'static, esp_hal::ledc::LowSpeed>,
-) -> Player {
+fn start_player(sound: ActiveSound) -> Player {
     let now = now_ms32();
     let steps = match sound {
         ActiveSound::UiOk => STEPS_UI_OK,
         ActiveSound::UiFail => STEPS_UI_FAIL,
-        ActiveSound::UiTick => STEPS_UI_TICK,
+        ActiveSound::UiTickClip => STEPS_UI_TICK_CLIP,
         ActiveSound::PrimaryAlarm => STEPS_PRIMARY_ALARM,
         ActiveSound::SecondaryAlarm => STEPS_SECONDARY_ALARM,
         ActiveSound::TripAlarm => STEPS_TRIP_ALARM,
     };
     let step0 = steps[0];
-    buzzer_apply(channel, step0.duty_pct);
+
+    match sound {
+        ActiveSound::UiOk => {
+            // Rendered via WAV clip (speaker backend).
+            speaker::enqueue(speaker::SpeakerSound::UiOk);
+        }
+        ActiveSound::UiFail => {
+            // Rendered via WAV clip (speaker backend).
+            speaker::enqueue(speaker::SpeakerSound::UiFail);
+        }
+        ActiveSound::UiTickClip => {
+            // Deterministic, single "pip" tick via WAV clip (speaker backend).
+            speaker::enqueue(speaker::SpeakerSound::UiTick);
+            TICKS_PLAY_TOTAL.fetch_add(1, Ordering::Relaxed);
+        }
+        _ => {}
+    }
+
+    buzzer_apply(step0.duty_pct);
     Player {
         sound,
         step_index: 0,
@@ -442,11 +440,7 @@ fn start_player(
     }
 }
 
-fn advance_player(
-    mut player: Player,
-    channel: &'static ledc_channel::Channel<'static, esp_hal::ledc::LowSpeed>,
-    repeat: bool,
-) -> Option<Player> {
+fn advance_player(mut player: Player, repeat: bool) -> Option<Player> {
     let now = now_ms32();
     if (now.wrapping_sub(player.step_deadline_ms) as i32) < 0 {
         return Some(player);
@@ -458,13 +452,13 @@ fn advance_player(
         if repeat {
             player.step_index = 0;
         } else {
-            buzzer_apply(channel, 0);
+            buzzer_apply(0);
             return None;
         }
     }
 
     let step = steps[player.step_index];
-    buzzer_apply(channel, step.duty_pct);
+    buzzer_apply(step.duty_pct);
     player.step_deadline_ms = now.wrapping_add(step.duration_ms);
     Some(player)
 }
@@ -472,16 +466,14 @@ fn advance_player(
 // --- Main task --------------------------------------------------------------
 
 #[embassy_executor::task]
-pub async fn prompt_tone_task(
-    buzzer_channel: &'static ledc_channel::Channel<'static, esp_hal::ledc::LowSpeed>,
-) {
+pub async fn prompt_tone_task() {
     info!(
-        "prompt_tone: starting (GPIO21=BUZZER, freq={}Hz, ui_duty={}%, primary_duty={}%, secondary_duty={}%)",
-        BUZZER_FREQ_HZ, UI_DUTY_PCT, PRIMARY_ALARM_DUTY_PCT, SECONDARY_ALARM_DUTY_PCT
+        "prompt_tone: starting (speaker/MAX98357A, freq={}Hz, ui=wav, primary_duty={}%, secondary_duty={}%)",
+        BUZZER_FREQ_HZ, PRIMARY_ALARM_DUTY_PCT, SECONDARY_ALARM_DUTY_PCT
     );
 
     // Ensure we start silent.
-    buzzer_apply(buzzer_channel, 0);
+    buzzer_apply(0);
 
     let mut last_fault_flags: u32 = 0;
 
@@ -494,6 +486,7 @@ pub async fn prompt_tone_task(
     let mut pending_fail: u8 = 0;
 
     let mut player: Option<Player> = None;
+    let mut last_alarm_active: bool = false;
 
     loop {
         let fault_flags = FAULT_FLAGS.load(Ordering::Relaxed);
@@ -518,7 +511,7 @@ pub async fn prompt_tone_task(
                 pending_fail = 0;
                 LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
                 PENDING_TICKS.store(0, Ordering::Relaxed); // discard suppressed ticks
-                player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
+                player = Some(start_player(ActiveSound::PrimaryAlarm));
             }
 
             // Falling edge out of Primary condition.
@@ -528,7 +521,7 @@ pub async fn prompt_tone_task(
                 LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
                 if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::PrimaryAlarm)
                 {
-                    player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
+                    player = Some(start_player(ActiveSound::PrimaryAlarm));
                 }
             }
 
@@ -544,6 +537,15 @@ pub async fn prompt_tone_task(
             last_link_latched = link_latched;
         }
 
+        // Audio backend suppression:
+        // Only continuous alarms suppress other audio sources (voice clips, etc.).
+        let alarm_active =
+            primary_condition_active || primary_cleared_wait_ack || link_latched || trip_latched;
+        if alarm_active != last_alarm_active {
+            last_alarm_active = alarm_active;
+            speaker::set_prompt_tone_alarm_active(alarm_active);
+        }
+
         // --- Primary alarm (highest priority) ---------------------------------
 
         if primary_condition_active {
@@ -554,10 +556,10 @@ pub async fn prompt_tone_task(
             PENDING_TICKS.store(0, Ordering::Relaxed);
 
             if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::PrimaryAlarm) {
-                player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
+                player = Some(start_player(ActiveSound::PrimaryAlarm));
             }
             if let Some(p) = player {
-                player = advance_player(p, buzzer_channel, true);
+                player = advance_player(p, true);
             }
         } else if primary_cleared_wait_ack {
             // Primary is cleared; keep playing alarm until the first local interaction happens.
@@ -569,15 +571,15 @@ pub async fn prompt_tone_task(
                 info!("prompt_tone: local ack observed; stopping primary alarm");
                 primary_cleared_wait_ack = false;
                 LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
-                buzzer_apply(buzzer_channel, 0);
+                buzzer_apply(0);
                 player = None;
             } else {
                 if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::PrimaryAlarm)
                 {
-                    player = Some(start_player(ActiveSound::PrimaryAlarm, buzzer_channel));
+                    player = Some(start_player(ActiveSound::PrimaryAlarm));
                 }
                 if let Some(p) = player {
-                    player = advance_player(p, buzzer_channel, true);
+                    player = advance_player(p, true);
                 }
             }
         } else {
@@ -599,17 +601,16 @@ pub async fn prompt_tone_task(
                         secondary_cleared_wait_ack = false;
                         LINK_ALARM_LATCHED.store(false, Ordering::Relaxed);
                         LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
-                        buzzer_apply(buzzer_channel, 0);
+                        buzzer_apply(0);
                         player = None;
                     } else {
                         if player.is_none()
                             || player.is_some_and(|p| p.sound != ActiveSound::SecondaryAlarm)
                         {
-                            player =
-                                Some(start_player(ActiveSound::SecondaryAlarm, buzzer_channel));
+                            player = Some(start_player(ActiveSound::SecondaryAlarm));
                         }
                         if let Some(p) = player {
-                            player = advance_player(p, buzzer_channel, true);
+                            player = advance_player(p, true);
                         }
                     }
                 } else {
@@ -622,10 +623,10 @@ pub async fn prompt_tone_task(
                     if player.is_none()
                         || player.is_some_and(|p| p.sound != ActiveSound::SecondaryAlarm)
                     {
-                        player = Some(start_player(ActiveSound::SecondaryAlarm, buzzer_channel));
+                        player = Some(start_player(ActiveSound::SecondaryAlarm));
                     }
                     if let Some(p) = player {
-                        player = advance_player(p, buzzer_channel, true);
+                        player = advance_player(p, true);
                     }
                 }
             } else if trip_latched {
@@ -650,15 +651,15 @@ pub async fn prompt_tone_task(
                     TRIP_ALARM_LATCHED.store(false, Ordering::Relaxed);
                     TRIP_REASON.store(0, Ordering::Relaxed);
                     LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
-                    buzzer_apply(buzzer_channel, 0);
+                    buzzer_apply(0);
                     player = None;
                 } else {
                     if player.is_none() || player.is_some_and(|p| p.sound != ActiveSound::TripAlarm)
                     {
-                        player = Some(start_player(ActiveSound::TripAlarm, buzzer_channel));
+                        player = Some(start_player(ActiveSound::TripAlarm));
                     }
                     if let Some(p) = player {
-                        player = advance_player(p, buzzer_channel, true);
+                        player = advance_player(p, true);
                     }
                 }
             } else {
@@ -674,25 +675,25 @@ pub async fn prompt_tone_task(
                         || p.sound == ActiveSound::SecondaryAlarm
                         || p.sound == ActiveSound::TripAlarm
                 }) {
-                    buzzer_apply(buzzer_channel, 0);
+                    buzzer_apply(0);
                     player = None;
                 }
 
                 // Advance current player (no repeat for UI sounds).
                 if let Some(p) = player {
-                    player = advance_player(p, buzzer_channel, false);
+                    player = advance_player(p, false);
                 }
 
                 // If idle, start the next sound by priority.
                 if player.is_none() {
                     if pending_fail > 0 {
                         pending_fail = pending_fail.saturating_sub(1);
-                        player = Some(start_player(ActiveSound::UiFail, buzzer_channel));
+                        player = Some(start_player(ActiveSound::UiFail));
                     } else if pending_ok > 0 {
                         pending_ok = pending_ok.saturating_sub(1);
-                        player = Some(start_player(ActiveSound::UiOk, buzzer_channel));
+                        player = Some(start_player(ActiveSound::UiOk));
                     } else if try_take_one_tick() {
-                        player = Some(start_player(ActiveSound::UiTick, buzzer_channel));
+                        player = Some(start_player(ActiveSound::UiTickClip));
                     }
                 }
             }

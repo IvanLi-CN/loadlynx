@@ -86,10 +86,12 @@ lto = "fat"
 panic = "abort"
 
 [features]
-default = ["enable_analog_5v_on_boot", "esp32s3", "net_http"]
+default = ["enable_analog_5v_on_boot", "esp32s3", "net_http", "audio_menu"]
 enable_analog_5v_on_boot = []
 esp32s3 = []
 mock_setpoint = []
+# On-device diagnostics: long-press touch power button -> settings menu listing audio clips.
+audio_menu = []
 # Experimental Wi‑Fi + HTTP server; disabled by default to avoid impacting existing
 # firmware layout and link scripts. When enabled, this pulls in esp-radio +
 # esp-rtos (Wi‑Fi + allocator bits) + embassy-net/smoltcp. The net task wiring

@@ -1,3 +1,5 @@
+#[cfg(feature = "audio_menu")]
+pub mod audio_menu;
 mod fonts;
 pub mod pd_settings;
 pub mod preset_panel;
