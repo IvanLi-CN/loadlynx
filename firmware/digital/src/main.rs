@@ -1172,7 +1172,7 @@ async fn encoder_task(
                                 if prev {
                                     guard.output_enabled = false;
                                     bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    prompt_tone::enqueue_load_off_ok();
                                     info!(
                                         "encoder short-press: LOAD ON -> OFF (preset_id={})",
                                         guard.active_preset_id
@@ -1189,7 +1189,7 @@ async fn encoder_task(
                                 } else {
                                     guard.output_enabled = true;
                                     bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    prompt_tone::enqueue_load_on_ok();
                                     info!(
                                         "encoder short-press: LOAD OFF -> ON (preset_id={})",
                                         guard.active_preset_id
@@ -1592,7 +1592,7 @@ async fn touch_spring_task(
                         if guard.output_enabled {
                             guard.output_enabled = false;
                             bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
+                            prompt_tone::enqueue_load_off_ok();
                             info!(
                                 "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
                                 guard.active_preset_id, preset.mode
@@ -1616,7 +1616,7 @@ async fn touch_spring_task(
                         } else {
                             guard.output_enabled = true;
                             bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
+                            prompt_tone::enqueue_load_on_ok();
                             info!(
                                 "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
                                 guard.active_preset_id, preset.mode
@@ -1670,7 +1670,7 @@ async fn touch_spring_task(
                                 if guard.output_enabled {
                                     guard.output_enabled = false;
                                     bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    prompt_tone::enqueue_load_off_ok();
                                     info!(
                                         "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
                                         guard.active_preset_id, preset.mode
@@ -1694,7 +1694,7 @@ async fn touch_spring_task(
                                 } else {
                                     guard.output_enabled = true;
                                     bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    prompt_tone::enqueue_load_on_ok();
                                     info!(
                                         "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
                                         guard.active_preset_id, preset.mode
@@ -2851,7 +2851,7 @@ async fn touch_ui_task(
                         if guard.output_enabled {
                             guard.output_enabled = false;
                             bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
+                            prompt_tone::enqueue_load_off_ok();
                         } else if let Some(reason) =
                             current_load_enable_block_abbrev(guard.active_preset().min_v_mv)
                         {
@@ -2861,7 +2861,7 @@ async fn touch_ui_task(
                         } else {
                             guard.output_enabled = true;
                             bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
+                            prompt_tone::enqueue_load_on_ok();
                         }
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
@@ -3064,7 +3064,7 @@ async fn touch_ui_task(
                                     if guard.output_enabled {
                                         guard.output_enabled = false;
                                         bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
+                                        prompt_tone::enqueue_load_off_ok();
                                     } else if let Some(reason) = current_load_enable_block_abbrev(
                                         guard.active_preset().min_v_mv,
                                     ) {
@@ -3074,7 +3074,7 @@ async fn touch_ui_task(
                                     } else {
                                         guard.output_enabled = true;
                                         bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
+                                        prompt_tone::enqueue_load_on_ok();
                                     }
                                     last_tab_tap = None;
                                 }

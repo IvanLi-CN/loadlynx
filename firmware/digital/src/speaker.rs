@@ -14,6 +14,7 @@ use esp_hal::{
 pub enum SpeakerSound {
     BootChirp,
     UiOk,
+    UiOkOff,
     UiFail,
     UiTouch,
     UiTick,
@@ -48,6 +49,7 @@ pub fn enqueue(sound: SpeakerSound) {
 pub const AUDIO_MENU_SOUNDS: &[SpeakerSound] = &[
     SpeakerSound::BootChirp,
     SpeakerSound::UiOk,
+    SpeakerSound::UiOkOff,
     SpeakerSound::UiFail,
     SpeakerSound::UiTouch,
     SpeakerSound::UiTick,
@@ -58,6 +60,7 @@ pub fn sound_label(sound: SpeakerSound) -> &'static str {
     match sound {
         SpeakerSound::BootChirp => "Boot",
         SpeakerSound::UiOk => "UI OK",
+        SpeakerSound::UiOkOff => "LOAD Off OK",
         SpeakerSound::UiFail => "UI Fail",
         SpeakerSound::UiTouch => "UI Touch",
         SpeakerSound::UiTick => "UI Tick",
@@ -125,6 +128,7 @@ const PROMPT_TONE_RAMP_MS: u32 = 2; // reduce clicks on on/off edges
 
 const SPEAKER_WAV_BOOT_CHIRP: &[u8] = include_bytes!("../assets/audio/speaker-boot-chirp-8k.wav");
 const SPEAKER_WAV_UI_OK: &[u8] = include_bytes!("../assets/audio/speaker-ui-ok-8k.wav");
+const SPEAKER_WAV_UI_OK_OFF: &[u8] = include_bytes!("../assets/audio/speaker-ui-ok-off-8k.wav");
 const SPEAKER_WAV_UI_FAIL: &[u8] = include_bytes!("../assets/audio/speaker-ui-fail-8k.wav");
 const SPEAKER_WAV_UI_TOUCH: &[u8] = include_bytes!("../assets/audio/speaker-ui-touch-8k.wav");
 const SPEAKER_WAV_UI_TICK: &[u8] = include_bytes!("../assets/audio/speaker-ui-tick-8k.wav");
@@ -490,6 +494,7 @@ enum PlaylistKind {
     BootChirp,
     Boot,
     UiOk,
+    UiOkOff,
     UiFail,
     UiTouch,
     UiTick,
@@ -513,6 +518,7 @@ struct AudioAssets {
     diag_880: &'static [u8],
     boot_chirp: &'static [u8],
     ui_ok: &'static [u8],
+    ui_ok_off: &'static [u8],
     ui_fail: &'static [u8],
     ui_touch: &'static [u8],
     ui_tick: &'static [u8],
@@ -538,6 +544,7 @@ impl AudioAssets {
             diag_880: load_one("diag_880", SPEAKER_WAV_DIAG_880),
             boot_chirp: load_one("boot_chirp", SPEAKER_WAV_BOOT_CHIRP),
             ui_ok: load_one("ui_ok", SPEAKER_WAV_UI_OK),
+            ui_ok_off: load_one("ui_ok_off", SPEAKER_WAV_UI_OK_OFF),
             ui_fail: load_one("ui_fail", SPEAKER_WAV_UI_FAIL),
             ui_touch: load_one("ui_touch", SPEAKER_WAV_UI_TOUCH),
             ui_tick: load_one("ui_tick", SPEAKER_WAV_UI_TICK),
@@ -590,6 +597,15 @@ impl AudioAssets {
                 1 => Some(PlaylistItem::Audio {
                     label: "ui ok",
                     pcm: self.ui_ok,
+                }),
+                2 => Some(PlaylistItem::SilenceMs(40)),
+                _ => None,
+            },
+            PlaylistKind::UiOkOff => match idx {
+                0 => Some(PlaylistItem::SilenceMs(20)),
+                1 => Some(PlaylistItem::Audio {
+                    label: "load off ok",
+                    pcm: self.ui_ok_off,
                 }),
                 2 => Some(PlaylistItem::SilenceMs(40)),
                 _ => None,
@@ -816,6 +832,7 @@ pub async fn speaker_task(
                 let kind = match sound {
                     SpeakerSound::BootChirp => PlaylistKind::BootChirp,
                     SpeakerSound::UiOk => PlaylistKind::UiOk,
+                    SpeakerSound::UiOkOff => PlaylistKind::UiOkOff,
                     SpeakerSound::UiFail => PlaylistKind::UiFail,
                     SpeakerSound::UiTouch => PlaylistKind::UiTouch,
                     SpeakerSound::UiTick => PlaylistKind::UiTick,
