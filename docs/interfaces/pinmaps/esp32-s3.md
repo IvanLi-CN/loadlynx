@@ -119,7 +119,7 @@
 | 16 | GPIO11 | MOSI | 已用 | 同上。 |
 | 17 | GPIO12 | SCLK | 已用 | 同上。 |
 | 18 | GPIO13 | CS | 已用 | 同上。 |
-| 19 | GPIO14 | TOUCH_SPRING | 规划 | Touch Sensor：`TouchPad14`；电极为触摸弹簧，顶住亚克力背面（0.8–1.0 mm）；注意与 `I2S_BCLK` 等高速时钟、RGB PWM 走线隔离（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
+| 19 | GPIO14 | TOUCH_SPRING | 规划 | Touch Sensor：`TouchPad14`；电极为触摸弹簧，顶住亚克力背面（0.8–1.0 mm）；固件用作触摸电源键/本地输入（熄屏时用于唤醒，Plan #6mre7）；注意与 `I2S_BCLK` 等高速时钟、RGB PWM 走线隔离（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
 | 20 | VDD3P3_RTC | 3V3 | 已用 | RTC 供电。 |
 | 21 | GPIO15 | BLK | 已用 | 背光使能/PWM。 |
 | 22 | GPIO16 | — | 空 | 预留 IO。 |

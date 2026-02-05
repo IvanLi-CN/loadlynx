@@ -262,14 +262,27 @@
 
 - **触发条件**
   - 仅当 `output_enabled=false`（LOAD OFF）时启用计时；LOAD ON 时禁止自动熄屏。
-  - “无操作”以本地用户输入事件为准：触控 / 旋钮旋转 / 旋钮按压均会刷新 `last_user_activity_ms`。
+  - “无操作”以本地用户输入事件为准：触控 / 旋钮旋转 / 旋钮按压 / 触摸电源键（`TOUCH_SPRING`）均会刷新 `last_user_activity_ms`。
 - **两段计时**
   - `T+2min`：进入调暗（`backlight_pct = min(orig_pct, 10)`；不得调亮）。
   - `T+5min`：进入熄屏（背光关断 0% → `Display::sleep()`）。
 - **唤醒**
   - 任意用户输入或 `LOAD OFF → ON` 会唤醒：`Display::wake()` → 恢复背光到 `orig_pct` → 强制整帧重绘 UI。
-  - **安全策略**：在熄屏状态下，第一次输入仅用于唤醒且会被消费，不会触发 UI 动作（避免盲操作误开负载/改设置）。
+  - **安全策略**：在熄屏状态下，第一次输入仅用于唤醒且会被消费，不会触发 UI 动作；触摸电源键同样遵循该口径（避免盲操作误开负载/改设置）。
 - **可观测性**
   - 状态切换会打印一次日志：`screen_power: active->dim` / `dim->off` / `off->active`（包含 `idle_ms` 与目标背光百分比）。
 
 实现位置：`firmware/digital/src/main.rs`（`display_task` + `touch_ui_task` + `encoder_task`）。
+
+## 7. 数字板：睡眠待机指示灯（触摸电源键白光呼吸）
+
+为便于在熄屏时从远处快速判断“设备仍处于待机而非断电”，数字板固件在 **`ScreenPowerState::Off`**（熄屏/睡眠待机）期间让触摸电源键指示灯输出白光低频呼吸（Plan #6mre7）。
+
+- **状态源**：`ScreenPowerState::Off`（`firmware/digital/src/main.rs` 中的 `SCREEN_POWER_STATE` 原子变量）。
+- **硬件**：`TOUCH_SPRING`（GPIO14/TouchPad14）作为触摸电源键；RGB 指示灯为 `RGB_R/G/B_PWM`（GPIO38/39/40，active-low）。
+- **灯效参数（当前固件默认值）**
+  - 呼吸周期：`STANDBY_BREATH_PERIOD_MS = 14000 ms`（7s 上升 + 7s 下降）
+  - 亮度上限：`STANDBY_BREATH_MAX_BRIGHTNESS_PCT = 12 %`
+  - 更新步进：`STANDBY_BREATH_UPDATE_MS = 10 ms`
+- **输入语义**：在熄屏状态下，触摸电源键输入仅用于唤醒且会被消费，不会改变业务状态（例如不切换 `output_enabled`）。
+- **日志**：进入/退出熄屏时会打印 `standby_led: enabled/disabled ...`，便于 HIL 验收与调参记录。

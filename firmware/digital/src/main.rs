@@ -21,6 +21,8 @@ use embedded_io_async::Read as AsyncRead;
 use esp_hal::gpio::OutputSignal as GpioOutputSignal;
 use esp_hal::gpio::interconnect::OutputSignal as OutputSignalPin;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
+use esp_hal::interrupt::Priority;
+use esp_hal::interrupt::software::SoftwareInterruptControl;
 use esp_hal::time::Instant as HalInstant;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::uhci::{self, RxConfig as UhciRxConfig, TxConfig as UhciTxConfig, Uhci};
@@ -32,7 +34,7 @@ use esp_hal::{
     gpio::{DriveMode, Level, NoPin, Output, OutputConfig},
     ledc::{
         LSGlobalClkSource, Ledc, LowSpeed,
-        channel::{self as ledc_channel, ChannelIFace as _},
+        channel::{self as ledc_channel, ChannelHW as _, ChannelIFace as _},
         timer::{self as ledc_timer, TimerIFace as _},
     },
     spi::{
@@ -71,6 +73,8 @@ use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over
 pub(crate) const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
 const STATE_FLAG_ENABLED: u32 = 1 << 2;
+const STATE_FLAG_POWER_LIMITED: u32 = 1 << 4;
+const STATE_FLAG_CURRENT_LIMITED: u32 = 1 << 5;
 
 const PD_T_PD_MS: u32 = 2_000;
 
@@ -92,6 +96,16 @@ const RGB_STATUS_PWM_FREQUENCY_KHZ: u32 = 5; // avoid visible flicker
 const RGB_STATUS_SOLID_BRIGHTNESS_PCT: u8 = 35;
 const RGB_STATUS_BLINK_BRIGHTNESS_PCT: u8 = 35;
 const RGB_STATUS_BLINK_TOGGLE_MS: u32 = 250; // 2 Hz: toggle every 250ms
+
+// Plan #6mre7: when the device is in "sleep standby" (ScreenPowerState::Off),
+// show a low-tempo white breathing indicator on the touch power button LED.
+const STANDBY_BREATH_PERIOD_MS: u32 = 14_000; // 7s up + 7s down
+const STANDBY_BREATH_MAX_BRIGHTNESS_PCT: u8 = 12;
+const STANDBY_BREATH_UPDATE_MS: u32 = 10;
+
+// RGB status LEDC uses Timer3 configured at Duty13Bit (see init below).
+// esp-hal defines max duty cycle as 2^bits (e.g. 13-bit => 8192).
+const RGB_STATUS_DUTY_MAX: u16 = 8192;
 
 const SCREEN_POWER_STATE_ACTIVE: u8 = 0;
 const SCREEN_POWER_STATE_DIM: u8 = 1;
@@ -136,23 +150,30 @@ fn backlight_pwm_disconnect(backlight_pin: &'static OutputSignalPin<'static>) {
 }
 
 #[inline]
-fn rgb_hw_duty_pct(logical_pct: u8) -> u8 {
+fn rgb_hw_duty(logical_duty: u16) -> u32 {
     // RGB channels are active-low (common anode on 3V3, GPIO sinks current).
-    100u8.saturating_sub(logical_pct.min(100))
+    // Map "logical brightness" (low-time) to "HW duty" (high-time).
+    (RGB_STATUS_DUTY_MAX.saturating_sub(logical_duty.min(RGB_STATUS_DUTY_MAX))) as u32
 }
 
 #[inline]
-fn set_rgb_pct(
+fn pct_to_rgb_duty(logical_pct: u8) -> u16 {
+    let pct = logical_pct.min(100) as u32;
+    ((RGB_STATUS_DUTY_MAX as u32) * pct / 100) as u16
+}
+
+#[inline]
+fn set_rgb_duty(
     r: &'static ledc_channel::Channel<'static, LowSpeed>,
     g: &'static ledc_channel::Channel<'static, LowSpeed>,
     b: &'static ledc_channel::Channel<'static, LowSpeed>,
-    r_pct: u8,
-    g_pct: u8,
-    b_pct: u8,
+    r_duty: u16,
+    g_duty: u16,
+    b_duty: u16,
 ) {
-    r.set_duty(rgb_hw_duty_pct(r_pct)).expect("rgb r duty");
-    g.set_duty(rgb_hw_duty_pct(g_pct)).expect("rgb g duty");
-    b.set_duty(rgb_hw_duty_pct(b_pct)).expect("rgb b duty");
+    r.set_duty_hw(rgb_hw_duty(r_duty));
+    g.set_duty_hw(rgb_hw_duty(g_duty));
+    b.set_duty_hw(rgb_hw_duty(b_duty));
 }
 
 mod control;
@@ -288,8 +309,6 @@ static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
 static BACKLIGHT_PIN: StaticCell<OutputSignalPin<'static>> = StaticCell::new();
 static FAN_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static FAN_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
-static BUZZER_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
-static BUZZER_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static RGB_STATUS_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static RGB_STATUS_R_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> =
     StaticCell::new();
@@ -301,6 +320,7 @@ static UART1_CELL: StaticCell<Uart<'static, Async>> = StaticCell::new();
 static UART_DMA_DECODER: StaticCell<SlipDecoder<FAST_STATUS_SLIP_CAPACITY>> = StaticCell::new();
 #[cfg(not(feature = "mock_setpoint"))]
 static PCNT: StaticCell<Pcnt<'static>> = StaticCell::new();
+static AUDIO_EXECUTOR: StaticCell<esp_rtos::embassy::InterruptExecutor<0>> = StaticCell::new();
 pub type TelemetryMutex = Mutex<CriticalSectionRawMutex, TelemetryModel>;
 static TELEMETRY: StaticCell<TelemetryMutex> = StaticCell::new();
 pub(crate) static ANALOG_STATE: AtomicU8 = AtomicU8::new(AnalogState::Offline as u8);
@@ -809,8 +829,14 @@ async fn encoder_task(
                     residual = 0;
                     break;
                 }
-                prompt_tone::enqueue_ticks(1);
                 let mut guard = control.lock().await;
+                #[cfg(feature = "audio_menu")]
+                if guard.ui_view == control::UiView::AudioMenu {
+                    // Audio menu is a diagnostic screen: suppress detent tick sounds and
+                    // avoid adjusting business state while it is open.
+                    continue;
+                }
+                prompt_tone::enqueue_ticks(1);
                 match guard.ui_view {
                     control::UiView::Main => {
                         let preset_id = guard.active_preset_id;
@@ -1116,6 +1142,8 @@ async fn encoder_task(
                             bump_control_rev();
                         }
                     }
+                    #[cfg(feature = "audio_menu")]
+                    control::UiView::AudioMenu => {}
                 }
             }
         }
@@ -1146,7 +1174,7 @@ async fn encoder_task(
                                 if prev {
                                     guard.output_enabled = false;
                                     bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    prompt_tone::enqueue_load_off_ok();
                                     info!(
                                         "encoder short-press: LOAD ON -> OFF (preset_id={})",
                                         guard.active_preset_id
@@ -1163,7 +1191,7 @@ async fn encoder_task(
                                 } else {
                                     guard.output_enabled = true;
                                     bump_control_rev();
-                                    prompt_tone::enqueue_ui_ok();
+                                    prompt_tone::enqueue_load_on_ok();
                                     info!(
                                         "encoder short-press: LOAD OFF -> ON (preset_id={})",
                                         guard.active_preset_id
@@ -1194,6 +1222,8 @@ async fn encoder_task(
                             }
                             control::UiView::PresetPanelBlocked => {}
                             control::UiView::PdSettings => {}
+                            #[cfg(feature = "audio_menu")]
+                            control::UiView::AudioMenu => {}
                         }
                     }
                     down_since_ms = None;
@@ -1249,7 +1279,7 @@ async fn touch_spring_task(
     );
 
     // Keep RGB dark until touch calibration completes.
-    set_rgb_pct(rgb_r, rgb_g, rgb_b, 0, 0, 0);
+    set_rgb_duty(rgb_r, rgb_g, rgb_b, 0, 0, 0);
 
     // NOTE: esp-hal 1.0.0 does not currently expose `esp_hal::touch` for ESP32-S3
     // (cfg(touch) is not set), so we configure + read the S3 touch controller via
@@ -1460,20 +1490,39 @@ async fn touch_spring_task(
     let mut last_touch_block_ms: Option<u32> = None;
     let mut down_streak: u8 = 0;
 
+    // When the on-device audio menu feature is enabled, the touch power button supports a
+    // long-press gesture to enter/exit the settings screen.
+    #[cfg(feature = "audio_menu")]
+    #[derive(Clone, Copy)]
+    struct TouchSpringPress {
+        start_ms: u32,
+        long_fired: bool,
+    }
+    #[cfg(feature = "audio_menu")]
+    let mut press: Option<TouchSpringPress> = None;
+    #[cfg(feature = "audio_menu")]
+    const POWER_LONG_PRESS_MS: u32 = 800;
+
     info!(
         "touch spring calibrated: baseline={} (min={}, max={}, span={}), delta_abs_down={}, delta_abs_up={}",
         baseline0, min, max, noise_span, down_delta, up_delta
     );
 
+    let standby_max_duty = pct_to_rgb_duty(STANDBY_BREATH_MAX_BRIGHTNESS_PCT);
+    let solid_duty = pct_to_rgb_duty(RGB_STATUS_SOLID_BRIGHTNESS_PCT);
+    let blink_duty = pct_to_rgb_duty(RGB_STATUS_BLINK_BRIGHTNESS_PCT);
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     struct Rgb {
-        r: u8,
-        g: u8,
-        b: u8,
+        r: u16,
+        g: u16,
+        b: u16,
     }
     let mut last_rgb = Rgb { r: 0, g: 0, b: 0 };
     let mut blink_on: bool = false;
     let mut last_blink_toggle_ms: u32 = now_ms32();
+    let mut last_breath_update_ms: u32 = now_ms32();
+    let mut last_screen_off: bool = false;
     let mut last_dbg_ms: u32 = now_ms32();
 
     loop {
@@ -1510,101 +1559,230 @@ async fn touch_spring_task(
                     last_action_ms = now;
                     TOUCH_SPRING_TOUCHDOWN_TOTAL.fetch_add(1, Ordering::Relaxed);
 
-                    // Dedicated load switch input: treat as user activity (wake screen),
-                    // but do NOT consume (this is intended to work without the UI).
-                    note_user_activity();
+                    // Touch power button:
+                    // - always counts as user activity (wakes screen),
+                    // - BUT when the screen is OFF, the first touch is consumed (Plan #0015/#6mre7),
+                    //   i.e. it must not toggle LOAD / change business state.
+                    let consume = note_user_activity_and_should_consume_off();
+                    if consume {
+                        info!("touch_spring: wake screen (consumed because screen_power=off)");
+                    }
 
-                    let mut guard = control.lock().await;
-                    let preset = guard.active_preset();
-                    let setpoint_zero = match preset.mode {
-                        LoadMode::Cp => preset.target_p_mw == 0,
-                        LoadMode::Cv => preset.target_v_mv == 0,
-                        LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
-                    };
+                    #[cfg(feature = "audio_menu")]
+                    {
+                        // Defer short-press action until release so we can detect long-press.
+                        if consume {
+                            press = None;
+                        } else {
+                            press = Some(TouchSpringPress {
+                                start_ms: now,
+                                long_fired: false,
+                            });
+                        }
+                    }
 
-                    if guard.output_enabled {
-                        guard.output_enabled = false;
-                        bump_control_rev();
-                        prompt_tone::enqueue_ui_ok();
-                        speaker::enqueue(speaker::SpeakerSound::UiOk);
-                        info!(
-                            "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
-                            guard.active_preset_id, preset.mode
-                        );
-                    } else if setpoint_zero {
-                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                        last_touch_block_ms = Some(now);
-                        prompt_tone::enqueue_ui_fail();
-                        speaker::enqueue(speaker::SpeakerSound::UiFail);
-                        info!(
-                            "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
-                            guard.active_preset_id, preset.mode
-                        );
-                    } else if let Some(reason) = current_load_enable_block_abbrev(preset.min_v_mv) {
-                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                        last_touch_block_ms = Some(now);
-                        prompt_tone::enqueue_ui_fail();
-                        speaker::enqueue(speaker::SpeakerSound::UiFail);
-                        record_enable_block(reason);
-                        info!("touch_spring: LOAD enable blocked (reason={})", reason);
-                    } else {
-                        guard.output_enabled = true;
-                        bump_control_rev();
-                        prompt_tone::enqueue_ui_ok();
-                        speaker::enqueue(speaker::SpeakerSound::UiOk);
-                        info!(
-                            "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
-                            guard.active_preset_id, preset.mode
-                        );
+                    #[cfg(not(feature = "audio_menu"))]
+                    if !consume {
+                        let mut guard = control.lock().await;
+                        let preset = guard.active_preset();
+                        let setpoint_zero = match preset.mode {
+                            LoadMode::Cp => preset.target_p_mw == 0,
+                            LoadMode::Cv => preset.target_v_mv == 0,
+                            LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+                        };
+
+                        if guard.output_enabled {
+                            guard.output_enabled = false;
+                            bump_control_rev();
+                            prompt_tone::enqueue_load_off_ok();
+                            info!(
+                                "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
+                        } else if setpoint_zero {
+                            TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                            last_touch_block_ms = Some(now);
+                            prompt_tone::enqueue_ui_fail();
+                            info!(
+                                "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
+                        } else if let Some(reason) =
+                            current_load_enable_block_abbrev(preset.min_v_mv)
+                        {
+                            TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                            last_touch_block_ms = Some(now);
+                            prompt_tone::enqueue_ui_fail();
+                            record_enable_block(reason);
+                            info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                        } else {
+                            guard.output_enabled = true;
+                            bump_control_rev();
+                            prompt_tone::enqueue_load_on_ok();
+                            info!(
+                                "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
+                        }
                     }
                 }
             }
         } else {
+            #[cfg(feature = "audio_menu")]
+            {
+                // Long press while touched: toggle audio menu.
+                if let Some(p) = press.as_mut() {
+                    if !p.long_fired && now.wrapping_sub(p.start_ms) >= POWER_LONG_PRESS_MS {
+                        let mut guard = control.lock().await;
+                        if guard.ui_view == control::UiView::AudioMenu {
+                            guard.ui_view = control::UiView::Main;
+                            info!("touch_spring: long-press -> close audio menu");
+                        } else {
+                            guard.ui_view = control::UiView::AudioMenu;
+                            info!("touch_spring: long-press -> open audio menu");
+                        }
+                        bump_control_rev();
+                        // UI-only confirmation; avoid playing an extra clip from the audio menu itself.
+                        prompt_tone::enqueue_ui_ok();
+                        p.long_fired = true;
+                    }
+                }
+            }
+
             // Release edge: require the signal to settle back close to the baseline.
             if delta_abs <= up_delta {
                 touched = false;
+
+                #[cfg(feature = "audio_menu")]
+                {
+                    // Short press: if we did not fire the long action, fall back to the legacy
+                    // behaviour (toggle LOAD), unless we are currently in the audio menu.
+                    if let Some(p) = press.take() {
+                        if !p.long_fired {
+                            let view = { control.lock().await.ui_view };
+                            if view != control::UiView::AudioMenu {
+                                let mut guard = control.lock().await;
+                                let preset = guard.active_preset();
+                                let setpoint_zero = match preset.mode {
+                                    LoadMode::Cp => preset.target_p_mw == 0,
+                                    LoadMode::Cv => preset.target_v_mv == 0,
+                                    LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+                                };
+
+                                if guard.output_enabled {
+                                    guard.output_enabled = false;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_load_off_ok();
+                                    info!(
+                                        "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
+                                        guard.active_preset_id, preset.mode
+                                    );
+                                } else if setpoint_zero {
+                                    TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                                    last_touch_block_ms = Some(now);
+                                    prompt_tone::enqueue_ui_fail();
+                                    info!(
+                                        "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                        guard.active_preset_id, preset.mode
+                                    );
+                                } else if let Some(reason) =
+                                    current_load_enable_block_abbrev(preset.min_v_mv)
+                                {
+                                    TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                                    last_touch_block_ms = Some(now);
+                                    prompt_tone::enqueue_ui_fail();
+                                    record_enable_block(reason);
+                                    info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                                } else {
+                                    guard.output_enabled = true;
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_load_on_ok();
+                                    info!(
+                                        "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                                        guard.active_preset_id, preset.mode
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 
-        // Status LED mapping (frozen by Plan #0021):
-        // abnormal (yellow blink) > load_enabled=ON (green) > load_enabled=OFF (red).
-        let output_enabled = { control.lock().await.output_enabled };
-        let abnormal = current_load_block_abbrev().is_some()
-            || recent_enable_block_abbrev(now).is_some()
-            || last_touch_block_ms
-                .map(|t| now.wrapping_sub(t) <= ENABLE_BLOCK_TTL_MS)
-                .unwrap_or(false);
-
-        let desired = if abnormal {
-            if now.wrapping_sub(last_blink_toggle_ms) >= RGB_STATUS_BLINK_TOGGLE_MS {
-                blink_on = !blink_on;
-                last_blink_toggle_ms = now;
+        // Status LED policy:
+        // - Standby indicator (Plan #6mre7): ScreenPowerState::Off => low-tempo white breathing.
+        // - Otherwise, mapping frozen by Plan #0021:
+        //   abnormal (yellow blink) > load_enabled=ON (green) > load_enabled=OFF (red).
+        let screen_off = screen_power_state_is_off();
+        if screen_off != last_screen_off {
+            last_screen_off = screen_off;
+            if screen_off {
+                // Force a prompt update on entry to ensure the LED starts within 1s.
+                last_breath_update_ms = now.wrapping_sub(STANDBY_BREATH_UPDATE_MS);
+                info!(
+                    "standby_led: enabled (screen_power=off, period_ms={}, max_brightness={}%)",
+                    STANDBY_BREATH_PERIOD_MS, STANDBY_BREATH_MAX_BRIGHTNESS_PCT
+                );
+            } else {
+                info!("standby_led: disabled (screen_power!=off)");
             }
-            if blink_on {
+        }
+
+        let desired = if screen_off {
+            if now.wrapping_sub(last_breath_update_ms) >= STANDBY_BREATH_UPDATE_MS {
+                last_breath_update_ms = now;
+                let duty = loadlynx_led_effects::breathing::triangle_breathe_u16(
+                    now,
+                    STANDBY_BREATH_PERIOD_MS,
+                    standby_max_duty,
+                );
                 Rgb {
-                    r: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
-                    g: RGB_STATUS_BLINK_BRIGHTNESS_PCT,
+                    r: duty,
+                    g: duty,
+                    b: duty,
+                }
+            } else {
+                last_rgb
+            }
+        } else {
+            let output_enabled = { control.lock().await.output_enabled };
+            let abnormal = current_load_block_abbrev().is_some()
+                || recent_enable_block_abbrev(now).is_some()
+                || last_touch_block_ms
+                    .map(|t| now.wrapping_sub(t) <= ENABLE_BLOCK_TTL_MS)
+                    .unwrap_or(false);
+
+            if abnormal {
+                if now.wrapping_sub(last_blink_toggle_ms) >= RGB_STATUS_BLINK_TOGGLE_MS {
+                    blink_on = !blink_on;
+                    last_blink_toggle_ms = now;
+                }
+                if blink_on {
+                    Rgb {
+                        r: blink_duty,
+                        g: blink_duty,
+                        b: 0,
+                    }
+                } else {
+                    Rgb { r: 0, g: 0, b: 0 }
+                }
+            } else if output_enabled {
+                Rgb {
+                    r: 0,
+                    g: solid_duty,
                     b: 0,
                 }
             } else {
-                Rgb { r: 0, g: 0, b: 0 }
-            }
-        } else if output_enabled {
-            Rgb {
-                r: 0,
-                g: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
-                b: 0,
-            }
-        } else {
-            Rgb {
-                r: RGB_STATUS_SOLID_BRIGHTNESS_PCT,
-                g: 0,
-                b: 0,
+                Rgb {
+                    r: solid_duty,
+                    g: 0,
+                    b: 0,
+                }
             }
         };
 
         if desired != last_rgb {
-            set_rgb_pct(rgb_r, rgb_g, rgb_b, desired.r, desired.g, desired.b);
+            set_rgb_duty(rgb_r, rgb_g, rgb_b, desired.r, desired.g, desired.b);
             last_rgb = desired;
         }
 
@@ -1785,6 +1963,32 @@ async fn touch_ui_task(
         }
 
         let view = { control.lock().await.ui_view };
+
+        #[cfg(feature = "audio_menu")]
+        if view == control::UiView::AudioMenu {
+            // Settings UI: audio list. Keep it isolated from the dashboard gesture logic.
+            if marker.event == 1 {
+                match ui::audio_menu::hit_test_audio_menu(marker.x, marker.y) {
+                    Some(ui::audio_menu::AudioMenuHit::Back) => {
+                        let mut guard = control.lock().await;
+                        guard.ui_view = control::UiView::Main;
+                        bump_control_rev();
+                        speaker::enqueue(speaker::SpeakerSound::UiTouch);
+                        info!("touch: audio menu -> back");
+                    }
+                    Some(ui::audio_menu::AudioMenuHit::Item(idx)) => {
+                        if let Some(sound) = speaker::AUDIO_MENU_SOUNDS.get(idx).copied() {
+                            speaker::enqueue(sound);
+                            info!("touch: audio menu play (idx={}, sound={=?})", idx, sound);
+                        }
+                    }
+                    None => {}
+                }
+            }
+            yield_now().await;
+            continue;
+        }
+
         match marker.event {
             // down
             0 => {
@@ -2305,7 +2509,7 @@ async fn touch_ui_task(
                                         guard.panel_selected_digit =
                                             ui::preset_panel::PresetPanelDigit::Tenths;
                                         bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
+                                        speaker::enqueue(speaker::SpeakerSound::UiTouch);
                                         info!(
                                             "touch: preset entry tap (fallback) -> open preset panel (editing preset_id={})",
                                             guard.editing_preset_id
@@ -2316,13 +2520,15 @@ async fn touch_ui_task(
                                         guard.close_panel_discard();
                                         guard.ui_view = control::UiView::Main;
                                         bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
+                                        speaker::enqueue(speaker::SpeakerSound::UiTouch);
                                         info!(
                                             "touch: preset entry tap (fallback) -> close preset panel (discard non-active)"
                                         );
                                     }
                                     control::UiView::PresetPanelBlocked => {}
                                     control::UiView::PdSettings => {}
+                                    #[cfg(feature = "audio_menu")]
+                                    control::UiView::AudioMenu => {}
                                 },
                                 ui::ControlRowHit::TargetEntry => {
                                     if view == control::UiView::Main {
@@ -2344,7 +2550,7 @@ async fn touch_ui_task(
                                         if digit != guard.adjust_digit {
                                             guard.adjust_digit = digit;
                                             bump_control_rev();
-                                            prompt_tone::enqueue_ui_ok();
+                                            speaker::enqueue(speaker::SpeakerSound::UiTouch);
                                             info!(
                                                 "touch: setpoint entry tap (fallback) -> select adjust_digit ({:?})",
                                                 guard.adjust_digit
@@ -2370,7 +2576,7 @@ async fn touch_ui_task(
                         guard.pd_settings_focus = control::PdSettingsFocus::DEFAULT;
                         guard.pd_settings_digit = control::AdjustDigit::Tenths;
                         bump_control_rev();
-                        prompt_tone::enqueue_ui_ok();
+                        speaker::enqueue(speaker::SpeakerSound::UiTouch);
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
                         info!("touch: PD button tap -> open PD settings panel");
@@ -2647,7 +2853,7 @@ async fn touch_ui_task(
                         if guard.output_enabled {
                             guard.output_enabled = false;
                             bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
+                            prompt_tone::enqueue_load_off_ok();
                         } else if let Some(reason) =
                             current_load_enable_block_abbrev(guard.active_preset().min_v_mv)
                         {
@@ -2657,7 +2863,7 @@ async fn touch_ui_task(
                         } else {
                             guard.output_enabled = true;
                             bump_control_rev();
-                            prompt_tone::enqueue_ui_ok();
+                            prompt_tone::enqueue_load_on_ok();
                         }
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
@@ -2860,7 +3066,7 @@ async fn touch_ui_task(
                                     if guard.output_enabled {
                                         guard.output_enabled = false;
                                         bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
+                                        prompt_tone::enqueue_load_off_ok();
                                     } else if let Some(reason) = current_load_enable_block_abbrev(
                                         guard.active_preset().min_v_mv,
                                     ) {
@@ -2870,7 +3076,7 @@ async fn touch_ui_task(
                                     } else {
                                         guard.output_enabled = true;
                                         bump_control_rev();
-                                        prompt_tone::enqueue_ui_ok();
+                                        prompt_tone::enqueue_load_on_ok();
                                     }
                                     last_tab_tap = None;
                                 }
@@ -2956,6 +3162,8 @@ async fn touch_ui_task(
                                 }
                                 control::UiView::PresetPanelBlocked => {}
                                 control::UiView::PdSettings => {}
+                                #[cfg(feature = "audio_menu")]
+                                control::UiView::AudioMenu => {}
                             }
                         }
                     }
@@ -3906,6 +4114,15 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Uvlo);
     }
     let enabled = status.enable;
+    // Non-fatal warning class: while the load is still enabled, the analog side may report
+    // that it is power-limited or current-limited. Emit a periodic warning beep so the user
+    // can notice the limiting condition without stopping the load.
+    let warn_flags = if enabled {
+        status.state_flags & (STATE_FLAG_POWER_LIMITED | STATE_FLAG_CURRENT_LIMITED)
+    } else {
+        0
+    };
+    prompt_tone::set_warn_flags(warn_flags);
     let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
 
     // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
@@ -4522,7 +4739,14 @@ async fn display_task(
                 (snapshot, mask, pd_status)
             };
 
-            if ui_view != control::UiView::PdSettings && mask.is_empty() && !force_full_render {
+            let full_screen_view = match ui_view {
+                control::UiView::PdSettings => true,
+                #[cfg(feature = "audio_menu")]
+                control::UiView::AudioMenu => true,
+                _ => false,
+            };
+
+            if !full_screen_view && mask.is_empty() && !force_full_render {
                 if log_this_frame {
                     info!(
                         "display: frame {} skipped (no UI changes, dt_ms={})",
@@ -4545,6 +4769,10 @@ async fn display_task(
                                 pd_status_for_panel.as_ref(),
                             );
                             ui::pd_settings::render_pd_settings(&mut frame, &vm);
+                        }
+                        #[cfg(feature = "audio_menu")]
+                        control::UiView::AudioMenu => {
+                            ui::audio_menu::render_audio_menu(&mut frame);
                         }
                         _ => {
                             if force_full_render || mask.touch_marker {
@@ -5309,7 +5537,6 @@ async fn main(spawner: Spawner) {
     let rst_pin = peripherals.GPIO6;
     let backlight_pin = peripherals.GPIO15;
     let fan_pwm_pin = peripherals.GPIO41; // MTDI / FAN_PWM (reclaimed PAD‑JTAG pin)
-    let buzzer_pin = peripherals.GPIO21; // BUZZER (prompt tone manager)
     let amp_sd_mode_pin = peripherals.GPIO34; // MAX98357A SD_MODE (AMP_EN)
     let i2s_bclk_pin = peripherals.GPIO35; // I2S_BCLK
     let i2s_lrclk_pin = peripherals.GPIO36; // I2S_LRCLK
@@ -5399,34 +5626,12 @@ async fn main(spawner: Spawner) {
         .set_duty(FAN_DUTY_DEFAULT_PCT)
         .expect("fan duty default");
 
-    // BUZZER: low-speed LEDC Timer2/Channel2, used by prompt_tone_task.
-    let mut buzzer_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer2);
-    buzzer_timer
-        .configure(ledc_timer::config::Config {
-            duty: ledc_timer::config::Duty::Duty10Bit,
-            clock_source: ledc_timer::LSClockSource::APBClk,
-            frequency: Rate::from_hz(prompt_tone::BUZZER_FREQ_HZ),
-        })
-        .expect("buzzer timer");
-    let buzzer_timer = BUZZER_TIMER.init(buzzer_timer);
-
-    let mut buzzer_channel = ledc.channel::<LowSpeed>(ledc_channel::Number::Channel2, buzzer_pin);
-    buzzer_channel
-        .configure(ledc_channel::config::Config {
-            timer: &*buzzer_timer,
-            duty_pct: 0,
-            drive_mode: DriveMode::PushPull,
-        })
-        .expect("buzzer channel");
-    let buzzer_channel = BUZZER_CHANNEL.init(buzzer_channel);
-    buzzer_channel.set_duty(0).expect("buzzer duty init");
-
     // RGB status LED (Plan #0021): low-speed LEDC Timer3 + Channel3/4/5.
     // Pin map (digital board netlist): R=GPIO38, G=GPIO39(MTCK), B=GPIO40(MTDO).
     let mut rgb_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer3);
     rgb_timer
         .configure(ledc_timer::config::Config {
-            duty: ledc_timer::config::Duty::Duty10Bit,
+            duty: ledc_timer::config::Duty::Duty13Bit,
             clock_source: ledc_timer::LSClockSource::APBClk,
             frequency: Rate::from_khz(RGB_STATUS_PWM_FREQUENCY_KHZ),
         })
@@ -5613,6 +5818,18 @@ async fn main(spawner: Spawner) {
 
     let uart1 = uart_async.map(|u| UART1_CELL.init(u));
 
+    // Audio tasks (prompt tone + I2S speaker) must be low-latency. If they run on the
+    // thread-mode executor, long synchronous UI rendering can starve DMA refills and
+    // cause audible stutter / missed ticks. Run them on a high-priority SW interrupt
+    // executor instead so they preempt rendering work.
+    let audio_spawner = {
+        let sw_ints = SoftwareInterruptControl::new(peripherals.SW_INTERRUPT);
+        let exec = AUDIO_EXECUTOR.init(esp_rtos::embassy::InterruptExecutor::new(
+            sw_ints.software_interrupt0,
+        ));
+        exec.start(Priority::Priority3)
+    };
+
     info!("spawning ticker task");
     spawner.spawn(ticker()).expect("ticker spawn");
     info!("spawning diag task");
@@ -5668,11 +5885,11 @@ async fn main(spawner: Spawner) {
         .spawn(touch_ui_task(control, telemetry, eeprom))
         .expect("touch_ui_task spawn");
     info!("spawning prompt tone task");
-    spawner
-        .spawn(prompt_tone::prompt_tone_task(buzzer_channel))
+    audio_spawner
+        .spawn(prompt_tone::prompt_tone_task())
         .expect("prompt_tone_task spawn");
     info!("spawning speaker task");
-    spawner
+    audio_spawner
         .spawn(speaker::speaker_task(
             peripherals.I2S0,
             peripherals.DMA_CH2,
@@ -5821,8 +6038,11 @@ async fn stats_task() {
             let ts_da = TOUCH_SPRING_LAST_DELTA_ABS.load(Ordering::Relaxed);
             let spk_play = speaker::SPEAKER_PLAY_TOTAL.load(Ordering::Relaxed);
             let spk_drop = speaker::SPEAKER_ENQUEUE_DROPS.load(Ordering::Relaxed);
+            let pt_tick_enq = prompt_tone::TICKS_ENQUEUE_TOTAL.load(Ordering::Relaxed);
+            let pt_tick_play = prompt_tone::TICKS_PLAY_TOTAL.load(Ordering::Relaxed);
+            let pt_tick_pending = prompt_tone::pending_ticks();
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}",
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}, tick_enq={}, tick_play={}, tick_pending={}",
                 ok,
                 de,
                 df,
@@ -5844,6 +6064,9 @@ async fn stats_task() {
                 ts_da,
                 spk_play,
                 spk_drop,
+                pt_tick_enq,
+                pt_tick_play,
+                pt_tick_pending,
             );
         }
     }

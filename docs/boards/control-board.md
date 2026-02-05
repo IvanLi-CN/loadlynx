@@ -9,7 +9,7 @@
 - 人机接口（HMI）：
 - 显示：P024C128-CTP TFT（ST7789，2.4" 240×RGB×320，SPI）；资料参见 [datasheet 目录](https://webdav-syncthing.ivanli.cc/Ivan-Personal/Datasheets/Display/P024C128-CTP/)。
   - 输入：编码器、按钮。
-  - 蜂鸣器：提示音。
+  - 音频（提示音/告警音）：MAX98357A + I²S 扬声器输出（当前装配版本：蜂鸣器相关器件/驱动链路 DNP；`BUZZER` 仅代表网名/引脚分配，不代表实际装配）。
 - 供电与隔离：
   - 系统供电：带 USB PD 12 V（项目情报中已出现）。
   - 数字隔离（已确认）：TI ISO7721DR（1/1 双通道，默认输出高，SOIC‑D‑8）。
