@@ -2,9 +2,9 @@
 
 ## 状态
 
-- Status: 部分完成（2/3）
+- Status: 已完成
 - Created: 2026-02-01
-- Last: 2026-02-03
+- Last: 2026-02-05
 
 ## 背景 / 问题陈述
 
@@ -115,7 +115,7 @@ None
 
 - [x] M1: 数字板：新增扬声器音频输出后端（I²S + MAX98357A），提供 play/stop/mute 的最小接口
 - [x] M2: 数字板：`prompt_tone` 输出从蜂鸣器迁移到扬声器（保持既有告警/ack 语义）
-- [ ] M3: HIL：在当前硬件验证可听到 UI 反馈音与告警音，并记录日志/结论
+- [x] M3: HIL：在当前硬件验证可听到 UI 反馈音与告警音，并记录日志/结论
 
 ## 方案概述（Approach, high-level）
 
@@ -135,6 +135,7 @@ None
 
 - 2026-02-01: 创建计划 #shkmx
 - 2026-02-03: digital: 将 `prompt_tone` 从蜂鸣器迁移到扬声器（MAX98357A/I²S），并更新控制板文档说明（待 HIL 声音验收）。
+- 2026-02-05: HIL: 设备实测确认触摸/旋钮反馈音与连续告警音均可正常从扬声器输出；固件通过 `just d-build` + `just agentd flash/monitor digital` 验证。
 
 ## 参考（References）
 

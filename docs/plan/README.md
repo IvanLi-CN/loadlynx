@@ -80,4 +80,4 @@
 | 0024 | Web：版本号展示 + GitHub 分支跳转 | 已完成 | `0024:web-version-github-link/PLAN.md` | 2026-01-21 | - |
 | 0025 | 服务端口规范化（高位端口 + 禁止自动换端口） | 已完成 | `0025:service-ports-avoid-defaults/PLAN.md` | 2026-01-21 | PR #62 |
 | 6mre7 | 触摸电源按键：睡眠待机白光低频呼吸 | 已完成 | `6mre7:touch-power-button-standby-breathing-white/PLAN.md` | 2026-02-03 | HIL: 14s breath OK |
-| shkmx | 音频：蜂鸣器 → 扬声器（MAX98357A/I²S） | 部分完成（2/3） | `shkmx-buzzer-to-speaker-audio/PLAN.md` | 2026-02-03 | - |
+| shkmx | 音频：蜂鸣器 → 扬声器（MAX98357A/I²S） | 已完成 | `shkmx-buzzer-to-speaker-audio/PLAN.md` | 2026-02-05 | PR #69 |
