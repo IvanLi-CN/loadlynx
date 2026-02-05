@@ -16,6 +16,7 @@ const LIST_TOP: i32 = 34;
 const ROW_H: i32 = 22;
 const ROW_GAP: i32 = 2;
 const ROW_RADIUS: i32 = 6;
+const COL_GAP: i32 = 8;
 
 const COLOR_TOP_BG: u32 = 0x1c2638;
 const COLOR_BG: u32 = 0x0b111e;
@@ -41,6 +42,19 @@ fn draw_text(canvas: &mut Canvas<'_>, x: i32, y: i32, text: &str, color: Rgb565)
 
 fn hit_in_rect(x: i32, y: i32, rect: Rect) -> bool {
     x >= rect.left && x < rect.right && y >= rect.top && y < rect.bottom
+}
+
+fn list_columns() -> (i32, i32, i32, i32) {
+    let list_left = PAD_X;
+    let list_right = super::LOGICAL_WIDTH - PAD_X;
+    let total_w = list_right - list_left;
+    // Keep the right column slightly wider if rounding forces it.
+    let col_w = (total_w - COL_GAP) / 2;
+    let col0_left = list_left;
+    let col0_right = col0_left + col_w;
+    let col1_left = col0_right + COL_GAP;
+    let col1_right = list_right;
+    (col0_left, col0_right, col1_left, col1_right)
 }
 
 pub fn render_audio_menu(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
@@ -69,11 +83,18 @@ pub fn render_audio_menu(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
 
     // Simple list: fixed items, no scrolling.
     let items: &[SpeakerSound] = speaker::AUDIO_MENU_SOUNDS;
-    let list_left = PAD_X;
-    let list_right = super::LOGICAL_WIDTH - PAD_X;
+    let (col0_left, col0_right, col1_left, col1_right) = list_columns();
 
     for (idx, sound) in items.iter().copied().enumerate() {
-        let row_top = LIST_TOP + idx as i32 * (ROW_H + ROW_GAP);
+        let row = idx / 2;
+        let col = idx & 1;
+        let (left, right) = if col == 0 {
+            (col0_left, col0_right)
+        } else {
+            (col1_left, col1_right)
+        };
+
+        let row_top = LIST_TOP + row as i32 * (ROW_H + ROW_GAP);
         let row_bottom = row_top + ROW_H;
         if row_bottom > super::LOGICAL_HEIGHT {
             break;
@@ -84,7 +105,7 @@ pub fn render_audio_menu(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
         } else {
             COLOR_ROW_1
         };
-        let row = Rect::new(list_left, row_top, list_right, row_bottom);
+        let row = Rect::new(left, row_top, right, row_bottom);
         canvas.fill_round_rect(row, ROW_RADIUS, rgb(bg));
 
         // Border (1px).
@@ -100,7 +121,7 @@ pub fn render_audio_menu(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>) {
         );
 
         let label = speaker::sound_label(sound);
-        draw_text(&mut canvas, row.left + 10, row.top + 6, label, COLOR_TEXT);
+        draw_text(&mut canvas, row.left + 8, row.top + 6, label, COLOR_TEXT);
     }
 
     // Footer hint.
@@ -120,22 +141,29 @@ pub fn hit_test_audio_menu(x: i32, y: i32) -> Option<AudioMenuHit> {
         return Some(AudioMenuHit::Back);
     }
 
-    let list_left = PAD_X;
-    let list_right = super::LOGICAL_WIDTH - PAD_X;
-    if x < list_left || x >= list_right || y < LIST_TOP {
+    if y < LIST_TOP {
         return None;
     }
 
     let stride = ROW_H + ROW_GAP;
-    let idx = ((y - LIST_TOP) / stride) as usize;
-    let row_top = LIST_TOP + idx as i32 * stride;
+    let row = ((y - LIST_TOP) / stride) as usize;
+    let row_top = LIST_TOP + row as i32 * stride;
     if y >= row_top + ROW_H {
         return None;
     }
 
+    let (col0_left, col0_right, col1_left, col1_right) = list_columns();
+    let col = if x >= col0_left && x < col0_right {
+        0usize
+    } else if x >= col1_left && x < col1_right {
+        1usize
+    } else {
+        return None;
+    };
+
+    let idx = row * 2 + col;
     if idx >= speaker::AUDIO_MENU_SOUNDS.len() {
         return None;
     }
-
     Some(AudioMenuHit::Item(idx))
 }

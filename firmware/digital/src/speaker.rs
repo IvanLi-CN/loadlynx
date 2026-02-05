@@ -13,7 +13,11 @@ use esp_hal::{
 #[derive(Clone, Copy, Format)]
 pub enum SpeakerSound {
     BootChirp,
+    AlarmPrimary,
+    AlarmSecondary,
+    AlarmTrip,
     UiOk,
+    LoadOnOk,
     UiOkOff,
     UiFail,
     UiWarn,
@@ -49,7 +53,11 @@ pub fn enqueue(sound: SpeakerSound) {
 /// Keep the list small and the clips short: this is intended for HIL diagnostics.
 pub const AUDIO_MENU_SOUNDS: &[SpeakerSound] = &[
     SpeakerSound::BootChirp,
+    SpeakerSound::AlarmPrimary,
+    SpeakerSound::AlarmSecondary,
+    SpeakerSound::AlarmTrip,
     SpeakerSound::UiOk,
+    SpeakerSound::LoadOnOk,
     SpeakerSound::UiOkOff,
     SpeakerSound::UiFail,
     SpeakerSound::UiWarn,
@@ -61,7 +69,11 @@ pub const AUDIO_MENU_SOUNDS: &[SpeakerSound] = &[
 pub fn sound_label(sound: SpeakerSound) -> &'static str {
     match sound {
         SpeakerSound::BootChirp => "Boot",
+        SpeakerSound::AlarmPrimary => "FATAL Alarm",
+        SpeakerSound::AlarmSecondary => "LINK Alarm",
+        SpeakerSound::AlarmTrip => "TRIP Alarm",
         SpeakerSound::UiOk => "UI OK",
+        SpeakerSound::LoadOnOk => "LOAD On OK",
         SpeakerSound::UiOkOff => "LOAD Off OK",
         SpeakerSound::UiFail => "UI Fail",
         SpeakerSound::UiWarn => "Warning",
@@ -130,7 +142,13 @@ const PROMPT_TONE_MAX_AMP: i32 = 12_000; // < 32767, keeps headroom for mixing
 const PROMPT_TONE_RAMP_MS: u32 = 2; // reduce clicks on on/off edges
 
 const SPEAKER_WAV_BOOT_CHIRP: &[u8] = include_bytes!("../assets/audio/speaker-boot-chirp-8k.wav");
-const SPEAKER_WAV_UI_OK: &[u8] = include_bytes!("../assets/audio/speaker-ui-ok-8k.wav");
+const SPEAKER_WAV_ALARM_PRIMARY: &[u8] =
+    include_bytes!("../assets/audio/speaker-alarm-primary-8k.wav");
+const SPEAKER_WAV_ALARM_SECONDARY: &[u8] =
+    include_bytes!("../assets/audio/speaker-alarm-secondary-8k.wav");
+const SPEAKER_WAV_ALARM_TRIP: &[u8] = include_bytes!("../assets/audio/speaker-alarm-trip-8k.wav");
+const SPEAKER_WAV_UI_OK: &[u8] = include_bytes!("../assets/audio/speaker-ui-ok-new-8k.wav");
+const SPEAKER_WAV_LOAD_ON_OK: &[u8] = include_bytes!("../assets/audio/speaker-ui-ok-8k.wav");
 const SPEAKER_WAV_UI_OK_OFF: &[u8] = include_bytes!("../assets/audio/speaker-ui-ok-off-8k.wav");
 const SPEAKER_WAV_UI_FAIL: &[u8] = include_bytes!("../assets/audio/speaker-ui-fail-8k.wav");
 const SPEAKER_WAV_UI_WARN: &[u8] = include_bytes!("../assets/audio/speaker-ui-warn-8k.wav");
@@ -497,7 +515,11 @@ struct VoicePlayer {
 enum PlaylistKind {
     BootChirp,
     Boot,
+    AlarmPrimary,
+    AlarmSecondary,
+    AlarmTrip,
     UiOk,
+    LoadOnOk,
     UiOkOff,
     UiFail,
     UiWarn,
@@ -522,7 +544,11 @@ struct AudioAssets {
     diag_659: &'static [u8],
     diag_880: &'static [u8],
     boot_chirp: &'static [u8],
+    alarm_primary: &'static [u8],
+    alarm_secondary: &'static [u8],
+    alarm_trip: &'static [u8],
     ui_ok: &'static [u8],
+    load_on_ok: &'static [u8],
     ui_ok_off: &'static [u8],
     ui_fail: &'static [u8],
     ui_warn: &'static [u8],
@@ -549,7 +575,11 @@ impl AudioAssets {
             diag_659: load_one("diag_659", SPEAKER_WAV_DIAG_659),
             diag_880: load_one("diag_880", SPEAKER_WAV_DIAG_880),
             boot_chirp: load_one("boot_chirp", SPEAKER_WAV_BOOT_CHIRP),
+            alarm_primary: load_one("alarm_primary", SPEAKER_WAV_ALARM_PRIMARY),
+            alarm_secondary: load_one("alarm_secondary", SPEAKER_WAV_ALARM_SECONDARY),
+            alarm_trip: load_one("alarm_trip", SPEAKER_WAV_ALARM_TRIP),
             ui_ok: load_one("ui_ok", SPEAKER_WAV_UI_OK),
+            load_on_ok: load_one("load_on_ok", SPEAKER_WAV_LOAD_ON_OK),
             ui_ok_off: load_one("ui_ok_off", SPEAKER_WAV_UI_OK_OFF),
             ui_fail: load_one("ui_fail", SPEAKER_WAV_UI_FAIL),
             ui_warn: load_one("ui_warn", SPEAKER_WAV_UI_WARN),
@@ -599,11 +629,44 @@ impl AudioAssets {
                 10 => Some(PlaylistItem::SilenceMs(120)),
                 _ => None,
             },
+            PlaylistKind::AlarmPrimary => match idx {
+                0 => Some(PlaylistItem::Audio {
+                    label: "alarm primary",
+                    pcm: self.alarm_primary,
+                }),
+                1 => Some(PlaylistItem::SilenceMs(40)),
+                _ => None,
+            },
+            PlaylistKind::AlarmSecondary => match idx {
+                0 => Some(PlaylistItem::Audio {
+                    label: "alarm secondary",
+                    pcm: self.alarm_secondary,
+                }),
+                1 => Some(PlaylistItem::SilenceMs(40)),
+                _ => None,
+            },
+            PlaylistKind::AlarmTrip => match idx {
+                0 => Some(PlaylistItem::Audio {
+                    label: "alarm trip",
+                    pcm: self.alarm_trip,
+                }),
+                1 => Some(PlaylistItem::SilenceMs(40)),
+                _ => None,
+            },
             PlaylistKind::UiOk => match idx {
                 0 => Some(PlaylistItem::SilenceMs(20)),
                 1 => Some(PlaylistItem::Audio {
                     label: "ui ok",
                     pcm: self.ui_ok,
+                }),
+                2 => Some(PlaylistItem::SilenceMs(40)),
+                _ => None,
+            },
+            PlaylistKind::LoadOnOk => match idx {
+                0 => Some(PlaylistItem::SilenceMs(20)),
+                1 => Some(PlaylistItem::Audio {
+                    label: "load on ok",
+                    pcm: self.load_on_ok,
                 }),
                 2 => Some(PlaylistItem::SilenceMs(40)),
                 _ => None,
@@ -847,7 +910,11 @@ pub async fn speaker_task(
             if let Ok(sound) = SPEAKER_QUEUE.try_receive() {
                 let kind = match sound {
                     SpeakerSound::BootChirp => PlaylistKind::BootChirp,
+                    SpeakerSound::AlarmPrimary => PlaylistKind::AlarmPrimary,
+                    SpeakerSound::AlarmSecondary => PlaylistKind::AlarmSecondary,
+                    SpeakerSound::AlarmTrip => PlaylistKind::AlarmTrip,
                     SpeakerSound::UiOk => PlaylistKind::UiOk,
+                    SpeakerSound::LoadOnOk => PlaylistKind::LoadOnOk,
                     SpeakerSound::UiOkOff => PlaylistKind::UiOkOff,
                     SpeakerSound::UiFail => PlaylistKind::UiFail,
                     SpeakerSound::UiWarn => PlaylistKind::UiWarn,

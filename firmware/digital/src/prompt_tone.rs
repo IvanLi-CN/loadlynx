@@ -29,6 +29,7 @@ use crate::speaker;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum UiSound {
     Ok,
+    LoadOnOk,
     LoadOffOk,
     Fail,
 }
@@ -173,7 +174,8 @@ pub fn enqueue_ui_ok() {
 ///
 /// This is intentionally distinct from the "LOAD OFF ok" sound to make toggles audible.
 pub fn enqueue_load_on_ok() {
-    enqueue_ui_ok();
+    let _ = UI_SOUNDS.try_send(UiSound::LoadOnOk);
+    WAKE.signal(());
 }
 
 /// Enqueue a single "LOAD OFF ok" feedback sound (low volume).
@@ -272,6 +274,7 @@ const UI_TICK_PLAY_MS: u32 = 14; // ~= 12ms clip + small margin (fast rotation f
 // UI ok/fail clips are longer than ticks; these values are only used to keep the
 // prompt-tone scheduler from starting a large backlog while a clip is still playing.
 const UI_OK_PLAY_MS: u32 = 160; // ~= 150ms playlist (including pre/post silence)
+const UI_LOAD_ON_OK_PLAY_MS: u32 = 160; // ~= load-on ok playlist (including pre/post silence)
 const UI_LOAD_OFF_OK_PLAY_MS: u32 = 160; // ~= load-off ok playlist (including pre/post silence)
 const UI_FAIL_PLAY_MS: u32 = 240; // ~= 220ms playlist (including pre/post silence)
 const UI_WARN_PLAY_MS: u32 = 180; // ~= warning beep clip + small margin
@@ -312,6 +315,11 @@ const STEPS_UI_TICK_CLIP: &[Step] = &[Step {
 const STEPS_UI_OK: &[Step] = &[Step {
     duty_pct: 0,
     duration_ms: UI_OK_PLAY_MS,
+}];
+
+const STEPS_UI_LOAD_ON_OK: &[Step] = &[Step {
+    duty_pct: 0,
+    duration_ms: UI_LOAD_ON_OK_PLAY_MS,
 }];
 
 const STEPS_UI_LOAD_OFF_OK: &[Step] = &[Step {
@@ -389,6 +397,7 @@ const STEPS_TRIP_ALARM: &[Step] = &[
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ActiveSound {
     UiOk,
+    UiLoadOnOk,
     UiLoadOffOk,
     UiFail,
     UiWarn,
@@ -409,6 +418,7 @@ impl Player {
     fn steps(self) -> &'static [Step] {
         match self.sound {
             ActiveSound::UiOk => STEPS_UI_OK,
+            ActiveSound::UiLoadOnOk => STEPS_UI_LOAD_ON_OK,
             ActiveSound::UiLoadOffOk => STEPS_UI_LOAD_OFF_OK,
             ActiveSound::UiFail => STEPS_UI_FAIL,
             ActiveSound::UiWarn => STEPS_UI_WARN,
@@ -433,6 +443,7 @@ fn buzzer_apply(duty_pct: u8) {
 
 fn drain_ui_sounds(
     pending_ok: &mut u8,
+    pending_load_on_ok: &mut u8,
     pending_load_off_ok: &mut u8,
     pending_fail: &mut u8,
     suppress: bool,
@@ -446,6 +457,9 @@ fn drain_ui_sounds(
         match sound {
             UiSound::Ok => {
                 *pending_ok = pending_ok.saturating_add(1).min(32);
+            }
+            UiSound::LoadOnOk => {
+                *pending_load_on_ok = pending_load_on_ok.saturating_add(1).min(32);
             }
             UiSound::LoadOffOk => {
                 *pending_load_off_ok = pending_load_off_ok.saturating_add(1).min(32);
@@ -461,6 +475,7 @@ fn start_player(sound: ActiveSound) -> Player {
     let now = now_ms32();
     let steps = match sound {
         ActiveSound::UiOk => STEPS_UI_OK,
+        ActiveSound::UiLoadOnOk => STEPS_UI_LOAD_ON_OK,
         ActiveSound::UiLoadOffOk => STEPS_UI_LOAD_OFF_OK,
         ActiveSound::UiFail => STEPS_UI_FAIL,
         ActiveSound::UiWarn => STEPS_UI_WARN,
@@ -475,6 +490,10 @@ fn start_player(sound: ActiveSound) -> Player {
         ActiveSound::UiOk => {
             // Rendered via WAV clip (speaker backend).
             speaker::enqueue(speaker::SpeakerSound::UiOk);
+        }
+        ActiveSound::UiLoadOnOk => {
+            // Rendered via WAV clip (speaker backend).
+            speaker::enqueue(speaker::SpeakerSound::LoadOnOk);
         }
         ActiveSound::UiLoadOffOk => {
             // Rendered via WAV clip (speaker backend).
@@ -547,6 +566,7 @@ pub async fn prompt_tone_task() {
     let mut secondary_cleared_wait_ack: bool = false;
 
     let mut pending_ok: u8 = 0;
+    let mut pending_load_on_ok: u8 = 0;
     let mut pending_load_off_ok: u8 = 0;
     let mut pending_fail: u8 = 0;
 
@@ -589,6 +609,7 @@ pub async fn prompt_tone_task() {
                 );
                 primary_cleared_wait_ack = false;
                 pending_ok = 0;
+                pending_load_on_ok = 0;
                 pending_load_off_ok = 0;
                 pending_fail = 0;
                 LOCAL_ACTIVITY.store(0, Ordering::Relaxed);
@@ -636,6 +657,7 @@ pub async fn prompt_tone_task() {
             // While Primary is active, suppress UI sounds and discard detent ticks.
             drain_ui_sounds(
                 &mut pending_ok,
+                &mut pending_load_on_ok,
                 &mut pending_load_off_ok,
                 &mut pending_fail,
                 true,
@@ -652,13 +674,17 @@ pub async fn prompt_tone_task() {
             // Primary is cleared; keep playing alarm until the first local interaction happens.
             drain_ui_sounds(
                 &mut pending_ok,
+                &mut pending_load_on_ok,
                 &mut pending_load_off_ok,
                 &mut pending_fail,
                 false,
             );
             let has_activity = LOCAL_ACTIVITY.load(Ordering::Relaxed) > 0;
             let has_detent = PENDING_TICKS.load(Ordering::Relaxed) > 0;
-            let has_sound = pending_ok > 0 || pending_load_off_ok > 0 || pending_fail > 0;
+            let has_sound = pending_ok > 0
+                || pending_load_on_ok > 0
+                || pending_load_off_ok > 0
+                || pending_fail > 0;
             if has_activity || has_detent || has_sound {
                 info!("prompt_tone: local ack observed; stopping primary alarm");
                 primary_cleared_wait_ack = false;
@@ -686,13 +712,17 @@ pub async fn prompt_tone_task() {
 
                     drain_ui_sounds(
                         &mut pending_ok,
+                        &mut pending_load_on_ok,
                         &mut pending_load_off_ok,
                         &mut pending_fail,
                         false,
                     );
                     let has_activity = LOCAL_ACTIVITY.load(Ordering::Relaxed) > 0;
                     let has_detent = PENDING_TICKS.load(Ordering::Relaxed) > 0;
-                    let has_sound = pending_ok > 0 || pending_load_off_ok > 0 || pending_fail > 0;
+                    let has_sound = pending_ok > 0
+                        || pending_load_on_ok > 0
+                        || pending_load_off_ok > 0
+                        || pending_fail > 0;
                     if has_activity || has_detent || has_sound {
                         info!("prompt_tone: local ack observed; stopping secondary alarm");
                         secondary_cleared_wait_ack = false;
@@ -716,6 +746,7 @@ pub async fn prompt_tone_task() {
                     // While Secondary is active, suppress UI sounds and discard detent ticks.
                     drain_ui_sounds(
                         &mut pending_ok,
+                        &mut pending_load_on_ok,
                         &mut pending_load_off_ok,
                         &mut pending_fail,
                         true,
@@ -737,6 +768,7 @@ pub async fn prompt_tone_task() {
                 // immediately after the alarm stops.
                 drain_ui_sounds(
                     &mut pending_ok,
+                    &mut pending_load_on_ok,
                     &mut pending_load_off_ok,
                     &mut pending_fail,
                     false,
@@ -776,6 +808,7 @@ pub async fn prompt_tone_task() {
 
                 drain_ui_sounds(
                     &mut pending_ok,
+                    &mut pending_load_on_ok,
                     &mut pending_load_off_ok,
                     &mut pending_fail,
                     false,
@@ -804,6 +837,9 @@ pub async fn prompt_tone_task() {
                     } else if pending_load_off_ok > 0 {
                         pending_load_off_ok = pending_load_off_ok.saturating_sub(1);
                         player = Some(start_player(ActiveSound::UiLoadOffOk));
+                    } else if pending_load_on_ok > 0 {
+                        pending_load_on_ok = pending_load_on_ok.saturating_sub(1);
+                        player = Some(start_player(ActiveSound::UiLoadOnOk));
                     } else if pending_ok > 0 {
                         pending_ok = pending_ok.saturating_sub(1);
                         player = Some(start_player(ActiveSound::UiOk));
