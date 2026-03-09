@@ -2729,18 +2729,6 @@ async fn handle_pd_update(
     }
 
     let changed = cfg != prev_cfg || allow_extended_voltage != prev_allow_extended_voltage;
-    {
-        let mut guard = control_mutex.lock().await;
-        guard.pd_saved = cfg;
-        guard.allow_extended_voltage = allow_extended_voltage;
-        if guard.ui_view == crate::control::UiView::PdSettings {
-            guard.pd_draft = cfg;
-        }
-        if changed {
-            bump_control_rev();
-        }
-    }
-
     if changed {
         let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
         let res = {
@@ -2753,10 +2741,20 @@ async fn handle_pd_update(
             crate::PD_LAST_RESULT_MS.store(now_ms32(), Ordering::Relaxed);
             return Err("503 Service Unavailable");
         }
+
+        {
+            let mut guard = control_mutex.lock().await;
+            guard.pd_saved = cfg;
+            guard.allow_extended_voltage = allow_extended_voltage;
+            if guard.ui_view == crate::control::UiView::PdSettings {
+                guard.pd_draft = cfg;
+            }
+            bump_control_rev();
+        }
     }
 
     if !allow_extended_voltage {
-        crate::PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+        crate::clear_pd_extended_voltage_failure();
     }
 
     let attached_now = {
@@ -2767,8 +2765,9 @@ async fn handle_pd_update(
             .map(|status| status.attached)
             .unwrap_or(false)
     };
-    if attached_now {
+    if changed && attached_now {
         let now = now_ms32();
+        crate::reset_pd_extended_voltage_retry_window();
         crate::PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
         crate::PD_FORCE_SEND.store(true, Ordering::Release);
     }

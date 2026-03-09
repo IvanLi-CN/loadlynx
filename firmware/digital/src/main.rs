@@ -2572,22 +2572,28 @@ async fn touch_ui_task(
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
                         let apply_ms = now_ms32();
-                        let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed);
                         let (cfg, allow_extended_voltage) = {
-                            let mut guard = control.lock().await;
-                            guard.allow_extended_voltage = !guard.allow_extended_voltage;
-                            if !guard.allow_extended_voltage {
-                                PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
-                            }
-                            let allow_extended_voltage = guard.allow_extended_voltage;
-                            let cfg = guard.pd_saved;
-                            bump_control_rev();
-                            (cfg, allow_extended_voltage)
+                            let guard = control.lock().await;
+                            (guard.pd_saved, !guard.allow_extended_voltage)
                         };
 
                         let ok =
                             save_pd_config_to_eeprom(cfg, allow_extended_voltage, eeprom).await;
+                        let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed);
                         if ok {
+                            {
+                                let mut guard = control.lock().await;
+                                guard.allow_extended_voltage = allow_extended_voltage;
+                                bump_control_rev();
+                            }
+                            if !allow_extended_voltage {
+                                clear_pd_extended_voltage_failure();
+                            }
+                            if attached {
+                                reset_pd_extended_voltage_retry_window();
+                                PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
+                                PD_FORCE_SEND.store(true, Ordering::Release);
+                            }
                             prompt_tone::enqueue_ui_ok();
                         } else {
                             prompt_tone::enqueue_ui_fail();
@@ -2595,16 +2601,11 @@ async fn touch_ui_task(
                             PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
                         }
 
-                        if attached {
-                            PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
-                            PD_FORCE_SEND.store(true, Ordering::Release);
-                        }
-
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
                         info!(
-                            "touch: PD extended-voltage toggle -> allow_extended_voltage={} attached={}",
-                            allow_extended_voltage, attached
+                            "touch: PD extended-voltage toggle -> allow_extended_voltage={} attached={} persisted={}",
+                            allow_extended_voltage, attached, ok
                         );
                         yield_now().await;
                         continue;
@@ -2652,17 +2653,15 @@ async fn touch_ui_task(
                                     // Apply = persist + update the saved PD policy. Whether it may
                                     // leave Safe5V is still gated by `allow_extended_voltage`.
                                     let apply_ms = now_ms32();
-                                    PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
-                                    PD_FORCE_SEND.store(true, Ordering::Release);
-
                                     let (changed, cfg, allow_extended_voltage) = {
-                                        let mut guard = control.lock().await;
-                                        let changed = guard.pd_saved != guard.pd_draft;
-                                        guard.pd_saved = guard.pd_draft;
-                                        (changed, guard.pd_saved, guard.allow_extended_voltage)
+                                        let guard = control.lock().await;
+                                        (
+                                            guard.pd_saved != guard.pd_draft,
+                                            guard.pd_draft,
+                                            guard.allow_extended_voltage,
+                                        )
                                     };
                                     if changed {
-                                        bump_control_rev();
                                         let ok = save_pd_config_to_eeprom(
                                             cfg,
                                             allow_extended_voltage,
@@ -2670,6 +2669,19 @@ async fn touch_ui_task(
                                         )
                                         .await;
                                         if ok {
+                                            {
+                                                let mut guard = control.lock().await;
+                                                guard.pd_saved = cfg;
+                                                bump_control_rev();
+                                            }
+                                            if !allow_extended_voltage {
+                                                clear_pd_extended_voltage_failure();
+                                            }
+                                            if PD_STATUS_ATTACHED.load(Ordering::Relaxed) {
+                                                reset_pd_extended_voltage_retry_window();
+                                                PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
+                                                PD_FORCE_SEND.store(true, Ordering::Release);
+                                            }
                                             prompt_tone::enqueue_ui_ok();
                                         } else {
                                             prompt_tone::enqueue_ui_fail();
@@ -3798,6 +3810,15 @@ async fn save_editing_preset_to_eeprom(control: &ControlMutex, eeprom: &EepromMu
     }
 }
 
+fn reset_pd_extended_voltage_retry_window() {
+    PD_LAST_APPLY_MS.store(0, Ordering::Relaxed);
+}
+
+fn clear_pd_extended_voltage_failure() {
+    PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+    reset_pd_extended_voltage_retry_window();
+}
+
 async fn save_pd_config_to_eeprom(
     cfg: control::PdConfig,
     allow_extended_voltage: bool,
@@ -3830,11 +3851,11 @@ async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
     let prev = PD_STATUS_ATTACHED.swap(status.attached, Ordering::Relaxed);
     if status.attached && !prev {
         // New source session: clear any prior extended-voltage failure before retrying.
-        PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+        clear_pd_extended_voltage_failure();
         // PD auto-apply: trigger a re-send of the persisted policy on attach rising edge.
         PD_FORCE_SEND.store(true, Ordering::Release);
     } else if !status.attached {
-        PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+        clear_pd_extended_voltage_failure();
     }
     let mut guard = telemetry.lock().await;
     let changed = match guard.last_pd_status.as_ref() {
@@ -7076,6 +7097,7 @@ async fn setmode_tx_task(
         let link_up_now = LINK_UP.load(Ordering::Relaxed);
         if link_up_now && !prev_pd_link_up {
             prev_pd_link_up = true;
+            reset_pd_extended_voltage_retry_window();
             pd_force_send = true;
         } else if !link_up_now && prev_pd_link_up {
             prev_pd_link_up = false;
@@ -7124,7 +7146,7 @@ async fn setmode_tx_task(
         };
 
         if !allow_extended_voltage {
-            PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+            clear_pd_extended_voltage_failure();
         }
         let pd_status = {
             let guard = telemetry.lock().await;
