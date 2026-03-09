@@ -1,5 +1,8 @@
 # USB‑PD Sink：5V/20V 两态切换（STM32G431 UCPD）（#0010）
 
+> 说明：当前主界面里左侧 `PD` 按钮、右侧设置入口与 Safe5V 门控的设计与交互，统一以 `docs/specs/w4cpd-dashboard-extended-voltage-toggle/SPEC.md` 为准；本文保留为早期 5V/20V 两态实现记录。
+
+
 ## 状态
 
 - Status: 已完成

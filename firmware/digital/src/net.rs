@@ -2196,7 +2196,10 @@ async fn render_pd_view_json(
         AnalogState::CalMissing | AnalogState::Ready => {}
     }
 
-    let saved = { control_mutex.lock().await.pd_saved };
+    let (saved, allow_extended_voltage) = {
+        let guard = control_mutex.lock().await;
+        (guard.pd_saved, guard.allow_extended_voltage)
+    };
     let ack_pending = crate::PD_REQ_ACK_PENDING.load(Ordering::Relaxed);
     let last_code = crate::PD_LAST_RESULT_CODE.load(Ordering::Relaxed);
     let last_ms = crate::PD_LAST_RESULT_MS.load(Ordering::Relaxed);
@@ -2218,6 +2221,12 @@ async fn render_pd_view_json(
         buf.push_str(",\"contract_ma\":null");
         buf.push_str(",\"fixed_pdos\":[]");
         buf.push_str(",\"pps_pdos\":[]");
+        buf.push_str(",\"allow_extended_voltage\":");
+        buf.push_str(if allow_extended_voltage {
+            "true"
+        } else {
+            "false"
+        });
 
         // Saved config
         buf.push_str(",\"saved\":{");
@@ -2310,6 +2319,13 @@ async fn render_pd_view_json(
     }
     buf.push(']');
 
+    buf.push_str(",\"allow_extended_voltage\":");
+    buf.push_str(if allow_extended_voltage {
+        "true"
+    } else {
+        "false"
+    });
+
     // Saved config
     buf.push_str(",\"saved\":{");
     buf.push_str("\"mode\":\"");
@@ -2353,10 +2369,11 @@ async fn render_pd_view_json(
 }
 
 struct PdUpdateRequest {
-    mode: control::PdMode,
-    object_pos: u8,
+    mode: Option<control::PdMode>,
+    object_pos: Option<u8>,
     target_mv: Option<u32>,
-    i_req_ma: u32,
+    i_req_ma: Option<u32>,
+    allow_extended_voltage: Option<bool>,
 }
 
 fn parse_pd_update_json(body: &str) -> Result<PdUpdateRequest, &'static str> {
@@ -2386,8 +2403,24 @@ fn parse_pd_update_json(body: &str) -> Result<PdUpdateRequest, &'static str> {
             .map_err(|_| "invalid integer")
     }
 
-    let mode = {
-        let idx = body.find("\"mode\"").ok_or("missing field mode")?;
+    fn parse_bool_field(body: &str, key: &str) -> Result<Option<bool>, &'static str> {
+        let Some(idx) = body.find(key) else {
+            return Ok(None);
+        };
+        let Some(colon_idx) = body[idx..].find(':') else {
+            return Err("malformed boolean field");
+        };
+        let value_str = body[idx + colon_idx + 1..].trim_start();
+        if value_str.starts_with("true") {
+            Ok(Some(true))
+        } else if value_str.starts_with("false") {
+            Ok(Some(false))
+        } else {
+            Err("boolean field must be true or false")
+        }
+    }
+
+    let mode = if let Some(idx) = body.find("\"mode\"") {
         let colon_idx = body[idx..].find(':').ok_or("malformed mode field")?;
         let mut value_str = body[idx + colon_idx + 1..].trim_start();
         if !value_str.starts_with('"') {
@@ -2396,24 +2429,27 @@ fn parse_pd_update_json(body: &str) -> Result<PdUpdateRequest, &'static str> {
         value_str = &value_str[1..];
         let end = value_str.find('"').ok_or("malformed mode string")?;
         let raw = &value_str[..end];
-        match raw {
+        Some(match raw {
             "fixed" => control::PdMode::Fixed,
             "pps" => control::PdMode::Pps,
             _ => return Err("mode must be \"fixed\" or \"pps\""),
-        }
+        })
+    } else {
+        None
     };
 
-    let object_pos = parse_u32_field(body, "\"object_pos\"")?
-        .ok_or("missing field object_pos")?
-        .min(u8::MAX as u32) as u8;
-    let i_req_ma = parse_u32_field(body, "\"i_req_ma\"")?.ok_or("missing field i_req_ma")?;
+    let object_pos =
+        parse_u32_field(body, "\"object_pos\"")?.map(|value| value.min(u8::MAX as u32) as u8);
+    let i_req_ma = parse_u32_field(body, "\"i_req_ma\"")?;
     let target_mv = parse_u32_field(body, "\"target_mv\"")?;
+    let allow_extended_voltage = parse_bool_field(body, "\"allow_extended_voltage\"")?;
 
     Ok(PdUpdateRequest {
         mode,
         object_pos,
         target_mv,
         i_req_ma,
+        allow_extended_voltage,
     })
 }
 
@@ -2450,32 +2486,6 @@ async fn handle_pd_update(
         AnalogState::CalMissing | AnalogState::Ready => {}
     }
 
-    let status = {
-        let guard = telemetry.lock().await;
-        guard.last_pd_status.clone()
-    }
-    .ok_or_else(|| {
-        write_error_body(
-            body_out,
-            "NOT_ATTACHED",
-            "PD status unavailable; refusing apply",
-            true,
-            None,
-        );
-        "409 Conflict"
-    })?;
-
-    if !status.attached {
-        write_error_body(
-            body_out,
-            "NOT_ATTACHED",
-            "PD not attached; refusing apply",
-            true,
-            None,
-        );
-        return Err("409 Conflict");
-    }
-
     let parsed = match parse_pd_update_json(body_in) {
         Ok(v) => v,
         Err(msg) => {
@@ -2484,181 +2494,284 @@ async fn handle_pd_update(
         }
     };
 
-    if parsed.object_pos == 0 {
+    let updates_saved_cfg = parsed.mode.is_some()
+        || parsed.object_pos.is_some()
+        || parsed.i_req_ma.is_some()
+        || parsed.target_mv.is_some();
+    if !updates_saved_cfg && parsed.allow_extended_voltage.is_none() {
         write_error_body(
             body_out,
             "INVALID_REQUEST",
-            "object_pos must be >= 1",
+            "request must update saved PD fields or allow_extended_voltage",
             false,
             None,
         );
         return Err("400 Bad Request");
     }
-    if parsed.i_req_ma < 50 {
-        write_error_body(
-            body_out,
-            "LIMIT_VIOLATION",
-            "i_req_ma must be >= 50",
-            false,
-            None,
-        );
-        return Err("422 Unprocessable Entity");
-    }
 
-    let find_fixed = |pos: u8| {
-        status
-            .fixed_pdos
-            .iter()
-            .enumerate()
-            .find(|(idx, pdo)| {
-                let effective = if pdo.pos != 0 {
-                    pdo.pos
-                } else {
-                    (idx + 1) as u8
-                };
-                effective == pos
-            })
-            .map(|(_idx, pdo)| *pdo)
+    let status = if updates_saved_cfg {
+        let status = {
+            let guard = telemetry.lock().await;
+            guard.last_pd_status.clone()
+        }
+        .ok_or_else(|| {
+            write_error_body(
+                body_out,
+                "NOT_ATTACHED",
+                "PD status unavailable; refusing apply",
+                true,
+                None,
+            );
+            "409 Conflict"
+        })?;
+
+        if !status.attached {
+            write_error_body(
+                body_out,
+                "NOT_ATTACHED",
+                "PD not attached; refusing apply",
+                true,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+
+        Some(status)
+    } else {
+        None
     };
 
-    let find_pps = |pos: u8| {
-        status
-            .pps_pdos
-            .iter()
-            .enumerate()
-            .find(|(idx, pdo)| {
-                let effective = if pdo.pos != 0 {
-                    pdo.pos
-                } else {
-                    (idx + 1) as u8
-                };
-                effective == pos
-            })
-            .map(|(_idx, pdo)| *pdo)
+    let (mut cfg, mut allow_extended_voltage) = {
+        let guard = control_mutex.lock().await;
+        (guard.pd_saved, guard.allow_extended_voltage)
     };
+    let prev_cfg = cfg;
+    let prev_allow_extended_voltage = allow_extended_voltage;
 
-    // Validate against current capabilities (no implicit clamping).
-    match parsed.mode {
-        control::PdMode::Fixed => {
-            let Some(pdo) = find_fixed(parsed.object_pos) else {
-                let details = format!(r#"{{"object_pos":{}}}"#, parsed.object_pos);
-                write_error_body(
-                    body_out,
-                    "LIMIT_VIOLATION",
-                    "selected PDO not present in capabilities",
-                    false,
-                    Some(&details),
-                );
-                return Err("422 Unprocessable Entity");
-            };
-            if parsed.i_req_ma > pdo.max_ma {
-                let details = format!(
-                    r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                    parsed.i_req_ma, pdo.max_ma, parsed.object_pos
-                );
-                write_error_body(
-                    body_out,
-                    "LIMIT_VIOLATION",
-                    "i_req_ma exceeds PDO Imax",
-                    false,
-                    Some(&details),
-                );
-                return Err("422 Unprocessable Entity");
-            }
+    if updates_saved_cfg {
+        let mode = parsed.mode.ok_or_else(|| {
+            write_error_body(
+                body_out,
+                "INVALID_REQUEST",
+                "missing field mode",
+                false,
+                None,
+            );
+            "400 Bad Request"
+        })?;
+        let object_pos = parsed.object_pos.ok_or_else(|| {
+            write_error_body(
+                body_out,
+                "INVALID_REQUEST",
+                "missing field object_pos",
+                false,
+                None,
+            );
+            "400 Bad Request"
+        })?;
+        let i_req_ma = parsed.i_req_ma.ok_or_else(|| {
+            write_error_body(
+                body_out,
+                "INVALID_REQUEST",
+                "missing field i_req_ma",
+                false,
+                None,
+            );
+            "400 Bad Request"
+        })?;
+
+        if object_pos == 0 {
+            write_error_body(
+                body_out,
+                "INVALID_REQUEST",
+                "object_pos must be >= 1",
+                false,
+                None,
+            );
+            return Err("400 Bad Request");
         }
-        control::PdMode::Pps => {
-            let Some(apdo) = find_pps(parsed.object_pos) else {
-                let details = format!(r#"{{"object_pos":{}}}"#, parsed.object_pos);
-                write_error_body(
-                    body_out,
-                    "LIMIT_VIOLATION",
-                    "selected APDO not present in capabilities",
-                    false,
-                    Some(&details),
-                );
-                return Err("422 Unprocessable Entity");
-            };
-            let target_mv = parsed.target_mv.ok_or_else(|| {
-                write_error_body(
-                    body_out,
-                    "INVALID_REQUEST",
-                    "missing field target_mv for PPS",
-                    false,
-                    None,
-                );
-                "400 Bad Request"
-            })?;
-            if target_mv < apdo.min_mv || target_mv > apdo.max_mv {
-                let details = format!(
-                    r#"{{"target_mv":{},"min_mv":{},"max_mv":{},"object_pos":{}}}"#,
-                    target_mv, apdo.min_mv, apdo.max_mv, parsed.object_pos
-                );
-                write_error_body(
-                    body_out,
-                    "LIMIT_VIOLATION",
-                    "target_mv out of APDO range",
-                    false,
-                    Some(&details),
-                );
-                return Err("422 Unprocessable Entity");
+        if i_req_ma < 50 {
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "i_req_ma must be >= 50",
+                false,
+                None,
+            );
+            return Err("422 Unprocessable Entity");
+        }
+
+        let status = status
+            .as_ref()
+            .expect("status required when updating saved PD fields");
+        let find_fixed = |pos: u8| {
+            status
+                .fixed_pdos
+                .iter()
+                .enumerate()
+                .find(|(idx, pdo)| {
+                    let effective = if pdo.pos != 0 {
+                        pdo.pos
+                    } else {
+                        (idx + 1) as u8
+                    };
+                    effective == pos
+                })
+                .map(|(_idx, pdo)| *pdo)
+        };
+
+        let find_pps = |pos: u8| {
+            status
+                .pps_pdos
+                .iter()
+                .enumerate()
+                .find(|(idx, pdo)| {
+                    let effective = if pdo.pos != 0 {
+                        pdo.pos
+                    } else {
+                        (idx + 1) as u8
+                    };
+                    effective == pos
+                })
+                .map(|(_idx, pdo)| *pdo)
+        };
+
+        cfg.mode = mode;
+        cfg.i_req_ma = i_req_ma;
+        match mode {
+            control::PdMode::Fixed => {
+                let Some(pdo) = find_fixed(object_pos) else {
+                    let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
+                    write_error_body(
+                        body_out,
+                        "LIMIT_VIOLATION",
+                        "selected PDO not present in capabilities",
+                        false,
+                        Some(&details),
+                    );
+                    return Err("422 Unprocessable Entity");
+                };
+                if i_req_ma > pdo.max_ma {
+                    let details = format!(
+                        r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                        i_req_ma, pdo.max_ma, object_pos
+                    );
+                    write_error_body(
+                        body_out,
+                        "LIMIT_VIOLATION",
+                        "i_req_ma exceeds PDO Imax",
+                        false,
+                        Some(&details),
+                    );
+                    return Err("422 Unprocessable Entity");
+                }
+                cfg.fixed_object_pos = object_pos;
+                cfg.target_mv = pdo.mv;
             }
-            if parsed.i_req_ma > apdo.max_ma {
-                let details = format!(
-                    r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                    parsed.i_req_ma, apdo.max_ma, parsed.object_pos
-                );
-                write_error_body(
-                    body_out,
-                    "LIMIT_VIOLATION",
-                    "i_req_ma exceeds APDO Imax",
-                    false,
-                    Some(&details),
-                );
-                return Err("422 Unprocessable Entity");
+            control::PdMode::Pps => {
+                let Some(apdo) = find_pps(object_pos) else {
+                    let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
+                    write_error_body(
+                        body_out,
+                        "LIMIT_VIOLATION",
+                        "selected APDO not present in capabilities",
+                        false,
+                        Some(&details),
+                    );
+                    return Err("422 Unprocessable Entity");
+                };
+                let target_mv = parsed.target_mv.ok_or_else(|| {
+                    write_error_body(
+                        body_out,
+                        "INVALID_REQUEST",
+                        "missing field target_mv for PPS",
+                        false,
+                        None,
+                    );
+                    "400 Bad Request"
+                })?;
+                if target_mv < apdo.min_mv || target_mv > apdo.max_mv {
+                    let details = format!(
+                        r#"{{"target_mv":{},"min_mv":{},"max_mv":{},"object_pos":{}}}"#,
+                        target_mv, apdo.min_mv, apdo.max_mv, object_pos
+                    );
+                    write_error_body(
+                        body_out,
+                        "LIMIT_VIOLATION",
+                        "target_mv out of APDO range",
+                        false,
+                        Some(&details),
+                    );
+                    return Err("422 Unprocessable Entity");
+                }
+                if i_req_ma > apdo.max_ma {
+                    let details = format!(
+                        r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                        i_req_ma, apdo.max_ma, object_pos
+                    );
+                    write_error_body(
+                        body_out,
+                        "LIMIT_VIOLATION",
+                        "i_req_ma exceeds APDO Imax",
+                        false,
+                        Some(&details),
+                    );
+                    return Err("422 Unprocessable Entity");
+                }
+                cfg.pps_object_pos = object_pos;
+                cfg.target_mv = target_mv;
             }
         }
     }
 
-    // Update and persist.
-    let mut cfg = { control_mutex.lock().await.pd_saved };
-    cfg.mode = parsed.mode;
-    cfg.i_req_ma = parsed.i_req_ma;
-    match parsed.mode {
-        control::PdMode::Fixed => {
-            cfg.fixed_object_pos = parsed.object_pos;
-            // Keep PPS target_mv intact (fixed does not use target_mv).
-        }
-        control::PdMode::Pps => {
-            cfg.pps_object_pos = parsed.object_pos;
-            cfg.target_mv = parsed.target_mv.unwrap_or(cfg.target_mv);
-        }
+    if let Some(value) = parsed.allow_extended_voltage {
+        allow_extended_voltage = value;
     }
 
+    let changed = cfg != prev_cfg || allow_extended_voltage != prev_allow_extended_voltage;
     {
         let mut guard = control_mutex.lock().await;
         guard.pd_saved = cfg;
+        guard.allow_extended_voltage = allow_extended_voltage;
         if guard.ui_view == crate::control::UiView::PdSettings {
             guard.pd_draft = cfg;
         }
-        bump_control_rev();
+        if changed {
+            bump_control_rev();
+        }
     }
 
-    let blob = control::encode_pd_blob(&cfg);
-    let res = {
-        let mut guard = eeprom.lock().await;
-        guard.write_pd_blob(&blob).await
+    if changed {
+        let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
+        let res = {
+            let mut guard = eeprom.lock().await;
+            guard.write_pd_blob(&blob).await
+        };
+        if let Err(_err) = res {
+            write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
+            crate::PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed);
+            crate::PD_LAST_RESULT_MS.store(now_ms32(), Ordering::Relaxed);
+            return Err("503 Service Unavailable");
+        }
+    }
+
+    if !allow_extended_voltage {
+        crate::PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+    }
+
+    let attached_now = {
+        let guard = telemetry.lock().await;
+        guard
+            .last_pd_status
+            .as_ref()
+            .map(|status| status.attached)
+            .unwrap_or(false)
     };
-    if let Err(_err) = res {
-        write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
-        crate::PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed);
-        crate::PD_LAST_RESULT_MS.store(now_ms32(), Ordering::Relaxed);
-        return Err("503 Service Unavailable");
+    if attached_now {
+        let now = now_ms32();
+        crate::PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
+        crate::PD_FORCE_SEND.store(true, Ordering::Release);
     }
-
-    // Trigger apply on the UART TX task.
-    let now = now_ms32();
-    crate::PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
-    crate::PD_FORCE_SEND.store(true, Ordering::Release);
 
     render_pd_view_json(body_out, control_mutex, telemetry).await
 }

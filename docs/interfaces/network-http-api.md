@@ -468,6 +468,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   "pps_pdos": [
     { "pos": 2, "min_mv": 3300, "max_mv": 21000, "max_ma": 5000 }
   ],
+  "allow_extended_voltage": false,
   "saved": {
     "mode": "fixed",
     "fixed_object_pos": 4,
@@ -485,7 +486,8 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 字段说明：
 
 - `fixed_pdos[].pos` 与 `pps_pdos[].pos` 均为 **object position（1-based）**；若模拟板能力列表未携带 `pos`（旧格式），数字板以列表索引 `idx+1` 生成稳定的 `pos`。
-- `saved.target_mv` 在 `mode="pps"` 时表示 PPS 目标电压（mV）；在 `mode="fixed"` 时不参与协商（Fixed 的电压由所选 PDO 决定）。
+- `allow_extended_voltage=false` 表示运行时有效策略被锁定为 Safe5V；即使 `saved` 里保留了更高电压档位，也不会自动离开 Safe5V。
+- `saved.target_mv` 在 `mode="pps"` 时表示 PPS 目标电压（mV）；在 `mode="fixed"` 时仅作为 UI/恢复用的目标电压缓存，Fixed 的实际请求仍由所选 PDO 决定。
 - `contract_mv` / `contract_ma` 在 `attached=false`（或合同未知）时为 `null`。
 
 可用性约定（重要）：
@@ -521,6 +523,17 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 ```jsonc
 { "mode": "pps", "object_pos": 2, "target_mv": 9000, "i_req_ma": 2000 }
 ```
+
+- 请求（仅切换 Safe5V 门控）：
+
+```jsonc
+{ "allow_extended_voltage": true }
+```
+
+- 兼容性约定：
+  - `allow_extended_voltage` 为可选字段；未提供时保持原值。
+  - 若同时提供 `mode/object_pos/i_req_ma/(target_mv)`，固件会先更新并保存 `saved`，再按 `allow_extended_voltage` 选择有效策略。
+  - `allow_extended_voltage=false` 时，即使更新了 `saved`，设备也会保持/回到 Safe5V，不会偷偷恢复高压档。
 
 - 响应（200）：返回更新后的 `GET /api/v1/pd` 视图。
 

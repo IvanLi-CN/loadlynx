@@ -201,6 +201,22 @@ impl PdConfig {
         }
     }
 
+    pub const fn safe5v() -> Self {
+        Self::default()
+    }
+
+    pub const fn effective(saved: Self, allow_extended_voltage: bool) -> Self {
+        if allow_extended_voltage {
+            saved
+        } else {
+            Self::safe5v()
+        }
+    }
+
+    pub const fn allows_non_safe5v(self) -> bool {
+        self.target_mv > Self::DEFAULT_TARGET_MV
+    }
+
     pub fn toggle_target(&mut self) -> bool {
         let next = if self.target_mv == 20_000 {
             5_000
@@ -233,6 +249,8 @@ pub struct ControlState {
     pub panel_selected_digit: PresetPanelDigit,
     /// Persisted PD policy (EEPROM-backed); used by the UART PD apply task.
     pub pd_saved: PdConfig,
+    /// User-controlled gate that decides whether the runtime PD policy may leave Safe5V.
+    pub allow_extended_voltage: bool,
     /// Draft PD policy edited in the PD settings UI; copied to `pd_saved` on Apply.
     pub pd_draft: PdConfig,
     pub pd_settings_focus: PdSettingsFocus,
@@ -240,7 +258,11 @@ pub struct ControlState {
 }
 
 impl ControlState {
-    pub fn new(presets: [Preset; PRESET_COUNT], pd: PdConfig) -> Self {
+    pub fn new(
+        presets: [Preset; PRESET_COUNT],
+        pd: PdConfig,
+        allow_extended_voltage: bool,
+    ) -> Self {
         Self {
             presets,
             saved: presets,
@@ -253,6 +275,7 @@ impl ControlState {
             panel_selected_field: PresetPanelField::Target,
             panel_selected_digit: PresetPanelDigit::Tenths,
             pd_saved: pd,
+            allow_extended_voltage,
             pd_draft: pd,
             pd_settings_focus: PdSettingsFocus::DEFAULT,
             pd_settings_digit: AdjustDigit::Tenths,
@@ -506,7 +529,7 @@ pub fn decode_presets_blob(
 // ---- EEPROM PD config blob -------------------------------------------------
 
 const PD_MAGIC: [u8; 4] = *b"LLPD";
-const PD_FMT_VERSION: u8 = 3;
+const PD_FMT_VERSION: u8 = 4;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdBlobError {
@@ -518,7 +541,10 @@ pub enum PdBlobError {
     InvalidLayout,
 }
 
-pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
+pub fn encode_pd_blob(
+    cfg: &PdConfig,
+    allow_extended_voltage: bool,
+) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     let mut out = [0u8; crate::eeprom::EEPROM_PD_LEN];
     out[0..4].copy_from_slice(&PD_MAGIC);
     out[4] = PD_FMT_VERSION;
@@ -527,7 +553,8 @@ pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     out[7] = cfg.pps_object_pos;
     put_u32_le(&mut out, 8, cfg.target_mv);
     put_u32_le(&mut out, 12, cfg.i_req_ma);
-    // out[16..28] reserved = 0
+    out[16] = u8::from(allow_extended_voltage);
+    // out[17..28] reserved = 0
 
     let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
     let crc = calfmt::crc32_ieee(&out[..crc_offset]);
@@ -535,12 +562,14 @@ pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     out
 }
 
-pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdConfig, PdBlobError> {
+pub fn decode_pd_blob(
+    bytes: &[u8; crate::eeprom::EEPROM_PD_LEN],
+) -> Result<(PdConfig, bool), PdBlobError> {
     if bytes[0..4] != PD_MAGIC {
         return Err(PdBlobError::InvalidMagic);
     }
     let ver = bytes[4];
-    if ver != 1 && ver != 2 && ver != PD_FMT_VERSION {
+    if ver != 1 && ver != 2 && ver != 3 && ver != PD_FMT_VERSION {
         return Err(PdBlobError::UnsupportedVersion(ver));
     }
 
@@ -575,12 +604,68 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
     } else {
         PdConfig::DEFAULT_I_REQ_MA
     };
+    let allow_extended_voltage = if ver >= 4 { bytes[16] != 0 } else { false };
 
-    Ok(PdConfig {
-        mode,
-        fixed_object_pos,
-        pps_object_pos,
-        target_mv,
-        i_req_ma,
-    })
+    Ok((
+        PdConfig {
+            mode,
+            fixed_object_pos,
+            pps_object_pos,
+            target_mv,
+            i_req_ma,
+        },
+        allow_extended_voltage,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_v3_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
+        let mut out = [0u8; crate::eeprom::EEPROM_PD_LEN];
+        out[0..4].copy_from_slice(&PD_MAGIC);
+        out[4] = 3;
+        out[5] = cfg.mode as u8;
+        out[6] = cfg.fixed_object_pos;
+        out[7] = cfg.pps_object_pos;
+        put_u32_le(&mut out, 8, cfg.target_mv);
+        put_u32_le(&mut out, 12, cfg.i_req_ma);
+        let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
+        let crc = calfmt::crc32_ieee(&out[..crc_offset]);
+        put_u32_le(&mut out, crc_offset, crc);
+        out
+    }
+
+    #[test]
+    fn pd_blob_roundtrip_preserves_allow_extended_voltage() {
+        let cfg = PdConfig {
+            mode: PdMode::Pps,
+            fixed_object_pos: 4,
+            pps_object_pos: 2,
+            target_mv: 9_000,
+            i_req_ma: 2_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v4 blob");
+        assert_eq!(decoded, cfg);
+        assert!(allow_extended_voltage);
+    }
+
+    #[test]
+    fn pd_blob_v3_defaults_allow_extended_voltage_to_false() {
+        let cfg = PdConfig {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 3,
+            pps_object_pos: 0,
+            target_mv: 20_000,
+            i_req_ma: 3_000,
+        };
+
+        let blob = encode_v3_blob(&cfg);
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v3 blob");
+        assert_eq!(decoded, cfg);
+        assert!(!allow_extended_voltage);
+    }
 }
