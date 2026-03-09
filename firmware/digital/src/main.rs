@@ -6769,6 +6769,7 @@ async fn setmode_tx_task(
     let mut pd_pending: Option<PdPending> = None;
     let mut pd_last_sent: Option<PdPolicyKey> = None;
     let mut pd_force_send: bool = false;
+    let mut prev_pd_link_up: bool = LINK_UP.load(Ordering::Relaxed);
     let mut last_pd_req_skip_warn_ms: u32 = 0;
 
     // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
@@ -7070,6 +7071,14 @@ async fn setmode_tx_task(
             }
         } else {
             calmissing_since_ms = None;
+        }
+
+        let link_up_now = LINK_UP.load(Ordering::Relaxed);
+        if link_up_now && !prev_pd_link_up {
+            prev_pd_link_up = true;
+            pd_force_send = true;
+        } else if !link_up_now && prev_pd_link_up {
+            prev_pd_link_up = false;
         }
 
         let (rev_now, desired_cmd, mut pd_cfg, allow_extended_voltage) = {
