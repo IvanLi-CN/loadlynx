@@ -2319,6 +2319,8 @@ async fn render_pd_view_json(
     }
     buf.push(']');
 
+    let saved = crate::normalized_pd_config_for_status(saved, Some(&status));
+
     buf.push_str(",\"allow_extended_voltage\":");
     buf.push_str(if allow_extended_voltage {
         "true"

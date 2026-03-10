@@ -3569,7 +3569,7 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
     }
 }
 
-fn pd_fixed_target_mv(cfg: control::PdConfig, status: Option<&PdStatus>) -> u32 {
+pub(crate) fn pd_fixed_target_mv(cfg: control::PdConfig, status: Option<&PdStatus>) -> u32 {
     fn pdo_pos(pos: u8, idx: usize) -> u8 {
         if pos != 0 {
             pos
@@ -3603,6 +3603,16 @@ fn pd_fixed_target_mv(cfg: control::PdConfig, status: Option<&PdStatus>) -> u32 
 
     cfg.target_mv
         .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000)
+}
+
+pub(crate) fn normalized_pd_config_for_status(
+    mut cfg: control::PdConfig,
+    status: Option<&PdStatus>,
+) -> control::PdConfig {
+    if matches!(cfg.mode, control::PdMode::Fixed) {
+        cfg.target_mv = pd_fixed_target_mv(cfg, status);
+    }
+    cfg
 }
 
 fn pd_button_display_mode(
@@ -7154,14 +7164,6 @@ async fn setmode_tx_task(
             pd_cfg.target_mv = 5_000;
         }
         pd_cfg.i_req_ma = pd_cfg.i_req_ma.clamp(50, 10_000);
-        let pd_key = PdPolicyKey {
-            mode: pd_cfg.mode,
-            fixed_object_pos: pd_cfg.fixed_object_pos,
-            pps_object_pos: pd_cfg.pps_object_pos,
-            target_mv: pd_cfg.target_mv,
-            i_req_ma: pd_cfg.i_req_ma,
-        };
-
         if !allow_extended_voltage {
             clear_pd_extended_voltage_failure();
         }
@@ -7169,8 +7171,33 @@ async fn setmode_tx_task(
             let guard = telemetry.lock().await;
             guard.last_pd_status.clone()
         };
+        pd_cfg = normalized_pd_config_for_status(pd_cfg, pd_status.as_ref());
         let desired_pd_req = build_pd_sink_request(&pd_cfg, pd_status.as_ref());
-        let requested_non_safe5v = pd_cfg.allows_non_safe5v();
+        let requested_non_safe5v = desired_pd_req
+            .as_ref()
+            .map(pd_request_allows_non_safe5v)
+            .unwrap_or_else(|| pd_cfg.allows_non_safe5v());
+        let pd_key = if let Some(req) = desired_pd_req.as_ref() {
+            PdPolicyKey {
+                mode: match req.mode {
+                    PdSinkMode::Fixed => control::PdMode::Fixed,
+                    PdSinkMode::Pps => control::PdMode::Pps,
+                    PdSinkMode::Unknown(_) => pd_cfg.mode,
+                },
+                fixed_object_pos: pd_cfg.fixed_object_pos,
+                pps_object_pos: pd_cfg.pps_object_pos,
+                target_mv: req.target_mv,
+                i_req_ma: req.i_req_ma,
+            }
+        } else {
+            PdPolicyKey {
+                mode: pd_cfg.mode,
+                fixed_object_pos: pd_cfg.fixed_object_pos,
+                pps_object_pos: pd_cfg.pps_object_pos,
+                target_mv: pd_cfg.target_mv,
+                i_req_ma: pd_cfg.i_req_ma,
+            }
+        };
 
         if PD_FORCE_SEND.swap(false, Ordering::AcqRel) {
             pd_force_send = true;

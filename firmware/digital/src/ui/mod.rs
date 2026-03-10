@@ -925,22 +925,15 @@ fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
     draw_small_text(canvas, line1, line1_x, line1_y, accent, spacing);
 
     let mut line2_buf = String::<8>::new();
-    match data.pd_display_mode {
-        PdButtonDisplayMode::Pps => {
-            if let Some(mv) = data.pd_target_mv {
-                let v10 = mv / 100;
-                let _ = write!(&mut line2_buf, "{}.{}V", v10 / 10, v10 % 10);
-            } else {
-                let _ = line2_buf.push_str("N/A");
-            }
+    if let Some(mv) = data.pd_target_mv {
+        let v10 = (mv + 50) / 100;
+        if v10 % 10 == 0 {
+            let _ = write!(&mut line2_buf, "{}V", v10 / 10);
+        } else {
+            let _ = write!(&mut line2_buf, "{}.{}V", v10 / 10, v10 % 10);
         }
-        PdButtonDisplayMode::Fixed | PdButtonDisplayMode::Detach => {
-            if let Some(mv) = data.pd_target_mv {
-                let _ = write!(&mut line2_buf, "{}V", mv / 1000);
-            } else {
-                let _ = line2_buf.push_str("N/A");
-            }
-        }
+    } else {
+        let _ = line2_buf.push_str("N/A");
     }
 
     let line2 = line2_buf.as_str();
