@@ -6079,7 +6079,9 @@ async fn main(spawner: Spawner) {
         info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
     }
     info!("spawning stats task");
-    spawner.spawn(stats_task()).expect("stats_task spawn");
+    spawner
+        .spawn(stats_task(telemetry))
+        .expect("stats_task spawn");
     info!("spawning load guard task");
     spawner
         .spawn(load_guard_task(control))
@@ -6123,7 +6125,7 @@ async fn main(spawner: Spawner) {
 
 // 周期性聚合统计，启动后每 5 秒打印一次（便于 DMA 验证阶段观察计数）
 #[embassy_executor::task]
-async fn stats_task() {
+async fn stats_task(telemetry: &'static TelemetryMutex) {
     let mut last_stats_ms = timestamp_ms();
     let mut prev_link_up = LINK_UP.load(Ordering::Relaxed);
     let mut link_alarm_fired_for_down: bool = false;
@@ -6151,6 +6153,11 @@ async fn stats_task() {
             } else {
                 warn!("link down (no frames for {} ms)", age_ms);
                 ANALOG_STATE.store(AnalogState::Offline as u8, Ordering::Relaxed);
+                // Treat link-down as the start of a new PD session: clear any stale PD_STATUS
+                // snapshot so link-recovery auto-send cannot reuse old PDO/APDO lists.
+                PD_STATUS_ATTACHED.store(false, Ordering::Relaxed);
+                let mut guard = telemetry.lock().await;
+                guard.last_pd_status = None;
             }
         }
 

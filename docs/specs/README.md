@@ -64,4 +64,3 @@
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
 | w4cpd | Dashboard 扩展电压开关与 PD 设置入口重构 | 已完成 | `w4cpd-dashboard-extended-voltage-toggle/SPEC.md` | 2026-03-10 | 实现已完成；HIL 待补（可选） |
-| k3p8m | 示例：新增工作项规格 | 待设计 | `k3p8m-example-spec/SPEC.md` | YYYY-MM-DD | - |
