@@ -533,6 +533,8 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 - 兼容性约定：
   - `allow_extended_voltage` 为可选字段；未提供时保持原值。
   - 若同时提供 `mode/object_pos/i_req_ma/(target_mv)`，固件会先更新并保存 `saved`，再按 `allow_extended_voltage` 选择有效策略。
+  - `saved` 仍按持久化 payload 原样返回；fixed 模式下 `saved.target_mv` 只是缓存值，不会在 `GET` 时按当前 Source 能力重新归一化。
+  - 更新 `saved` 字段时，固件仍会按当前 attach 的 Source 能力校验 `object_pos` / `target_mv` / `i_req_ma`；因此未 attach（或 `PD_STATUS` 不可用）时只支持单独切换 `allow_extended_voltage`。
   - `allow_extended_voltage=false` 时，即使更新了 `saved`，设备也会保持/回到 Safe5V，不会偷偷恢复高压档。
 
 - 响应（200）：返回更新后的 `GET /api/v1/pd` 视图。

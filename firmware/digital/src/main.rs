@@ -7563,7 +7563,7 @@ async fn send_setmode_frame(
 }
 
 fn pd_request_allows_non_safe5v(req: &PdSinkRequest) -> bool {
-    !matches!(req.mode, PdSinkMode::Fixed) || req.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+    req.target_mv != control::PdConfig::DEFAULT_TARGET_MV
 }
 
 fn build_pd_sink_request(
