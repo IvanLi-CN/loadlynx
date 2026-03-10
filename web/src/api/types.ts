@@ -297,6 +297,17 @@ export interface PdView {
 }
 
 export type PdUpdateRequest =
-  | { mode: "fixed"; object_pos: number; i_req_ma: number }
-  | { mode: "pps"; object_pos: number; target_mv: number; i_req_ma: number }
+  | {
+      mode: "fixed";
+      object_pos: number;
+      i_req_ma: number;
+      allow_extended_voltage?: boolean;
+    }
+  | {
+      mode: "pps";
+      object_pos: number;
+      target_mv: number;
+      i_req_ma: number;
+      allow_extended_voltage?: boolean;
+    }
   | { allow_extended_voltage: boolean };

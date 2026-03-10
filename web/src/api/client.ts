@@ -929,9 +929,37 @@ async function mockUpdatePd(
   const next = structuredClone(current);
   const nowMs = state.status.raw.uptime_ms ?? 0;
 
+  function applyMockPdPolicy(view: PdView): void {
+    if (!view.attached) {
+      view.contract_mv = null;
+      view.contract_ma = null;
+      return;
+    }
+
+    const allowExtendedVoltage = view.allow_extended_voltage ?? true;
+    if (!allowExtendedVoltage) {
+      view.contract_mv = 5_000;
+      view.contract_ma = view.saved.i_req_ma;
+      return;
+    }
+
+    if (view.saved.mode === "fixed") {
+      const pos = view.saved.fixed_object_pos;
+      const pdo =
+        view.fixed_pdos.find((entry) => entry.pos === pos) ?? view.fixed_pdos[0];
+      view.contract_mv = pdo?.mv ?? 5_000;
+      view.contract_ma = view.saved.i_req_ma;
+      return;
+    }
+
+    view.contract_mv = view.saved.target_mv;
+    view.contract_ma = view.saved.i_req_ma;
+  }
+
   // Firmware allows toggling the Safe5V gate even while detached/offline.
-  if ("allow_extended_voltage" in payload) {
+  if (!("mode" in payload)) {
     next.allow_extended_voltage = payload.allow_extended_voltage;
+    applyMockPdPolicy(next);
     next.apply = {
       pending: false,
       last: { code: "ok", at_ms: nowMs },
@@ -975,14 +1003,15 @@ async function mockUpdatePd(
       });
     }
 
+    const cachedPpsTarget = next.saved.pps_target_mv ?? next.saved.target_mv;
     next.saved = {
       ...next.saved,
       mode: "fixed",
       fixed_object_pos: objectPos,
+      target_mv: pdo.mv,
+      pps_target_mv: cachedPpsTarget,
       i_req_ma: payload.i_req_ma,
     };
-    next.contract_mv = pdo.mv;
-    next.contract_ma = payload.i_req_ma;
   } else {
     const apdo = next.pps_pdos.find((entry) => entry.pos === objectPos);
     if (!apdo) {
@@ -1009,11 +1038,15 @@ async function mockUpdatePd(
       mode: "pps",
       pps_object_pos: objectPos,
       target_mv: payload.target_mv,
+      pps_target_mv: payload.target_mv,
       i_req_ma: payload.i_req_ma,
     };
-    next.contract_mv = payload.target_mv;
-    next.contract_ma = payload.i_req_ma;
   }
+
+  if (payload.allow_extended_voltage != null) {
+    next.allow_extended_voltage = payload.allow_extended_voltage;
+  }
+  applyMockPdPolicy(next);
 
   next.apply = {
     pending: false,
