@@ -184,13 +184,13 @@ pub enum WifiUiStatus {
     Error,
 }
 
-// Dashboard LOAD power-button (UI mock contract).
+// Dashboard settings entry (reuses the old round button footprint).
 // Scaled up from the original 21px design to ~1.3× while keeping an odd diameter.
 const LOAD_BUTTON_SIZE: i32 = 27;
 const LOAD_BUTTON_RIGHT: i32 = CONTROL_VALUE_PILL_RIGHT;
 const LOAD_BUTTON_LEFT: i32 = LOAD_BUTTON_RIGHT - LOAD_BUTTON_SIZE;
 const LOAD_BUTTON_BOTTOM: i32 = LOAD_ROW_TOP + LOAD_BUTTON_SIZE;
-// Dashboard PD button (replaces the old "LOAD" label).
+// Dashboard extended-voltage toggle (keeps the original PD button footprint).
 const PD_BUTTON_LEFT: i32 = 198;
 const PD_BUTTON_GAP_TO_POWER: i32 = 10;
 const PD_BUTTON_RIGHT: i32 = LOAD_BUTTON_LEFT - PD_BUTTON_GAP_TO_POWER;
@@ -199,10 +199,9 @@ const PD_BUTTON_RADIUS: i32 = 6;
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug, defmt::Format)]
 pub enum PdButtonState {
-    Standby,
-    Negotiating,
-    Active,
-    Error,
+    Safe5vOnly,
+    ExtendedAllowed,
+    ExtendedFailed,
 }
 
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
@@ -883,7 +882,12 @@ fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
 }
 
 pub fn hit_test_dashboard_load_button(x: i32, y: i32) -> bool {
-    x >= LOAD_BUTTON_LEFT && x < LOAD_BUTTON_RIGHT && y >= LOAD_ROW_TOP && y < LOAD_BUTTON_BOTTOM
+    let radius = (LOAD_BUTTON_SIZE / 2) + 1;
+    let cx = LOAD_BUTTON_LEFT + (LOAD_BUTTON_SIZE / 2);
+    let cy = LOAD_ROW_TOP + (LOAD_BUTTON_SIZE / 2);
+    let dx = x - cx;
+    let dy = y - cy;
+    dx.saturating_mul(dx) + dy.saturating_mul(dy) <= radius.saturating_mul(radius)
 }
 
 pub fn hit_test_dashboard_pd_button(x: i32, y: i32) -> bool {
@@ -892,21 +896,7 @@ pub fn hit_test_dashboard_pd_button(x: i32, y: i32) -> bool {
 
 fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
     draw_dashboard_pd_button(canvas, data);
-
-    // State colors apply ONLY to the power symbol (not the button container).
-    let forced_off = data.uv_latched
-        || data.trip_alarm_abbrev.is_some()
-        || data.fault_flags != 0
-        || data.link_alarm_latched;
-    let symbol_color = if forced_off {
-        rgb(0xff5252)
-    } else if data.output_enabled {
-        rgb(0x4cc9f0)
-    } else {
-        rgb(0x555f75)
-    };
-
-    draw_power_button(canvas, LOAD_BUTTON_LEFT, LOAD_ROW_TOP, symbol_color);
+    draw_settings_button(canvas, LOAD_BUTTON_LEFT, LOAD_ROW_TOP);
 }
 
 fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
@@ -918,67 +908,43 @@ fn draw_dashboard_pd_button(canvas: &mut Canvas, data: &UiSnapshot) {
     );
 
     let accent = match data.pd_state {
-        PdButtonState::Standby => rgb(0x555f75),
-        PdButtonState::Negotiating => rgb(0xffb347),
-        PdButtonState::Active => rgb(0x4cc9f0),
-        PdButtonState::Error => rgb(0xff5252),
+        PdButtonState::Safe5vOnly => rgb(0x555f75),
+        PdButtonState::ExtendedAllowed => rgb(0x4cc9f0),
+        PdButtonState::ExtendedFailed => rgb(0xff5252),
     };
 
-    // Match the existing design mock: solid fill, with small corner highlights only.
+    // Match the approved mock: neutral dark body, with state color only on the text + corner accents.
     canvas.fill_round_rect(rect, PD_BUTTON_RADIUS, rgb(0x1c2638));
-    if !matches!(data.pd_state, PdButtonState::Standby) {
+    if !matches!(data.pd_state, PdButtonState::Safe5vOnly) {
         overlay_pd_button_corner_highlights(canvas, rect, accent);
     }
 
-    // Two-line layout: `SMALL_FONT` is 12px tall but has internal blank rows (no ascenders/descenders
-    // for "PD"/"20V"). Use a slight overlap so the *visual* gap becomes ~2–3px.
     let pad_top = 3;
     let line1_y = rect.top + pad_top;
     let line2_y = line1_y + 11;
 
     let spacing = 0;
-    let line1 = match data.pd_display_mode {
-        PdButtonDisplayMode::Pps => "PPS",
-        PdButtonDisplayMode::Fixed | PdButtonDisplayMode::Detach => "PD",
-    };
+    let line1 = "PD";
     let line1_w = small_text_width(line1, spacing);
     let line1_x = rect.left + ((rect.right - rect.left - line1_w).max(0) / 2);
     draw_small_text(canvas, line1, line1_x, line1_y, accent, spacing);
 
     let mut line2_buf = String::<8>::new();
-    match data.pd_display_mode {
-        PdButtonDisplayMode::Detach => {
-            let _ = line2_buf.push_str("Detach");
+    if let Some(mv) = data.pd_target_mv {
+        let v10 = (mv + 50) / 100;
+        if v10 % 10 == 0 {
+            let _ = write!(&mut line2_buf, "{}V", v10 / 10);
+        } else {
+            let _ = write!(&mut line2_buf, "{}.{}V", v10 / 10, v10 % 10);
         }
-        PdButtonDisplayMode::Fixed => {
-            if let Some(mv) = data.pd_target_mv {
-                let _ = write!(&mut line2_buf, "{}V", mv / 1000);
-            } else {
-                let _ = line2_buf.push_str("N/A");
-            }
-        }
-        PdButtonDisplayMode::Pps => {
-            if let Some(mv) = data.pd_target_mv {
-                let v10 = mv / 100;
-                let _ = write!(&mut line2_buf, "{}.{}V", v10 / 10, v10 % 10);
-            } else {
-                let _ = line2_buf.push_str("N/A");
-            }
-        }
-    }
-
-    let line2_is_voltage =
-        data.pd_display_mode != PdButtonDisplayMode::Detach && data.pd_target_mv.is_some();
-    let line2_color = if line2_is_voltage && data.pd_target_available {
-        accent
     } else {
-        rgb(0x555f75)
-    };
+        let _ = line2_buf.push_str("N/A");
+    }
 
     let line2 = line2_buf.as_str();
     let line2_w = small_text_width(line2, spacing);
     let line2_x = rect.left + ((rect.right - rect.left - line2_w).max(0) / 2);
-    draw_small_text(canvas, line2, line2_x, line2_y, line2_color, spacing);
+    draw_small_text(canvas, line2, line2_x, line2_y, accent, spacing);
 }
 
 fn overlay_pd_button_corner_highlights(canvas: &mut Canvas, rect: Rect, color: Rgb565) {
@@ -1065,23 +1031,15 @@ fn overlay_round_rect_corner_outline(canvas: &mut Canvas, rect: Rect, radius: i3
     }
 }
 
-fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb565) {
-    // Pixel-perfect, non-resampled rendering. Kept intentionally simple so the icon stays crisp
-    // at different sizes (no bitmap scaling / no blur).
+fn draw_settings_button(canvas: &mut Canvas, left: i32, top: i32) {
     let border = rgb(0x1c2a3f);
     let shadow = rgb(0x19243a);
     let fill = rgb(0x1c2638);
+    let icon = rgb(0xf4f7ff);
 
     let size = LOAD_BUTTON_SIZE;
     let center = (size - 1) / 2;
     let outer_r = center;
-
-    // Power symbol parameters (tuned by eye on 320×240 mocks).
-    let sym_r = (outer_r - 5).max(4);
-    let sym_gap_half_w = 2;
-    let sym_gap_depth = 2;
-    let sym_line_top = -(sym_r + 2);
-    let sym_line_bottom = -1;
 
     for y in 0..size {
         for x in 0..size {
@@ -1090,7 +1048,6 @@ fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb
             let d2 = dx * dx + dy * dy;
             let d2_4 = d2 * 4;
 
-            // Button container: border ring + inner shadow ring + fill.
             let mut px = None;
             if in_circle_ring(d2_4, outer_r) {
                 px = Some(border);
@@ -1100,26 +1057,14 @@ fn draw_power_button(canvas: &mut Canvas, left: i32, top: i32, symbol_color: Rgb
                 px = Some(fill);
             }
 
-            // Power symbol overlay (ring + centered line). Kept away from the outer rings.
-            if d2_4 <= circle_fill_limit_4(sym_r + 2) {
-                // Ring thickness ≈ 2 px (sym_r and sym_r-1).
-                let mut in_sym_ring =
-                    in_circle_ring(d2_4, sym_r) || in_circle_ring(d2_4, sym_r - 1);
-                // Notch at the top center to "break" the ring.
-                if in_sym_ring
-                    && dy < 0
-                    && dy <= -(sym_r - sym_gap_depth)
-                    && dx >= -(sym_gap_half_w + 1)
-                    && dx <= sym_gap_half_w
-                {
-                    in_sym_ring = false;
-                }
-
-                let in_sym_line =
-                    (dx == -1 || dx == 0) && dy >= sym_line_top && dy <= sym_line_bottom;
-                if in_sym_ring || in_sym_line {
-                    px = Some(symbol_color);
-                }
+            let line1 = dx == -4 && dy >= -5 && dy <= 5;
+            let line2 = dx == 0 && dy >= -5 && dy <= 5;
+            let line3 = dx == 4 && dy >= -5 && dy <= 5;
+            let knob1 = dy >= -3 && dy <= -1 && dx >= -5 && dx <= -3;
+            let knob2 = dy >= 0 && dy <= 2 && dx >= -1 && dx <= 1;
+            let knob3 = dy >= 2 && dy <= 4 && dx >= 3 && dx <= 5;
+            if line1 || line2 || line3 || knob1 || knob2 || knob3 {
+                px = Some(icon);
             }
 
             if let Some(px) = px {
@@ -1707,9 +1652,9 @@ impl UiSnapshot {
             trip_alarm_abbrev: None,
             blocked_enable_abbrev: None,
             blink_on: false,
-            pd_state: PdButtonState::Standby,
-            pd_display_mode: PdButtonDisplayMode::Detach,
-            pd_target_mv: None,
+            pd_state: PdButtonState::Safe5vOnly,
+            pd_display_mode: PdButtonDisplayMode::Fixed,
+            pd_target_mv: Some(5_000),
             pd_target_available: true,
             preset_preview_active: false,
             preset_preview_target_text: String::new(),

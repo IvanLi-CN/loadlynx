@@ -7,6 +7,7 @@
 > Mock is rendered at 320×240 px, matching the landscape frame buffer of the P024C128-CTP module (`docs/other-datasheets/p024c128-ctp.md`).
 >
 > NOTE: The main-screen control row interaction is defined by `docs/plan/0005:on-device-preset-ui/PLAN.md` and replaces the legacy “tap CC/CV + encoder digit adjust” behavior previously described here.
+> NOTE: The two controls below the remote/local voltage bar now follow `docs/specs/w4cpd-dashboard-extended-voltage-toggle/SPEC.md`: the left `PD` button is the extended-voltage toggle, and the right circular button is the PD settings entry.
 
 ## 需求说明
 
@@ -60,7 +61,8 @@
 | Control row | 主界面 Preset 概览与入口：左侧两行 `M#` / `CC|CV`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更） | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；分别用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；交互语义详见 `docs/plan/0005:on-device-preset-ui/PLAN.md`。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
-| PD button | 两行：`<line1>/<line2>`（`/` 代表换行）；入口：短按进入 USB‑PD settings | SmallFont | 上行/边框按 PD 状态色；下行在不可用/缺失时灰显 | 圆角矩形 `(198,118)-(277,145)`；文案规则见 `docs/plan/0019:dashboard-pd-button-label/PLAN.md`：Detach→`PD/Detach`；PPS→`PPS/20.0V`；Fixed→`PD/20V`；缺失→`*/N/A` |
+| Extended-voltage toggle | 两行：`PD/<V>V`（`/` 代表换行）；短按切换“仅 Safe5V / 允许扩展电压” | SmallFont | 灰=`#555F75`（仅 Safe5V）；蓝=`#4CC9F0`（允许扩展电压）；红=`#FF5252`（允许扩展电压但最近一次非 Safe5V 请求失败） | 圆角矩形 `(198,118)-(277,145)`；顶部文案固定为 `PD`；第二行显示 `5V` 或已保存目标电压（当前设计稿示例为 `20V`） |
+| PD settings entry | 右侧圆形设置入口；短按进入 USB‑PD settings | SmallFont / icon-only | 深色中性圆底 + 白色滑杆图标；外侧不使用蓝色边框，也不承载 PD 成功/失败状态色 | 圆形按钮 `(287,118)-(314,145)`；代替原 on-screen LOAD 按钮 |
 | Status lines (5) | 运行时间 + 温度 + 状态行（例如 `RUN 01:32:10`、`CORE 42.3C`、`SINK 38.1C`、`MCU 35.0C`、`RDY` / `CAL` / `OFF` / `LNK` / `UVLO` / `OCF` / `OVP` / `OTP` / `FLT 0x12345678`） | SmallFont | 默认 `#DFE7FF`；**Status line #5 在异常时闪烁（`#FF5252` ⇄ `#FFFFFF`）** | Right block 底部对齐：Top-left at `(198,172)` 起，每行 +12px，底边距约 12px（**每行最多 15 字符**，避免右侧被裁切） |
 
 ### Status line #5：状态文案（对外缩写，禁止 debug 噪声）
@@ -92,43 +94,33 @@
 - 数值部分 `DD.ddd` 使用 `SetpointFont`（10×18）绘制；单位 `U` 仍使用 `SmallFont`（8×12）绘制并紧贴其右侧。
 - 主界面不显示“选中位高亮”（避免被误认为可点选子区域）。
 
-### PD button：两行文案与示例（详见 #0019）
+### Extended-voltage toggle + PD settings entry
 
-![Dashboard PD button label states](../assets/main-display/pd-button/dashboard-pd-button-states.png)
+![Approved dashboard extended-voltage states](../specs/w4cpd-dashboard-extended-voltage-toggle/assets/dashboard-extended-voltage-states-v1.png)
 
 #### Placement（像素契约）
 
-- Button rect：`(198,118)-(277,145)`（含边框），圆角半径 `6 px`。
-- Border thickness：`1 px`（内缩后填充内层）。
-- 与右侧 Power button 的水平间距：`10 px`（见 `PD_BUTTON_GAP_TO_POWER`）。
-- 触控命中区域（Hit box）：与 button rect 一致。
+- Left toggle rect：`(198,118)-(277,145)`（含边框），圆角半径 `6 px`。
+- Right settings circle：`(287,118)-(314,145)`。
+- 两者的水平间距保持 `10 px`。
+- 两个控件的触控命中区域均与各自视觉边界一致。
 
 #### Color（颜色语义）
 
-- Base fill：`#1C2638`；Standby border：`#1C2A3F`。
-- Accent（由 PD 状态决定，上行文本 + 非 Standby 边框）：
-  - Standby：`#555F75`
-  - Negotiating：`#FFB347`
-  - Active：`#4CC9F0`
-  - Error：`#FF5252`
-- 下行文本颜色：
-  - 电压值：`accent` 或（不可用时）`#555F75`
-  - `Detach` / `N/A`：固定 `#555F75`（避免与“电压值”混淆）
+- 左侧 `PD` 开关：
+  - `#555F75`：仅 Safe5V
+  - `#4CC9F0`：允许扩展电压
+  - `#FF5252`：允许扩展电压，但最近一次非 Safe5V 请求失败
+- 右侧设置入口：固定深色圆底 + 白色滑杆图标；不使用蓝色外边框，也不表达 PD 成功/失败。
 
-#### Typography & layout（字体与排版）
+#### Typography & copy（文案与排版）
 
-- Font：`SmallFont`（8×12），字符间距 `0`，两行均水平居中。
-- 垂直布局（与固件一致，用轻微重叠换取 2–3 px 的视觉行距）：
-  - `pad_top = 3`
-  - `line1_y = rect.top + pad_top`
-  - `line2_y = line1_y + 11`
-
-#### Copy rules（文案规则；`/` 代表换行）
-
-- Detach（未连接到 PD Source / Unattached）：`PD/Detach`（无论配置为 Fixed/PPS 都显示该文案）。
-- Fixed（合同值）：`PD/<V>V`（`<V>` 为整数，例如 `PD/20V`）。
-- PPS（合同值）：`PPS/<V>V`（固定 1 位小数，例如 `PPS/20.0V`）。
-- 缺失值：`PD/N/A` 或 `PPS/N/A`（第二行灰显）。
+- 左侧按钮继续使用 `SmallFont` 两行居中排版；顶部文案固定为 `PD`。
+- 第二行显示当前有效的“Safe5V 锁定结果”或“已保存目标电压”：
+  - Safe5V only：`PD/5V`
+  - extended voltage allowed（示例目标 20V）：`PD/20V`
+  - extended voltage failed（示例目标仍为 20V）：`PD/20V` + 红态
+- 主界面不再承担 Fixed/PPS 详细模式展示；详细模式仍留在 `USB‑PD Settings` 页面。
 
 ## Color Palette
 
@@ -177,7 +169,7 @@
 
 ### USB‑PD settings panel
 
-- 入口：主界面 `PD` 按钮**短按**进入 `USB‑PD Settings` 面板；`Back` 返回主界面。
+- 入口：主界面右侧圆形设置按钮**短按**进入 `USB‑PD Settings` 面板；`Back` 返回主界面。
 - 模式切换：顶部 `Fixed / PPS` 两段式按钮切换模式（仅切换编辑视图，不自动联动负载开关/设定值）。
 - 能力列表：
   - `Fixed`：全量展示 Fixed PDO 列表；点击行选择目标 PDO（以 `PDO{pos}` 表示 object position，1-based）。
@@ -197,6 +189,9 @@
 
 ### Operator quick guide
 
+- Tap the left `PD` button to toggle between `Safe5V only` and `allow extended voltage`.
+- Tap the right circular settings entry to open `USB‑PD Settings` for full PD configuration editing.
+- Load ON/OFF is no longer on-screen in this row; keep using the touch spring / physical path for load control.
 - Tap `<M#><MODE>` to open the Preset Panel for full editing and saving.
 - Use quick switch (press-and-swipe) to change active preset when you just need to move between stored presets quickly.
 

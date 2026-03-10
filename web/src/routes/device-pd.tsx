@@ -118,7 +118,7 @@ export function DevicePdRoute() {
 
     setFixedIReqMa(pd.saved.i_req_ma);
     setPpsIReqMa(pd.saved.i_req_ma);
-    setPpsTargetMv(pd.saved.target_mv);
+    setPpsTargetMv(pd.saved.pps_target_mv ?? pd.saved.target_mv);
   }, [pd]);
 
   const applyMutation = useMutation({
@@ -399,9 +399,23 @@ export function DevicePdRoute() {
             </div>
           </div>
 
+          {pd?.allow_extended_voltage === false ? (
+            <div className="alert alert-info shadow-sm text-xs sm:text-sm">
+              <span>
+                Safe5V only (allow_extended_voltage=false) — Apply will save the
+                profile, but the active contract stays at 5V until extended
+                voltage is enabled on the device dashboard.
+              </span>
+            </div>
+          ) : null}
+
           {applyMutation.isSuccess ? (
             <div className="alert alert-success shadow-sm text-xs sm:text-sm">
-              <span>Apply succeeded.</span>
+              <span>
+                {applyMutation.data?.allow_extended_voltage === false
+                  ? "Saved (Safe5V only)."
+                  : "Apply succeeded."}
+              </span>
             </div>
           ) : null}
 

@@ -354,24 +354,52 @@ function createInitialPd(baseUrl: string): PdView | null {
   const detached =
     normalized.includes("detached") || normalized.includes("not-attached");
 
-  return {
+  const allow_extended_voltage = normalized.includes("extended");
+
+  const saved: PdView["saved"] = {
+    mode: "pps",
+    fixed_object_pos: 5,
+    pps_object_pos: 3,
+    target_mv: 9_000,
+    pps_target_mv: 9_000,
+    i_req_ma: 2_000,
+  };
+
+  const view: PdView = {
     attached: !detached,
-    contract_mv: detached ? null : 9_000,
-    contract_ma: detached ? null : 2_000,
+    contract_mv: null,
+    contract_ma: null,
     fixed_pdos,
     pps_pdos,
-    saved: {
-      mode: "pps",
-      fixed_object_pos: 5,
-      pps_object_pos: 3,
-      target_mv: 9_000,
-      i_req_ma: 2_000,
-    },
+    allow_extended_voltage,
+    saved,
     apply: {
       pending: false,
       last: { code: "ok", at_ms: 123_456 },
     },
   };
+
+  if (!detached) {
+    if (!allow_extended_voltage) {
+      // Default to Safe5V contract; any non-Safe5V config must be explicitly allowed/applied.
+      const safePdo =
+        fixed_pdos.find((entry) => entry.mv === 5_000) ?? fixed_pdos[0];
+      const safeMaxMa = safePdo?.max_ma ?? saved.i_req_ma;
+      view.contract_mv = 5_000;
+      view.contract_ma = Math.min(saved.i_req_ma, safeMaxMa);
+    } else if (saved.mode === "fixed") {
+      const pdo =
+        fixed_pdos.find((entry) => entry.pos === saved.fixed_object_pos) ??
+        fixed_pdos[0];
+      view.contract_mv = pdo?.mv ?? 5_000;
+      view.contract_ma = saved.i_req_ma;
+    } else {
+      view.contract_mv = saved.target_mv;
+      view.contract_ma = saved.i_req_ma;
+    }
+  }
+
+  return view;
 }
 
 function createInitialCc(): CcControlView {
@@ -926,6 +954,53 @@ async function mockUpdatePd(
   mockRequirePdReady(state);
 
   const current = mockRequirePdSupported(state);
+  const next = structuredClone(current);
+  const nowMs = state.status.raw.uptime_ms ?? 0;
+
+  function applyMockPdPolicy(view: PdView): void {
+    if (!view.attached) {
+      view.contract_mv = null;
+      view.contract_ma = null;
+      return;
+    }
+
+    const allowExtendedVoltage = view.allow_extended_voltage ?? true;
+    if (!allowExtendedVoltage) {
+      const safePdo =
+        view.fixed_pdos.find((entry) => entry.mv === 5_000) ??
+        view.fixed_pdos[0];
+      const safeMaxMa = safePdo?.max_ma ?? view.saved.i_req_ma;
+      view.contract_mv = 5_000;
+      view.contract_ma = Math.min(view.saved.i_req_ma, safeMaxMa);
+      return;
+    }
+
+    if (view.saved.mode === "fixed") {
+      const pos = view.saved.fixed_object_pos;
+      const pdo =
+        view.fixed_pdos.find((entry) => entry.pos === pos) ??
+        view.fixed_pdos[0];
+      view.contract_mv = pdo?.mv ?? 5_000;
+      view.contract_ma = view.saved.i_req_ma;
+      return;
+    }
+
+    view.contract_mv = view.saved.target_mv;
+    view.contract_ma = view.saved.i_req_ma;
+  }
+
+  // Firmware allows toggling the Safe5V gate even while detached/offline.
+  if (!("mode" in payload)) {
+    next.allow_extended_voltage = payload.allow_extended_voltage;
+    applyMockPdPolicy(next);
+    next.apply = {
+      pending: false,
+      last: { code: "ok", at_ms: nowMs },
+    };
+    state.pd = next;
+    return structuredClone(next);
+  }
+
   if (!current.attached) {
     throw new HttpApiError({
       status: 409,
@@ -935,9 +1010,6 @@ async function mockUpdatePd(
       details: null,
     });
   }
-
-  const next = structuredClone(current);
-  const nowMs = state.status.raw.uptime_ms ?? 0;
 
   function limitViolation(message: string, details?: unknown): never {
     throw new HttpApiError({
@@ -964,14 +1036,15 @@ async function mockUpdatePd(
       });
     }
 
+    const cachedPpsTarget = next.saved.pps_target_mv ?? next.saved.target_mv;
     next.saved = {
       ...next.saved,
       mode: "fixed",
       fixed_object_pos: objectPos,
+      target_mv: pdo.mv,
+      pps_target_mv: cachedPpsTarget,
       i_req_ma: payload.i_req_ma,
     };
-    next.contract_mv = pdo.mv;
-    next.contract_ma = payload.i_req_ma;
   } else {
     const apdo = next.pps_pdos.find((entry) => entry.pos === objectPos);
     if (!apdo) {
@@ -998,11 +1071,15 @@ async function mockUpdatePd(
       mode: "pps",
       pps_object_pos: objectPos,
       target_mv: payload.target_mv,
+      pps_target_mv: payload.target_mv,
       i_req_ma: payload.i_req_ma,
     };
-    next.contract_mv = payload.target_mv;
-    next.contract_ma = payload.i_req_ma;
   }
+
+  if (payload.allow_extended_voltage != null) {
+    next.allow_extended_voltage = payload.allow_extended_voltage;
+  }
+  applyMockPdPolicy(next);
 
   next.apply = {
     pending: false,

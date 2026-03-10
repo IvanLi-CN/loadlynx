@@ -439,6 +439,7 @@ static TOUCH_SPRING_LAST_DELTA_ABS: AtomicU32 = AtomicU32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
 static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
+static PD_RETRY_WINDOW_START_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_V_LOCAL_MV: AtomicI32 = AtomicI32::new(0);
 static PD_STATUS_ATTACHED: AtomicBool = AtomicBool::new(false);
 static PD_REQ_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -451,6 +452,7 @@ static PD_FORCE_SEND: AtomicBool = AtomicBool::new(false);
 static PD_LAST_RESULT_CODE: AtomicU8 = AtomicU8::new(0);
 static PD_LAST_RESULT_MS: AtomicU32 = AtomicU32::new(0);
 static PD_UI_APPLY_MS: AtomicU32 = AtomicU32::new(0);
+static PD_EXTENDED_FAILURE_LATCH: AtomicBool = AtomicBool::new(false);
 static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
 static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -1057,11 +1059,12 @@ async fn encoder_task(
                                         })
                                         .map(|(_idx, p)| *p)
                                     {
-                                        if guard.pd_draft.target_mv == 0 {
+                                        if guard.pd_draft.pps_target_mv == 0 {
+                                            guard.pd_draft.pps_target_mv = apdo.min_mv;
                                             guard.pd_draft.target_mv = apdo.min_mv;
                                             changed = true;
                                         }
-                                        let prev = guard.pd_draft.target_mv;
+                                        let prev = guard.pd_draft.pps_target_mv;
                                         let mut next = if step_dir > 0 {
                                             prev.saturating_add(step_mv)
                                         } else {
@@ -1069,6 +1072,7 @@ async fn encoder_task(
                                         };
                                         next = next.clamp(apdo.min_mv, apdo.max_mv);
                                         if next != prev {
+                                            guard.pd_draft.pps_target_mv = next;
                                             guard.pd_draft.target_mv = next;
                                             changed = true;
                                         }
@@ -2570,16 +2574,69 @@ async fn touch_ui_task(
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
-                        let mut guard = control.lock().await;
-                        guard.ui_view = control::UiView::PdSettings;
-                        guard.pd_draft = guard.pd_saved;
-                        guard.pd_settings_focus = control::PdSettingsFocus::DEFAULT;
-                        guard.pd_settings_digit = control::AdjustDigit::Tenths;
-                        bump_control_rev();
-                        speaker::enqueue(speaker::SpeakerSound::UiTouch);
+                        let apply_ms = now_ms32();
+                        // The dashboard button is a persisted gate. Keep the EEPROM update and
+                        // in-memory state change under the same lock so concurrent UI/HTTP PD
+                        // updates cannot overwrite each other.
+                        let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed)
+                            && LINK_UP.load(Ordering::Relaxed);
+                        let analog_state =
+                            AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+                        let (ok, allow_extended_voltage, allows_non_safe5v) = {
+                            let mut guard = control.lock().await;
+                            let prev_allow = guard.allow_extended_voltage;
+                            let next_allow = !prev_allow;
+                            let cfg = guard.pd_saved;
+                            let effective = control::PdConfig::effective(cfg, next_allow);
+                            let allows_non_safe5v = effective.allows_non_safe5v();
+                            let ok =
+                                write_pd_blob_to_eeprom(cfg, next_allow, eeprom, "touch: PD SAVE")
+                                    .await
+                                    .is_ok();
+                            if ok {
+                                guard.allow_extended_voltage = next_allow;
+                                bump_control_rev();
+                            }
+                            (
+                                ok,
+                                if ok { next_allow } else { prev_allow },
+                                allows_non_safe5v,
+                            )
+                        };
+
+                        if ok {
+                            if !allow_extended_voltage {
+                                clear_pd_extended_voltage_failure();
+                            }
+                            // Only attempt a non-Safe5V renegotiation while the analog side is
+                            // healthy; Safe5V requests may still be sent to lock back down.
+                            let may_live_apply = if !allow_extended_voltage {
+                                true
+                            } else if !allows_non_safe5v {
+                                true
+                            } else {
+                                !matches!(analog_state, AnalogState::Faulted | AnalogState::Offline)
+                            };
+                            if attached {
+                                start_pd_extended_voltage_retry_window(apply_ms);
+                                PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
+                                if may_live_apply {
+                                    PD_FORCE_SEND.store(true, Ordering::Release);
+                                }
+                            }
+                            prompt_tone::enqueue_ui_ok();
+                        } else {
+                            prompt_tone::enqueue_ui_fail();
+                            PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed);
+                            PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
+                        }
+
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
-                        info!("touch: PD button tap -> open PD settings panel");
+                        info!(
+                            "touch: PD extended-voltage toggle -> allow_extended_voltage={} attached={} persisted={} analog_state={}",
+                            allow_extended_voltage, attached, ok, analog_state as u8
+                        );
                         yield_now().await;
                         continue;
                     }
@@ -2623,29 +2680,72 @@ async fn touch_ui_task(
                                         continue;
                                     }
 
-                                    // Apply = persist + update active PD policy.
+                                    // Apply = persist + update the saved PD policy. Whether it may
+                                    // leave Safe5V is still gated by `allow_extended_voltage`.
                                     let apply_ms = now_ms32();
-                                    PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
-                                    PD_FORCE_SEND.store(true, Ordering::Release);
-
-                                    let (changed, cfg) = {
+                                    // Apply updates the persisted policy immediately, but only
+                                    // kicks a live renegotiation while the PD session is reachable.
+                                    let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed)
+                                        && LINK_UP.load(Ordering::Relaxed);
+                                    let analog_state =
+                                        AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+                                    let (_changed, ok, allow_extended_voltage, allows_non_safe5v) = {
                                         let mut guard = control.lock().await;
-                                        let changed = guard.pd_saved != guard.pd_draft;
-                                        guard.pd_saved = guard.pd_draft;
-                                        (changed, guard.pd_saved)
-                                    };
-                                    if changed {
-                                        bump_control_rev();
-                                        let ok = save_pd_config_to_eeprom(cfg, eeprom).await;
-                                        if ok {
-                                            prompt_tone::enqueue_ui_ok();
+                                        let allow_extended_voltage = guard.allow_extended_voltage;
+                                        let prev_cfg = guard.pd_saved;
+                                        let cfg = guard.pd_draft;
+                                        let changed = prev_cfg != cfg;
+                                        let effective = control::PdConfig::effective(
+                                            cfg,
+                                            allow_extended_voltage,
+                                        );
+                                        let allows_non_safe5v = effective.allows_non_safe5v();
+                                        let ok = if changed {
+                                            write_pd_blob_to_eeprom(
+                                                cfg,
+                                                allow_extended_voltage,
+                                                eeprom,
+                                                "touch: PD SAVE",
+                                            )
+                                            .await
+                                            .is_ok()
                                         } else {
-                                            prompt_tone::enqueue_ui_fail();
-                                            PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed); // persist fail
-                                            PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
+                                            true
+                                        };
+                                        if ok && changed {
+                                            guard.pd_saved = cfg;
+                                            bump_control_rev();
                                         }
-                                    } else {
+                                        (changed, ok, allow_extended_voltage, allows_non_safe5v)
+                                    };
+
+                                    if ok {
+                                        if !allow_extended_voltage {
+                                            clear_pd_extended_voltage_failure();
+                                        }
+                                        let may_live_apply = if !allow_extended_voltage {
+                                            true
+                                        } else if !allows_non_safe5v {
+                                            true
+                                        } else {
+                                            !matches!(
+                                                analog_state,
+                                                AnalogState::Faulted | AnalogState::Offline
+                                            )
+                                        };
+                                        if attached {
+                                            start_pd_extended_voltage_retry_window(apply_ms);
+                                            PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
+                                            if may_live_apply {
+                                                PD_FORCE_SEND.store(true, Ordering::Release);
+                                            }
+                                        }
                                         prompt_tone::enqueue_ui_ok();
+                                    } else {
+                                        // If persist failed, keep draft so the user can retry.
+                                        prompt_tone::enqueue_ui_fail();
+                                        PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed); // persist fail
+                                        PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
                                     }
                                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                                     last_tab_tap = None;
@@ -2701,6 +2801,9 @@ async fn touch_ui_task(
                                                 });
 
                                             guard.pd_draft.fixed_object_pos = pos;
+                                            // Keep Fixed display/request voltage in sync without
+                                            // touching the sticky PPS cache.
+                                            guard.pd_draft.target_mv = pdo.mv;
                                             guard.pd_draft.i_req_ma =
                                                 guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                         }
@@ -2735,13 +2838,15 @@ async fn touch_ui_task(
                                                 })
                                                 .map(|(_idx, p)| *p)
                                             {
-                                                if guard.pd_draft.target_mv == 0 {
-                                                    guard.pd_draft.target_mv = apdo.min_mv;
+                                                if guard.pd_draft.pps_target_mv == 0 {
+                                                    guard.pd_draft.pps_target_mv = apdo.min_mv;
                                                 }
-                                                guard.pd_draft.target_mv = guard
+                                                guard.pd_draft.pps_target_mv = guard
                                                     .pd_draft
-                                                    .target_mv
+                                                    .pps_target_mv
                                                     .clamp(apdo.min_mv, apdo.max_mv);
+                                                guard.pd_draft.target_mv =
+                                                    guard.pd_draft.pps_target_mv;
                                                 guard.pd_draft.i_req_ma = guard
                                                     .pd_draft
                                                     .i_req_ma
@@ -2802,6 +2907,9 @@ async fn touch_ui_task(
                                                     (idx + 1).min(u8::MAX as usize) as u8
                                                 };
                                                 guard.pd_draft.fixed_object_pos = pos;
+                                                // Keep Fixed display/request voltage in sync without
+                                                // touching the sticky PPS cache.
+                                                guard.pd_draft.target_mv = pdo.mv;
                                                 guard.pd_draft.i_req_ma =
                                                     guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                                 bump_control_rev();
@@ -2818,13 +2926,15 @@ async fn touch_ui_task(
                                                     (idx + 1).min(u8::MAX as usize) as u8
                                                 };
                                                 guard.pd_draft.pps_object_pos = pos;
-                                                if guard.pd_draft.target_mv == 0 {
-                                                    guard.pd_draft.target_mv = apdo.min_mv;
+                                                if guard.pd_draft.pps_target_mv == 0 {
+                                                    guard.pd_draft.pps_target_mv = apdo.min_mv;
                                                 }
-                                                guard.pd_draft.target_mv = guard
+                                                guard.pd_draft.pps_target_mv = guard
                                                     .pd_draft
-                                                    .target_mv
+                                                    .pps_target_mv
                                                     .clamp(apdo.min_mv, apdo.max_mv);
+                                                guard.pd_draft.target_mv =
+                                                    guard.pd_draft.pps_target_mv;
                                                 guard.pd_draft.i_req_ma = guard
                                                     .pd_draft
                                                     .i_req_ma
@@ -2850,23 +2960,15 @@ async fn touch_ui_task(
                         && ui::hit_test_dashboard_load_button(marker.x, marker.y)
                     {
                         let mut guard = control.lock().await;
-                        if guard.output_enabled {
-                            guard.output_enabled = false;
-                            bump_control_rev();
-                            prompt_tone::enqueue_load_off_ok();
-                        } else if let Some(reason) =
-                            current_load_enable_block_abbrev(guard.active_preset().min_v_mv)
-                        {
-                            prompt_tone::enqueue_ui_fail();
-                            record_enable_block(reason);
-                            info!("touch: LOAD enable blocked (reason={})", reason);
-                        } else {
-                            guard.output_enabled = true;
-                            bump_control_rev();
-                            prompt_tone::enqueue_load_on_ok();
-                        }
+                        guard.ui_view = control::UiView::PdSettings;
+                        guard.pd_draft = guard.pd_saved;
+                        guard.pd_settings_focus = control::PdSettingsFocus::DEFAULT;
+                        guard.pd_settings_digit = control::AdjustDigit::Tenths;
+                        bump_control_rev();
+                        speaker::enqueue(speaker::SpeakerSound::UiTouch);
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
+                        info!("touch: dashboard settings button -> open PD settings panel");
                         yield_now().await;
                         continue;
                     }
@@ -3521,6 +3623,91 @@ fn build_preset_panel_vm(state: &ControlState) -> ui::preset_panel::PresetPanelV
     }
 }
 
+pub(crate) fn pd_fixed_target_mv(cfg: control::PdConfig, status: Option<&PdStatus>) -> u32 {
+    fn pdo_pos(pos: u8, idx: usize) -> u8 {
+        if pos != 0 {
+            pos
+        } else {
+            (idx + 1).min(u8::MAX as usize) as u8
+        }
+    }
+
+    if let Some(status) = status {
+        if cfg.fixed_object_pos != 0 {
+            if let Some(pdo) = status
+                .fixed_pdos
+                .iter()
+                .enumerate()
+                .find(|(idx, pdo)| pdo_pos(pdo.pos, *idx) == cfg.fixed_object_pos)
+                .map(|(_idx, pdo)| *pdo)
+            {
+                return pdo.mv;
+            }
+        }
+
+        if let Some(pdo) = status
+            .fixed_pdos
+            .iter()
+            .find(|pdo| pdo.mv == cfg.target_mv)
+            .copied()
+        {
+            return pdo.mv;
+        }
+    }
+
+    cfg.target_mv
+        .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000)
+}
+
+pub(crate) fn normalized_pd_config_for_status(
+    mut cfg: control::PdConfig,
+    status: Option<&PdStatus>,
+) -> control::PdConfig {
+    if matches!(cfg.mode, control::PdMode::Fixed) {
+        cfg.target_mv = pd_fixed_target_mv(cfg, status);
+    }
+    cfg
+}
+
+fn pd_button_display_mode(
+    saved: control::PdConfig,
+    allow_extended_voltage: bool,
+) -> ui::PdButtonDisplayMode {
+    if !allow_extended_voltage {
+        ui::PdButtonDisplayMode::Fixed
+    } else {
+        match saved.mode {
+            control::PdMode::Fixed => ui::PdButtonDisplayMode::Fixed,
+            control::PdMode::Pps => ui::PdButtonDisplayMode::Pps,
+        }
+    }
+}
+
+fn pd_button_display_target_mv(
+    saved: control::PdConfig,
+    status: Option<&PdStatus>,
+    allow_extended_voltage: bool,
+) -> u32 {
+    let cfg = control::PdConfig::effective(saved, allow_extended_voltage);
+    match cfg.mode {
+        // Dashboard line2 should prefer the persisted target, but legacy blobs may have a stale
+        // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
+        // from `PD_STATUS`, prefer that value to avoid misleading UI output.
+        control::PdMode::Fixed => {
+            let persisted = cfg
+                .target_mv
+                .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000);
+            let derived = pd_fixed_target_mv(cfg, status);
+            if derived != persisted {
+                derived
+            } else {
+                persisted
+            }
+        }
+        control::PdMode::Pps => cfg.target_mv.clamp(3_000, 21_000),
+    }
+}
+
 fn build_pd_settings_vm(
     draft: control::PdConfig,
     focus: control::PdSettingsFocus,
@@ -3585,7 +3772,14 @@ fn build_pd_settings_vm(
 
     let mut selection_missing = false;
     let apply_enabled = if !attached {
-        false
+        match draft.mode {
+            control::PdMode::Fixed => draft.fixed_object_pos != 0 && draft.i_req_ma >= 50,
+            control::PdMode::Pps => {
+                draft.pps_object_pos != 0
+                    && (3_000..=21_000).contains(&draft.pps_target_mv)
+                    && draft.i_req_ma >= 50
+            }
+        }
     } else {
         match draft.mode {
             control::PdMode::Fixed => match fixed_selected {
@@ -3603,8 +3797,8 @@ fn build_pd_settings_vm(
                 } else {
                     match pps_selected {
                         Some(pdo) => {
-                            draft.target_mv >= pdo.min_mv
-                                && draft.target_mv <= pdo.max_mv
+                            draft.pps_target_mv >= pdo.min_mv
+                                && draft.pps_target_mv <= pdo.max_mv
                                 && draft.i_req_ma >= 50
                                 && draft.i_req_ma <= pdo.max_ma
                         }
@@ -3660,7 +3854,7 @@ fn build_pd_settings_vm(
         contract_ma,
         fixed_object_pos,
         pps_object_pos,
-        pps_target_mv: draft.target_mv,
+        pps_target_mv: draft.pps_target_mv,
         i_req_ma: draft.i_req_ma,
         apply_enabled,
         message,
@@ -3706,26 +3900,46 @@ async fn save_editing_preset_to_eeprom(control: &ControlMutex, eeprom: &EepromMu
     }
 }
 
-async fn save_pd_config_to_eeprom(cfg: control::PdConfig, eeprom: &EepromMutex) -> bool {
-    let blob = control::encode_pd_blob(&cfg);
-    let res = {
+fn reset_pd_extended_voltage_retry_window() {
+    PD_LAST_APPLY_MS.store(0, Ordering::Relaxed);
+    PD_RETRY_WINDOW_START_MS.store(0, Ordering::Relaxed);
+}
+
+fn start_pd_extended_voltage_retry_window(now: u32) {
+    PD_LAST_APPLY_MS.store(now, Ordering::Relaxed);
+    PD_RETRY_WINDOW_START_MS.store(now, Ordering::Relaxed);
+}
+
+fn clear_pd_extended_voltage_failure() {
+    PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+    reset_pd_extended_voltage_retry_window();
+}
+
+async fn write_pd_blob_to_eeprom(
+    cfg: control::PdConfig,
+    allow_extended_voltage: bool,
+    eeprom: &EepromMutex,
+    ctx: &str,
+) -> Result<(), eeprom::EepromError> {
+    let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
+    let res: Result<(), eeprom::EepromError> = {
         let mut guard = eeprom.lock().await;
         guard.write_pd_blob(&blob).await
     };
     match res {
         Ok(()) => {
             info!(
-                "touch: PD SAVE ok (mode={:?}, target_mv={}, i_req_ma={})",
-                cfg.mode, cfg.target_mv, cfg.i_req_ma
+                "{} ok (mode={:?}, target_mv={}, i_req_ma={}, allow_extended_voltage={})",
+                ctx, cfg.mode, cfg.target_mv, cfg.i_req_ma, allow_extended_voltage
             );
-            true
+            Ok(())
         }
         Err(err) => {
             warn!(
-                "touch: PD SAVE failed (mode={:?}, target_mv={}, i_req_ma={}, err={:?})",
-                cfg.mode, cfg.target_mv, cfg.i_req_ma, err
+                "{} failed (mode={:?}, target_mv={}, i_req_ma={}, allow_extended_voltage={}, err={:?})",
+                ctx, cfg.mode, cfg.target_mv, cfg.i_req_ma, allow_extended_voltage, err
             );
-            false
+            Err(err)
         }
     }
 }
@@ -3733,8 +3947,23 @@ async fn save_pd_config_to_eeprom(cfg: control::PdConfig, eeprom: &EepromMutex) 
 async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
     let prev = PD_STATUS_ATTACHED.swap(status.attached, Ordering::Relaxed);
     if status.attached && !prev {
+        // New source session: clear any prior extended-voltage failure before retrying.
+        clear_pd_extended_voltage_failure();
+        start_pd_extended_voltage_retry_window(now_ms32());
         // PD auto-apply: trigger a re-send of the persisted policy on attach rising edge.
         PD_FORCE_SEND.store(true, Ordering::Release);
+    } else if !status.attached {
+        clear_pd_extended_voltage_failure();
+    }
+
+    // Clear red state once we *observe* a non-Safe5V contract. PD_SINK_REQUEST ACK/NACK only
+    // confirms policy reception; final negotiation outcome is reported via PD_STATUS.
+    if status.attached
+        && status.contract_mv != 0
+        && status.contract_ma != 0
+        && status.contract_mv != control::PdConfig::DEFAULT_TARGET_MV
+    {
+        clear_pd_extended_voltage_failure();
     }
     let mut guard = telemetry.lock().await;
     let changed = match guard.last_pd_status.as_ref() {
@@ -4461,6 +4690,7 @@ async fn display_task(
                 adjust_digit,
                 ui_view,
                 pd_saved,
+                allow_extended_voltage,
                 pd_draft,
                 pd_focus,
                 pd_digit,
@@ -4522,6 +4752,7 @@ async fn display_task(
                     coerce_adjust_digit_for_mode(active_mode, guard.adjust_digit),
                     guard.ui_view,
                     guard.pd_saved,
+                    guard.allow_extended_voltage,
                     guard.pd_draft,
                     guard.pd_settings_focus,
                     guard.pd_settings_digit,
@@ -4577,133 +4808,55 @@ async fn display_task(
                 } else {
                     recent_enable_block_abbrev(now)
                 };
-                let (pd_attached, pd_display_mode, pd_target_mv, pd_target_available) =
-                    if let Some(s) = guard.last_pd_status.as_ref() {
-                        fn pdo_pos(pos: u8, idx: usize) -> u8 {
-                            if pos != 0 {
-                                pos
-                            } else {
-                                (idx + 1).min(u8::MAX as usize) as u8
-                            }
-                        }
-
-                        let pd_attached = s.attached;
-                        let pd_display_mode = if !pd_attached {
-                            ui::PdButtonDisplayMode::Detach
-                        } else {
-                            match pd_saved.mode {
-                                control::PdMode::Fixed => ui::PdButtonDisplayMode::Fixed,
-                                control::PdMode::Pps => ui::PdButtonDisplayMode::Pps,
-                            }
-                        };
-                        let pd_target_mv = if pd_attached && s.contract_mv != 0 {
-                            Some(s.contract_mv)
-                        } else {
-                            None
-                        };
-                        let pd_target_available = if !pd_attached {
-                            false
-                        } else {
-                            match pd_saved.mode {
-                                control::PdMode::Fixed => {
-                                    let fixed_object_pos = if pd_saved.fixed_object_pos != 0 {
-                                        pd_saved.fixed_object_pos
-                                    } else {
-                                        s.fixed_pdos
-                                            .iter()
-                                            .enumerate()
-                                            .find(|(_idx, pdo)| pdo.mv == pd_saved.target_mv)
-                                            .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))
-                                            .unwrap_or(0)
-                                    };
-
-                                    let fixed_selected = if fixed_object_pos != 0 {
-                                        s.fixed_pdos
-                                            .iter()
-                                            .enumerate()
-                                            .find(|(idx, pdo)| {
-                                                pdo_pos(pdo.pos, *idx) == fixed_object_pos
-                                            })
-                                            .map(|(_idx, pdo)| *pdo)
-                                    } else {
-                                        None
-                                    };
-
-                                    match fixed_selected {
-                                        Some(pdo) => {
-                                            pd_saved.i_req_ma >= 50
-                                                && pd_saved.i_req_ma <= pdo.max_ma
-                                        }
-                                        None => false,
-                                    }
-                                }
-                                control::PdMode::Pps => {
-                                    if pd_saved.pps_object_pos == 0 {
-                                        false
-                                    } else {
-                                        let pps_selected = s
-                                            .pps_pdos
-                                            .iter()
-                                            .enumerate()
-                                            .find(|(idx, pdo)| {
-                                                pdo_pos(pdo.pos, *idx) == pd_saved.pps_object_pos
-                                            })
-                                            .map(|(_idx, pdo)| *pdo);
-                                        match pps_selected {
-                                            Some(pdo) => {
-                                                pd_saved.target_mv >= pdo.min_mv
-                                                    && pd_saved.target_mv <= pdo.max_mv
-                                                    && pd_saved.i_req_ma >= 50
-                                                    && pd_saved.i_req_ma <= pdo.max_ma
-                                            }
-                                            None => false,
-                                        }
-                                    }
-                                }
-                            }
-                        };
-                        (
-                            pd_attached,
-                            pd_display_mode,
-                            pd_target_mv,
-                            pd_target_available,
-                        )
-                    } else {
-                        (
-                            false,
-                            ui::PdButtonDisplayMode::Detach,
-                            None,
-                            true, // No caps; default to "available" to avoid false gray.
-                        )
-                    };
+                let pd_status = guard.last_pd_status.as_ref();
+                let pd_attached = pd_status.map(|status| status.attached).unwrap_or(false);
+                let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
+                let pd_wants_non_safe5v = pd_config_allows_non_safe5v(pd_saved, pd_status);
+                let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
+                let pd_target_mv = Some(pd_button_display_target_mv(
+                    pd_saved,
+                    pd_status,
+                    allow_extended_voltage,
+                ));
+                let pd_target_available = true;
 
                 guard.snapshot.pd_display_mode = pd_display_mode;
                 guard.snapshot.pd_target_mv = pd_target_mv;
                 guard.snapshot.pd_target_available = pd_target_available;
 
-                let attached = pd_attached;
-                let contract_mv = pd_target_mv.unwrap_or(0);
-                let last_apply_ms = PD_LAST_APPLY_MS.load(Ordering::Relaxed);
-                let in_window = last_apply_ms != 0 && now.wrapping_sub(last_apply_ms) <= PD_T_PD_MS;
                 let prev_pd_state = guard.snapshot.pd_state;
-                guard.snapshot.pd_state = if !link_up || !attached {
-                    ui::PdButtonState::Standby
-                } else if contract_mv != 0 {
-                    ui::PdButtonState::Active
-                } else if in_window || last_apply_ms == 0 {
-                    ui::PdButtonState::Negotiating
+                // If we recently attempted a non-Safe5V request but the contract is still stuck
+                // at 5V after a grace window, treat it as a failure and latch red state.
+                if allow_extended_voltage
+                    && pd_wants_non_safe5v
+                    && pd_attached
+                    && pd_contract_mv == control::PdConfig::DEFAULT_TARGET_MV
+                {
+                    let since = PD_RETRY_WINDOW_START_MS.load(Ordering::Relaxed);
+                    if since != 0 && now.wrapping_sub(since) > PD_T_PD_MS {
+                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                        reset_pd_extended_voltage_retry_window();
+                    }
+                }
+                let pd_failure_latched = PD_EXTENDED_FAILURE_LATCH.load(Ordering::Relaxed);
+                // This button intentionally reflects the persisted extended-voltage gate rather
+                // than the last observed contract; link/attach reachability is shown elsewhere.
+                guard.snapshot.pd_state = if !allow_extended_voltage {
+                    ui::PdButtonState::Safe5vOnly
+                } else if pd_failure_latched {
+                    ui::PdButtonState::ExtendedFailed
                 } else {
-                    ui::PdButtonState::Error
+                    ui::PdButtonState::ExtendedAllowed
                 };
                 if prev_pd_state != guard.snapshot.pd_state {
                     info!(
-                        "pd_button: state {:?}->{:?} attached={} contract={}mV last_apply_ms={} in_window={}",
+                        "pd_button: state {:?}->{:?} allow_extended_voltage={} attached={} failure_latched={} display_target_mv={}",
                         prev_pd_state,
                         guard.snapshot.pd_state,
-                        attached,
-                        contract_mv,
-                        last_apply_ms,
-                        in_window
+                        allow_extended_voltage,
+                        pd_attached,
+                        pd_failure_latched,
+                        pd_target_mv.unwrap_or(0)
                     );
                 }
                 guard.snapshot.set_control_overlay(
@@ -5494,16 +5647,16 @@ async fn main(spawner: Spawner) {
 
     // Load PD config from EEPROM (non-overlapping with presets).
     // On invalid blob (version/CRC), fall back to firmware defaults (5V Fixed).
-    let initial_pd = {
+    let (initial_pd, initial_allow_extended_voltage) = {
         let mut guard = eeprom.lock().await;
         match guard.read_pd_blob().await {
             Ok(blob) => match control::decode_pd_blob(&blob) {
-                Ok(cfg) => {
+                Ok((cfg, allow_extended_voltage)) => {
                     info!(
-                        "EEPROM PD config loaded (mode={:?}, target_mv={}, i_req_ma={})",
-                        cfg.mode, cfg.target_mv, cfg.i_req_ma
+                        "EEPROM PD config loaded (mode={:?}, target_mv={}, i_req_ma={}, allow_extended_voltage={})",
+                        cfg.mode, cfg.target_mv, cfg.i_req_ma, allow_extended_voltage
                     );
-                    cfg
+                    (cfg, allow_extended_voltage)
                 }
                 Err(err) => {
                     let kind = match err {
@@ -5515,7 +5668,7 @@ async fn main(spawner: Spawner) {
                         control::PdBlobError::InvalidLayout => "layout",
                     };
                     warn!("EEPROM PD config invalid; using defaults (err={})", kind);
-                    control::PdConfig::default()
+                    (control::PdConfig::default(), false)
                 }
             },
             Err(err) => {
@@ -5523,7 +5676,7 @@ async fn main(spawner: Spawner) {
                     "EEPROM PD config read failed; using defaults (err={:?})",
                     err
                 );
-                control::PdConfig::default()
+                (control::PdConfig::default(), false)
             }
         }
     };
@@ -5692,7 +5845,11 @@ async fn main(spawner: Spawner) {
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
     let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
-    let control = CONTROL.init(Mutex::new(ControlState::new(initial_presets, initial_pd)));
+    let control = CONTROL.init(Mutex::new(ControlState::new(
+        initial_presets,
+        initial_pd,
+        initial_allow_extended_voltage,
+    )));
     CONTROL_REV.store(1, Ordering::Relaxed);
     LAST_USER_ACTIVITY_MS.store(now_ms32(), Ordering::Relaxed);
     SCREEN_POWER_STATE.store(SCREEN_POWER_STATE_ACTIVE, Ordering::Relaxed);
@@ -5922,7 +6079,9 @@ async fn main(spawner: Spawner) {
         info!("UART link task disabled (ENABLE_UART_LINK_TASK=false)");
     }
     info!("spawning stats task");
-    spawner.spawn(stats_task()).expect("stats_task spawn");
+    spawner
+        .spawn(stats_task(telemetry))
+        .expect("stats_task spawn");
     info!("spawning load guard task");
     spawner
         .spawn(load_guard_task(control))
@@ -5966,7 +6125,7 @@ async fn main(spawner: Spawner) {
 
 // 周期性聚合统计，启动后每 5 秒打印一次（便于 DMA 验证阶段观察计数）
 #[embassy_executor::task]
-async fn stats_task() {
+async fn stats_task(telemetry: &'static TelemetryMutex) {
     let mut last_stats_ms = timestamp_ms();
     let mut prev_link_up = LINK_UP.load(Ordering::Relaxed);
     let mut link_alarm_fired_for_down: bool = false;
@@ -5994,6 +6153,12 @@ async fn stats_task() {
             } else {
                 warn!("link down (no frames for {} ms)", age_ms);
                 ANALOG_STATE.store(AnalogState::Offline as u8, Ordering::Relaxed);
+                // Treat link-down as the start of a new PD session: clear any stale PD_STATUS
+                // snapshot so link-recovery auto-send cannot reuse old PDO/APDO lists.
+                clear_pd_extended_voltage_failure();
+                PD_STATUS_ATTACHED.store(false, Ordering::Relaxed);
+                let mut guard = telemetry.lock().await;
+                guard.last_pd_status = None;
             }
         }
 
@@ -6758,6 +6923,7 @@ async fn setmode_tx_task(
     let mut pd_pending: Option<PdPending> = None;
     let mut pd_last_sent: Option<PdPolicyKey> = None;
     let mut pd_force_send: bool = false;
+    let mut prev_pd_link_up: bool = LINK_UP.load(Ordering::Relaxed);
     let mut last_pd_req_skip_warn_ms: u32 = 0;
 
     // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
@@ -7061,7 +7227,16 @@ async fn setmode_tx_task(
             calmissing_since_ms = None;
         }
 
-        let (rev_now, desired_cmd, mut pd_cfg) = {
+        let link_up_now = LINK_UP.load(Ordering::Relaxed);
+        if link_up_now && !prev_pd_link_up {
+            prev_pd_link_up = true;
+            start_pd_extended_voltage_retry_window(now);
+            pd_force_send = true;
+        } else if !link_up_now && prev_pd_link_up {
+            prev_pd_link_up = false;
+        }
+
+        let (rev_now, desired_cmd, mut pd_cfg, allow_extended_voltage) = {
             let guard = control.lock().await;
             let p = guard.active_preset();
             let cmd = SetMode {
@@ -7087,23 +7262,69 @@ async fn setmode_tx_task(
             (
                 CONTROL_REV.load(Ordering::Relaxed),
                 sanitize_setmode(cmd),
-                guard.pd_saved,
+                control::PdConfig::effective(guard.pd_saved, guard.allow_extended_voltage),
+                guard.allow_extended_voltage,
             )
         };
         if pd_cfg.target_mv < 3_000 || pd_cfg.target_mv > 21_000 {
             pd_cfg.target_mv = 5_000;
         }
+        if pd_cfg.pps_target_mv < 3_000 || pd_cfg.pps_target_mv > 21_000 {
+            pd_cfg.pps_target_mv = control::PdConfig::DEFAULT_TARGET_MV;
+        }
         pd_cfg.i_req_ma = pd_cfg.i_req_ma.clamp(50, 10_000);
-        let pd_key = PdPolicyKey {
-            mode: pd_cfg.mode,
-            fixed_object_pos: pd_cfg.fixed_object_pos,
-            pps_object_pos: pd_cfg.pps_object_pos,
-            target_mv: pd_cfg.target_mv,
-            i_req_ma: pd_cfg.i_req_ma,
+        if !allow_extended_voltage {
+            clear_pd_extended_voltage_failure();
+        }
+        let pd_status = {
+            let guard = telemetry.lock().await;
+            guard.last_pd_status.clone()
+        };
+        pd_cfg = normalized_pd_config_for_status(pd_cfg, pd_status.as_ref());
+        let desired_pd_req = build_pd_sink_request(&pd_cfg, pd_status.as_ref());
+        let pd_key = if let Some(req) = desired_pd_req.as_ref() {
+            PdPolicyKey {
+                mode: match req.mode {
+                    PdSinkMode::Fixed => control::PdMode::Fixed,
+                    PdSinkMode::Pps => control::PdMode::Pps,
+                    PdSinkMode::Unknown(_) => pd_cfg.mode,
+                },
+                fixed_object_pos: pd_cfg.fixed_object_pos,
+                pps_object_pos: pd_cfg.pps_object_pos,
+                target_mv: req.target_mv,
+                i_req_ma: req.i_req_ma,
+            }
+        } else {
+            PdPolicyKey {
+                mode: pd_cfg.mode,
+                fixed_object_pos: pd_cfg.fixed_object_pos,
+                pps_object_pos: pd_cfg.pps_object_pos,
+                target_mv: pd_cfg.target_mv,
+                i_req_ma: pd_cfg.i_req_ma,
+            }
         };
 
         if PD_FORCE_SEND.swap(false, Ordering::AcqRel) {
             pd_force_send = true;
+        }
+
+        if allow_extended_voltage {
+            match (pd_status.as_ref(), desired_pd_req.as_ref()) {
+                (_, Some(req)) if !pd_request_allows_non_safe5v(req) => {
+                    PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+                }
+                (Some(status), None)
+                    if LINK_UP.load(Ordering::Relaxed)
+                        && status.attached
+                        && pd_config_allows_non_safe5v(pd_cfg, Some(status)) =>
+                {
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                }
+                _ if !pd_config_allows_non_safe5v(pd_cfg, pd_status.as_ref()) => {
+                    PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+                }
+                _ => {}
+            }
         }
 
         // PD ACK / timeout / preemption handling.
@@ -7112,11 +7333,18 @@ async fn setmode_tx_task(
             let ack_seq = PD_REQ_LAST_ACK_SEQ.load(Ordering::Relaxed);
             let ack_hit = ack_total != p.ack_total_at_send && ack_seq == p.seq;
             if ack_hit {
+                let flags = PD_REQ_LAST_ACK_FLAGS.load(Ordering::Relaxed);
                 if p.user_initiated {
-                    let flags = PD_REQ_LAST_ACK_FLAGS.load(Ordering::Relaxed);
                     let code = if (flags & FLAG_IS_NACK) != 0 { 2 } else { 1 };
                     PD_LAST_RESULT_CODE.store(code, Ordering::Relaxed);
                     PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                }
+                if !matches!(p.key.mode, control::PdMode::Fixed)
+                    || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+                {
+                    if (flags & FLAG_IS_NACK) != 0 {
+                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                    }
                 }
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
@@ -7129,6 +7357,11 @@ async fn setmode_tx_task(
                 if p.user_initiated {
                     PD_LAST_RESULT_CODE.store(3, Ordering::Relaxed); // timeout
                     PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                }
+                if !matches!(p.key.mode, control::PdMode::Fixed)
+                    || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+                {
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
                 }
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
@@ -7153,15 +7386,38 @@ async fn setmode_tx_task(
                 let ui_apply_ms = PD_UI_APPLY_MS.load(Ordering::Relaxed);
                 ui_apply_ms != 0 && now.wrapping_sub(ui_apply_ms) < 2_000
             };
-            let pd_status = {
-                let guard = telemetry.lock().await;
-                guard.last_pd_status.clone()
-            };
-            if let Some(req) = build_pd_sink_request(&pd_cfg, pd_status.as_ref()) {
-                if send_pd_sink_request_frame(&mut uhci_tx, seq_now, &req, &mut raw, &mut slip)
-                    .await
+            if let Some(req) = desired_pd_req.as_ref() {
+                let wants_non_safe5v = pd_request_allows_non_safe5v(req);
+                let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+                // Never attempt to renegotiate up to non-Safe5V while the analog side is faulted
+                // or offline. Safe5V requests are allowed so the device can always lock back down.
+                let non_safe5v_gated = wants_non_safe5v
+                    && matches!(analog_state, AnalogState::Faulted | AnalogState::Offline);
+                if non_safe5v_gated {
+                    let delta = now.wrapping_sub(last_pd_req_skip_warn_ms);
+                    if delta >= 2000 {
+                        last_pd_req_skip_warn_ms = now;
+                        warn!(
+                            "pd_sink_request gated: analog not healthy (state={}, mode={:?}, target_mv={})",
+                            analog_state as u8, pd_cfg.mode, req.target_mv
+                        );
+                    }
+                    if user_initiated {
+                        // Treat as an immediate failure for UI/API feedback.
+                        PD_LAST_RESULT_CODE.store(3, Ordering::Relaxed); // timeout/gated
+                        PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                    }
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                } else if send_pd_sink_request_frame(
+                    &mut uhci_tx,
+                    seq_now,
+                    req,
+                    &mut raw,
+                    &mut slip,
+                )
+                .await
                 {
-                    PD_LAST_APPLY_MS.store(now, Ordering::Relaxed);
+                    start_pd_extended_voltage_retry_window(now);
                     pd_last_sent = Some(pd_key);
                     pd_force_send = false;
                     pd_pending = Some(PdPending {
@@ -7171,6 +7427,15 @@ async fn setmode_tx_task(
                         deadline_ms: now.saturating_add(PD_ACK_TIMEOUT_MS),
                         user_initiated,
                     });
+                } else {
+                    // Local send failure is still a failure from the user's perspective.
+                    if user_initiated {
+                        PD_LAST_RESULT_CODE.store(3, Ordering::Relaxed); // timeout/tx-fail
+                        PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                    }
+                    if wants_non_safe5v {
+                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                    }
                 }
             } else {
                 let delta = now.wrapping_sub(last_pd_req_skip_warn_ms);
@@ -7433,6 +7698,20 @@ async fn send_setmode_frame(
     }
 }
 
+fn pd_request_allows_non_safe5v(req: &PdSinkRequest) -> bool {
+    req.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+}
+
+fn pd_config_allows_non_safe5v(cfg: control::PdConfig, status: Option<&PdStatus>) -> bool {
+    match cfg.mode {
+        control::PdMode::Fixed => {
+            pd_fixed_target_mv(cfg, status) != control::PdConfig::DEFAULT_TARGET_MV
+                || (cfg.fixed_object_pos != 0 && cfg.fixed_object_pos != 1)
+        }
+        control::PdMode::Pps => cfg.pps_target_mv != control::PdConfig::DEFAULT_TARGET_MV,
+    }
+}
+
 fn build_pd_sink_request(
     cfg: &control::PdConfig,
     status: Option<&PdStatus>,
@@ -7474,6 +7753,13 @@ fn build_pd_sink_request(
                 .find(|(idx, p)| pdo_pos(p.pos, *idx) == fixed_object_pos)
                 .map(|(_idx, p)| *p)?;
 
+            // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
+            // source's advertised 5V maximum instead of rejecting the request.
+            let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {
+                i_req_ma.min(pdo.max_ma)
+            } else {
+                i_req_ma
+            };
             if i_req_ma > pdo.max_ma {
                 return None;
             }

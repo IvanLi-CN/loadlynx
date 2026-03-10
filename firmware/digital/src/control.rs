@@ -183,7 +183,11 @@ pub struct PdConfig {
     pub fixed_object_pos: u8,
     /// Selected PPS APDO object position (1-based). `0` means "not selected" and disables Apply.
     pub pps_object_pos: u8,
+    /// Active target voltage. In Fixed mode this mirrors the selected PDO voltage; in PPS mode it
+    /// mirrors the currently edited PPS target.
     pub target_mv: u32,
+    /// Sticky PPS target cache so browsing/saving Fixed PDOs does not overwrite the last PPS Vreq.
+    pub pps_target_mv: u32,
     pub i_req_ma: u32,
 }
 
@@ -197,7 +201,39 @@ impl PdConfig {
             fixed_object_pos: 0,
             pps_object_pos: 0,
             target_mv: Self::DEFAULT_TARGET_MV,
+            pps_target_mv: Self::DEFAULT_TARGET_MV,
             i_req_ma: Self::DEFAULT_I_REQ_MA,
+        }
+    }
+
+    pub const fn safe5v() -> Self {
+        Self::safe5v_with_i(Self::DEFAULT_I_REQ_MA)
+    }
+
+    pub const fn safe5v_with_i(i_req_ma: u32) -> Self {
+        Self {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 0,
+            pps_object_pos: 0,
+            target_mv: Self::DEFAULT_TARGET_MV,
+            pps_target_mv: Self::DEFAULT_TARGET_MV,
+            i_req_ma,
+        }
+    }
+
+    pub const fn effective(saved: Self, allow_extended_voltage: bool) -> Self {
+        if allow_extended_voltage {
+            saved
+        } else {
+            // Force 5V but preserve the user-saved current request.
+            Self::safe5v_with_i(saved.i_req_ma)
+        }
+    }
+
+    pub const fn allows_non_safe5v(self) -> bool {
+        match self.mode {
+            PdMode::Fixed => self.target_mv != Self::DEFAULT_TARGET_MV,
+            PdMode::Pps => self.pps_target_mv != Self::DEFAULT_TARGET_MV,
         }
     }
 
@@ -233,6 +269,8 @@ pub struct ControlState {
     pub panel_selected_digit: PresetPanelDigit,
     /// Persisted PD policy (EEPROM-backed); used by the UART PD apply task.
     pub pd_saved: PdConfig,
+    /// User-controlled gate that decides whether the runtime PD policy may leave Safe5V.
+    pub allow_extended_voltage: bool,
     /// Draft PD policy edited in the PD settings UI; copied to `pd_saved` on Apply.
     pub pd_draft: PdConfig,
     pub pd_settings_focus: PdSettingsFocus,
@@ -240,7 +278,11 @@ pub struct ControlState {
 }
 
 impl ControlState {
-    pub fn new(presets: [Preset; PRESET_COUNT], pd: PdConfig) -> Self {
+    pub fn new(
+        presets: [Preset; PRESET_COUNT],
+        pd: PdConfig,
+        allow_extended_voltage: bool,
+    ) -> Self {
         Self {
             presets,
             saved: presets,
@@ -253,6 +295,7 @@ impl ControlState {
             panel_selected_field: PresetPanelField::Target,
             panel_selected_digit: PresetPanelDigit::Tenths,
             pd_saved: pd,
+            allow_extended_voltage,
             pd_draft: pd,
             pd_settings_focus: PdSettingsFocus::DEFAULT,
             pd_settings_digit: AdjustDigit::Tenths,
@@ -506,7 +549,7 @@ pub fn decode_presets_blob(
 // ---- EEPROM PD config blob -------------------------------------------------
 
 const PD_MAGIC: [u8; 4] = *b"LLPD";
-const PD_FMT_VERSION: u8 = 3;
+const PD_FMT_VERSION: u8 = 5;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdBlobError {
@@ -518,7 +561,10 @@ pub enum PdBlobError {
     InvalidLayout,
 }
 
-pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
+pub fn encode_pd_blob(
+    cfg: &PdConfig,
+    allow_extended_voltage: bool,
+) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     let mut out = [0u8; crate::eeprom::EEPROM_PD_LEN];
     out[0..4].copy_from_slice(&PD_MAGIC);
     out[4] = PD_FMT_VERSION;
@@ -527,7 +573,9 @@ pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     out[7] = cfg.pps_object_pos;
     put_u32_le(&mut out, 8, cfg.target_mv);
     put_u32_le(&mut out, 12, cfg.i_req_ma);
-    // out[16..28] reserved = 0
+    out[16] = u8::from(allow_extended_voltage);
+    put_u32_le(&mut out, 17, cfg.pps_target_mv);
+    // out[21..28] reserved = 0
 
     let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
     let crc = calfmt::crc32_ieee(&out[..crc_offset]);
@@ -535,12 +583,14 @@ pub fn encode_pd_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
     out
 }
 
-pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdConfig, PdBlobError> {
+pub fn decode_pd_blob(
+    bytes: &[u8; crate::eeprom::EEPROM_PD_LEN],
+) -> Result<(PdConfig, bool), PdBlobError> {
     if bytes[0..4] != PD_MAGIC {
         return Err(PdBlobError::InvalidMagic);
     }
     let ver = bytes[4];
-    if ver != 1 && ver != 2 && ver != PD_FMT_VERSION {
+    if ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != PD_FMT_VERSION {
         return Err(PdBlobError::UnsupportedVersion(ver));
     }
 
@@ -575,12 +625,129 @@ pub fn decode_pd_blob(bytes: &[u8; crate::eeprom::EEPROM_PD_LEN]) -> Result<PdCo
     } else {
         PdConfig::DEFAULT_I_REQ_MA
     };
+    let allow_extended_voltage = if ver >= 4 { bytes[16] != 0 } else { false };
+    let (target_mv, pps_target_mv) = if ver >= 5 {
+        let cached = get_u32_le(bytes, 17);
+        let cached = if (3_000..=21_000).contains(&cached) {
+            cached
+        } else {
+            PdConfig::DEFAULT_TARGET_MV
+        };
+        (target_mv, cached)
+    } else if matches!(mode, PdMode::Pps) {
+        (target_mv, target_mv)
+    } else {
+        // Legacy fixed-mode blobs reused `target_mv` inconsistently (fixed display vs PPS cache).
+        // Keep it for both fields so the UI/API stays stable after upgrade; fixed-mode requests
+        // still derive their voltage from the selected PDO when status is available.
+        (target_mv, target_mv)
+    };
 
-    Ok(PdConfig {
-        mode,
-        fixed_object_pos,
-        pps_object_pos,
-        target_mv,
-        i_req_ma,
-    })
+    Ok((
+        PdConfig {
+            mode,
+            fixed_object_pos,
+            pps_object_pos,
+            target_mv,
+            pps_target_mv,
+            i_req_ma,
+        },
+        allow_extended_voltage,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn encode_v3_blob(cfg: &PdConfig) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
+        let mut out = [0u8; crate::eeprom::EEPROM_PD_LEN];
+        out[0..4].copy_from_slice(&PD_MAGIC);
+        out[4] = 3;
+        out[5] = cfg.mode as u8;
+        out[6] = cfg.fixed_object_pos;
+        out[7] = cfg.pps_object_pos;
+        put_u32_le(&mut out, 8, cfg.target_mv);
+        put_u32_le(&mut out, 12, cfg.i_req_ma);
+        let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
+        let crc = calfmt::crc32_ieee(&out[..crc_offset]);
+        put_u32_le(&mut out, crc_offset, crc);
+        out
+    }
+
+    fn encode_v4_blob(
+        cfg: &PdConfig,
+        allow_extended_voltage: bool,
+    ) -> [u8; crate::eeprom::EEPROM_PD_LEN] {
+        let mut out = [0u8; crate::eeprom::EEPROM_PD_LEN];
+        out[0..4].copy_from_slice(&PD_MAGIC);
+        out[4] = 4;
+        out[5] = cfg.mode as u8;
+        out[6] = cfg.fixed_object_pos;
+        out[7] = cfg.pps_object_pos;
+        put_u32_le(&mut out, 8, cfg.target_mv);
+        put_u32_le(&mut out, 12, cfg.i_req_ma);
+        out[16] = u8::from(allow_extended_voltage);
+        let crc_offset = crate::eeprom::EEPROM_PD_LEN - 4;
+        let crc = calfmt::crc32_ieee(&out[..crc_offset]);
+        put_u32_le(&mut out, crc_offset, crc);
+        out
+    }
+
+    #[test]
+    fn pd_blob_roundtrip_preserves_allow_extended_voltage() {
+        let cfg = PdConfig {
+            mode: PdMode::Pps,
+            fixed_object_pos: 4,
+            pps_object_pos: 2,
+            target_mv: 9_000,
+            pps_target_mv: 9_000,
+            i_req_ma: 2_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v5 blob");
+        assert_eq!(decoded, cfg);
+        assert!(allow_extended_voltage);
+    }
+
+    #[test]
+    fn pd_blob_v3_fixed_keeps_target_voltage() {
+        let legacy = PdConfig {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 4,
+            pps_object_pos: 2,
+            target_mv: 20_000,
+            pps_target_mv: PdConfig::DEFAULT_TARGET_MV,
+            i_req_ma: 3_000,
+        };
+
+        let blob = encode_v3_blob(&legacy);
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v3 blob");
+        assert_eq!(decoded.mode, PdMode::Fixed);
+        assert_eq!(decoded.fixed_object_pos, 4);
+        assert_eq!(decoded.target_mv, 20_000);
+        assert_eq!(decoded.pps_target_mv, 20_000);
+        assert!(!allow_extended_voltage);
+    }
+
+    #[test]
+    fn pd_blob_v4_fixed_keeps_target_voltage() {
+        let legacy = PdConfig {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 4,
+            pps_object_pos: 2,
+            target_mv: 20_000,
+            pps_target_mv: PdConfig::DEFAULT_TARGET_MV,
+            i_req_ma: 3_000,
+        };
+
+        let blob = encode_v4_blob(&legacy, true);
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v4 blob");
+        assert_eq!(decoded.mode, PdMode::Fixed);
+        assert_eq!(decoded.fixed_object_pos, 4);
+        assert_eq!(decoded.target_mv, 20_000);
+        assert_eq!(decoded.pps_target_mv, 20_000);
+        assert!(allow_extended_voltage);
+    }
 }
