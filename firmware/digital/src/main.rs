@@ -6155,6 +6155,7 @@ async fn stats_task(telemetry: &'static TelemetryMutex) {
                 ANALOG_STATE.store(AnalogState::Offline as u8, Ordering::Relaxed);
                 // Treat link-down as the start of a new PD session: clear any stale PD_STATUS
                 // snapshot so link-recovery auto-send cannot reuse old PDO/APDO lists.
+                clear_pd_extended_voltage_failure();
                 PD_STATUS_ATTACHED.store(false, Ordering::Relaxed);
                 let mut guard = telemetry.lock().await;
                 guard.last_pd_status = None;
