@@ -356,8 +356,8 @@ function createInitialPd(baseUrl: string): PdView | null {
 
   const allow_extended_voltage = normalized.includes("extended");
 
-  const saved = {
-    mode: "pps" as const,
+  const saved: PdView["saved"] = {
+    mode: "pps",
     fixed_object_pos: 5,
     pps_object_pos: 3,
     target_mv: 9_000,
