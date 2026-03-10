@@ -2666,7 +2666,7 @@ async fn handle_pd_update(
                     return Err("422 Unprocessable Entity");
                 }
                 cfg.fixed_object_pos = object_pos;
-                cfg.target_mv = pdo.mv;
+                // Preserve the cached PPS target; Fixed requests derive voltage from the PDO.
             }
             control::PdMode::Pps => {
                 let Some(apdo) = find_pps(object_pos) else {
@@ -2758,7 +2758,9 @@ async fn handle_pd_update(
         crate::clear_pd_extended_voltage_failure();
     }
 
-    let attached_now = {
+    // Persisted PD updates apply immediately, but live renegotiation still requires a fresh
+    // PD session snapshot and an active digital<->analog link.
+    let attached_now = LINK_UP.load(Ordering::Relaxed) && {
         let guard = telemetry.lock().await;
         guard
             .last_pd_status

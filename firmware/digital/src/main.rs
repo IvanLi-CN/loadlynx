@@ -2580,7 +2580,10 @@ async fn touch_ui_task(
 
                         let ok =
                             save_pd_config_to_eeprom(cfg, allow_extended_voltage, eeprom).await;
-                        let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed);
+                        // The dashboard button is a persisted gate, but immediate PD re-apply only
+                        // makes sense while both the last PD session and the MCU link are live.
+                        let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed)
+                            && LINK_UP.load(Ordering::Relaxed);
                         if ok {
                             {
                                 let mut guard = control.lock().await;
@@ -2662,7 +2665,10 @@ async fn touch_ui_task(
                                             guard.allow_extended_voltage,
                                         )
                                     };
-                                    let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed);
+                                    // Apply updates the persisted policy immediately, but only
+                                    // kicks a live renegotiation while the PD session is reachable.
+                                    let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed)
+                                        && LINK_UP.load(Ordering::Relaxed);
                                     if changed {
                                         let ok = save_pd_config_to_eeprom(
                                             cfg,
@@ -2755,7 +2761,8 @@ async fn touch_ui_task(
                                                 });
 
                                             guard.pd_draft.fixed_object_pos = pos;
-                                            guard.pd_draft.target_mv = pdo.mv;
+                                            // Preserve the last PPS voltage so switching back to PPS
+                                            // does not silently reuse the Fixed PDO voltage.
                                             guard.pd_draft.i_req_ma =
                                                 guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                         }
@@ -2857,7 +2864,8 @@ async fn touch_ui_task(
                                                     (idx + 1).min(u8::MAX as usize) as u8
                                                 };
                                                 guard.pd_draft.fixed_object_pos = pos;
-                                                guard.pd_draft.target_mv = pdo.mv;
+                                                // Preserve the last PPS voltage so switching back to PPS
+                                                // does not silently reuse the Fixed PDO voltage.
                                                 guard.pd_draft.i_req_ma =
                                                     guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                                 bump_control_rev();
@@ -4743,6 +4751,8 @@ async fn display_task(
 
                 let prev_pd_state = guard.snapshot.pd_state;
                 let pd_failure_latched = PD_EXTENDED_FAILURE_LATCH.load(Ordering::Relaxed);
+                // This button intentionally reflects the persisted extended-voltage gate rather
+                // than the last observed contract; link/attach reachability is shown elsewhere.
                 guard.snapshot.pd_state = if !allow_extended_voltage {
                     ui::PdButtonState::Safe5vOnly
                 } else if pd_failure_latched {
@@ -7173,10 +7183,6 @@ async fn setmode_tx_task(
         };
         pd_cfg = normalized_pd_config_for_status(pd_cfg, pd_status.as_ref());
         let desired_pd_req = build_pd_sink_request(&pd_cfg, pd_status.as_ref());
-        let requested_non_safe5v = desired_pd_req
-            .as_ref()
-            .map(pd_request_allows_non_safe5v)
-            .unwrap_or_else(|| pd_cfg.allows_non_safe5v());
         let pd_key = if let Some(req) = desired_pd_req.as_ref() {
             PdPolicyKey {
                 mode: match req.mode {
@@ -7211,21 +7217,7 @@ async fn setmode_tx_task(
                 (Some(status), Some(req)) if pd_contract_matches_request(status, req) => {
                     PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
                 }
-                _ if !requested_non_safe5v => {
-                    PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
-                }
-                _ => {
-                    let retry_window_start_ms = PD_RETRY_WINDOW_START_MS.load(Ordering::Relaxed);
-                    let apply_window_open = retry_window_start_ms != 0
-                        && now.wrapping_sub(retry_window_start_ms) <= PD_T_PD_MS;
-                    if pd_status.is_some()
-                        && retry_window_start_ms != 0
-                        && !PD_REQ_ACK_PENDING.load(Ordering::Relaxed)
-                        && !apply_window_open
-                    {
-                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
-                    }
-                }
+                _ => {}
             }
         }
 
@@ -7300,6 +7292,8 @@ async fn setmode_tx_task(
                         deadline_ms: now.saturating_add(PD_ACK_TIMEOUT_MS),
                         user_initiated,
                     });
+                } else if pd_request_allows_non_safe5v(req) {
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
                 }
             } else {
                 let delta = now.wrapping_sub(last_pd_req_skip_warn_ms);
