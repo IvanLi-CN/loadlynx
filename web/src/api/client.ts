@@ -952,7 +952,8 @@ async function mockUpdatePd(
     if (view.saved.mode === "fixed") {
       const pos = view.saved.fixed_object_pos;
       const pdo =
-        view.fixed_pdos.find((entry) => entry.pos === pos) ?? view.fixed_pdos[0];
+        view.fixed_pdos.find((entry) => entry.pos === pos) ??
+        view.fixed_pdos[0];
       view.contract_mv = pdo?.mv ?? 5_000;
       view.contract_ma = view.saved.i_req_ma;
       return;
