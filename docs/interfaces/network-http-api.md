@@ -459,7 +459,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 ```jsonc
 {
   "attached": true,
-  "contract_mv": 9000,
+  "contract_mv": 5000,
   "contract_ma": 2000,
   "fixed_pdos": [
     { "pos": 1, "mv": 5000, "max_ma": 3000 },
@@ -473,7 +473,8 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
     "mode": "fixed",
     "fixed_object_pos": 4,
     "pps_object_pos": 2,
-    "target_mv": 9000,
+    "target_mv": 20000,
+    "pps_target_mv": 9000,
     "i_req_ma": 2000
   },
   "apply": {
@@ -487,7 +488,8 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 - `fixed_pdos[].pos` 与 `pps_pdos[].pos` 均为 **object position（1-based）**；若模拟板能力列表未携带 `pos`（旧格式），数字板以列表索引 `idx+1` 生成稳定的 `pos`。
 - `allow_extended_voltage=false` 表示运行时有效策略被锁定为 Safe5V；即使 `saved` 里保留了更高电压档位，也不会自动离开 Safe5V。
-- `saved.target_mv` 表示当前保存模式下的目标电压（mV）：`mode="fixed"` 时为所选 PDO 电压，`mode="pps"` 时为 PPS 目标电压。
+- `saved.target_mv` 表示当前保存模式下的“活动目标电压”（mV）：`mode="fixed"` 时为所选 PDO 电压，`mode="pps"` 时为 PPS 目标电压（Vreq）。
+- `saved.pps_target_mv` 为 PPS 目标电压的粘性缓存（mV），用于在 `mode="fixed"` 时仍能保留上一次 PPS Vreq，避免 UI 在切换到 PPS 页签时被 Fixed 电压覆盖。
 - `contract_mv` / `contract_ma` 在 `attached=false`（或合同未知）时为 `null`。
 
 可用性约定（重要）：
@@ -533,7 +535,8 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 - 兼容性约定：
   - `allow_extended_voltage` 为可选字段；未提供时保持原值。
   - 若同时提供 `mode/object_pos/i_req_ma/(target_mv)`，固件会先更新并保存 `saved`，再按 `allow_extended_voltage` 选择有效策略。
-  - `saved` 仍按持久化 payload 原样返回；fixed 模式下 `saved.target_mv` 为保存的 PDO 电压，不会在 `GET` 时按当前 Source 能力重新归一化。
+  - `saved` 基本按持久化配置返回，并包含 `saved.pps_target_mv`（PPS Vreq 粘性缓存）。
+  - fixed 模式下，为兼容旧版本 blob（可能未持久化一致的 PDO 电压），固件在 `GET` 且已 attach 时允许基于当前 Source 能力推导并返回 `saved.target_mv`（仅影响返回视图，不会隐式改写 EEPROM）。
   - 更新 `saved` 字段时，固件仍会按当前 attach 的 Source 能力校验 `object_pos` / `target_mv` / `i_req_ma`；因此未 attach（或 `PD_STATUS` 不可用）时只支持单独切换 `allow_extended_voltage`。
   - `allow_extended_voltage=false` 时，即使更新了 `saved`，设备也会保持/回到 Safe5V，不会偷偷恢复高压档。
 

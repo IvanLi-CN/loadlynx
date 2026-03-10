@@ -2238,10 +2238,11 @@ async fn render_pd_view_json(
         buf.push('"');
         let _ = core::write!(
             buf,
-            ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"i_req_ma\":{}",
+            ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"pps_target_mv\":{},\"i_req_ma\":{}",
             saved.fixed_object_pos,
             saved.pps_object_pos,
             saved.target_mv,
+            saved.pps_target_mv,
             saved.i_req_ma
         );
         buf.push('}');
@@ -2346,10 +2347,11 @@ async fn render_pd_view_json(
     };
     let _ = core::write!(
         buf,
-        ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"i_req_ma\":{}",
+        ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"pps_target_mv\":{},\"i_req_ma\":{}",
         saved.fixed_object_pos,
         saved.pps_object_pos,
         saved_target_mv,
+        saved.pps_target_mv,
         saved.i_req_ma
     );
     buf.push('}');
@@ -2843,10 +2845,11 @@ async fn handle_pd_update(
             body_out.push('"');
             let _ = core::write!(
                 body_out,
-                ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"i_req_ma\":{}",
+                ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"pps_target_mv\":{},\"i_req_ma\":{}",
                 saved.fixed_object_pos,
                 saved.pps_object_pos,
                 saved.target_mv,
+                saved.pps_target_mv,
                 saved.i_req_ma
             );
             body_out.push('}');

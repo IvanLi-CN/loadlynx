@@ -118,7 +118,7 @@ export function DevicePdRoute() {
 
     setFixedIReqMa(pd.saved.i_req_ma);
     setPpsIReqMa(pd.saved.i_req_ma);
-    setPpsTargetMv(pd.saved.target_mv);
+    setPpsTargetMv(pd.saved.pps_target_mv ?? pd.saved.target_mv);
   }, [pd]);
 
   const applyMutation = useMutation({

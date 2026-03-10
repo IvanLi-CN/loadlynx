@@ -4811,6 +4811,7 @@ async fn display_task(
                 let pd_status = guard.last_pd_status.as_ref();
                 let pd_attached = pd_status.map(|status| status.attached).unwrap_or(false);
                 let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
+                let pd_wants_non_safe5v = pd_config_allows_non_safe5v(pd_saved, pd_status);
                 let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
                 let pd_target_mv = Some(pd_button_display_target_mv(
                     pd_saved,
@@ -4827,8 +4828,7 @@ async fn display_task(
                 // If we recently attempted a non-Safe5V request but the contract is still stuck
                 // at 5V after a grace window, treat it as a failure and latch red state.
                 if allow_extended_voltage
-                    && control::PdConfig::effective(pd_saved, allow_extended_voltage)
-                        .allows_non_safe5v()
+                    && pd_wants_non_safe5v
                     && pd_attached
                     && pd_contract_mv == control::PdConfig::DEFAULT_TARGET_MV
                 {

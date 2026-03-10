@@ -264,7 +264,13 @@ export interface PdSavedConfig {
   mode: PdSavedMode;
   fixed_object_pos: number;
   pps_object_pos: number;
-  target_mv: number; // PPS target; ignored for fixed negotiation
+  // Active target voltage (mV).
+  // - mode="fixed": mirrors the selected PDO voltage
+  // - mode="pps": mirrors the current PPS Vreq
+  target_mv: number;
+  // Sticky PPS Vreq cache so the UI can restore the last PPS voltage even if
+  // the saved mode is currently "fixed".
+  pps_target_mv?: number;
   i_req_ma: number;
 }
 
@@ -284,10 +290,13 @@ export interface PdView {
   contract_ma: number | null;
   fixed_pdos: PdFixedPdo[];
   pps_pdos: PdPpsPdo[];
+  // Safe5V gate; older firmware may omit this field.
+  allow_extended_voltage?: boolean;
   saved: PdSavedConfig;
   apply: PdApplyState;
 }
 
 export type PdUpdateRequest =
   | { mode: "fixed"; object_pos: number; i_req_ma: number }
-  | { mode: "pps"; object_pos: number; target_mv: number; i_req_ma: number };
+  | { mode: "pps"; object_pos: number; target_mv: number; i_req_ma: number }
+  | { allow_extended_voltage: boolean };
