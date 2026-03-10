@@ -926,6 +926,20 @@ async function mockUpdatePd(
   mockRequirePdReady(state);
 
   const current = mockRequirePdSupported(state);
+  const next = structuredClone(current);
+  const nowMs = state.status.raw.uptime_ms ?? 0;
+
+  // Firmware allows toggling the Safe5V gate even while detached/offline.
+  if ("allow_extended_voltage" in payload) {
+    next.allow_extended_voltage = payload.allow_extended_voltage;
+    next.apply = {
+      pending: false,
+      last: { code: "ok", at_ms: nowMs },
+    };
+    state.pd = next;
+    return structuredClone(next);
+  }
+
   if (!current.attached) {
     throw new HttpApiError({
       status: 409,
@@ -935,9 +949,6 @@ async function mockUpdatePd(
       details: null,
     });
   }
-
-  const next = structuredClone(current);
-  const nowMs = state.status.raw.uptime_ms ?? 0;
 
   function limitViolation(message: string, details?: unknown): never {
     throw new HttpApiError({
