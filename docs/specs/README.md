@@ -63,4 +63,4 @@
 
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
-| w4cpd | Dashboard 扩展电压开关与 PD 设置入口重构 | 已完成 | `w4cpd-dashboard-extended-voltage-toggle/SPEC.md` | 2026-03-10 | 实现已完成；HIL 待补（可选） |
+| w4cpd | Dashboard 扩展电压开关与 PD 设置入口重构 | 已完成 | `w4cpd-dashboard-extended-voltage-toggle/SPEC.md` | 2026-03-10 | PR #70；实现已完成；HIL 可选 |

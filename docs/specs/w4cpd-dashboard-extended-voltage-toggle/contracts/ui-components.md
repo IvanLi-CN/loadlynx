@@ -17,6 +17,7 @@
 - Scope: internal
 - Owner: digital firmware UI
 - Bounds: keep the existing right circular button bounds `(287,118)-(314,145)`.
+- Hit test: treat the bounds as a circle (taps outside the circle but inside the bbox should not trigger).
 - Appearance: settings-entry affordance only; do not encode PD success/failure colors here.
 - Interaction: tap enters `UiView::PdSettings`.
 - Contract note: the on-screen LOAD toggle is removed from the main dashboard; this entry does not toggle load output.

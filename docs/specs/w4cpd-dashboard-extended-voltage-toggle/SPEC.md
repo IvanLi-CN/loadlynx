@@ -5,7 +5,7 @@
 - Status: 已完成
 - Created: 2026-03-09
 - Last: 2026-03-10
-- Notes: HIL 验证待补（Safe5V 起步、开关开/关重协商、红态锁存）
+- Notes: PR #70；HIL 可选（Safe5V 起步、开关开/关重协商、红态锁存）
 
 ## 背景 / 问题陈述
 
@@ -35,7 +35,7 @@
 
 - 主界面 control row 下方两个控件的视觉与点击语义重排。
 - `allow_extended_voltage` 的状态模型、持久化、Safe5V 门控与三态显示规则。
-- `GET/PUT /api/v1/pd` 的最小字段扩展。
+- `GET/PUT /api/v1/pd` 的最小字段扩展（含 `allow_extended_voltage`、`saved.pps_target_mv`）。
 - 第一轮设计稿与实现前冻结规则。
 
 ### Out of scope
@@ -217,6 +217,7 @@ None
 - 2026-03-09: 根据主人反馈，左侧按钮恢复为原有 `PD` 顶部文案，不再额外引入 `EXT` / `FIXED` 之类的新标签。
 - 2026-03-09: 主人确认当前设计稿，可进入实现阶段。
 - 2026-03-10: 数字侧已完成 `allow_extended_voltage` 持久化、Dashboard 语义重排、Safe5V 门控与 `/api/v1/pd` 最小对齐；本地 `cargo fmt` 与 `just d-build` 已通过。
+- 2026-03-10: 根据 review 修复 Safe5V 门控的电流语义：关闭“允许扩展电压”时仍保留保存的 `i_req_ma`，并按 5V PDO `max_ma` 做 clamp，避免回退到 3A 默认值。
 
 ## 参考（References）
 
