@@ -2728,7 +2728,8 @@ async fn handle_pd_update(
         allow_extended_voltage = value;
     }
 
-    let changed = cfg != prev_cfg || allow_extended_voltage != prev_allow_extended_voltage;
+    let saved_changed = cfg != prev_cfg;
+    let changed = saved_changed || allow_extended_voltage != prev_allow_extended_voltage;
     if changed {
         let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
         let res = {
@@ -2746,7 +2747,7 @@ async fn handle_pd_update(
             let mut guard = control_mutex.lock().await;
             guard.pd_saved = cfg;
             guard.allow_extended_voltage = allow_extended_voltage;
-            if guard.ui_view == crate::control::UiView::PdSettings {
+            if saved_changed && guard.ui_view == crate::control::UiView::PdSettings {
                 guard.pd_draft = cfg;
             }
             bump_control_rev();
@@ -2765,9 +2766,12 @@ async fn handle_pd_update(
             .map(|status| status.attached)
             .unwrap_or(false)
     };
-    if changed && attached_now {
+    if attached_now {
         let now = now_ms32();
-        crate::reset_pd_extended_voltage_retry_window();
+        if !allow_extended_voltage {
+            crate::clear_pd_extended_voltage_failure();
+        }
+        crate::start_pd_extended_voltage_retry_window(now);
         crate::PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
         crate::PD_FORCE_SEND.store(true, Ordering::Release);
     }

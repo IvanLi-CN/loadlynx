@@ -439,6 +439,7 @@ static TOUCH_SPRING_LAST_DELTA_ABS: AtomicU32 = AtomicU32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
 static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
+static PD_RETRY_WINDOW_START_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_V_LOCAL_MV: AtomicI32 = AtomicI32::new(0);
 static PD_STATUS_ATTACHED: AtomicBool = AtomicBool::new(false);
 static PD_REQ_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -2590,7 +2591,7 @@ async fn touch_ui_task(
                                 clear_pd_extended_voltage_failure();
                             }
                             if attached {
-                                reset_pd_extended_voltage_retry_window();
+                                start_pd_extended_voltage_retry_window(apply_ms);
                                 PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
                                 PD_FORCE_SEND.store(true, Ordering::Release);
                             }
@@ -2661,6 +2662,7 @@ async fn touch_ui_task(
                                             guard.allow_extended_voltage,
                                         )
                                     };
+                                    let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed);
                                     if changed {
                                         let ok = save_pd_config_to_eeprom(
                                             cfg,
@@ -2677,8 +2679,8 @@ async fn touch_ui_task(
                                             if !allow_extended_voltage {
                                                 clear_pd_extended_voltage_failure();
                                             }
-                                            if PD_STATUS_ATTACHED.load(Ordering::Relaxed) {
-                                                reset_pd_extended_voltage_retry_window();
+                                            if attached {
+                                                start_pd_extended_voltage_retry_window(apply_ms);
                                                 PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
                                                 PD_FORCE_SEND.store(true, Ordering::Release);
                                             }
@@ -2689,6 +2691,14 @@ async fn touch_ui_task(
                                             PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
                                         }
                                     } else {
+                                        if !allow_extended_voltage {
+                                            clear_pd_extended_voltage_failure();
+                                        }
+                                        if attached {
+                                            start_pd_extended_voltage_retry_window(apply_ms);
+                                            PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
+                                            PD_FORCE_SEND.store(true, Ordering::Release);
+                                        }
                                         prompt_tone::enqueue_ui_ok();
                                     }
                                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -3812,6 +3822,12 @@ async fn save_editing_preset_to_eeprom(control: &ControlMutex, eeprom: &EepromMu
 
 fn reset_pd_extended_voltage_retry_window() {
     PD_LAST_APPLY_MS.store(0, Ordering::Relaxed);
+    PD_RETRY_WINDOW_START_MS.store(0, Ordering::Relaxed);
+}
+
+fn start_pd_extended_voltage_retry_window(now: u32) {
+    PD_LAST_APPLY_MS.store(now, Ordering::Relaxed);
+    PD_RETRY_WINDOW_START_MS.store(now, Ordering::Relaxed);
 }
 
 fn clear_pd_extended_voltage_failure() {
@@ -3852,6 +3868,7 @@ async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
     if status.attached && !prev {
         // New source session: clear any prior extended-voltage failure before retrying.
         clear_pd_extended_voltage_failure();
+        start_pd_extended_voltage_retry_window(now_ms32());
         // PD auto-apply: trigger a re-send of the persisted policy on attach rising edge.
         PD_FORCE_SEND.store(true, Ordering::Release);
     } else if !status.attached {
@@ -7097,7 +7114,7 @@ async fn setmode_tx_task(
         let link_up_now = LINK_UP.load(Ordering::Relaxed);
         if link_up_now && !prev_pd_link_up {
             prev_pd_link_up = true;
-            reset_pd_extended_voltage_retry_window();
+            start_pd_extended_voltage_retry_window(now);
             pd_force_send = true;
         } else if !link_up_now && prev_pd_link_up {
             prev_pd_link_up = false;
@@ -7172,10 +7189,11 @@ async fn setmode_tx_task(
                     PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
                 }
                 _ => {
-                    let last_apply_ms = PD_LAST_APPLY_MS.load(Ordering::Relaxed);
-                    let apply_window_open =
-                        last_apply_ms != 0 && now.wrapping_sub(last_apply_ms) <= PD_T_PD_MS;
-                    if last_apply_ms != 0
+                    let retry_window_start_ms = PD_RETRY_WINDOW_START_MS.load(Ordering::Relaxed);
+                    let apply_window_open = retry_window_start_ms != 0
+                        && now.wrapping_sub(retry_window_start_ms) <= PD_T_PD_MS;
+                    if pd_status.is_some()
+                        && retry_window_start_ms != 0
                         && !PD_REQ_ACK_PENDING.load(Ordering::Relaxed)
                         && !apply_window_open
                     {
@@ -7243,7 +7261,7 @@ async fn setmode_tx_task(
             if let Some(req) = desired_pd_req.as_ref() {
                 if send_pd_sink_request_frame(&mut uhci_tx, seq_now, req, &mut raw, &mut slip).await
                 {
-                    PD_LAST_APPLY_MS.store(now, Ordering::Relaxed);
+                    start_pd_extended_voltage_retry_window(now);
                     pd_last_sent = Some(pd_key);
                     pd_force_send = false;
                     pd_pending = Some(PdPending {
@@ -7255,9 +7273,6 @@ async fn setmode_tx_task(
                     });
                 }
             } else {
-                if allow_extended_voltage && requested_non_safe5v {
-                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
-                }
                 let delta = now.wrapping_sub(last_pd_req_skip_warn_ms);
                 if delta >= 2000 {
                     last_pd_req_skip_warn_ms = now;
