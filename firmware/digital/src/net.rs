@@ -2666,7 +2666,7 @@ async fn handle_pd_update(
                     return Err("422 Unprocessable Entity");
                 }
                 cfg.fixed_object_pos = object_pos;
-                // Preserve the cached PPS target; Fixed requests derive voltage from the PDO.
+                cfg.target_mv = pdo.mv;
             }
             control::PdMode::Pps => {
                 let Some(apdo) = find_pps(object_pos) else {
@@ -2720,6 +2720,7 @@ async fn handle_pd_update(
                 }
                 cfg.pps_object_pos = object_pos;
                 cfg.target_mv = target_mv;
+                cfg.pps_target_mv = target_mv;
             }
         }
     }

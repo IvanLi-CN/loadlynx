@@ -1059,11 +1059,12 @@ async fn encoder_task(
                                         })
                                         .map(|(_idx, p)| *p)
                                     {
-                                        if guard.pd_draft.target_mv == 0 {
+                                        if guard.pd_draft.pps_target_mv == 0 {
+                                            guard.pd_draft.pps_target_mv = apdo.min_mv;
                                             guard.pd_draft.target_mv = apdo.min_mv;
                                             changed = true;
                                         }
-                                        let prev = guard.pd_draft.target_mv;
+                                        let prev = guard.pd_draft.pps_target_mv;
                                         let mut next = if step_dir > 0 {
                                             prev.saturating_add(step_mv)
                                         } else {
@@ -1071,6 +1072,7 @@ async fn encoder_task(
                                         };
                                         next = next.clamp(apdo.min_mv, apdo.max_mv);
                                         if next != prev {
+                                            guard.pd_draft.pps_target_mv = next;
                                             guard.pd_draft.target_mv = next;
                                             changed = true;
                                         }
@@ -2761,8 +2763,9 @@ async fn touch_ui_task(
                                                 });
 
                                             guard.pd_draft.fixed_object_pos = pos;
-                                            // Preserve the last PPS voltage so switching back to PPS
-                                            // does not silently reuse the Fixed PDO voltage.
+                                            // Keep Fixed display/request voltage in sync without
+                                            // touching the sticky PPS cache.
+                                            guard.pd_draft.target_mv = pdo.mv;
                                             guard.pd_draft.i_req_ma =
                                                 guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                         }
@@ -2797,13 +2800,15 @@ async fn touch_ui_task(
                                                 })
                                                 .map(|(_idx, p)| *p)
                                             {
-                                                if guard.pd_draft.target_mv == 0 {
-                                                    guard.pd_draft.target_mv = apdo.min_mv;
+                                                if guard.pd_draft.pps_target_mv == 0 {
+                                                    guard.pd_draft.pps_target_mv = apdo.min_mv;
                                                 }
-                                                guard.pd_draft.target_mv = guard
+                                                guard.pd_draft.pps_target_mv = guard
                                                     .pd_draft
-                                                    .target_mv
+                                                    .pps_target_mv
                                                     .clamp(apdo.min_mv, apdo.max_mv);
+                                                guard.pd_draft.target_mv =
+                                                    guard.pd_draft.pps_target_mv;
                                                 guard.pd_draft.i_req_ma = guard
                                                     .pd_draft
                                                     .i_req_ma
@@ -2864,8 +2869,9 @@ async fn touch_ui_task(
                                                     (idx + 1).min(u8::MAX as usize) as u8
                                                 };
                                                 guard.pd_draft.fixed_object_pos = pos;
-                                                // Preserve the last PPS voltage so switching back to PPS
-                                                // does not silently reuse the Fixed PDO voltage.
+                                                // Keep Fixed display/request voltage in sync without
+                                                // touching the sticky PPS cache.
+                                                guard.pd_draft.target_mv = pdo.mv;
                                                 guard.pd_draft.i_req_ma =
                                                     guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
                                                 bump_control_rev();
@@ -2882,13 +2888,15 @@ async fn touch_ui_task(
                                                     (idx + 1).min(u8::MAX as usize) as u8
                                                 };
                                                 guard.pd_draft.pps_object_pos = pos;
-                                                if guard.pd_draft.target_mv == 0 {
-                                                    guard.pd_draft.target_mv = apdo.min_mv;
+                                                if guard.pd_draft.pps_target_mv == 0 {
+                                                    guard.pd_draft.pps_target_mv = apdo.min_mv;
                                                 }
-                                                guard.pd_draft.target_mv = guard
+                                                guard.pd_draft.pps_target_mv = guard
                                                     .pd_draft
-                                                    .target_mv
+                                                    .pps_target_mv
                                                     .clamp(apdo.min_mv, apdo.max_mv);
+                                                guard.pd_draft.target_mv =
+                                                    guard.pd_draft.pps_target_mv;
                                                 guard.pd_draft.i_req_ma = guard
                                                     .pd_draft
                                                     .i_req_ma
@@ -3735,8 +3743,8 @@ fn build_pd_settings_vm(
                 } else {
                     match pps_selected {
                         Some(pdo) => {
-                            draft.target_mv >= pdo.min_mv
-                                && draft.target_mv <= pdo.max_mv
+                            draft.pps_target_mv >= pdo.min_mv
+                                && draft.pps_target_mv <= pdo.max_mv
                                 && draft.i_req_ma >= 50
                                 && draft.i_req_ma <= pdo.max_ma
                         }
@@ -3792,7 +3800,7 @@ fn build_pd_settings_vm(
         contract_ma,
         fixed_object_pos,
         pps_object_pos,
-        pps_target_mv: draft.target_mv,
+        pps_target_mv: draft.pps_target_mv,
         i_req_ma: draft.i_req_ma,
         apply_enabled,
         message,
@@ -7173,6 +7181,9 @@ async fn setmode_tx_task(
         if pd_cfg.target_mv < 3_000 || pd_cfg.target_mv > 21_000 {
             pd_cfg.target_mv = 5_000;
         }
+        if pd_cfg.pps_target_mv < 3_000 || pd_cfg.pps_target_mv > 21_000 {
+            pd_cfg.pps_target_mv = control::PdConfig::DEFAULT_TARGET_MV;
+        }
         pd_cfg.i_req_ma = pd_cfg.i_req_ma.clamp(50, 10_000);
         if !allow_extended_voltage {
             clear_pd_extended_voltage_failure();
@@ -7292,8 +7303,6 @@ async fn setmode_tx_task(
                         deadline_ms: now.saturating_add(PD_ACK_TIMEOUT_MS),
                         user_initiated,
                     });
-                } else if pd_request_allows_non_safe5v(req) {
-                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
                 }
             } else {
                 let delta = now.wrapping_sub(last_pd_req_skip_warn_ms);
