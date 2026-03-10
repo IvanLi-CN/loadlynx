@@ -356,10 +356,12 @@ function createInitialPd(baseUrl: string): PdView | null {
 
   return {
     attached: !detached,
-    contract_mv: detached ? null : 9_000,
+    // Default to Safe5V contract; any non-Safe5V config must be explicitly allowed/applied.
+    contract_mv: detached ? null : 5_000,
     contract_ma: detached ? null : 2_000,
     fixed_pdos,
     pps_pdos,
+    allow_extended_voltage: false,
     saved: {
       mode: "pps",
       fixed_object_pos: 5,
@@ -938,8 +940,12 @@ async function mockUpdatePd(
 
     const allowExtendedVoltage = view.allow_extended_voltage ?? true;
     if (!allowExtendedVoltage) {
+      const safePdo =
+        view.fixed_pdos.find((entry) => entry.mv === 5_000) ??
+        view.fixed_pdos[0];
+      const safeMaxMa = safePdo?.max_ma ?? view.saved.i_req_ma;
       view.contract_mv = 5_000;
-      view.contract_ma = view.saved.i_req_ma;
+      view.contract_ma = Math.min(view.saved.i_req_ma, safeMaxMa);
       return;
     }
 

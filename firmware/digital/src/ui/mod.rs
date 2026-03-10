@@ -882,7 +882,12 @@ fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
 }
 
 pub fn hit_test_dashboard_load_button(x: i32, y: i32) -> bool {
-    x >= LOAD_BUTTON_LEFT && x < LOAD_BUTTON_RIGHT && y >= LOAD_ROW_TOP && y < LOAD_BUTTON_BOTTOM
+    let radius = (LOAD_BUTTON_SIZE / 2) + 1;
+    let cx = LOAD_BUTTON_LEFT + (LOAD_BUTTON_SIZE / 2);
+    let cy = LOAD_ROW_TOP + (LOAD_BUTTON_SIZE / 2);
+    let dx = x - cx;
+    let dy = y - cy;
+    dx.saturating_mul(dx) + dy.saturating_mul(dy) <= radius.saturating_mul(radius)
 }
 
 pub fn hit_test_dashboard_pd_button(x: i32, y: i32) -> bool {
