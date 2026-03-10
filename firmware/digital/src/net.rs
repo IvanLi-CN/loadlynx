@@ -2334,12 +2334,22 @@ async fn render_pd_view_json(
         crate::control::PdMode::Pps => "pps",
     });
     buf.push('"');
+    let saved_target_mv = if matches!(saved.mode, crate::control::PdMode::Fixed) {
+        let derived = crate::pd_fixed_target_mv(saved, Some(&status));
+        if derived != saved.target_mv {
+            derived
+        } else {
+            saved.target_mv
+        }
+    } else {
+        saved.target_mv
+    };
     let _ = core::write!(
         buf,
         ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"i_req_ma\":{}",
         saved.fixed_object_pos,
         saved.pps_object_pos,
-        saved.target_mv,
+        saved_target_mv,
         saved.i_req_ma
     );
     buf.push('}');

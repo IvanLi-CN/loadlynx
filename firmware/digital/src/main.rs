@@ -3685,16 +3685,25 @@ fn pd_button_display_mode(
 
 fn pd_button_display_target_mv(
     saved: control::PdConfig,
-    _status: Option<&PdStatus>,
+    status: Option<&PdStatus>,
     allow_extended_voltage: bool,
 ) -> u32 {
     let cfg = control::PdConfig::effective(saved, allow_extended_voltage);
     match cfg.mode {
-        // Dashboard line2 must be stable: show the persisted target, not a source-dependent PDO.
-        // Source-specific normalization is only used when building actual requests.
-        control::PdMode::Fixed => cfg
-            .target_mv
-            .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000),
+        // Dashboard line2 should prefer the persisted target, but legacy blobs may have a stale
+        // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
+        // from `PD_STATUS`, prefer that value to avoid misleading UI output.
+        control::PdMode::Fixed => {
+            let persisted = cfg
+                .target_mv
+                .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000);
+            let derived = pd_fixed_target_mv(cfg, status);
+            if derived != persisted {
+                derived
+            } else {
+                persisted
+            }
+        }
         control::PdMode::Pps => cfg.target_mv.clamp(3_000, 21_000),
     }
 }
@@ -3763,7 +3772,14 @@ fn build_pd_settings_vm(
 
     let mut selection_missing = false;
     let apply_enabled = if !attached {
-        false
+        match draft.mode {
+            control::PdMode::Fixed => draft.fixed_object_pos != 0 && draft.i_req_ma >= 50,
+            control::PdMode::Pps => {
+                draft.pps_object_pos != 0
+                    && (3_000..=21_000).contains(&draft.pps_target_mv)
+                    && draft.i_req_ma >= 50
+            }
+        }
     } else {
         match draft.mode {
             control::PdMode::Fixed => match fixed_selected {
@@ -4794,6 +4810,7 @@ async fn display_task(
                 };
                 let pd_status = guard.last_pd_status.as_ref();
                 let pd_attached = pd_status.map(|status| status.attached).unwrap_or(false);
+                let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
                 let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
                 let pd_target_mv = Some(pd_button_display_target_mv(
                     pd_saved,
@@ -4807,6 +4824,20 @@ async fn display_task(
                 guard.snapshot.pd_target_available = pd_target_available;
 
                 let prev_pd_state = guard.snapshot.pd_state;
+                // If we recently attempted a non-Safe5V request but the contract is still stuck
+                // at 5V after a grace window, treat it as a failure and latch red state.
+                if allow_extended_voltage
+                    && control::PdConfig::effective(pd_saved, allow_extended_voltage)
+                        .allows_non_safe5v()
+                    && pd_attached
+                    && pd_contract_mv == control::PdConfig::DEFAULT_TARGET_MV
+                {
+                    let since = PD_RETRY_WINDOW_START_MS.load(Ordering::Relaxed);
+                    if since != 0 && now.wrapping_sub(since) > PD_T_PD_MS {
+                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                        reset_pd_extended_voltage_retry_window();
+                    }
+                }
                 let pd_failure_latched = PD_EXTENDED_FAILURE_LATCH.load(Ordering::Relaxed);
                 // This button intentionally reflects the persisted extended-voltage gate rather
                 // than the last observed contract; link/attach reachability is shown elsewhere.
