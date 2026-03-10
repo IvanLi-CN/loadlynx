@@ -2575,30 +2575,54 @@ async fn touch_ui_task(
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
                         let apply_ms = now_ms32();
-                        let (cfg, allow_extended_voltage) = {
-                            let guard = control.lock().await;
-                            (guard.pd_saved, !guard.allow_extended_voltage)
-                        };
-
-                        let ok =
-                            save_pd_config_to_eeprom(cfg, allow_extended_voltage, eeprom).await;
-                        // The dashboard button is a persisted gate, but immediate PD re-apply only
-                        // makes sense while both the last PD session and the MCU link are live.
+                        // The dashboard button is a persisted gate. Keep the EEPROM update and
+                        // in-memory state change under the same lock so concurrent UI/HTTP PD
+                        // updates cannot overwrite each other.
                         let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed)
                             && LINK_UP.load(Ordering::Relaxed);
-                        if ok {
-                            {
-                                let mut guard = control.lock().await;
-                                guard.allow_extended_voltage = allow_extended_voltage;
+                        let analog_state =
+                            AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+                        let (ok, allow_extended_voltage, allows_non_safe5v) = {
+                            let mut guard = control.lock().await;
+                            let prev_allow = guard.allow_extended_voltage;
+                            let next_allow = !prev_allow;
+                            let cfg = guard.pd_saved;
+                            let effective = control::PdConfig::effective(cfg, next_allow);
+                            let allows_non_safe5v = effective.allows_non_safe5v();
+                            let ok =
+                                write_pd_blob_to_eeprom(cfg, next_allow, eeprom, "touch: PD SAVE")
+                                    .await
+                                    .is_ok();
+                            if ok {
+                                guard.allow_extended_voltage = next_allow;
                                 bump_control_rev();
                             }
+                            (
+                                ok,
+                                if ok { next_allow } else { prev_allow },
+                                allows_non_safe5v,
+                            )
+                        };
+
+                        if ok {
                             if !allow_extended_voltage {
                                 clear_pd_extended_voltage_failure();
                             }
+                            // Only attempt a non-Safe5V renegotiation while the analog side is
+                            // healthy; Safe5V requests may still be sent to lock back down.
+                            let may_live_apply = if !allow_extended_voltage {
+                                true
+                            } else if !allows_non_safe5v {
+                                true
+                            } else {
+                                !matches!(analog_state, AnalogState::Faulted | AnalogState::Offline)
+                            };
                             if attached {
                                 start_pd_extended_voltage_retry_window(apply_ms);
                                 PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
-                                PD_FORCE_SEND.store(true, Ordering::Release);
+                                if may_live_apply {
+                                    PD_FORCE_SEND.store(true, Ordering::Release);
+                                }
                             }
                             prompt_tone::enqueue_ui_ok();
                         } else {
@@ -2610,8 +2634,8 @@ async fn touch_ui_task(
                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                         last_tab_tap = None;
                         info!(
-                            "touch: PD extended-voltage toggle -> allow_extended_voltage={} attached={} persisted={}",
-                            allow_extended_voltage, attached, ok
+                            "touch: PD extended-voltage toggle -> allow_extended_voltage={} attached={} persisted={} analog_state={}",
+                            allow_extended_voltage, attached, ok, analog_state as u8
                         );
                         yield_now().await;
                         continue;
@@ -2659,55 +2683,69 @@ async fn touch_ui_task(
                                     // Apply = persist + update the saved PD policy. Whether it may
                                     // leave Safe5V is still gated by `allow_extended_voltage`.
                                     let apply_ms = now_ms32();
-                                    let (changed, cfg, allow_extended_voltage) = {
-                                        let guard = control.lock().await;
-                                        (
-                                            guard.pd_saved != guard.pd_draft,
-                                            guard.pd_draft,
-                                            guard.allow_extended_voltage,
-                                        )
-                                    };
                                     // Apply updates the persisted policy immediately, but only
                                     // kicks a live renegotiation while the PD session is reachable.
                                     let attached = PD_STATUS_ATTACHED.load(Ordering::Relaxed)
                                         && LINK_UP.load(Ordering::Relaxed);
-                                    if changed {
-                                        let ok = save_pd_config_to_eeprom(
+                                    let analog_state =
+                                        AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+                                    let (_changed, ok, allow_extended_voltage, allows_non_safe5v) = {
+                                        let mut guard = control.lock().await;
+                                        let allow_extended_voltage = guard.allow_extended_voltage;
+                                        let prev_cfg = guard.pd_saved;
+                                        let cfg = guard.pd_draft;
+                                        let changed = prev_cfg != cfg;
+                                        let effective = control::PdConfig::effective(
                                             cfg,
                                             allow_extended_voltage,
-                                            eeprom,
-                                        )
-                                        .await;
-                                        if ok {
-                                            {
-                                                let mut guard = control.lock().await;
-                                                guard.pd_saved = cfg;
-                                                bump_control_rev();
-                                            }
-                                            if !allow_extended_voltage {
-                                                clear_pd_extended_voltage_failure();
-                                            }
-                                            if attached {
-                                                start_pd_extended_voltage_retry_window(apply_ms);
-                                                PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
-                                                PD_FORCE_SEND.store(true, Ordering::Release);
-                                            }
-                                            prompt_tone::enqueue_ui_ok();
+                                        );
+                                        let allows_non_safe5v = effective.allows_non_safe5v();
+                                        let ok = if changed {
+                                            write_pd_blob_to_eeprom(
+                                                cfg,
+                                                allow_extended_voltage,
+                                                eeprom,
+                                                "touch: PD SAVE",
+                                            )
+                                            .await
+                                            .is_ok()
                                         } else {
-                                            prompt_tone::enqueue_ui_fail();
-                                            PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed); // persist fail
-                                            PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
+                                            true
+                                        };
+                                        if ok && changed {
+                                            guard.pd_saved = cfg;
+                                            bump_control_rev();
                                         }
-                                    } else {
+                                        (changed, ok, allow_extended_voltage, allows_non_safe5v)
+                                    };
+
+                                    if ok {
                                         if !allow_extended_voltage {
                                             clear_pd_extended_voltage_failure();
                                         }
+                                        let may_live_apply = if !allow_extended_voltage {
+                                            true
+                                        } else if !allows_non_safe5v {
+                                            true
+                                        } else {
+                                            !matches!(
+                                                analog_state,
+                                                AnalogState::Faulted | AnalogState::Offline
+                                            )
+                                        };
                                         if attached {
                                             start_pd_extended_voltage_retry_window(apply_ms);
                                             PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
-                                            PD_FORCE_SEND.store(true, Ordering::Release);
+                                            if may_live_apply {
+                                                PD_FORCE_SEND.store(true, Ordering::Release);
+                                            }
                                         }
                                         prompt_tone::enqueue_ui_ok();
+                                    } else {
+                                        // If persist failed, keep draft so the user can retry.
+                                        prompt_tone::enqueue_ui_fail();
+                                        PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed); // persist fail
+                                        PD_LAST_RESULT_MS.store(apply_ms, Ordering::Relaxed);
                                     }
                                     PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
                                     last_tab_tap = None;
@@ -3861,30 +3899,31 @@ fn clear_pd_extended_voltage_failure() {
     reset_pd_extended_voltage_retry_window();
 }
 
-async fn save_pd_config_to_eeprom(
+async fn write_pd_blob_to_eeprom(
     cfg: control::PdConfig,
     allow_extended_voltage: bool,
     eeprom: &EepromMutex,
-) -> bool {
+    ctx: &str,
+) -> Result<(), eeprom::EepromError> {
     let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
-    let res = {
+    let res: Result<(), eeprom::EepromError> = {
         let mut guard = eeprom.lock().await;
         guard.write_pd_blob(&blob).await
     };
     match res {
         Ok(()) => {
             info!(
-                "touch: PD SAVE ok (mode={:?}, target_mv={}, i_req_ma={}, allow_extended_voltage={})",
-                cfg.mode, cfg.target_mv, cfg.i_req_ma, allow_extended_voltage
+                "{} ok (mode={:?}, target_mv={}, i_req_ma={}, allow_extended_voltage={})",
+                ctx, cfg.mode, cfg.target_mv, cfg.i_req_ma, allow_extended_voltage
             );
-            true
+            Ok(())
         }
         Err(err) => {
             warn!(
-                "touch: PD SAVE failed (mode={:?}, target_mv={}, i_req_ma={}, allow_extended_voltage={}, err={:?})",
-                cfg.mode, cfg.target_mv, cfg.i_req_ma, allow_extended_voltage, err
+                "{} failed (mode={:?}, target_mv={}, i_req_ma={}, allow_extended_voltage={}, err={:?})",
+                ctx, cfg.mode, cfg.target_mv, cfg.i_req_ma, allow_extended_voltage, err
             );
-            false
+            Err(err)
         }
     }
 }
@@ -7309,7 +7348,35 @@ async fn setmode_tx_task(
                 ui_apply_ms != 0 && now.wrapping_sub(ui_apply_ms) < 2_000
             };
             if let Some(req) = desired_pd_req.as_ref() {
-                if send_pd_sink_request_frame(&mut uhci_tx, seq_now, req, &mut raw, &mut slip).await
+                let wants_non_safe5v = pd_request_allows_non_safe5v(req);
+                let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+                // Never attempt to renegotiate up to non-Safe5V while the analog side is faulted
+                // or offline. Safe5V requests are allowed so the device can always lock back down.
+                let non_safe5v_gated = wants_non_safe5v
+                    && matches!(analog_state, AnalogState::Faulted | AnalogState::Offline);
+                if non_safe5v_gated {
+                    let delta = now.wrapping_sub(last_pd_req_skip_warn_ms);
+                    if delta >= 2000 {
+                        last_pd_req_skip_warn_ms = now;
+                        warn!(
+                            "pd_sink_request gated: analog not healthy (state={}, mode={:?}, target_mv={})",
+                            analog_state as u8, pd_cfg.mode, req.target_mv
+                        );
+                    }
+                    if user_initiated {
+                        // Treat as an immediate failure for UI/API feedback.
+                        PD_LAST_RESULT_CODE.store(3, Ordering::Relaxed); // timeout/gated
+                        PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                    }
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                } else if send_pd_sink_request_frame(
+                    &mut uhci_tx,
+                    seq_now,
+                    req,
+                    &mut raw,
+                    &mut slip,
+                )
+                .await
                 {
                     start_pd_extended_voltage_retry_window(now);
                     pd_last_sent = Some(pd_key);
@@ -7321,6 +7388,15 @@ async fn setmode_tx_task(
                         deadline_ms: now.saturating_add(PD_ACK_TIMEOUT_MS),
                         user_initiated,
                     });
+                } else {
+                    // Local send failure is still a failure from the user's perspective.
+                    if user_initiated {
+                        PD_LAST_RESULT_CODE.store(3, Ordering::Relaxed); // timeout/tx-fail
+                        PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
+                    }
+                    if wants_non_safe5v {
+                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                    }
                 }
             } else {
                 let delta = now.wrapping_sub(last_pd_req_skip_warn_ms);

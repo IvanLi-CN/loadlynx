@@ -2547,10 +2547,11 @@ async fn handle_pd_update(
         None
     };
 
-    let (mut cfg, mut allow_extended_voltage) = {
-        let guard = control_mutex.lock().await;
-        (guard.pd_saved, guard.allow_extended_voltage)
-    };
+    // Serialize PD updates under the control lock so UI + HTTP cannot race and stomp the EEPROM
+    // blob with stale snapshots.
+    let mut ctrl = control_mutex.lock().await;
+    let mut cfg = ctrl.pd_saved;
+    let mut allow_extended_voltage = ctrl.allow_extended_voltage;
     let prev_cfg = cfg;
     let prev_allow_extended_voltage = allow_extended_voltage;
 
@@ -2740,8 +2741,8 @@ async fn handle_pd_update(
     if changed {
         let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
         let res = {
-            let mut guard = eeprom.lock().await;
-            guard.write_pd_blob(&blob).await
+            let mut ep = eeprom.lock().await;
+            ep.write_pd_blob(&blob).await
         };
         if let Err(_err) = res {
             write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
@@ -2750,16 +2751,14 @@ async fn handle_pd_update(
             return Err("503 Service Unavailable");
         }
 
-        {
-            let mut guard = control_mutex.lock().await;
-            guard.pd_saved = cfg;
-            guard.allow_extended_voltage = allow_extended_voltage;
-            if saved_changed && guard.ui_view == crate::control::UiView::PdSettings {
-                guard.pd_draft = cfg;
-            }
-            bump_control_rev();
+        ctrl.pd_saved = cfg;
+        ctrl.allow_extended_voltage = allow_extended_voltage;
+        if saved_changed && ctrl.ui_view == crate::control::UiView::PdSettings {
+            ctrl.pd_draft = cfg;
         }
+        bump_control_rev();
     }
+    drop(ctrl);
 
     if !allow_extended_voltage {
         crate::clear_pd_extended_voltage_failure();
@@ -2782,7 +2781,19 @@ async fn handle_pd_update(
         }
         crate::start_pd_extended_voltage_retry_window(now);
         crate::PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
-        crate::PD_FORCE_SEND.store(true, Ordering::Release);
+        let effective = control::PdConfig::effective(cfg, allow_extended_voltage);
+        let allows_non_safe5v = effective.allows_non_safe5v();
+        let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+        let may_force_send = if !allow_extended_voltage {
+            true
+        } else if !allows_non_safe5v {
+            true
+        } else {
+            !matches!(analog_state, AnalogState::Faulted | AnalogState::Offline)
+        };
+        if may_force_send {
+            crate::PD_FORCE_SEND.store(true, Ordering::Release);
+        }
     }
 
     match render_pd_view_json(body_out, control_mutex, telemetry).await {
