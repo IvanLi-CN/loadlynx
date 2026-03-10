@@ -5,6 +5,21 @@ function PdRouteDefaultStory() {
   return <RouteStoryHarness initialPath="/mock-001/pd" />;
 }
 
+function PdRouteExtendedVoltageStory() {
+  return (
+    <RouteStoryHarness
+      initialPath="/mock-001/pd"
+      devices={[
+        {
+          id: "mock-001",
+          name: "PD Extended Enabled",
+          baseUrl: "mock://demo-extended",
+        },
+      ]}
+    />
+  );
+}
+
 function PdRouteUnsupportedStory() {
   return (
     <RouteStoryHarness
@@ -44,6 +59,10 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {};
+
+export const ExtendedVoltageEnabled: Story = {
+  render: () => <PdRouteExtendedVoltageStory />,
+};
 
 export const Unsupported: Story = {
   render: () => <PdRouteUnsupportedStory />,
