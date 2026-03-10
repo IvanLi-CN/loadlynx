@@ -219,6 +219,7 @@ None
 - 2026-03-10: 数字侧已完成 `allow_extended_voltage` 持久化、Dashboard 语义重排、Safe5V 门控与 `/api/v1/pd` 最小对齐；本地 `cargo fmt` 与 `just d-build` 已通过。
 - 2026-03-10: 根据 review 修复 Safe5V 门控的电流语义：关闭“允许扩展电压”时仍保留保存的 `i_req_ma`，并按 5V PDO `max_ma` 做 clamp，避免回退到 3A 默认值。
 - 2026-03-10: Web 端 `USB‑PD Settings` 在 `allow_extended_voltage=false` 时明确提示 Safe5V 锁定语义，避免 “Apply succeeded” 与实际合同停留 5V 的误解。
+- 2026-03-10: 修复 Web mock PD 初始化的类型标注问题，确保 `bun run build` 的类型检查通过。
 
 ## 参考（References）
 
