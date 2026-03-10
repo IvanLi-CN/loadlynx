@@ -207,14 +207,26 @@ impl PdConfig {
     }
 
     pub const fn safe5v() -> Self {
-        Self::default()
+        Self::safe5v_with_i(Self::DEFAULT_I_REQ_MA)
+    }
+
+    pub const fn safe5v_with_i(i_req_ma: u32) -> Self {
+        Self {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 0,
+            pps_object_pos: 0,
+            target_mv: Self::DEFAULT_TARGET_MV,
+            pps_target_mv: Self::DEFAULT_TARGET_MV,
+            i_req_ma,
+        }
     }
 
     pub const fn effective(saved: Self, allow_extended_voltage: bool) -> Self {
         if allow_extended_voltage {
             saved
         } else {
-            Self::safe5v()
+            // Force 5V but preserve the user-saved current request.
+            Self::safe5v_with_i(saved.i_req_ma)
         }
     }
 

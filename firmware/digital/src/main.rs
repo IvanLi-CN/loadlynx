@@ -7752,7 +7752,9 @@ fn build_pd_sink_request(
                 .find(|(idx, p)| pdo_pos(p.pos, *idx) == fixed_object_pos)
                 .map(|(_idx, p)| *p)?;
 
-            let i_req_ma = if *cfg == control::PdConfig::safe5v() {
+            // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
+            // source's advertised 5V maximum instead of rejecting the request.
+            let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {
                 i_req_ma.min(pdo.max_ma)
             } else {
                 i_req_ma
