@@ -2461,31 +2461,6 @@ async fn handle_pd_update(
     telemetry: &'static TelemetryMutex,
     eeprom: &'static EepromMutex,
 ) -> Result<(), &'static str> {
-    let link_up = LINK_UP.load(Ordering::Relaxed);
-    if !link_up {
-        write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
-        return Err("503 Service Unavailable");
-    }
-
-    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
-    match analog_state {
-        AnalogState::Faulted => {
-            write_error_body(
-                body_out,
-                "ANALOG_FAULTED",
-                "analog board is faulted",
-                false,
-                None,
-            );
-            return Err("409 Conflict");
-        }
-        AnalogState::Offline => {
-            write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
-            return Err("503 Service Unavailable");
-        }
-        AnalogState::CalMissing | AnalogState::Ready => {}
-    }
-
     let parsed = match parse_pd_update_json(body_in) {
         Ok(v) => v,
         Err(msg) => {
@@ -2507,6 +2482,37 @@ async fn handle_pd_update(
             None,
         );
         return Err("400 Bad Request");
+    }
+
+    // Only requests that update `saved` (and therefore may want to apply immediately) require an
+    // active digital<->analog link + live PD_STATUS for capability validation. Gate-only updates
+    // must be allowed offline so callers can lock the device back to Safe5V even if the analog
+    // board is disconnected/unhealthy.
+    if updates_saved_cfg {
+        let link_up = LINK_UP.load(Ordering::Relaxed);
+        if !link_up {
+            write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
+            return Err("503 Service Unavailable");
+        }
+
+        let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+        match analog_state {
+            AnalogState::Faulted => {
+                write_error_body(
+                    body_out,
+                    "ANALOG_FAULTED",
+                    "analog board is faulted",
+                    false,
+                    None,
+                );
+                return Err("409 Conflict");
+            }
+            AnalogState::Offline => {
+                write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
+                return Err("503 Service Unavailable");
+            }
+            AnalogState::CalMissing | AnalogState::Ready => {}
+        }
     }
 
     let status = if updates_saved_cfg {
@@ -2779,7 +2785,75 @@ async fn handle_pd_update(
         crate::PD_FORCE_SEND.store(true, Ordering::Release);
     }
 
-    render_pd_view_json(body_out, control_mutex, telemetry).await
+    match render_pd_view_json(body_out, control_mutex, telemetry).await {
+        Ok(()) => Ok(()),
+        Err(_err) if !updates_saved_cfg => {
+            // Best-effort: allow gate-only updates even when GET /api/v1/pd is currently
+            // unavailable (e.g. LINK_DOWN). Return a detached view so the caller gets a stable
+            // confirmation payload.
+            let (saved, allow_extended_voltage) = {
+                let guard = control_mutex.lock().await;
+                (guard.pd_saved, guard.allow_extended_voltage)
+            };
+            let ack_pending = crate::PD_REQ_ACK_PENDING.load(Ordering::Relaxed);
+            let last_code = crate::PD_LAST_RESULT_CODE.load(Ordering::Relaxed);
+            let last_ms = crate::PD_LAST_RESULT_MS.load(Ordering::Relaxed);
+
+            body_out.clear();
+            body_out.push('{');
+            body_out.push_str("\"attached\":false");
+            body_out.push_str(",\"contract_mv\":null");
+            body_out.push_str(",\"contract_ma\":null");
+            body_out.push_str(",\"fixed_pdos\":[]");
+            body_out.push_str(",\"pps_pdos\":[]");
+            body_out.push_str(",\"allow_extended_voltage\":");
+            body_out.push_str(if allow_extended_voltage {
+                "true"
+            } else {
+                "false"
+            });
+
+            body_out.push_str(",\"saved\":{");
+            body_out.push_str("\"mode\":\"");
+            body_out.push_str(match saved.mode {
+                crate::control::PdMode::Fixed => "fixed",
+                crate::control::PdMode::Pps => "pps",
+            });
+            body_out.push('"');
+            let _ = core::write!(
+                body_out,
+                ",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"i_req_ma\":{}",
+                saved.fixed_object_pos,
+                saved.pps_object_pos,
+                saved.target_mv,
+                saved.i_req_ma
+            );
+            body_out.push('}');
+
+            body_out.push_str(",\"apply\":{");
+            body_out.push_str("\"pending\":");
+            body_out.push_str(if ack_pending { "true" } else { "false" });
+            if last_code != 0 {
+                body_out.push_str(",\"last\":{");
+                body_out.push_str("\"code\":\"");
+                body_out.push_str(match last_code {
+                    1 => "ok",
+                    2 => "nack",
+                    3 => "timeout",
+                    4 => "persist_fail",
+                    _ => "failed",
+                });
+                body_out.push('"');
+                let _ = core::write!(body_out, ",\"at_ms\":{}", last_ms);
+                body_out.push('}');
+            }
+            body_out.push('}');
+
+            body_out.push('}');
+            Ok(())
+        }
+        Err(err) => Err(err),
+    }
 }
 
 struct CcUpdateRequest {
