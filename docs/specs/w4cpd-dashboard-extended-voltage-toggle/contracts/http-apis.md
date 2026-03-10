@@ -4,7 +4,7 @@
 
 - Add `allow_extended_voltage: boolean` to the response body.
 - `saved` keeps the persisted PD configuration payload shape.
-- Fixed-mode `saved.target_mv` remains the persisted cache value; it is not normalized on read against the currently attached source.
+- Fixed-mode `saved.target_mv` is the persisted PDO voltage for the saved selection; it is not normalized on read against the currently attached source.
 - `allow_extended_voltage=false` means the effective runtime policy is Safe5V, regardless of the saved PD target.
 
 ## PUT /api/v1/pd

@@ -7228,6 +7228,16 @@ async fn setmode_tx_task(
                 (Some(status), Some(req)) if pd_contract_matches_request(status, req) => {
                     PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
                 }
+                (Some(status), None)
+                    if LINK_UP.load(Ordering::Relaxed)
+                        && status.attached
+                        && pd_config_allows_non_safe5v(pd_cfg, Some(status)) =>
+                {
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                }
+                _ if !pd_config_allows_non_safe5v(pd_cfg, pd_status.as_ref()) => {
+                    PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+                }
                 _ => {}
             }
         }
@@ -7567,6 +7577,16 @@ async fn send_setmode_frame(
 
 fn pd_request_allows_non_safe5v(req: &PdSinkRequest) -> bool {
     req.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+}
+
+fn pd_config_allows_non_safe5v(cfg: control::PdConfig, status: Option<&PdStatus>) -> bool {
+    match cfg.mode {
+        control::PdMode::Fixed => {
+            pd_fixed_target_mv(cfg, status) != control::PdConfig::DEFAULT_TARGET_MV
+                || (cfg.fixed_object_pos != 0 && cfg.fixed_object_pos != 1)
+        }
+        control::PdMode::Pps => cfg.pps_target_mv != control::PdConfig::DEFAULT_TARGET_MV,
+    }
 }
 
 fn build_pd_sink_request(

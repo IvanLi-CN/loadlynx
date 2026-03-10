@@ -10,7 +10,7 @@
   - `extended_allowed`: blue, means `allow_extended_voltage=true` and no current failure latch
   - `extended_failed`: red, means `allow_extended_voltage=true` and the latest non-Safe5V request hit the existing failure criteria
 - Interaction: tap toggles `allow_extended_voltage`; no long-press or secondary gesture.
-- Contract note: the exact two-line copy is still pending owner signoff from the design phase.
+- Contract note: the approved copy is fixed to `PD` on the first line and `5V` / saved target voltage on the second line.
 
 ## DashboardPdSettingsEntry
 
