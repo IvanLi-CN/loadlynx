@@ -625,9 +625,10 @@ pub fn decode_pd_blob(
     } else if matches!(mode, PdMode::Pps) {
         (target_mv, target_mv)
     } else {
-        // Legacy fixed-mode blobs reused `target_mv` as a PPS cache. Keep that value for future
-        // PPS edits, and let fixed-mode runtime/display recover the real PDO voltage from status.
-        (PdConfig::DEFAULT_TARGET_MV, target_mv)
+        // Legacy fixed-mode blobs reused `target_mv` inconsistently (fixed display vs PPS cache).
+        // Keep it for both fields so the UI/API stays stable after upgrade; fixed-mode requests
+        // still derive their voltage from the selected PDO when status is available.
+        (target_mv, target_mv)
     };
 
     Ok((
@@ -693,18 +694,18 @@ mod tests {
         };
 
         let blob = encode_pd_blob(&cfg, true);
-        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v4 blob");
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v5 blob");
         assert_eq!(decoded, cfg);
         assert!(allow_extended_voltage);
     }
 
     #[test]
-    fn pd_blob_v3_fixed_migrates_target_into_pps_cache() {
+    fn pd_blob_v3_fixed_keeps_target_voltage() {
         let legacy = PdConfig {
             mode: PdMode::Fixed,
-            fixed_object_pos: 3,
-            pps_object_pos: 0,
-            target_mv: 9_000,
+            fixed_object_pos: 4,
+            pps_object_pos: 2,
+            target_mv: 20_000,
             pps_target_mv: PdConfig::DEFAULT_TARGET_MV,
             i_req_ma: 3_000,
         };
@@ -712,19 +713,19 @@ mod tests {
         let blob = encode_v3_blob(&legacy);
         let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v3 blob");
         assert_eq!(decoded.mode, PdMode::Fixed);
-        assert_eq!(decoded.fixed_object_pos, 3);
-        assert_eq!(decoded.target_mv, PdConfig::DEFAULT_TARGET_MV);
-        assert_eq!(decoded.pps_target_mv, 9_000);
+        assert_eq!(decoded.fixed_object_pos, 4);
+        assert_eq!(decoded.target_mv, 20_000);
+        assert_eq!(decoded.pps_target_mv, 20_000);
         assert!(!allow_extended_voltage);
     }
 
     #[test]
-    fn pd_blob_v4_fixed_migrates_target_into_pps_cache() {
+    fn pd_blob_v4_fixed_keeps_target_voltage() {
         let legacy = PdConfig {
             mode: PdMode::Fixed,
             fixed_object_pos: 4,
             pps_object_pos: 2,
-            target_mv: 9_000,
+            target_mv: 20_000,
             pps_target_mv: PdConfig::DEFAULT_TARGET_MV,
             i_req_ma: 3_000,
         };
@@ -733,8 +734,8 @@ mod tests {
         let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v4 blob");
         assert_eq!(decoded.mode, PdMode::Fixed);
         assert_eq!(decoded.fixed_object_pos, 4);
-        assert_eq!(decoded.target_mv, PdConfig::DEFAULT_TARGET_MV);
-        assert_eq!(decoded.pps_target_mv, 9_000);
+        assert_eq!(decoded.target_mv, 20_000);
+        assert_eq!(decoded.pps_target_mv, 20_000);
         assert!(allow_extended_voltage);
     }
 }

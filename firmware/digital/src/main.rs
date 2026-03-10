@@ -3657,10 +3657,6 @@ fn pd_button_display_target_mv(
     }
 }
 
-fn pd_contract_matches_request(status: &PdStatus, req: &PdSinkRequest) -> bool {
-    status.attached && status.contract_mv == req.target_mv && status.contract_ma != 0
-}
-
 fn build_pd_settings_vm(
     draft: control::PdConfig,
     focus: control::PdSettingsFocus,
@@ -7225,9 +7221,6 @@ async fn setmode_tx_task(
                 (_, Some(req)) if !pd_request_allows_non_safe5v(req) => {
                     PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
                 }
-                (Some(status), Some(req)) if pd_contract_matches_request(status, req) => {
-                    PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
-                }
                 (Some(status), None)
                     if LINK_UP.load(Ordering::Relaxed)
                         && status.attached
@@ -7254,11 +7247,14 @@ async fn setmode_tx_task(
                     PD_LAST_RESULT_CODE.store(code, Ordering::Relaxed);
                     PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
                 }
-                if (flags & FLAG_IS_NACK) != 0
-                    && (!matches!(p.key.mode, control::PdMode::Fixed)
-                        || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV)
+                if !matches!(p.key.mode, control::PdMode::Fixed)
+                    || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV
                 {
-                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                    if (flags & FLAG_IS_NACK) != 0 {
+                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                    } else {
+                        PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
+                    }
                 }
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
