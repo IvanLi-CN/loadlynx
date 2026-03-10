@@ -87,6 +87,7 @@
 ### Edge cases / errors
 
 - 若 `pd_saved` 本身就是 Safe5V，打开“扩展电压”不应报错；行为视为“允许使用保存配置”，只是结果仍停在 Safe5V。
+- 当 `allow_extended_voltage=true` 且保存的目标需要离开 Safe5V，但当前 source 能力列表缺失对应 PDO/APDO（导致无法构建请求）时，可以进入红态；语义视为“本次非 Safe5V 请求失败/不可达”，而不是静默回退或自动改写保存配置。
 - detach、新会话开始、成功拿到非 Safe5V 合同、手动关闭开关、设备重启，都必须清除红色失败态。
 - attach 上升沿、link 恢复、设置页 `Apply`、HTTP API 更新配置，都不得绕过 `allow_extended_voltage` 直接恢复非 Safe5V。
 
