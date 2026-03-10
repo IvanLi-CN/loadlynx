@@ -7170,8 +7170,7 @@ async fn setmode_tx_task(
             guard.last_pd_status.clone()
         };
         let desired_pd_req = build_pd_sink_request(&pd_cfg, pd_status.as_ref());
-        let requested_non_safe5v = pd_button_display_target_mv(pd_cfg, pd_status.as_ref(), true)
-            > control::PdConfig::DEFAULT_TARGET_MV;
+        let requested_non_safe5v = pd_cfg.allows_non_safe5v();
 
         if PD_FORCE_SEND.swap(false, Ordering::AcqRel) {
             pd_force_send = true;
@@ -7179,7 +7178,7 @@ async fn setmode_tx_task(
 
         if allow_extended_voltage {
             match (pd_status.as_ref(), desired_pd_req.as_ref()) {
-                (_, Some(req)) if req.target_mv <= control::PdConfig::DEFAULT_TARGET_MV => {
+                (_, Some(req)) if !pd_request_allows_non_safe5v(req) => {
                     PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
                 }
                 (Some(status), Some(req)) if pd_contract_matches_request(status, req) => {
@@ -7216,7 +7215,8 @@ async fn setmode_tx_task(
                     PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
                 }
                 if (flags & FLAG_IS_NACK) != 0
-                    && p.key.target_mv > control::PdConfig::DEFAULT_TARGET_MV
+                    && (!matches!(p.key.mode, control::PdMode::Fixed)
+                        || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV)
                 {
                     PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
                 }
@@ -7232,7 +7232,9 @@ async fn setmode_tx_task(
                     PD_LAST_RESULT_CODE.store(3, Ordering::Relaxed); // timeout
                     PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
                 }
-                if p.key.target_mv > control::PdConfig::DEFAULT_TARGET_MV {
+                if !matches!(p.key.mode, control::PdMode::Fixed)
+                    || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+                {
                     PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
                 }
                 pd_pending = None;
@@ -7533,6 +7535,10 @@ async fn send_setmode_frame(
     }
 }
 
+fn pd_request_allows_non_safe5v(req: &PdSinkRequest) -> bool {
+    !matches!(req.mode, PdSinkMode::Fixed) || req.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+}
+
 fn build_pd_sink_request(
     cfg: &control::PdConfig,
     status: Option<&PdStatus>,
@@ -7574,6 +7580,11 @@ fn build_pd_sink_request(
                 .find(|(idx, p)| pdo_pos(p.pos, *idx) == fixed_object_pos)
                 .map(|(_idx, p)| *p)?;
 
+            let i_req_ma = if *cfg == control::PdConfig::safe5v() {
+                i_req_ma.min(pdo.max_ma)
+            } else {
+                i_req_ma
+            };
             if i_req_ma > pdo.max_ma {
                 return None;
             }

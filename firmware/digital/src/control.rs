@@ -214,7 +214,7 @@ impl PdConfig {
     }
 
     pub const fn allows_non_safe5v(self) -> bool {
-        self.target_mv > Self::DEFAULT_TARGET_MV
+        !matches!(self.mode, PdMode::Fixed) || self.target_mv != Self::DEFAULT_TARGET_MV
     }
 
     pub fn toggle_target(&mut self) -> bool {
