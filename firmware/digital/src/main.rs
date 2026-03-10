@@ -3647,12 +3647,16 @@ fn pd_button_display_mode(
 
 fn pd_button_display_target_mv(
     saved: control::PdConfig,
-    status: Option<&PdStatus>,
+    _status: Option<&PdStatus>,
     allow_extended_voltage: bool,
 ) -> u32 {
     let cfg = control::PdConfig::effective(saved, allow_extended_voltage);
     match cfg.mode {
-        control::PdMode::Fixed => pd_fixed_target_mv(cfg, status),
+        // Dashboard line2 must be stable: show the persisted target, not a source-dependent PDO.
+        // Source-specific normalization is only used when building actual requests.
+        control::PdMode::Fixed => cfg
+            .target_mv
+            .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000),
         control::PdMode::Pps => cfg.target_mv.clamp(3_000, 21_000),
     }
 }
@@ -3894,6 +3898,16 @@ async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
         // PD auto-apply: trigger a re-send of the persisted policy on attach rising edge.
         PD_FORCE_SEND.store(true, Ordering::Release);
     } else if !status.attached {
+        clear_pd_extended_voltage_failure();
+    }
+
+    // Clear red state once we *observe* a non-Safe5V contract. PD_SINK_REQUEST ACK/NACK only
+    // confirms policy reception; final negotiation outcome is reported via PD_STATUS.
+    if status.attached
+        && status.contract_mv != 0
+        && status.contract_ma != 0
+        && status.contract_mv != control::PdConfig::DEFAULT_TARGET_MV
+    {
         clear_pd_extended_voltage_failure();
     }
     let mut guard = telemetry.lock().await;
@@ -7252,8 +7266,6 @@ async fn setmode_tx_task(
                 {
                     if (flags & FLAG_IS_NACK) != 0 {
                         PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
-                    } else {
-                        PD_EXTENDED_FAILURE_LATCH.store(false, Ordering::Relaxed);
                     }
                 }
                 pd_pending = None;
