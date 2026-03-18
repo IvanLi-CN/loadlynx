@@ -106,12 +106,7 @@ pub struct PresetPanelVm {
 }
 
 pub fn push_panel_dirty_rect(rects: &mut super::DirtyRects) {
-    let _ = rects.push(super::DirtyRect::new(
-        PANEL_LEFT as u16,
-        PANEL_TOP as u16,
-        (PANEL_RIGHT - PANEL_LEFT) as u16,
-        (PANEL_BOTTOM - PANEL_TOP) as u16,
-    ));
+    super::push_logical_dirty_rect(rects, PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_BOTTOM);
 }
 
 pub fn render_preset_panel(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, vm: &PresetPanelVm) {

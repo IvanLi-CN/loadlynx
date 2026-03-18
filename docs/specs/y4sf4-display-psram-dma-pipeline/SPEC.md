@@ -4,7 +4,7 @@
 
 - Status: 已完成
 - Created: 2026-03-18
-- Last: 2026-03-18
+- Last: 2026-03-19
 
 ## 背景 / 问题陈述
 
@@ -164,6 +164,12 @@
   - 首帧 `display: frame 1 rendered ... clone_ms=0 render_ms=134 dirty_rows=320 full=true`，对应 `present_ms=69`。
   - 稳态样本：`display_clone_ms=20-22`、`display_present_ms=4-23`（偶发 `130-149` 峰值）、`uart_rx_err_total=0`、`fast_status_ok=325 @ 22.757s`。
   - 与回退前版本相比，clone 成本明显下降，`fast_status ok` 速率提升，`framing_drops` 仍存在但未触发 UART 错误。
+- Candidate monitor（最终 16 行 chunk + 细粒度 dirty rect + pending 背压）: `.mcu-agentd/monitor/digital/20260318_201044.mon.ndjson`
+  - 启动版本与 `tmp/digital-fw-version.txt` 一致：`src 0x9a3d8bca4b4a9db9`。
+  - render 基线改为“最新完成帧直接成为 composed 基底”，steady-state 不再做 rect clone-back。
+  - `display_pending_drops=0`，`display_clone_ms` 主要落在 `3-11ms`，`display_present_ms` 主要落在 `14-62ms`。
+  - 左上角 FPS 改为按真实 `present` 完成数统计，steady-state `fps` 主要落在 `9-13`，与肉眼流畅度一致。
+  - 默认实现恢复到 `8192B / 16 rows / 0 yield`，同时通过 finer dirty rects 与 frame-in-flight coalescing 压低了 sweep 和卡顿感。
 
 ## 资产晋升（Asset promotion）
 
@@ -195,6 +201,7 @@ None
 - 2026-03-18: 创建 spec，冻结 PSRAM 专用 arena、三缓冲 render/present 管线、dirty-span flush、33ms cadence 与 baseline/candidate HIL 验收口径。
 - 2026-03-18: 实现 PSRAM 三缓冲 + render/present 双任务，默认 chunk 按规格回退到 `4096B / 8 rows`，并补齐 baseline/candidate HIL 证据。
 - 2026-03-18: 创建 reviewable PR #71，spec 状态切换为已完成。
+- 2026-03-19: 继续在同一 PR 上收敛显示正确性与流畅度问题，细化 dirty rect、移除 clone-back、增加 frame-in-flight coalescing，并恢复 `8192B / 16 rows` 默认 chunk。
 
 ## 参考（References）
 

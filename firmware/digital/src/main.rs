@@ -226,11 +226,11 @@ const TPS82130_ENABLE_DELAY_MS: u32 = 10;
 // 显示最小帧间隔（毫秒）：33ms ≈ 30FPS，与 analog 侧 30Hz FAST_STATUS 节奏对齐。
 const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33;
 const DISPLAY_BUFFER_COUNT: usize = 3;
-const DISPLAY_DMA_STAGING_BYTES: usize = 4 * 1024;
-// HIL fallback: 8-row staging reduces SPI burst length and UART contention.
-const DISPLAY_CHUNK_ROWS: usize = 8;
-const DISPLAY_CHUNK_YIELD_LOOPS: usize = 1;
-const DISPLAY_DIRTY_RECT_FALLBACK: usize = 8;
+const DISPLAY_DMA_STAGING_BYTES: usize = 8 * 1024;
+// Larger DMA bursts reduce the visible right-to-left sweep on the rotated panel.
+const DISPLAY_CHUNK_ROWS: usize = 16;
+const DISPLAY_CHUNK_YIELD_LOOPS: usize = 0;
+const DISPLAY_DIRTY_RECT_FALLBACK: usize = ui::DIRTY_RECT_CAPACITY;
 const FRAME_SAMPLE_FRAMES: u32 = 3; // 仅记录前几帧像素统计，避免日志过多
 const FRAME_LOG_POINTS: [(usize, usize); 3] = [
     (0, 0),
@@ -427,6 +427,7 @@ pub(crate) static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
 static DISPLAY_FORCE_FULL_RENDER: AtomicBool = AtomicBool::new(true);
 static DISPLAY_LAST_RENDER_MS: AtomicU32 = AtomicU32::new(0);
@@ -1902,8 +1903,37 @@ async fn touch_ui_task(
             boundary_fail_fired: bool,
         },
     }
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum TapAction {
+        DashboardSettingsOpen,
+        DashboardPdToggle,
+        PdSettingsBack,
+        PdSettingsApply,
+        PdSettingsModeFixed,
+        PdSettingsModePps,
+        PdSettingsVreqValue,
+        PdSettingsIreqValue,
+        PdSettingsListRow(u8),
+    }
+    fn is_duplicate_tap_action(
+        last_action: &mut Option<(TapAction, u32)>,
+        action: TapAction,
+        now: u32,
+    ) -> bool {
+        const TAP_DEDUP_WINDOW_MS: u32 = 220;
+
+        if let Some((last_kind, last_ms)) = *last_action {
+            if last_kind == action && now.wrapping_sub(last_ms) <= TAP_DEDUP_WINDOW_MS {
+                return true;
+            }
+        }
+
+        *last_action = Some((action, now));
+        false
+    }
     let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
+    let mut last_tap_action: Option<(TapAction, u32)> = None;
     const DRAG_START_THRESHOLD_PX: i32 = 10;
     const SWIPE_STEP_PX: i32 = 24;
     // Setpoint digit selection should feel like a deliberate left/right swipe.
@@ -2583,6 +2613,16 @@ async fn touch_ui_task(
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
+                        if is_duplicate_tap_action(
+                            &mut last_tap_action,
+                            TapAction::DashboardPdToggle,
+                            now_ms32(),
+                        ) {
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                            last_tab_tap = None;
+                            yield_now().await;
+                            continue;
+                        }
                         let apply_ms = now_ms32();
                         // The dashboard button is a persisted gate. Keep the EEPROM update and
                         // in-memory state change under the same lock so concurrent UI/HTTP PD
@@ -2667,6 +2707,16 @@ async fn touch_ui_task(
                         {
                             match hit {
                                 ui::pd_settings::PdSettingsHit::Back => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsBack,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     guard.ui_view = control::UiView::Main;
                                     guard.pd_draft = guard.pd_saved;
@@ -2681,6 +2731,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::Apply => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsApply,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     if !vm.apply_enabled {
                                         prompt_tone::enqueue_ui_fail();
                                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -2762,6 +2822,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::ModeFixed => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsModeFixed,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Fixed {
                                         guard.pd_draft.mode = control::PdMode::Fixed;
@@ -2825,6 +2895,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::ModePps => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsModePps,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Pps {
                                         guard.pd_draft.mode = control::PdMode::Pps;
@@ -2872,6 +2952,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::VreqValue => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsVreqValue,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Pps {
                                         prompt_tone::enqueue_ui_fail();
@@ -2891,6 +2981,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::IreqValue => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsIreqValue,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     guard.pd_settings_focus = control::PdSettingsFocus::Ireq;
                                     guard.pd_settings_digit = ui::pd_settings::pick_value_digit(
@@ -2906,6 +3006,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::ListRow(idx) => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsListRow(idx as u8),
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     match guard.pd_draft.mode {
                                         control::PdMode::Fixed => {
@@ -2968,6 +3078,16 @@ async fn touch_ui_task(
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_load_button(marker.x, marker.y)
                     {
+                        if is_duplicate_tap_action(
+                            &mut last_tap_action,
+                            TapAction::DashboardSettingsOpen,
+                            now_ms32(),
+                        ) {
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                            last_tab_tap = None;
+                            yield_now().await;
+                            continue;
+                        }
                         let mut guard = control.lock().await;
                         guard.ui_view = control::UiView::PdSettings;
                         guard.pd_draft = guard.pd_saved;
@@ -4077,18 +4197,18 @@ impl DisplayPipelineState {
             || self.presenting_idx == Some(idx)
     }
 
-    fn select_render_target(&self) -> usize {
+    fn select_render_target(&self) -> Option<usize> {
         if self.displayed_idx < DISPLAY_BUFFER_COUNT && !self.is_reserved(self.displayed_idx) {
-            return self.displayed_idx;
+            return Some(self.displayed_idx);
         }
 
         for idx in 0..DISPLAY_BUFFER_COUNT {
             if !self.is_reserved(idx) {
-                return idx;
+                return Some(idx);
             }
         }
 
-        core::panic!("display pipeline has no free framebuffer");
+        None
     }
 }
 
@@ -4261,7 +4381,7 @@ impl TelemetryModel {
     ///
     /// This is used by the display task to drive partial, character-aware
     /// updates on top of the existing framebuffer diff logic.
-    fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask) {
+    fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask, u32) {
         // Keep all display strings in sync with the latest numeric values so
         // the UI layer can render based purely on preformatted text. This is
         // intentionally called from the display task (UI context), not from the
@@ -4276,15 +4396,19 @@ impl TelemetryModel {
         let touch_seq = touch::touch_marker_seq();
         if touch_seq != self.last_touch_marker_seq {
             mask.touch_marker = true;
-            self.last_touch_marker_seq = touch_seq;
         }
 
         if let Some(prev) = prev_snapshot {
-            if prev.main_voltage_text != current.main_voltage_text
-                || prev.main_current_text != current.main_current_text
-                || prev.main_power_text != current.main_power_text
-            {
-                mask.main_metrics = true;
+            if prev.main_voltage_text != current.main_voltage_text {
+                mask.main_voltage = true;
+            }
+
+            if prev.main_current_text != current.main_current_text {
+                mask.main_current = true;
+            }
+
+            if prev.main_power_text != current.main_power_text {
+                mask.main_power = true;
             }
 
             if prev.remote_voltage_text != current.remote_voltage_text
@@ -4341,7 +4465,9 @@ impl TelemetryModel {
         } else {
             // First-frame render: everything is considered dirty so that the
             // initial layout is fully drawn.
-            mask.main_metrics = true;
+            mask.main_voltage = true;
+            mask.main_current = true;
+            mask.main_power = true;
             mask.voltage_pair = true;
             mask.channel_currents = true;
             mask.control_row = true;
@@ -4351,9 +4477,12 @@ impl TelemetryModel {
             mask.touch_marker = true;
         }
 
-        // 记录当前快照用于下一次 diff；只在这里 clone 一次，避免在栈上持有多份大对象。
-        self.last_rendered = Some(self.snapshot.clone());
-        (self.snapshot.clone(), mask)
+        (self.snapshot.clone(), mask, touch_seq)
+    }
+
+    fn commit_rendered(&mut self, snapshot: &UiSnapshot, touch_seq: u32) {
+        self.last_rendered = Some(snapshot.clone());
+        self.last_touch_marker_seq = touch_seq;
     }
 }
 
@@ -4661,6 +4790,26 @@ fn display_dirty_row_count(rects: &ui::DirtyRects) -> u16 {
     rows.iter().filter(|&&dirty| dirty).count() as u16
 }
 
+fn merge_pending_dirty_rects(
+    dirty_rects: &mut ui::DirtyRects,
+    pending_plan: DisplayFramePlan,
+) -> bool {
+    if pending_plan.full_refresh {
+        return true;
+    }
+
+    for rect in pending_plan.rects() {
+        if dirty_rects.iter().any(|existing| *existing == *rect) {
+            continue;
+        }
+        if dirty_rects.push(*rect).is_err() {
+            return true;
+        }
+    }
+
+    false
+}
+
 async fn push_dirty_rect_to_display<DI, M, RST>(
     display: &mut lcd_async::Display<DI, M, RST>,
     staging: &mut [u8; DISPLAY_DMA_STAGING_BYTES],
@@ -4722,13 +4871,14 @@ async fn display_render_task(
 
     let mut last_render_ms = now_ms32();
     let mut fps_window_start_ms = last_render_ms;
-    let mut fps_window_frames: u32 = 0;
+    let mut fps_window_presented = DISPLAY_PRESENT_COUNT.load(Ordering::Relaxed);
     let mut last_fps: u32 = 0;
     let mut last_panel_visible: bool = false;
     let mut last_preview_active: bool = false;
     let mut last_preview_mode: LoadMode = LoadMode::Cc;
     let mut last_ui_view: control::UiView = control::UiView::Main;
     let mut last_panel_vm: Option<ui::preset_panel::PresetPanelVm> = None;
+    let mut last_pd_settings_vm: Option<ui::pd_settings::PdSettingsVm> = None;
 
     loop {
         if SCREEN_POWER_STATE.load(Ordering::Relaxed) == SCREEN_POWER_STATE_OFF {
@@ -4751,12 +4901,13 @@ async fn display_render_task(
             info!("display: rendering frame {} (dt_ms={})", frame_idx, dt_ms);
         }
 
-        fps_window_frames = fps_window_frames.wrapping_add(1);
         let mut fps_dirty = false;
         let window_elapsed = now.wrapping_sub(fps_window_start_ms);
         if window_elapsed >= 500 {
+            let presented_total = DISPLAY_PRESENT_COUNT.load(Ordering::Relaxed);
+            let presented_frames = presented_total.wrapping_sub(fps_window_presented);
             let fps = if window_elapsed > 0 {
-                (fps_window_frames.saturating_mul(1000)) / window_elapsed
+                (presented_frames.saturating_mul(1000)) / window_elapsed
             } else {
                 0
             };
@@ -4764,9 +4915,9 @@ async fn display_render_task(
             last_fps = fps;
             info!(
                 "display: fps window_ms={} frames={} fps={}",
-                window_elapsed, fps_window_frames, fps
+                window_elapsed, presented_frames, fps
             );
-            fps_window_frames = 0;
+            fps_window_presented = presented_total;
             fps_window_start_ms = now;
         }
 
@@ -4875,14 +5026,8 @@ async fn display_render_task(
         if preview_active && last_preview_active && overlay_mode != last_preview_mode {
             force_full_render = true;
         }
-        last_panel_visible = panel_visible;
-        last_preview_active = preview_active;
-        if preview_active {
-            last_preview_mode = overlay_mode;
-        }
-        last_ui_view = ui_view;
 
-        let (snapshot, mask, pd_status_for_panel) = {
+        let (snapshot, mut mask, pd_status_for_panel, touch_seq) = {
             let mut guard = telemetry.lock().await;
             guard.snapshot.blink_on = ((now / 500) & 1) == 0;
             let uv_latched = guard
@@ -4972,8 +5117,29 @@ async fn display_render_task(
                 .snapshot
                 .set_control_row(active_target_milli, active_target_unit, adjust_digit);
             let pd_status = guard.last_pd_status.clone();
-            let (snapshot, mask) = guard.diff_for_render();
-            (snapshot, mask, pd_status)
+            let (snapshot, mask, touch_seq) = guard.diff_for_render();
+            (snapshot, mask, pd_status, touch_seq)
+        };
+
+        let touch_marker_dirty = ui::touch_marker_overlay_enabled() && mask.touch_marker;
+        if !ui::touch_marker_overlay_enabled() {
+            mask.touch_marker = false;
+        }
+
+        let pd_settings_vm = if ui_view == control::UiView::PdSettings {
+            Some(build_pd_settings_vm(
+                pd_draft,
+                pd_focus,
+                pd_digit,
+                pd_status_for_panel.as_ref(),
+            ))
+        } else {
+            None
+        };
+        let pd_settings_dirty = match (pd_settings_vm.as_ref(), last_pd_settings_vm.as_ref()) {
+            (Some(curr), Some(prev)) => curr != prev,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
         };
 
         let full_screen_view = match ui_view {
@@ -4982,12 +5148,18 @@ async fn display_render_task(
             control::UiView::AudioMenu => true,
             _ => false,
         };
-        if mask.touch_marker {
+        if touch_marker_dirty {
             force_full_render = true;
         }
-
-        if !full_screen_view && mask.is_empty() && !force_full_render && !fps_dirty && !panel_dirty
-        {
+        let needs_render = match ui_view {
+            control::UiView::PdSettings => {
+                force_full_render || pd_settings_dirty || fps_dirty || touch_marker_dirty
+            }
+            #[cfg(feature = "audio_menu")]
+            control::UiView::AudioMenu => force_full_render || fps_dirty || touch_marker_dirty,
+            _ => !mask.is_empty() || force_full_render || fps_dirty || panel_dirty,
+        };
+        if !needs_render {
             if log_this_frame {
                 info!(
                     "display: frame {} skipped (no UI changes, dt_ms={})",
@@ -4998,24 +5170,76 @@ async fn display_render_task(
             continue;
         }
 
-        let (base_idx, target_idx) = {
-            let guard = pipeline.state.lock().await;
-            (guard.composed_idx, guard.select_render_target())
+        let latency_sensitive = force_full_render
+            || full_screen_view
+            || touch_marker_dirty
+            || panel_dirty
+            || mask.control_row
+            || mask.load_row;
+        if !latency_sensitive {
+            let frame_in_flight = {
+                let guard = pipeline.state.lock().await;
+                guard.pending_idx.is_some() || guard.presenting_idx.is_some()
+            };
+            if frame_in_flight {
+                if log_this_frame {
+                    info!(
+                        "display: frame {} coalesced (frame in flight, dt_ms={})",
+                        frame_idx, dt_ms
+                    );
+                }
+                last_render_ms = now;
+                continue;
+            }
+        }
+
+        let (base_idx, target_idx, pending_plan) = {
+            let mut guard = pipeline.state.lock().await;
+            let target_idx = guard.select_render_target();
+            if target_idx.is_none() {
+                guard.dropped_frames = guard.dropped_frames.wrapping_add(1);
+                DISPLAY_PENDING_DROPS.store(guard.dropped_frames, Ordering::Relaxed);
+            }
+            let pending_plan = guard.pending_idx.map(|idx| guard.plans[idx]);
+            (guard.composed_idx, target_idx, pending_plan)
+        };
+        let Some(target_idx) = target_idx else {
+            if log_this_frame {
+                info!(
+                    "display: frame {} skipped (pipeline busy, dt_ms={})",
+                    frame_idx, dt_ms
+                );
+            }
+            last_render_ms = now;
+            continue;
         };
 
         let mut dirty_rects = ui::DirtyRects::new();
         let mut full_refresh = force_full_render || full_screen_view;
+        let mut overlay_dirty = force_full_render || fps_dirty;
         if full_refresh {
             ui::push_full_screen_dirty_rect(&mut dirty_rects);
+            if !full_screen_view {
+                overlay_dirty = true;
+            }
         } else {
-            ui::collect_partial_dirty_rects(&snapshot, &mask, fps_dirty, &mut dirty_rects);
+            ui::collect_partial_dirty_rects(&snapshot, &mask, overlay_dirty, &mut dirty_rects);
             if panel_dirty {
                 ui::preset_panel::push_panel_dirty_rect(&mut dirty_rects);
+            }
+            if let Some(plan) = pending_plan {
+                if merge_pending_dirty_rects(&mut dirty_rects, plan) {
+                    dirty_rects.clear();
+                    ui::push_full_screen_dirty_rect(&mut dirty_rects);
+                    full_refresh = true;
+                    overlay_dirty = true;
+                }
             }
             if dirty_rects.len() >= DISPLAY_DIRTY_RECT_FALLBACK {
                 dirty_rects.clear();
                 ui::push_full_screen_dirty_rect(&mut dirty_rects);
                 full_refresh = true;
+                overlay_dirty = true;
             }
         }
 
@@ -5026,7 +5250,6 @@ async fn display_render_task(
             }
         }
         let clone_ms = now_ms32().wrapping_sub(clone_start_ms);
-        DISPLAY_LAST_CLONE_MS.store(clone_ms, Ordering::Relaxed);
 
         let render_start_ms = now_ms32();
         {
@@ -5035,13 +5258,10 @@ async fn display_render_task(
                 RawFrameBuf::<Rgb565, _>::new(framebuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
             match ui_view {
                 control::UiView::PdSettings => {
-                    let vm = build_pd_settings_vm(
-                        pd_draft,
-                        pd_focus,
-                        pd_digit,
-                        pd_status_for_panel.as_ref(),
-                    );
-                    ui::pd_settings::render_pd_settings(&mut frame, &vm);
+                    let vm = pd_settings_vm
+                        .as_ref()
+                        .expect("pd_settings_vm missing while rendering PdSettings");
+                    ui::pd_settings::render_pd_settings(&mut frame, vm);
                 }
                 #[cfg(feature = "audio_menu")]
                 control::UiView::AudioMenu => {
@@ -5059,17 +5279,19 @@ async fn display_render_task(
                 }
             }
 
-            if force_full_render || fps_dirty || (full_refresh && !full_screen_view) {
+            if overlay_dirty {
                 ui::render_fps_overlay(&mut frame, last_fps);
             }
 
-            if force_full_render || mask.touch_marker {
+            if force_full_render || touch_marker_dirty {
                 ui::render_touch_marker(&mut frame, touch::load_touch_marker());
             }
         }
 
         let render_ms = now_ms32().wrapping_sub(render_start_ms);
         DISPLAY_LAST_RENDER_MS.store(render_ms, Ordering::Relaxed);
+
+        DISPLAY_LAST_CLONE_MS.store(clone_ms, Ordering::Relaxed);
 
         if frame_idx <= FRAME_SAMPLE_FRAMES {
             log_framebuffer_span("rendered-frame", pipeline.arena.framebuffer(target_idx));
@@ -5106,6 +5328,11 @@ async fn display_render_task(
             (generation, replaced_pending)
         };
 
+        {
+            let mut guard = telemetry.lock().await;
+            guard.commit_rendered(&snapshot, touch_seq);
+        }
+
         if log_this_frame {
             info!(
                 "display: frame {} rendered (gen={} clone_ms={} render_ms={} dirty_rows={} dirty_rects={} full={} replaced_pending={})",
@@ -5121,7 +5348,12 @@ async fn display_render_task(
         }
 
         last_render_ms = now;
+        last_panel_visible = panel_visible;
+        last_preview_active = preview_active;
+        last_preview_mode = overlay_mode;
+        last_ui_view = ui_view;
         last_panel_vm = panel_vm;
+        last_pd_settings_vm = pd_settings_vm;
     }
 }
 
@@ -5295,6 +5527,7 @@ async fn display_present_task(
             }
         }
         let present_ms = now_ms32().wrapping_sub(present_start_ms);
+        DISPLAY_PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
         DISPLAY_LAST_PRESENT_MS.store(present_ms, Ordering::Relaxed);
         if plan.full_refresh {
             DISPLAY_PRESENT_FULL_COUNT.fetch_add(1, Ordering::Relaxed);

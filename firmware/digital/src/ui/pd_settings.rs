@@ -168,7 +168,7 @@ pub enum PdSettingsMessage {
     ApplyFailed,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PdSettingsVm {
     pub attached: bool,
     pub mode: PdMode,
