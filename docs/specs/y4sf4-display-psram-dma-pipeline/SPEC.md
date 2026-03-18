@@ -2,7 +2,7 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成
 - Created: 2026-03-18
 - Last: 2026-03-18
 
@@ -174,7 +174,7 @@ None
 - [x] M1: 建立新 spec，并完成 baseline build/HIL 证据采集。
 - [x] M2: 启用 PSRAM arena 与三 framebuffer 池，删除默认构建的单缓冲退化。
 - [x] M3: 拆分 render/present 任务，接入 dirty-span flush 与 display counters。
-- [ ] M4: 完成 baseline/candidate 对比、spec sync、review 修复与 reviewable PR。
+- [x] M4: 完成 baseline/candidate 对比、spec sync、review 修复与 reviewable PR。
 
 ## 方案概述（Approach, high-level）
 
@@ -194,6 +194,7 @@ None
 
 - 2026-03-18: 创建 spec，冻结 PSRAM 专用 arena、三缓冲 render/present 管线、dirty-span flush、33ms cadence 与 baseline/candidate HIL 验收口径。
 - 2026-03-18: 实现 PSRAM 三缓冲 + render/present 双任务，默认 chunk 按规格回退到 `4096B / 8 rows`，并补齐 baseline/candidate HIL 证据。
+- 2026-03-18: 创建 reviewable PR #71，spec 状态切换为已完成。
 
 ## 参考（References）
 
