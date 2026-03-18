@@ -27,7 +27,7 @@ loadlynx-screen-power = { path = "../../libs/screen-power" }
 loadlynx-led-effects = { path = "../../libs/led-effects" }
 
 # HAL + Embassy integration for ESP32-S3
-esp-hal = { version = "=1.0.0", features = ["esp32s3", "rt", "unstable", "defmt"] }
+esp-hal = { version = "=1.0.0", features = ["esp32s3", "rt", "unstable", "defmt", "psram"] }
 
 # Logging & panic/backtrace on ESP (defmt over espflash)
 esp-println = { version = "0.16", default-features = false, features = ["esp32s3", "uart", "defmt-espflash"] }
@@ -49,7 +49,7 @@ embassy-net = { version = "0.7.1", default-features = false, features = [
     "udp",
     "dns",
 ], optional = true }
-embassy-time = { version = "0.5.0", default-features = false, features = ["defmt"], optional = true }
+embassy-time = { version = "0.5.0", default-features = false, features = ["defmt"], optional = false }
 smoltcp = { version = "0.12.0", default-features = false, features = [
     "defmt",
     "medium-ethernet",
@@ -102,6 +102,5 @@ net_http = [
     "esp-rtos/esp-alloc",
     "esp-alloc",
     "embassy-net",
-    "embassy-time",
     "smoltcp",
 ]

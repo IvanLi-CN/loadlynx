@@ -9,7 +9,7 @@ use embedded_graphics::pixelcolor::{
     Rgb565,
     raw::{RawData, RawU16},
 };
-use heapless::String;
+use heapless::{String, Vec};
 use lcd_async::raw_framebuf::RawFrameBuf;
 use loadlynx_protocol::{
     FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, LoadMode,
@@ -62,6 +62,10 @@ const VOLTAGE_PAIR_TOP: i32 = 50;
 const VOLTAGE_PAIR_BOTTOM: i32 = 96;
 const LOAD_ROW_TOP: i32 = 118;
 const TELEMETRY_TOP: i32 = 172;
+const PRESET_PREVIEW_PANEL_LEFT: i32 = 154;
+const PRESET_PREVIEW_PANEL_RIGHT: i32 = 314;
+const PRESET_PREVIEW_PANEL_TOP: i32 = 44;
+const PRESET_PREVIEW_PANEL_BOTTOM: i32 = 170;
 
 // Control row layout: <M#><MODE> entry + fixed-width target summary.
 pub(crate) const CONTROL_ROW_TOP: i32 = 10;
@@ -240,6 +244,130 @@ impl UiChangeMask {
     }
 }
 
+pub const DIRTY_RECT_CAPACITY: usize = 12;
+
+#[derive(Copy, Clone, Eq, PartialEq, Debug, Default)]
+pub struct DirtyRect {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+}
+
+impl DirtyRect {
+    pub const fn new(x: u16, y: u16, width: u16, height: u16) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+}
+
+pub type DirtyRects = Vec<DirtyRect, DIRTY_RECT_CAPACITY>;
+
+fn push_dirty_rect(rects: &mut DirtyRects, left: i32, top: i32, right: i32, bottom: i32) {
+    let left = left.clamp(0, DISPLAY_WIDTH as i32);
+    let top = top.clamp(0, DISPLAY_HEIGHT as i32);
+    let right = right.clamp(left, DISPLAY_WIDTH as i32);
+    let bottom = bottom.clamp(top, DISPLAY_HEIGHT as i32);
+
+    let width = right - left;
+    let height = bottom - top;
+    if width <= 0 || height <= 0 {
+        return;
+    }
+
+    let _ = rects.push(DirtyRect::new(
+        left as u16,
+        top as u16,
+        width as u16,
+        height as u16,
+    ));
+}
+
+pub fn full_screen_dirty_rect() -> DirtyRect {
+    DirtyRect::new(0, 0, DISPLAY_WIDTH as u16, DISPLAY_HEIGHT as u16)
+}
+
+pub fn push_full_screen_dirty_rect(rects: &mut DirtyRects) {
+    let _ = rects.push(full_screen_dirty_rect());
+}
+
+pub fn push_fps_overlay_dirty_rect(rects: &mut DirtyRects) {
+    push_dirty_rect(rects, 0, 0, 80, 16);
+}
+
+pub fn collect_partial_dirty_rects(
+    curr: &UiSnapshot,
+    mask: &UiChangeMask,
+    include_fps_overlay: bool,
+    dirty_rects: &mut DirtyRects,
+) {
+    if mask.main_metrics {
+        push_dirty_rect(dirty_rects, 8, 0, 182, 240);
+    }
+
+    if mask.voltage_pair {
+        push_dirty_rect(
+            dirty_rects,
+            190,
+            VOLTAGE_PAIR_TOP,
+            LOGICAL_WIDTH,
+            VOLTAGE_PAIR_BOTTOM,
+        );
+    }
+
+    if mask.load_row {
+        push_dirty_rect(
+            dirty_rects,
+            190,
+            VOLTAGE_PAIR_BOTTOM,
+            LOGICAL_WIDTH,
+            TELEMETRY_TOP,
+        );
+    }
+
+    if mask.channel_currents && !mask.main_metrics {
+        push_dirty_rect(dirty_rects, 80, 92, 182, 124);
+    }
+
+    if mask.control_row {
+        push_dirty_rect(dirty_rects, 190, 0, LOGICAL_WIDTH, VOLTAGE_PAIR_TOP);
+    }
+
+    if mask.telemetry_lines {
+        push_dirty_rect(
+            dirty_rects,
+            190,
+            TELEMETRY_TOP,
+            LOGICAL_WIDTH,
+            LOGICAL_HEIGHT,
+        );
+    }
+
+    let redraw_preview = curr.preset_preview_active
+        && (mask.control_row || mask.voltage_pair || mask.load_row || mask.telemetry_lines);
+    if redraw_preview {
+        push_dirty_rect(
+            dirty_rects,
+            PRESET_PREVIEW_PANEL_LEFT,
+            PRESET_PREVIEW_PANEL_TOP,
+            PRESET_PREVIEW_PANEL_RIGHT,
+            PRESET_PREVIEW_PANEL_BOTTOM,
+        );
+    }
+
+    if mask.wifi_status && !mask.control_row {
+        push_dirty_rect(dirty_rects, LOGICAL_WIDTH - 32, 0, LOGICAL_WIDTH, 10);
+    }
+
+    if include_fps_overlay {
+        push_fps_overlay_dirty_rect(dirty_rects);
+    }
+}
+
 pub fn render(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, data: &UiSnapshot) {
     let bytes = frame.as_mut_bytes();
     let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -386,7 +514,7 @@ pub fn render_partial(
         draw_dashboard_load_row(&mut canvas, curr);
     }
 
-    if mask.channel_currents {
+    if mask.channel_currents && !mask.main_metrics {
         // CURRENT 标签右侧的镜像条形图（CH1/CH2），与主电流读数解耦刷新。
         draw_current_mirror_bar(&mut canvas, curr);
     }
@@ -409,12 +537,19 @@ pub fn render_partial(
         draw_telemetry(&mut canvas, curr);
     }
 
-    // Preset preview info panel overlays part of the right-side info column; redraw it last so
-    // partial updates do not accidentally wipe it while the gesture is still held.
-    draw_preset_preview_panel(&mut canvas, curr);
+    let redraw_preview = curr.preset_preview_active
+        && (mask.control_row || mask.voltage_pair || mask.load_row || mask.telemetry_lines);
+    if redraw_preview {
+        // Preset preview info panel overlays part of the right-side info column; redraw it last so
+        // partial updates do not accidentally wipe it while the gesture is still held.
+        draw_preset_preview_panel(&mut canvas, curr);
+    }
 
-    // Wi‑Fi 状态标记始终在最后绘制一层小覆盖，避免被右侧其它元素重绘时“擦掉”。
-    render_wifi_status(&mut canvas, curr.wifi_status);
+    let redraw_wifi = mask.wifi_status || mask.control_row;
+    if redraw_wifi {
+        // Wi‑Fi 状态标记始终在最后绘制一层小覆盖，避免被右侧其它元素重绘时“擦掉”。
+        render_wifi_status(&mut canvas, curr.wifi_status);
+    }
 }
 
 /// 在左上角叠加显示 FPS 信息。
@@ -676,10 +811,6 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
 
     // A1 preset preview info panel: mirror `tools/ui-mock/src/preset_preview_panel.rs`
     // for pixel-perfect constants/layout (logical 320x240 coordinate space).
-    const PANEL_LEFT: i32 = 154;
-    const PANEL_RIGHT: i32 = 314;
-    const PANEL_TOP: i32 = 44;
-
     const BORDER: i32 = 1;
     const RADIUS: i32 = 6;
     const PAD_X: i32 = 10;
@@ -705,19 +836,24 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
     let rows = 6;
     let panel_h = BORDER * 2 + PAD_Y * 2 + rows * ROW_H;
 
-    let outer = Rect::new(PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_TOP + panel_h);
+    let outer = Rect::new(
+        PRESET_PREVIEW_PANEL_LEFT,
+        PRESET_PREVIEW_PANEL_TOP,
+        PRESET_PREVIEW_PANEL_RIGHT,
+        PRESET_PREVIEW_PANEL_TOP + panel_h,
+    );
     canvas.fill_round_rect(outer, RADIUS, rgb(COLOR_BORDER));
 
     let inner = Rect::new(
-        PANEL_LEFT + BORDER,
-        PANEL_TOP + BORDER,
-        PANEL_RIGHT - BORDER,
-        PANEL_TOP + panel_h - BORDER,
+        PRESET_PREVIEW_PANEL_LEFT + BORDER,
+        PRESET_PREVIEW_PANEL_TOP + BORDER,
+        PRESET_PREVIEW_PANEL_RIGHT - BORDER,
+        PRESET_PREVIEW_PANEL_TOP + panel_h - BORDER,
     );
     canvas.fill_round_rect(inner, (RADIUS - BORDER).max(0), rgb(COLOR_BG));
 
-    let label_x = PANEL_LEFT + PAD_X;
-    let value_right = PANEL_RIGHT - PAD_X;
+    let label_x = PRESET_PREVIEW_PANEL_LEFT + PAD_X;
+    let value_right = PRESET_PREVIEW_PANEL_RIGHT - PAD_X;
     let small_h = SMALL_FONT.height() as i32;
     let num_h = SETPOINT_FONT.height() as i32;
 
@@ -726,7 +862,7 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
 
     let mut row_idx = 0;
     while row_idx < rows {
-        let row_top = PANEL_TOP + BORDER + PAD_Y + row_idx * ROW_H;
+        let row_top = PRESET_PREVIEW_PANEL_TOP + BORDER + PAD_Y + row_idx * ROW_H;
         let row_bottom = row_top + ROW_H;
 
         let label_y = row_top + (ROW_H - small_h).max(0) / 2;
@@ -800,9 +936,9 @@ fn draw_preset_preview_panel(canvas: &mut Canvas, data: &UiSnapshot) {
         if row_idx < rows {
             canvas.fill_rect(
                 Rect::new(
-                    PANEL_LEFT + BORDER,
+                    PRESET_PREVIEW_PANEL_LEFT + BORDER,
                     row_bottom,
-                    PANEL_RIGHT - BORDER,
+                    PRESET_PREVIEW_PANEL_RIGHT - BORDER,
                     row_bottom + 1,
                 ),
                 rgb(COLOR_BORDER),
