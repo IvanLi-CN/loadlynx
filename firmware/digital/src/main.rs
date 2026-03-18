@@ -4728,6 +4728,7 @@ async fn display_render_task(
     let mut last_preview_active: bool = false;
     let mut last_preview_mode: LoadMode = LoadMode::Cc;
     let mut last_ui_view: control::UiView = control::UiView::Main;
+    let mut last_panel_vm: Option<ui::preset_panel::PresetPanelVm> = None;
 
     loop {
         if SCREEN_POWER_STATE.load(Ordering::Relaxed) == SCREEN_POWER_STATE_OFF {
@@ -4856,8 +4857,13 @@ async fn display_render_task(
         };
 
         let preview_active = preview_panel.is_some();
+        let panel_dirty = match (panel_vm.as_ref(), last_panel_vm.as_ref()) {
+            (Some(curr), Some(prev)) => curr != prev,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
+
         let mut force_full_render = DISPLAY_FORCE_FULL_RENDER.swap(false, Ordering::Relaxed)
-            || panel_visible
             || (panel_visible != last_panel_visible)
             || frame_idx == 1;
         if ui_view != last_ui_view {
@@ -4980,7 +4986,8 @@ async fn display_render_task(
             force_full_render = true;
         }
 
-        if !full_screen_view && mask.is_empty() && !force_full_render && !fps_dirty {
+        if !full_screen_view && mask.is_empty() && !force_full_render && !fps_dirty && !panel_dirty
+        {
             if log_this_frame {
                 info!(
                     "display: frame {} skipped (no UI changes, dt_ms={})",
@@ -5002,6 +5009,9 @@ async fn display_render_task(
             ui::push_full_screen_dirty_rect(&mut dirty_rects);
         } else {
             ui::collect_partial_dirty_rects(&snapshot, &mask, fps_dirty, &mut dirty_rects);
+            if panel_dirty {
+                ui::preset_panel::push_panel_dirty_rect(&mut dirty_rects);
+            }
             if dirty_rects.len() >= DISPLAY_DIRTY_RECT_FALLBACK {
                 dirty_rects.clear();
                 ui::push_full_screen_dirty_rect(&mut dirty_rects);
@@ -5111,6 +5121,7 @@ async fn display_render_task(
         }
 
         last_render_ms = now;
+        last_panel_vm = panel_vm;
     }
 }
 
