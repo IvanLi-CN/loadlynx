@@ -194,6 +194,9 @@ pub struct PdConfig {
 impl PdConfig {
     pub const DEFAULT_TARGET_MV: u32 = 5_000;
     pub const DEFAULT_I_REQ_MA: u32 = 3_000;
+    pub const MIN_AUGMENTED_TARGET_MV: u32 = 3_000;
+    pub const MAX_PPS_TARGET_MV: u32 = 21_000;
+    pub const MAX_FIXED_TARGET_MV: u32 = 48_000;
 
     pub const fn default() -> Self {
         Self {
@@ -238,8 +241,10 @@ impl PdConfig {
     }
 
     pub fn toggle_target(&mut self) -> bool {
-        let next = if self.target_mv == 20_000 {
+        let next = if self.target_mv >= 28_000 {
             5_000
+        } else if self.target_mv >= 20_000 {
+            28_000
         } else {
             20_000
         };
@@ -549,7 +554,7 @@ pub fn decode_presets_blob(
 // ---- EEPROM PD config blob -------------------------------------------------
 
 const PD_MAGIC: [u8; 4] = *b"LLPD";
-const PD_FMT_VERSION: u8 = 5;
+const PD_FMT_VERSION: u8 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdBlobError {
@@ -590,7 +595,7 @@ pub fn decode_pd_blob(
         return Err(PdBlobError::InvalidMagic);
     }
     let ver = bytes[4];
-    if ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != PD_FMT_VERSION {
+    if ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != 5 && ver != PD_FMT_VERSION {
         return Err(PdBlobError::UnsupportedVersion(ver));
     }
 
@@ -616,7 +621,11 @@ pub fn decode_pd_blob(
     if ver == 1 && target_mv != 5_000 && target_mv != 20_000 {
         return Err(PdBlobError::InvalidTarget(target_mv));
     }
-    if ver >= 2 && (target_mv < 3_000 || target_mv > 21_000) {
+    let max_target_mv = match mode {
+        PdMode::Fixed => PdConfig::MAX_FIXED_TARGET_MV,
+        PdMode::Pps => PdConfig::MAX_PPS_TARGET_MV,
+    };
+    if ver >= 2 && (target_mv < PdConfig::MIN_AUGMENTED_TARGET_MV || target_mv > max_target_mv) {
         return Err(PdBlobError::InvalidTarget(target_mv));
     }
 
@@ -628,7 +637,9 @@ pub fn decode_pd_blob(
     let allow_extended_voltage = if ver >= 4 { bytes[16] != 0 } else { false };
     let (target_mv, pps_target_mv) = if ver >= 5 {
         let cached = get_u32_le(bytes, 17);
-        let cached = if (3_000..=21_000).contains(&cached) {
+        let cached = if (PdConfig::MIN_AUGMENTED_TARGET_MV..=PdConfig::MAX_PPS_TARGET_MV)
+            .contains(&cached)
+        {
             cached
         } else {
             PdConfig::DEFAULT_TARGET_MV
@@ -709,6 +720,39 @@ mod tests {
         let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v5 blob");
         assert_eq!(decoded, cfg);
         assert!(allow_extended_voltage);
+    }
+
+    #[test]
+    fn pd_blob_roundtrip_preserves_28v_fixed_target() {
+        let cfg = PdConfig {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 8,
+            pps_object_pos: 0,
+            target_mv: 28_000,
+            pps_target_mv: 9_000,
+            i_req_ma: 5_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v6 blob");
+        assert_eq!(decoded, cfg);
+        assert!(allow_extended_voltage);
+    }
+
+    #[test]
+    fn pd_blob_rejects_pps_target_above_21v() {
+        let cfg = PdConfig {
+            mode: PdMode::Pps,
+            fixed_object_pos: 0,
+            pps_object_pos: 2,
+            target_mv: 28_000,
+            pps_target_mv: 28_000,
+            i_req_ma: 3_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let err = decode_pd_blob(&blob).unwrap_err();
+        assert_eq!(err, PdBlobError::InvalidTarget(28_000));
     }
 
     #[test]

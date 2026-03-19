@@ -726,8 +726,8 @@ async fn fast_status_tx_task(
 
     let mut raw_frame = [0u8; 192];
     let mut slip_frame = [0u8; 384];
-    let mut pd_raw = [0u8; 256];
-    let mut pd_slip = [0u8; 512];
+    let mut pd_raw = [0u8; 512];
+    let mut pd_slip = [0u8; 1024];
     let mut pd_beat = 0u8;
 
     loop {
@@ -3496,6 +3496,9 @@ async fn uart_setpoint_rx_task(
                                                                                 loadlynx_protocol::PdSinkMode::Pps => {
                                                                                     Some(pd::PD_MODE_PPS)
                                                                                 }
+                                                                                loadlynx_protocol::PdSinkMode::Avs => {
+                                                                                    Some(pd::PD_MODE_AVS)
+                                                                                }
                                                                                 loadlynx_protocol::PdSinkMode::Unknown(_) => None,
                                                                             };
 
@@ -3506,7 +3509,7 @@ async fn uart_setpoint_rx_task(
                                                                                     if object_pos == 0 || object_pos > 14 {
                                                                                         (true, "invalid object_pos")
                                                                                     } else if req.target_mv < 3_000
-                                                                                        || req.target_mv > 21_000
+                                                                                        || req.target_mv > 48_000
                                                                                     {
                                                                                         (true, "invalid target_mv")
                                                                                     } else if req.i_req_ma > 10_000 {

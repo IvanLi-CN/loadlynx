@@ -50,8 +50,9 @@ pub const MSG_CAL_WRITE: u8 = 0x30;
 /// Reserved for future calibration readback support.
 pub const MSG_CAL_READ: u8 = 0x31;
 
-pub const PD_MAX_FIXED_PDOS: usize = 8;
-pub const PD_MAX_PPS_PDOS: usize = 4;
+pub const PD_MAX_FIXED_PDOS: usize = 16;
+pub const PD_MAX_PPS_PDOS: usize = 16;
+pub const PD_MAX_EPR_AVS_PDOS: usize = 16;
 
 /// Wire-level load mode mapping shared between control messages and telemetry.
 ///
@@ -389,6 +390,7 @@ pub struct SetEnable {
 pub enum PdSinkMode {
     Fixed,
     Pps,
+    Avs,
     Unknown(u8),
 }
 
@@ -397,6 +399,7 @@ impl From<u8> for PdSinkMode {
         match value {
             0 => PdSinkMode::Fixed,
             1 => PdSinkMode::Pps,
+            2 => PdSinkMode::Avs,
             other => PdSinkMode::Unknown(other),
         }
     }
@@ -407,6 +410,7 @@ impl From<PdSinkMode> for u8 {
         match value {
             PdSinkMode::Fixed => 0,
             PdSinkMode::Pps => 1,
+            PdSinkMode::Avs => 2,
             PdSinkMode::Unknown(raw) => raw,
         }
     }
@@ -585,8 +589,74 @@ impl<'b, C> Decode<'b, C> for PpsPdo {
     }
 }
 
+/// Source-provided EPR AVS APDO capability summary: `[pos, min_mv, max_mv, pdp_w]`.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EprAvsPdo {
+    pub pos: u8,
+    pub min_mv: u32,
+    pub max_mv: u32,
+    pub pdp_w: u16,
+}
+
+impl<C> Encode<C> for EprAvsPdo {
+    fn encode<W: minicbor::encode::Write>(
+        &self,
+        e: &mut Encoder<W>,
+        _ctx: &mut C,
+    ) -> Result<(), minicbor::encode::Error<W::Error>> {
+        e.array(4)?;
+        e.u8(self.pos)?;
+        e.u32(self.min_mv)?;
+        e.u32(self.max_mv)?;
+        e.u16(self.pdp_w)?;
+        Ok(())
+    }
+}
+
+impl<'b, C> Decode<'b, C> for EprAvsPdo {
+    fn decode(d: &mut Decoder<'b>, _ctx: &mut C) -> Result<Self, minicbor::decode::Error> {
+        let Some(len) = d.array()? else {
+            return Err(minicbor::decode::Error::message(
+                "indefinite arrays not supported",
+            ));
+        };
+        let len = len as usize;
+
+        let mut out = EprAvsPdo::default();
+        let consumed = match len {
+            3 => {
+                // Legacy-compatible shape without explicit position: `[min_mv, max_mv, pdp_w]`.
+                out.pos = 0;
+                out.min_mv = d.u32()?;
+                out.max_mv = d.u32()?;
+                out.pdp_w = d.u16()?;
+                3
+            }
+            0 | 1 | 2 => {
+                return Err(minicbor::decode::Error::message(
+                    "invalid EprAvsPdo array length",
+                ));
+            }
+            _ => {
+                out.pos = d.u8()?;
+                out.min_mv = d.u32()?;
+                out.max_mv = d.u32()?;
+                out.pdp_w = d.u16()?;
+                4
+            }
+        };
+
+        for _ in consumed..len {
+            d.skip()?;
+        }
+        Ok(out)
+    }
+}
+
 pub type FixedPdoList = Vec<FixedPdo, PD_MAX_FIXED_PDOS>;
 pub type PpsPdoList = Vec<PpsPdo, PD_MAX_PPS_PDOS>;
+pub type EprAvsPdoList = Vec<EprAvsPdo, PD_MAX_EPR_AVS_PDOS>;
 
 /// Analog → digital PD status report (attach/contract + capability summary).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -596,6 +666,8 @@ pub struct PdStatus {
     pub contract_ma: u32,
     pub fixed_pdos: FixedPdoList,
     pub pps_pdos: PpsPdoList,
+    pub epr_active: bool,
+    pub epr_avs_pdos: EprAvsPdoList,
 }
 
 impl<C> Encode<C> for PdStatus {
@@ -604,7 +676,7 @@ impl<C> Encode<C> for PdStatus {
         e: &mut Encoder<W>,
         ctx: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        e.map(5)?;
+        e.map(7)?;
         e.u8(0)?;
         e.bool(self.attached)?;
         e.u8(1)?;
@@ -619,6 +691,13 @@ impl<C> Encode<C> for PdStatus {
         e.u8(4)?;
         e.array(self.pps_pdos.len() as u64)?;
         for pdo in self.pps_pdos.iter() {
+            e.encode_with(*pdo, ctx)?;
+        }
+        e.u8(5)?;
+        e.bool(self.epr_active)?;
+        e.u8(6)?;
+        e.array(self.epr_avs_pdos.len() as u64)?;
+        for pdo in self.epr_avs_pdos.iter() {
             e.encode_with(*pdo, ctx)?;
         }
         Ok(())
@@ -642,6 +721,8 @@ impl<'b, C> Decode<'b, C> for PdStatus {
                 2 => status.contract_ma = d.u32()?,
                 3 => status.fixed_pdos = decode_fixed_pdo_list(d, ctx)?,
                 4 => status.pps_pdos = decode_pps_pdo_list(d, ctx)?,
+                5 => status.epr_active = d.bool()?,
+                6 => status.epr_avs_pdos = decode_epr_avs_pdo_list(d, ctx)?,
                 _ => d.skip()?,
             }
         }
@@ -662,6 +743,24 @@ fn decode_fixed_pdo_list<'b, C>(
     let mut out = FixedPdoList::new();
     for _ in 0..len {
         let pdo: FixedPdo = d.decode_with(ctx)?;
+        let _ = out.push(pdo);
+    }
+    Ok(out)
+}
+
+fn decode_epr_avs_pdo_list<'b, C>(
+    d: &mut Decoder<'b>,
+    ctx: &mut C,
+) -> Result<EprAvsPdoList, minicbor::decode::Error> {
+    let Some(len) = d.array()? else {
+        return Err(minicbor::decode::Error::message(
+            "indefinite arrays not supported",
+        ));
+    };
+
+    let mut out = EprAvsPdoList::new();
+    for _ in 0..len {
+        let pdo: EprAvsPdo = d.decode_with(ctx)?;
         let _ = out.push(pdo);
     }
     Ok(out)
@@ -1881,15 +1980,27 @@ mod tests {
             })
             .unwrap();
 
+        let mut epr_avs_pdos = EprAvsPdoList::new();
+        epr_avs_pdos
+            .push(EprAvsPdo {
+                pos: 10,
+                min_mv: 15_000,
+                max_mv: 28_000,
+                pdp_w: 140,
+            })
+            .unwrap();
+
         let status = PdStatus {
             attached: true,
-            contract_mv: 20_000,
-            contract_ma: 1_500,
+            contract_mv: 28_000,
+            contract_ma: 5_000,
             fixed_pdos,
             pps_pdos,
+            epr_active: true,
+            epr_avs_pdos,
         };
 
-        let mut raw = [0u8; 128];
+        let mut raw = [0u8; 256];
         let len = encode_pd_status_frame(9, &status, &mut raw).unwrap();
         let (hdr, decoded) = decode_pd_status_frame(&raw[..len]).unwrap();
         assert_eq!(hdr.msg, MSG_PD_STATUS);
@@ -1898,6 +2009,9 @@ mod tests {
         assert_eq!(decoded.fixed_pdos.len(), 2);
         assert_eq!(decoded.fixed_pdos[1].pos, 4);
         assert_eq!(decoded.fixed_pdos[1].mv, 20_000);
+        assert!(decoded.epr_active);
+        assert_eq!(decoded.epr_avs_pdos.len(), 1);
+        assert_eq!(decoded.epr_avs_pdos[0].pdp_w, 140);
     }
 
     #[test]

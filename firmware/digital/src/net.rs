@@ -2221,6 +2221,8 @@ async fn render_pd_view_json(
         buf.push_str(",\"contract_ma\":null");
         buf.push_str(",\"fixed_pdos\":[]");
         buf.push_str(",\"pps_pdos\":[]");
+        buf.push_str(",\"epr_active\":false");
+        buf.push_str(",\"epr_avs_pdos\":[]");
         buf.push_str(",\"allow_extended_voltage\":");
         buf.push_str(if allow_extended_voltage {
             "true"
@@ -2316,6 +2318,26 @@ async fn render_pd_view_json(
             pdo.min_mv,
             pdo.max_mv,
             pdo.max_ma
+        );
+    }
+    buf.push(']');
+
+    buf.push_str(",\"epr_active\":");
+    buf.push_str(if status.epr_active { "true" } else { "false" });
+
+    buf.push_str(",\"epr_avs_pdos\":[");
+    for (i, pdo) in status.epr_avs_pdos.iter().enumerate() {
+        if i != 0 {
+            buf.push(',');
+        }
+        let pos = if pdo.pos != 0 { pdo.pos } else { (i + 8) as u8 };
+        let _ = core::write!(
+            buf,
+            "{{\"pos\":{},\"min_mv\":{},\"max_mv\":{},\"pdp_w\":{}}}",
+            pos,
+            pdo.min_mv,
+            pdo.max_mv,
+            pdo.pdp_w
         );
     }
     buf.push(']');
@@ -2829,6 +2851,8 @@ async fn handle_pd_update(
             body_out.push_str(",\"contract_ma\":null");
             body_out.push_str(",\"fixed_pdos\":[]");
             body_out.push_str(",\"pps_pdos\":[]");
+            body_out.push_str(",\"epr_active\":false");
+            body_out.push_str(",\"epr_avs_pdos\":[]");
             body_out.push_str(",\"allow_extended_voltage\":");
             body_out.push_str(if allow_extended_voltage {
                 "true"

@@ -3785,8 +3785,10 @@ pub(crate) fn pd_fixed_target_mv(cfg: control::PdConfig, status: Option<&PdStatu
         }
     }
 
-    cfg.target_mv
-        .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000)
+    cfg.target_mv.clamp(
+        control::PdConfig::DEFAULT_TARGET_MV,
+        control::PdConfig::MAX_FIXED_TARGET_MV,
+    )
 }
 
 pub(crate) fn normalized_pd_config_for_status(
@@ -3824,9 +3826,10 @@ fn pd_button_display_target_mv(
         // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
         // from `PD_STATUS`, prefer that value to avoid misleading UI output.
         control::PdMode::Fixed => {
-            let persisted = cfg
-                .target_mv
-                .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000);
+            let persisted = cfg.target_mv.clamp(
+                control::PdConfig::DEFAULT_TARGET_MV,
+                control::PdConfig::MAX_FIXED_TARGET_MV,
+            );
             let derived = pd_fixed_target_mv(cfg, status);
             if derived != persisted {
                 derived
@@ -3834,7 +3837,10 @@ fn pd_button_display_target_mv(
                 persisted
             }
         }
-        control::PdMode::Pps => cfg.target_mv.clamp(3_000, 21_000),
+        control::PdMode::Pps => cfg.target_mv.clamp(
+            control::PdConfig::MIN_AUGMENTED_TARGET_MV,
+            control::PdConfig::MAX_PPS_TARGET_MV,
+        ),
     }
 }
 
@@ -3906,7 +3912,9 @@ fn build_pd_settings_vm(
             control::PdMode::Fixed => draft.fixed_object_pos != 0 && draft.i_req_ma >= 50,
             control::PdMode::Pps => {
                 draft.pps_object_pos != 0
-                    && (3_000..=21_000).contains(&draft.pps_target_mv)
+                    && (control::PdConfig::MIN_AUGMENTED_TARGET_MV
+                        ..=control::PdConfig::MAX_PPS_TARGET_MV)
+                        .contains(&draft.pps_target_mv)
                     && draft.i_req_ma >= 50
             }
         }
@@ -4108,12 +4116,14 @@ async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
     if changed {
         let s = guard.last_pd_status.as_ref().unwrap();
         info!(
-            "PD_STATUS update: attached={} contract={}mV {}mA fixed_pdos={} pps_pdos={}",
+            "PD_STATUS update: attached={} contract={}mV {}mA fixed_pdos={} pps_pdos={} epr_active={} epr_avs_pdos={}",
             s.attached,
             s.contract_mv,
             s.contract_ma,
             s.fixed_pdos.len(),
-            s.pps_pdos.len()
+            s.pps_pdos.len(),
+            s.epr_active,
+            s.epr_avs_pdos.len()
         );
     }
 }
@@ -7768,10 +7778,14 @@ async fn setmode_tx_task(
                 guard.allow_extended_voltage,
             )
         };
-        if pd_cfg.target_mv < 3_000 || pd_cfg.target_mv > 21_000 {
+        if pd_cfg.target_mv < control::PdConfig::MIN_AUGMENTED_TARGET_MV
+            || pd_cfg.target_mv > control::PdConfig::MAX_FIXED_TARGET_MV
+        {
             pd_cfg.target_mv = 5_000;
         }
-        if pd_cfg.pps_target_mv < 3_000 || pd_cfg.pps_target_mv > 21_000 {
+        if pd_cfg.pps_target_mv < control::PdConfig::MIN_AUGMENTED_TARGET_MV
+            || pd_cfg.pps_target_mv > control::PdConfig::MAX_PPS_TARGET_MV
+        {
             pd_cfg.pps_target_mv = control::PdConfig::DEFAULT_TARGET_MV;
         }
         pd_cfg.i_req_ma = pd_cfg.i_req_ma.clamp(50, 10_000);
@@ -7789,6 +7803,7 @@ async fn setmode_tx_task(
                 mode: match req.mode {
                     PdSinkMode::Fixed => control::PdMode::Fixed,
                     PdSinkMode::Pps => control::PdMode::Pps,
+                    PdSinkMode::Avs => pd_cfg.mode,
                     PdSinkMode::Unknown(_) => pd_cfg.mode,
                 },
                 fixed_object_pos: pd_cfg.fixed_object_pos,
