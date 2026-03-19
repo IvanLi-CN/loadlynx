@@ -5,7 +5,7 @@
 - Status: 部分完成（3/4）
 - Created: 2026-03-19
 - Last: 2026-03-19
-- Notes: fast-track；实现与构建已完成；HIL 受当前模拟板启动 panic 阻塞
+- Notes: PR #72；实现与构建已完成；HIL 受当前模拟板启动 panic 阻塞
 
 ## 背景 / 问题陈述
 

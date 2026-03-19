@@ -65,4 +65,4 @@
 |-----:|-------|--------|------|------|-------|
 | w4cpd | Dashboard 扩展电压开关与 PD 设置入口重构 | 已完成 | `w4cpd-dashboard-extended-voltage-toggle/SPEC.md` | 2026-03-10 | PR #70；实现已完成；HIL 可选 |
 | y4sf4 | Digital Display PSRAM/DMA Pipeline | 已完成 | `y4sf4-display-psram-dma-pipeline/SPEC.md` | 2026-03-19 | PR #71；PSRAM 专用 framebuffer arena、多缓冲 present、真实 present-FPS、细粒度 dirty rect、pending 背压 |
-| t2f5j | USB-PD EPR 28V Sink Enablement | 部分完成（3/4） | `t2f5j-usb-pd-epr-28v-sink/SPEC.md` | 2026-03-19 | 实现与构建已完成；HIL 受模拟板启动 panic 阻塞 |
+| t2f5j | USB-PD EPR 28V Sink Enablement | 部分完成（3/4） | `t2f5j-usb-pd-epr-28v-sink/SPEC.md` | 2026-03-19 | PR #72；实现与构建已完成；HIL 受模拟板启动 panic 阻塞 |
