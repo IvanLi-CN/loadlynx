@@ -218,7 +218,7 @@ const CP_PTERM_POS_FREEZE_TICKS: u32 = control_ticks_from_ms(CP_PTERM_POS_FREEZE
 // It is useful for regression and for "internal acceptance" when external instrumentation
 // (scope-based P(t)=V(t)*I(t)) is unavailable.
 const CP_PERF_PERIOD_US: u32 = 100;
-const CP_PERF_SAMPLES: usize = 512;
+const CP_PERF_SAMPLES: usize = 128;
 const CP_PERF_WINDOW_CONSECUTIVE: usize = 3;
 const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
@@ -1211,6 +1211,7 @@ async fn main(_spawner: Spawner) -> ! {
     // Clock config:
     // Align with the reference PD sink bring-up (pd-sink-stm32g431cbu6-rs):
     // - SYSCLK = 170MHz (PLL1_R)
+    // - ADC12 kernel clock = SYSCLK (170MHz, internally prescaled by the ADC driver)
     // - CLK48 = HSI48 (for UCPD)
     let mut config = stm32::Config::default();
     {
@@ -1227,17 +1228,30 @@ async fn main(_spawner: Spawner) -> ! {
             source: PllSource::HSI,
             prediv: PllPreDiv::DIV4,
             mul: PllMul::MUL85,
-            divp: None,
+            divp: Some(PllPDiv::DIV4),
             divq: None,
             divr: Some(PllRDiv::DIV2),
         });
         config.rcc.sys = Sysclk::PLL1_R;
+        config.rcc.boost = true;
 
         config.enable_ucpd1_dead_battery = true;
     }
     let p = stm32::init(config);
 
     info!("LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)");
+    {
+        let clocks = embassy_stm32::rcc::clocks(&p.RCC);
+        info!(
+            "RCC clocks: sys={:?} pll1_p={:?} pll1_q={:?} hclk1={:?} pclk1={:?} pclk2={:?}",
+            clocks.sys.to_hertz(),
+            clocks.pll1_p.to_hertz(),
+            clocks.pll1_q.to_hertz(),
+            clocks.hclk1.to_hertz(),
+            clocks.pclk1.to_hertz(),
+            clocks.pclk2.to_hertz()
+        );
+    }
 
     // Ensure the DBCC pins don't load/distort the CC lines.
     // On this board they may be tied to the USB-C CC nets for dead-battery behavior.
@@ -1305,11 +1319,11 @@ async fn main(_spawner: Spawner) -> ! {
     }
 
     // 将 RX 端转换为环形缓冲 UART，以避免在任务之间存在调度间隙时丢字节。
-    // 115200 baud ≈ 11.5 kB/s; 4 KiB buffer provides ~350ms of headroom for
-    // bursty traffic (e.g. calibration curve writes) without triggering overruns.
-    static UART_RX_DMA_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
+    // 115200 baud ≈ 11.5 kB/s; 2 KiB buffer provides ~175ms of headroom while
+    // leaving enough SRAM for the control loop, PD state machine, and stack.
+    static UART_RX_DMA_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
     let uart_rx_ring: RingBufferedUartRx<'static> =
-        uart_rx.into_ring_buffered(UART_RX_DMA_BUF.init([0; 4096]));
+        uart_rx.into_ring_buffered(UART_RX_DMA_BUF.init([0; 2048]));
 
     // 启动独立任务接收 SetPoint 控制消息。
     if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring, uart_tx_shared)) {

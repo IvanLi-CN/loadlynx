@@ -5,7 +5,7 @@
 - Status: 部分完成（3/4）
 - Created: 2026-03-19
 - Last: 2026-03-19
-- Notes: PR #72；实现与构建已完成；HIL 受当前模拟板启动 panic 阻塞
+- Notes: PR #72；实现与构建已完成；模拟板启动已恢复；HIL 当前受外部 PD source 未 attach 阻塞
 
 ## 背景 / 问题陈述
 
@@ -189,6 +189,7 @@
 
 - 风险：现有硬件在 28V 下的电源路径与热裕量仍需真机确认。
 - 风险：`usbpd 2.0.0` 的 API 迁移面较大，模拟板可能需要一起调整 `embassy-futures` / `heapless` 的依赖兼容。
-- 风险：当前模拟板固件在板上启动时会先于 PD 协商阶段触发 `ADC1 uses sys clock, which is not running` panic，导致本轮 HIL 无法完成。
+- 风险：`embassy-stm32 0.4.0` 在 STM32G4 上对 ADC/DAC 时钟元数据存在启动期误判；当前分支已通过本地 vendored patch 绕过，但上游仍待确认。
+- 风险：当前 HIL 环境下设备未进入 PD attach（`GET /api/v1/pd => attached=false`），因此数字侧拿不到 live PDO 列表，也无法在线切换到 28V fixed 目标完成合同验证。
 - 假设：本轮 HIL 环境可用，且现有 Type-C/PD 前端硬件满足 EPR sink 基本条件。
 - 假设：AVS 只读不会影响本轮 28V fixed 的用户理解。
