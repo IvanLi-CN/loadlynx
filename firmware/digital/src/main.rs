@@ -6,12 +6,14 @@
 #[cfg(feature = "net_http")]
 extern crate alloc;
 
-use core::convert::Infallible;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
+use core::{convert::Infallible, ptr, slice};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_futures::yield_now;
-use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel, mutex::Mutex};
+#[cfg(feature = "net_http")]
+use embassy_sync::channel::Channel;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
@@ -223,12 +225,13 @@ const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
 // 显示最小帧间隔（毫秒）：33ms ≈ 30FPS，与 analog 侧 30Hz FAST_STATUS 节奏对齐。
 const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33;
-// 将整帧分块推送到 LCD，以缩短单次 SPI 事务时间并为其它任务让出执行机会。
-// 每块按行数分割：240 像素宽 × CHUNK 行 × RGB565(2B)，在 60MHz SPI 下能快速完成。
-const DISPLAY_CHUNK_ROWS: usize = 4; // 再缩短单事务，降低单次 SPI 占用
-const DISPLAY_CHUNK_YIELD_LOOPS: usize = 6; // 增大让出次数
-const DISPLAY_DIRTY_MERGE_GAP_ROWS: usize = 8; // 适度扩大合并间隙，减少 SPI 往返
-const DISPLAY_DIRTY_SPAN_FALLBACK: usize = 12; // 脏区 span 过多时退回整帧推送
+const DISPLAY_FPS_WINDOW_MS: u32 = 1_000;
+const DISPLAY_BUFFER_COUNT: usize = 3;
+const DISPLAY_DMA_STAGING_BYTES: usize = 8 * 1024;
+// Larger DMA bursts reduce the visible right-to-left sweep on the rotated panel.
+const DISPLAY_CHUNK_ROWS: usize = 16;
+const DISPLAY_CHUNK_YIELD_LOOPS: usize = 0;
+const DISPLAY_DIRTY_RECT_FALLBACK: usize = ui::DIRTY_RECT_CAPACITY;
 const FRAME_SAMPLE_FRAMES: u32 = 3; // 仅记录前几帧像素统计，避免日志过多
 const FRAME_LOG_POINTS: [(usize, usize); 3] = [
     (0, 0),
@@ -300,10 +303,10 @@ const FAN_POWER_LOW_W: f32 = 5.0; // sink 功率低于该值时允许在低温�
 #[repr(align(32))]
 struct Align32<T>(T);
 
-static FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
-#[cfg(not(feature = "net_http"))]
-static PREVIOUS_FRAMEBUFFER: StaticCell<Align32<[u8; FRAMEBUFFER_LEN]>> = StaticCell::new();
+static DISPLAY_DMA_STAGING: StaticCell<Align32<[u8; DISPLAY_DMA_STAGING_BYTES]>> =
+    StaticCell::new();
 static DISPLAY_RESOURCES: StaticCell<DisplayResources> = StaticCell::new();
+static DISPLAY_PIPELINE: StaticCell<DisplayPipeline> = StaticCell::new();
 static BACKLIGHT_TIMER: StaticCell<ledc_timer::Timer<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_CHANNEL: StaticCell<ledc_channel::Channel<'static, LowSpeed>> = StaticCell::new();
 static BACKLIGHT_PIN: StaticCell<OutputSignalPin<'static>> = StaticCell::new();
@@ -425,7 +428,15 @@ pub(crate) static FAST_STATUS_OK_COUNT: AtomicU32 = AtomicU32::new(0);
 static LAST_UART_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_PROTO_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_FRAME_COUNT: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_PRESENT_COUNT: AtomicU32 = AtomicU32::new(0);
 static DISPLAY_TASK_RUNNING: AtomicBool = AtomicBool::new(false);
+static DISPLAY_FORCE_FULL_RENDER: AtomicBool = AtomicBool::new(true);
+static DISPLAY_LAST_RENDER_MS: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_LAST_CLONE_MS: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_LAST_PRESENT_MS: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_PRESENT_FULL_COUNT: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_PRESENT_DIRTY_ROWS: AtomicU32 = AtomicU32::new(0);
+static DISPLAY_PENDING_DROPS: AtomicU32 = AtomicU32::new(0);
 pub(crate) static ENCODER_VALUE: AtomicI32 = AtomicI32::new(0);
 static TOUCH_SPRING_READ_TOTAL: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_TOUCHDOWN_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -1893,8 +1904,37 @@ async fn touch_ui_task(
             boundary_fail_fired: bool,
         },
     }
+    #[derive(Copy, Clone, Eq, PartialEq)]
+    enum TapAction {
+        DashboardSettingsOpen,
+        DashboardPdToggle,
+        PdSettingsBack,
+        PdSettingsApply,
+        PdSettingsModeFixed,
+        PdSettingsModePps,
+        PdSettingsVreqValue,
+        PdSettingsIreqValue,
+        PdSettingsListRow(u8),
+    }
+    fn is_duplicate_tap_action(
+        last_action: &mut Option<(TapAction, u32)>,
+        action: TapAction,
+        now: u32,
+    ) -> bool {
+        const TAP_DEDUP_WINDOW_MS: u32 = 220;
+
+        if let Some((last_kind, last_ms)) = *last_action {
+            if last_kind == action && now.wrapping_sub(last_ms) <= TAP_DEDUP_WINDOW_MS {
+                return true;
+            }
+        }
+
+        *last_action = Some((action, now));
+        false
+    }
     let mut quick_switch: Option<ControlRowTouch> = None;
     let mut last_tab_tap: Option<(u8, u32)> = None;
+    let mut last_tap_action: Option<(TapAction, u32)> = None;
     const DRAG_START_THRESHOLD_PX: i32 = 10;
     const SWIPE_STEP_PX: i32 = 24;
     // Setpoint digit selection should feel like a deliberate left/right swipe.
@@ -2574,6 +2614,16 @@ async fn touch_ui_task(
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_pd_button(marker.x, marker.y)
                     {
+                        if is_duplicate_tap_action(
+                            &mut last_tap_action,
+                            TapAction::DashboardPdToggle,
+                            now_ms32(),
+                        ) {
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                            last_tab_tap = None;
+                            yield_now().await;
+                            continue;
+                        }
                         let apply_ms = now_ms32();
                         // The dashboard button is a persisted gate. Keep the EEPROM update and
                         // in-memory state change under the same lock so concurrent UI/HTTP PD
@@ -2658,6 +2708,16 @@ async fn touch_ui_task(
                         {
                             match hit {
                                 ui::pd_settings::PdSettingsHit::Back => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsBack,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     guard.ui_view = control::UiView::Main;
                                     guard.pd_draft = guard.pd_saved;
@@ -2672,6 +2732,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::Apply => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsApply,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     if !vm.apply_enabled {
                                         prompt_tone::enqueue_ui_fail();
                                         PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
@@ -2753,6 +2823,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::ModeFixed => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsModeFixed,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Fixed {
                                         guard.pd_draft.mode = control::PdMode::Fixed;
@@ -2816,6 +2896,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::ModePps => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsModePps,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Pps {
                                         guard.pd_draft.mode = control::PdMode::Pps;
@@ -2863,6 +2953,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::VreqValue => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsVreqValue,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     if guard.pd_draft.mode != control::PdMode::Pps {
                                         prompt_tone::enqueue_ui_fail();
@@ -2882,6 +2982,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::IreqValue => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsIreqValue,
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     guard.pd_settings_focus = control::PdSettingsFocus::Ireq;
                                     guard.pd_settings_digit = ui::pd_settings::pick_value_digit(
@@ -2897,6 +3007,16 @@ async fn touch_ui_task(
                                     continue;
                                 }
                                 ui::pd_settings::PdSettingsHit::ListRow(idx) => {
+                                    if is_duplicate_tap_action(
+                                        &mut last_tap_action,
+                                        TapAction::PdSettingsListRow(idx as u8),
+                                        now_ms32(),
+                                    ) {
+                                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                                        last_tab_tap = None;
+                                        yield_now().await;
+                                        continue;
+                                    }
                                     let mut guard = control.lock().await;
                                     match guard.pd_draft.mode {
                                         control::PdMode::Fixed => {
@@ -2959,6 +3079,16 @@ async fn touch_ui_task(
                     if view == control::UiView::Main
                         && ui::hit_test_dashboard_load_button(marker.x, marker.y)
                     {
+                        if is_duplicate_tap_action(
+                            &mut last_tap_action,
+                            TapAction::DashboardSettingsOpen,
+                            now_ms32(),
+                        ) {
+                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                            last_tab_tap = None;
+                            yield_now().await;
+                            continue;
+                        }
                         let mut guard = control.lock().await;
                         guard.ui_view = control::UiView::PdSettings;
                         guard.pd_draft = guard.pd_saved;
@@ -3993,9 +4123,184 @@ struct DisplayResources {
     cs: Option<Output<'static>>,
     dc: Option<Output<'static>>,
     rst: Option<Output<'static>>,
-    framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
-    #[cfg(not(feature = "net_http"))]
-    previous_framebuffer: &'static mut [u8; FRAMEBUFFER_LEN],
+    pipeline: &'static DisplayPipeline,
+    dma_staging: &'static mut [u8; DISPLAY_DMA_STAGING_BYTES],
+}
+
+#[derive(Copy, Clone)]
+struct DisplayFramePlan {
+    generation: u32,
+    full_refresh: bool,
+    dirty_rows: u16,
+    rect_count: u8,
+    rects: [ui::DirtyRect; ui::DIRTY_RECT_CAPACITY],
+}
+
+impl DisplayFramePlan {
+    const fn empty() -> Self {
+        Self {
+            generation: 0,
+            full_refresh: false,
+            dirty_rows: 0,
+            rect_count: 0,
+            rects: [ui::DirtyRect::new(0, 0, 0, 0); ui::DIRTY_RECT_CAPACITY],
+        }
+    }
+
+    fn set_from_rects(
+        &mut self,
+        generation: u32,
+        full_refresh: bool,
+        dirty_rows: u16,
+        rects: &ui::DirtyRects,
+    ) {
+        self.generation = generation;
+        self.full_refresh = full_refresh;
+        self.dirty_rows = dirty_rows;
+        self.rect_count = rects.len() as u8;
+        self.rects.fill(ui::DirtyRect::new(0, 0, 0, 0));
+        for (idx, rect) in rects.iter().enumerate() {
+            self.rects[idx] = *rect;
+        }
+    }
+
+    fn rects(&self) -> &[ui::DirtyRect] {
+        &self.rects[..self.rect_count as usize]
+    }
+}
+
+struct DisplayPipelineState {
+    displayed_idx: usize,
+    composed_idx: usize,
+    pending_idx: Option<usize>,
+    presenting_idx: Option<usize>,
+    generation: u32,
+    dropped_frames: u32,
+    plans: [DisplayFramePlan; DISPLAY_BUFFER_COUNT],
+}
+
+impl DisplayPipelineState {
+    const fn new() -> Self {
+        Self {
+            displayed_idx: 0,
+            composed_idx: 0,
+            pending_idx: None,
+            presenting_idx: None,
+            generation: 0,
+            dropped_frames: 0,
+            plans: [DisplayFramePlan::empty(); DISPLAY_BUFFER_COUNT],
+        }
+    }
+
+    fn is_reserved(&self, idx: usize) -> bool {
+        idx == self.composed_idx
+            || self.pending_idx == Some(idx)
+            || self.presenting_idx == Some(idx)
+    }
+
+    fn select_render_target(&self) -> Option<usize> {
+        if self.displayed_idx < DISPLAY_BUFFER_COUNT && !self.is_reserved(self.displayed_idx) {
+            return Some(self.displayed_idx);
+        }
+
+        for idx in 0..DISPLAY_BUFFER_COUNT {
+            if !self.is_reserved(idx) {
+                return Some(idx);
+            }
+        }
+
+        None
+    }
+}
+
+struct DisplayPsramArena {
+    base: *mut u8,
+    size: usize,
+}
+
+unsafe impl Send for DisplayPsramArena {}
+unsafe impl Sync for DisplayPsramArena {}
+
+impl DisplayPsramArena {
+    fn new(base: *mut u8, size: usize) -> Self {
+        let aligned_base = ((base as usize) + 31) & !31usize;
+        let padding = aligned_base.saturating_sub(base as usize);
+        let usable = size.saturating_sub(padding);
+        let required = FRAMEBUFFER_LEN * DISPLAY_BUFFER_COUNT;
+        core::assert!(
+            usable >= required,
+            "PSRAM arena too small for display buffers: usable={} required={}",
+            usable,
+            required
+        );
+
+        Self {
+            base: aligned_base as *mut u8,
+            size: usable,
+        }
+    }
+
+    fn base_addr(&self) -> usize {
+        self.base as usize
+    }
+
+    fn size(&self) -> usize {
+        self.size
+    }
+
+    fn slot_ptr(&self, idx: usize) -> *mut u8 {
+        core::assert!(idx < DISPLAY_BUFFER_COUNT, "framebuffer slot out of range");
+        unsafe { self.base.add(idx * FRAMEBUFFER_LEN) }
+    }
+
+    fn framebuffer(&self, idx: usize) -> &[u8] {
+        unsafe { slice::from_raw_parts(self.slot_ptr(idx), FRAMEBUFFER_LEN) }
+    }
+
+    fn framebuffer_mut(&self, idx: usize) -> &mut [u8] {
+        unsafe { slice::from_raw_parts_mut(self.slot_ptr(idx), FRAMEBUFFER_LEN) }
+    }
+
+    fn clear_all(&self) {
+        for idx in 0..DISPLAY_BUFFER_COUNT {
+            self.framebuffer_mut(idx).fill(0);
+        }
+    }
+
+    fn copy_rect(&self, dst_idx: usize, src_idx: usize, rect: ui::DirtyRect) {
+        core::assert!(dst_idx < DISPLAY_BUFFER_COUNT && src_idx < DISPLAY_BUFFER_COUNT);
+        if dst_idx == src_idx || rect.width == 0 || rect.height == 0 {
+            return;
+        }
+
+        let row_bytes = rect.width as usize * 2;
+        let x = rect.x as usize;
+        let y = rect.y as usize;
+        for row in 0..rect.height as usize {
+            let row_start = ((y + row) * DISPLAY_WIDTH + x) * 2;
+            unsafe {
+                ptr::copy_nonoverlapping(
+                    self.slot_ptr(src_idx).add(row_start),
+                    self.slot_ptr(dst_idx).add(row_start),
+                    row_bytes,
+                );
+            }
+        }
+    }
+}
+
+struct DisplayPipeline {
+    arena: DisplayPsramArena,
+    state: Mutex<CriticalSectionRawMutex, DisplayPipelineState>,
+}
+
+impl DisplayPipeline {
+    fn new(arena: DisplayPsramArena) -> Self {
+        Self {
+            arena,
+            state: Mutex::new(DisplayPipelineState::new()),
+        }
+    }
 }
 
 pub struct TelemetryModel {
@@ -4077,7 +4382,7 @@ impl TelemetryModel {
     ///
     /// This is used by the display task to drive partial, character-aware
     /// updates on top of the existing framebuffer diff logic.
-    fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask) {
+    fn diff_for_render(&mut self) -> (UiSnapshot, ui::UiChangeMask, u32) {
         // Keep all display strings in sync with the latest numeric values so
         // the UI layer can render based purely on preformatted text. This is
         // intentionally called from the display task (UI context), not from the
@@ -4092,15 +4397,19 @@ impl TelemetryModel {
         let touch_seq = touch::touch_marker_seq();
         if touch_seq != self.last_touch_marker_seq {
             mask.touch_marker = true;
-            self.last_touch_marker_seq = touch_seq;
         }
 
         if let Some(prev) = prev_snapshot {
-            if prev.main_voltage_text != current.main_voltage_text
-                || prev.main_current_text != current.main_current_text
-                || prev.main_power_text != current.main_power_text
-            {
-                mask.main_metrics = true;
+            if prev.main_voltage_text != current.main_voltage_text {
+                mask.main_voltage = true;
+            }
+
+            if prev.main_current_text != current.main_current_text {
+                mask.main_current = true;
+            }
+
+            if prev.main_power_text != current.main_power_text {
+                mask.main_power = true;
             }
 
             if prev.remote_voltage_text != current.remote_voltage_text
@@ -4139,8 +4448,15 @@ impl TelemetryModel {
                 mask.load_row = true;
             }
 
-            if prev.status_lines != current.status_lines {
-                mask.telemetry_lines = true;
+            for (line_idx, (prev_line, curr_line)) in prev
+                .status_lines
+                .iter()
+                .zip(current.status_lines.iter())
+                .enumerate()
+            {
+                if prev_line != curr_line {
+                    mask.mark_telemetry_line_dirty(line_idx);
+                }
             }
             let ctl_alert = current.fault_flags != 0
                 || current.link_alarm_latched
@@ -4149,7 +4465,7 @@ impl TelemetryModel {
                 || current.uv_latched
                 || !current.link_up;
             if ctl_alert && prev.blink_on != current.blink_on {
-                mask.telemetry_lines = true;
+                mask.telemetry_line_mask |= ui::telemetry_alert_line_bit();
             }
             if prev.wifi_status != current.wifi_status {
                 mask.wifi_status = true;
@@ -4157,19 +4473,24 @@ impl TelemetryModel {
         } else {
             // First-frame render: everything is considered dirty so that the
             // initial layout is fully drawn.
-            mask.main_metrics = true;
+            mask.main_voltage = true;
+            mask.main_current = true;
+            mask.main_power = true;
             mask.voltage_pair = true;
             mask.channel_currents = true;
             mask.control_row = true;
             mask.load_row = true;
-            mask.telemetry_lines = true;
+            mask.telemetry_line_mask = ui::telemetry_line_all_mask();
             mask.wifi_status = true;
             mask.touch_marker = true;
         }
 
-        // 记录当前快照用于下一次 diff；只在这里 clone 一次，避免在栈上持有多份大对象。
-        self.last_rendered = Some(self.snapshot.clone());
-        (self.snapshot.clone(), mask)
+        (self.snapshot.clone(), mask, touch_seq)
+    }
+
+    fn commit_rendered(&mut self, snapshot: &UiSnapshot, touch_seq: u32) {
+        self.last_rendered = Some(snapshot.clone());
+        self.last_touch_marker_seq = touch_seq;
     }
 }
 
@@ -4465,35 +4786,610 @@ impl AsyncDelayNs for AsyncDelay {
     }
 }
 
+fn display_dirty_row_count(rects: &ui::DirtyRects) -> u16 {
+    let mut rows = [false; DISPLAY_HEIGHT];
+    for rect in rects.iter() {
+        let start = rect.y as usize;
+        let end = (start + rect.height as usize).min(DISPLAY_HEIGHT);
+        for row in start..end {
+            rows[row] = true;
+        }
+    }
+    rows.iter().filter(|&&dirty| dirty).count() as u16
+}
+
+fn merge_pending_dirty_rects(
+    dirty_rects: &mut ui::DirtyRects,
+    pending_plan: DisplayFramePlan,
+) -> bool {
+    if pending_plan.full_refresh {
+        return true;
+    }
+
+    for rect in pending_plan.rects() {
+        if dirty_rects
+            .iter()
+            .any(|existing| existing.same_region(rect))
+        {
+            continue;
+        }
+        if dirty_rects.push(rect.with_base_copy(true)).is_err() {
+            return true;
+        }
+    }
+
+    false
+}
+
+async fn push_dirty_rect_to_display<DI, M, RST>(
+    display: &mut lcd_async::Display<DI, M, RST>,
+    staging: &mut [u8; DISPLAY_DMA_STAGING_BYTES],
+    framebuffer: &[u8],
+    rect: ui::DirtyRect,
+) -> Result<(), DI::Error>
+where
+    DI: lcd_async::interface::Interface<Word = u8>,
+    M: lcd_async::models::Model,
+    RST: OutputPin,
+{
+    if rect.width == 0 || rect.height == 0 {
+        return Ok(());
+    }
+
+    let row_bytes = rect.width as usize * 2;
+    let max_chunk_rows = core::cmp::max(1, DISPLAY_DMA_STAGING_BYTES / row_bytes);
+    let chunk_rows_limit = core::cmp::min(DISPLAY_CHUNK_ROWS, max_chunk_rows);
+    let mut row_offset = 0usize;
+
+    while row_offset < rect.height as usize {
+        let rows = core::cmp::min(chunk_rows_limit, rect.height as usize - row_offset);
+        let chunk_len = rows * row_bytes;
+        for chunk_row in 0..rows {
+            let src_row = rect.y as usize + row_offset + chunk_row;
+            let src_start = (src_row * DISPLAY_WIDTH + rect.x as usize) * 2;
+            let src_end = src_start + row_bytes;
+            let dst_start = chunk_row * row_bytes;
+            let dst_end = dst_start + row_bytes;
+            staging[dst_start..dst_end].copy_from_slice(&framebuffer[src_start..src_end]);
+        }
+
+        display
+            .show_raw_data(
+                rect.x,
+                rect.y + row_offset as u16,
+                rect.width,
+                rows as u16,
+                &staging[..chunk_len],
+            )
+            .await?;
+
+        for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
+            yield_now().await;
+        }
+        row_offset += rows;
+    }
+
+    Ok(())
+}
+
 #[embassy_executor::task]
-async fn display_task(
-    ctx: &'static mut DisplayResources,
+async fn display_render_task(
+    pipeline: &'static DisplayPipeline,
     telemetry: &'static TelemetryMutex,
+    control: &'static ControlMutex,
+) {
+    info!("Display render task starting");
+
+    let mut last_render_ms = now_ms32();
+    let mut fps_window_start_ms = last_render_ms;
+    let mut fps_window_presented = DISPLAY_PRESENT_COUNT.load(Ordering::Relaxed);
+    let mut last_fps: u32 = 0;
+    let mut last_panel_visible: bool = false;
+    let mut last_preview_active: bool = false;
+    let mut last_preview_mode: LoadMode = LoadMode::Cc;
+    let mut last_ui_view: control::UiView = control::UiView::Main;
+    let mut last_panel_vm: Option<ui::preset_panel::PresetPanelVm> = None;
+    let mut last_pd_settings_vm: Option<ui::pd_settings::PdSettingsVm> = None;
+
+    loop {
+        if SCREEN_POWER_STATE.load(Ordering::Relaxed) == SCREEN_POWER_STATE_OFF {
+            cooperative_delay_ms(20).await;
+            continue;
+        }
+
+        let now = now_ms32();
+        let dt_ms = now.wrapping_sub(last_render_ms);
+        if dt_ms < DISPLAY_MIN_FRAME_INTERVAL_MS {
+            yield_now().await;
+            continue;
+        }
+
+        let frame_idx = DISPLAY_FRAME_COUNT
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_add(1);
+        let log_this_frame = frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
+        if log_this_frame {
+            info!("display: rendering frame {} (dt_ms={})", frame_idx, dt_ms);
+        }
+
+        let mut fps_dirty = false;
+        let window_elapsed = now.wrapping_sub(fps_window_start_ms);
+        if window_elapsed >= DISPLAY_FPS_WINDOW_MS {
+            let presented_total = DISPLAY_PRESENT_COUNT.load(Ordering::Relaxed);
+            let presented_frames = presented_total.wrapping_sub(fps_window_presented);
+            let fps = if window_elapsed > 0 {
+                (presented_frames.saturating_mul(1000)) / window_elapsed
+            } else {
+                0
+            };
+            fps_dirty = fps != last_fps;
+            last_fps = fps;
+            info!(
+                "display: fps window_ms={} frames={} fps={}",
+                window_elapsed, presented_frames, fps
+            );
+            fps_window_presented = presented_total;
+            fps_window_start_ms = now;
+        }
+
+        let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
+        let (
+            overlay_preset_id,
+            output_enabled,
+            overlay_mode,
+            active_target_milli,
+            active_target_unit,
+            adjust_digit,
+            ui_view,
+            pd_saved,
+            allow_extended_voltage,
+            pd_draft,
+            pd_focus,
+            pd_digit,
+            preview_panel,
+            panel_visible,
+            panel_vm,
+        ) = {
+            let guard = control.lock().await;
+            let preview_active = (1..=(control::PRESET_COUNT as u8)).contains(&preview_id);
+            let overlay_preset_id = if preview_active {
+                preview_id
+            } else {
+                guard.active_preset_id
+            };
+            let overlay_idx = overlay_preset_id.saturating_sub(1) as usize;
+            let overlay_preset = if overlay_idx < control::PRESET_COUNT {
+                guard.presets[overlay_idx]
+            } else {
+                guard.active_preset()
+            };
+            let overlay_mode = match overlay_preset.mode {
+                LoadMode::Cv => LoadMode::Cv,
+                LoadMode::Cp => LoadMode::Cp,
+                LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+            };
+            let active_preset = guard.active_preset();
+            let active_mode = match active_preset.mode {
+                LoadMode::Cv => LoadMode::Cv,
+                LoadMode::Cp => LoadMode::Cp,
+                LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
+            };
+            let (active_target_milli, active_target_unit) = match active_mode {
+                LoadMode::Cv => (active_preset.target_v_mv, 'V'),
+                LoadMode::Cp => (active_preset.target_p_mw as i32, 'W'),
+                LoadMode::Cc | LoadMode::Reserved(_) => (active_preset.target_i_ma, 'A'),
+            };
+            let preview_panel = if preview_active {
+                use ui::preset_panel::{format_av_3dp, format_power_2dp};
+                let target_text = match overlay_mode {
+                    LoadMode::Cv => format_av_3dp(overlay_preset.target_v_mv, 'V'),
+                    LoadMode::Cp => format_power_2dp(overlay_preset.target_p_mw as i32),
+                    _ => format_av_3dp(overlay_preset.target_i_ma, 'A'),
+                };
+                Some((
+                    target_text,
+                    format_av_3dp(overlay_preset.min_v_mv, 'V'),
+                    format_av_3dp(overlay_preset.max_i_ma_total, 'A'),
+                    format_power_2dp(overlay_preset.max_p_mw as i32),
+                ))
+            } else {
+                None
+            };
+            (
+                overlay_preset_id,
+                guard.output_enabled,
+                overlay_mode,
+                active_target_milli,
+                active_target_unit,
+                coerce_adjust_digit_for_mode(active_mode, guard.adjust_digit),
+                guard.ui_view,
+                guard.pd_saved,
+                guard.allow_extended_voltage,
+                guard.pd_draft,
+                guard.pd_settings_focus,
+                guard.pd_settings_digit,
+                preview_panel,
+                preset_panel_visible(guard.ui_view),
+                if preset_panel_visible(guard.ui_view) {
+                    Some(build_preset_panel_vm(&guard))
+                } else {
+                    None
+                },
+            )
+        };
+
+        let preview_active = preview_panel.is_some();
+        let panel_dirty = match (panel_vm.as_ref(), last_panel_vm.as_ref()) {
+            (Some(curr), Some(prev)) => curr != prev,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
+
+        let mut force_full_render = DISPLAY_FORCE_FULL_RENDER.swap(false, Ordering::Relaxed)
+            || (panel_visible != last_panel_visible)
+            || frame_idx == 1;
+        if ui_view != last_ui_view {
+            force_full_render = true;
+        }
+        if preview_active != last_preview_active {
+            force_full_render = true;
+        }
+        if preview_active && last_preview_active && overlay_mode != last_preview_mode {
+            force_full_render = true;
+        }
+
+        let (snapshot, mut mask, pd_status_for_panel, touch_seq) = {
+            let mut guard = telemetry.lock().await;
+            guard.snapshot.blink_on = ((now / 500) & 1) == 0;
+            let uv_latched = guard
+                .last_status
+                .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
+                .unwrap_or(false);
+            let link_up = LINK_UP.load(Ordering::Relaxed);
+            let link_alarm_latched = prompt_tone::is_link_alarm_latched();
+            let hello_seen = HELLO_SEEN.load(Ordering::Relaxed);
+            let trip_alarm_abbrev = prompt_tone::trip_alarm_reason().map(|reason| reason.abbrev());
+            let blocked_enable_abbrev = if output_enabled {
+                None
+            } else {
+                recent_enable_block_abbrev(now)
+            };
+            let pd_status = guard.last_pd_status.as_ref();
+            let pd_attached = pd_status.map(|status| status.attached).unwrap_or(false);
+            let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
+            let pd_wants_non_safe5v = pd_config_allows_non_safe5v(pd_saved, pd_status);
+            let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
+            let pd_target_mv = Some(pd_button_display_target_mv(
+                pd_saved,
+                pd_status,
+                allow_extended_voltage,
+            ));
+            let pd_target_available = true;
+
+            guard.snapshot.pd_display_mode = pd_display_mode;
+            guard.snapshot.pd_target_mv = pd_target_mv;
+            guard.snapshot.pd_target_available = pd_target_available;
+
+            let prev_pd_state = guard.snapshot.pd_state;
+            if allow_extended_voltage
+                && pd_wants_non_safe5v
+                && pd_attached
+                && pd_contract_mv == control::PdConfig::DEFAULT_TARGET_MV
+            {
+                let since = PD_RETRY_WINDOW_START_MS.load(Ordering::Relaxed);
+                if since != 0 && now.wrapping_sub(since) > PD_T_PD_MS {
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
+                    reset_pd_extended_voltage_retry_window();
+                }
+            }
+            let pd_failure_latched = PD_EXTENDED_FAILURE_LATCH.load(Ordering::Relaxed);
+            guard.snapshot.pd_state = if !allow_extended_voltage {
+                ui::PdButtonState::Safe5vOnly
+            } else if pd_failure_latched {
+                ui::PdButtonState::ExtendedFailed
+            } else {
+                ui::PdButtonState::ExtendedAllowed
+            };
+            if prev_pd_state != guard.snapshot.pd_state {
+                info!(
+                    "pd_button: state {:?}->{:?} allow_extended_voltage={} attached={} failure_latched={} display_target_mv={}",
+                    prev_pd_state,
+                    guard.snapshot.pd_state,
+                    allow_extended_voltage,
+                    pd_attached,
+                    pd_failure_latched,
+                    pd_target_mv.unwrap_or(0)
+                );
+            }
+            guard.snapshot.set_control_overlay(
+                overlay_preset_id,
+                output_enabled,
+                overlay_mode,
+                uv_latched,
+                link_up,
+                link_alarm_latched,
+                hello_seen,
+                trip_alarm_abbrev,
+                blocked_enable_abbrev,
+            );
+            guard.snapshot.preset_preview_active = preview_active;
+            if let Some((target, v_lim, i_lim, p_lim)) = preview_panel {
+                guard.snapshot.preset_preview_target_text = target;
+                guard.snapshot.preset_preview_v_lim_text = v_lim;
+                guard.snapshot.preset_preview_i_lim_text = i_lim;
+                guard.snapshot.preset_preview_p_lim_text = p_lim;
+            } else {
+                guard.snapshot.preset_preview_target_text.clear();
+                guard.snapshot.preset_preview_v_lim_text.clear();
+                guard.snapshot.preset_preview_i_lim_text.clear();
+                guard.snapshot.preset_preview_p_lim_text.clear();
+            }
+            guard
+                .snapshot
+                .set_control_row(active_target_milli, active_target_unit, adjust_digit);
+            let pd_status = guard.last_pd_status.clone();
+            let (snapshot, mask, touch_seq) = guard.diff_for_render();
+            (snapshot, mask, pd_status, touch_seq)
+        };
+
+        let touch_marker_dirty = ui::touch_marker_overlay_enabled() && mask.touch_marker;
+        if !ui::touch_marker_overlay_enabled() {
+            mask.touch_marker = false;
+        }
+
+        let pd_settings_vm = if ui_view == control::UiView::PdSettings {
+            Some(build_pd_settings_vm(
+                pd_draft,
+                pd_focus,
+                pd_digit,
+                pd_status_for_panel.as_ref(),
+            ))
+        } else {
+            None
+        };
+        let pd_settings_dirty = match (pd_settings_vm.as_ref(), last_pd_settings_vm.as_ref()) {
+            (Some(curr), Some(prev)) => curr != prev,
+            (Some(_), None) | (None, Some(_)) => true,
+            (None, None) => false,
+        };
+
+        let full_screen_view = match ui_view {
+            control::UiView::PdSettings => true,
+            #[cfg(feature = "audio_menu")]
+            control::UiView::AudioMenu => true,
+            _ => false,
+        };
+        if touch_marker_dirty {
+            force_full_render = true;
+        }
+        let needs_render = match ui_view {
+            control::UiView::PdSettings => {
+                force_full_render || pd_settings_dirty || fps_dirty || touch_marker_dirty
+            }
+            #[cfg(feature = "audio_menu")]
+            control::UiView::AudioMenu => force_full_render || fps_dirty || touch_marker_dirty,
+            _ => !mask.is_empty() || force_full_render || fps_dirty || panel_dirty,
+        };
+        if !needs_render {
+            if log_this_frame {
+                info!(
+                    "display: frame {} skipped (no UI changes, dt_ms={})",
+                    frame_idx, dt_ms
+                );
+            }
+            last_render_ms = now;
+            continue;
+        }
+
+        let latency_sensitive = force_full_render
+            || full_screen_view
+            || touch_marker_dirty
+            || panel_dirty
+            || mask.control_row
+            || mask.load_row;
+        if !latency_sensitive {
+            let frame_in_flight = {
+                let guard = pipeline.state.lock().await;
+                guard.pending_idx.is_some() || guard.presenting_idx.is_some()
+            };
+            if frame_in_flight {
+                if log_this_frame {
+                    info!(
+                        "display: frame {} coalesced (frame in flight, dt_ms={})",
+                        frame_idx, dt_ms
+                    );
+                }
+                last_render_ms = now;
+                continue;
+            }
+        }
+
+        let (base_idx, target_idx, pending_plan) = {
+            let mut guard = pipeline.state.lock().await;
+            let target_idx = guard.select_render_target();
+            if target_idx.is_none() {
+                guard.dropped_frames = guard.dropped_frames.wrapping_add(1);
+                DISPLAY_PENDING_DROPS.store(guard.dropped_frames, Ordering::Relaxed);
+            }
+            let pending_plan = guard.pending_idx.map(|idx| guard.plans[idx]);
+            (guard.composed_idx, target_idx, pending_plan)
+        };
+        let Some(target_idx) = target_idx else {
+            if log_this_frame {
+                info!(
+                    "display: frame {} skipped (pipeline busy, dt_ms={})",
+                    frame_idx, dt_ms
+                );
+            }
+            last_render_ms = now;
+            continue;
+        };
+
+        let mut dirty_rects = ui::DirtyRects::new();
+        let mut full_refresh = force_full_render || full_screen_view;
+        let mut overlay_dirty = force_full_render || fps_dirty;
+        if full_refresh {
+            ui::push_full_screen_dirty_rect(&mut dirty_rects);
+            if !full_screen_view {
+                overlay_dirty = true;
+            }
+        } else {
+            ui::collect_partial_dirty_rects(&snapshot, &mask, overlay_dirty, &mut dirty_rects);
+            if panel_dirty {
+                ui::preset_panel::push_panel_dirty_rect(&mut dirty_rects);
+            }
+            if let Some(plan) = pending_plan {
+                if merge_pending_dirty_rects(&mut dirty_rects, plan) {
+                    dirty_rects.clear();
+                    ui::push_full_screen_dirty_rect(&mut dirty_rects);
+                    full_refresh = true;
+                    overlay_dirty = true;
+                }
+            }
+            if dirty_rects.len() >= DISPLAY_DIRTY_RECT_FALLBACK {
+                dirty_rects.clear();
+                ui::push_full_screen_dirty_rect(&mut dirty_rects);
+                full_refresh = true;
+                overlay_dirty = true;
+            }
+        }
+
+        let clone_start_ms = now_ms32();
+        if !full_refresh {
+            for rect in dirty_rects.iter() {
+                if rect.needs_base_copy {
+                    pipeline.arena.copy_rect(target_idx, base_idx, *rect);
+                }
+            }
+        }
+        let clone_ms = now_ms32().wrapping_sub(clone_start_ms);
+
+        let render_start_ms = now_ms32();
+        {
+            let framebuffer = pipeline.arena.framebuffer_mut(target_idx);
+            let mut frame =
+                RawFrameBuf::<Rgb565, _>::new(framebuffer, DISPLAY_WIDTH, DISPLAY_HEIGHT);
+            match ui_view {
+                control::UiView::PdSettings => {
+                    let vm = pd_settings_vm
+                        .as_ref()
+                        .expect("pd_settings_vm missing while rendering PdSettings");
+                    ui::pd_settings::render_pd_settings(&mut frame, vm);
+                }
+                #[cfg(feature = "audio_menu")]
+                control::UiView::AudioMenu => {
+                    ui::audio_menu::render_audio_menu(&mut frame);
+                }
+                _ => {
+                    if full_refresh {
+                        ui::render(&mut frame, &snapshot);
+                    } else {
+                        ui::render_partial(&mut frame, &snapshot, &mask);
+                    }
+                    if let Some(vm) = panel_vm.as_ref() {
+                        ui::preset_panel::render_preset_panel(&mut frame, vm);
+                    }
+                }
+            }
+
+            if overlay_dirty {
+                ui::render_fps_overlay(&mut frame, last_fps);
+            }
+
+            if force_full_render || touch_marker_dirty {
+                ui::render_touch_marker(&mut frame, touch::load_touch_marker());
+            }
+        }
+
+        let render_ms = now_ms32().wrapping_sub(render_start_ms);
+        DISPLAY_LAST_RENDER_MS.store(render_ms, Ordering::Relaxed);
+
+        DISPLAY_LAST_CLONE_MS.store(clone_ms, Ordering::Relaxed);
+
+        if frame_idx <= FRAME_SAMPLE_FRAMES {
+            log_framebuffer_span("rendered-frame", pipeline.arena.framebuffer(target_idx));
+            log_framebuffer_samples("rendered-frame", pipeline.arena.framebuffer(target_idx));
+        }
+
+        if full_refresh && dirty_rects.is_empty() {
+            ui::push_full_screen_dirty_rect(&mut dirty_rects);
+        }
+
+        let dirty_rows = if full_refresh {
+            DISPLAY_HEIGHT as u16
+        } else {
+            display_dirty_row_count(&dirty_rects)
+        };
+
+        let (generation, replaced_pending) = {
+            let mut guard = pipeline.state.lock().await;
+            let replaced_pending = guard.pending_idx.is_some();
+            if replaced_pending {
+                guard.dropped_frames = guard.dropped_frames.wrapping_add(1);
+                DISPLAY_PENDING_DROPS.store(guard.dropped_frames, Ordering::Relaxed);
+            }
+            guard.generation = guard.generation.wrapping_add(1);
+            let generation = guard.generation;
+            guard.composed_idx = target_idx;
+            guard.pending_idx = Some(target_idx);
+            guard.plans[target_idx].set_from_rects(
+                generation,
+                full_refresh,
+                dirty_rows,
+                &dirty_rects,
+            );
+            (generation, replaced_pending)
+        };
+
+        {
+            let mut guard = telemetry.lock().await;
+            guard.commit_rendered(&snapshot, touch_seq);
+        }
+
+        if log_this_frame {
+            info!(
+                "display: frame {} rendered (gen={} clone_ms={} render_ms={} dirty_rows={} dirty_rects={} full={} replaced_pending={})",
+                frame_idx,
+                generation,
+                clone_ms,
+                render_ms,
+                dirty_rows,
+                dirty_rects.len(),
+                full_refresh,
+                replaced_pending,
+            );
+        }
+
+        last_render_ms = now;
+        last_panel_visible = panel_visible;
+        last_preview_active = preview_active;
+        last_preview_mode = overlay_mode;
+        last_ui_view = ui_view;
+        last_panel_vm = panel_vm;
+        last_pd_settings_vm = pd_settings_vm;
+    }
+}
+
+#[embassy_executor::task]
+async fn display_present_task(
+    ctx: &'static mut DisplayResources,
     control: &'static ControlMutex,
     backlight_channel: &'static ledc_channel::Channel<'static, LowSpeed>,
     backlight_pin: &'static OutputSignalPin<'static>,
 ) {
     DISPLAY_TASK_RUNNING.store(true, Ordering::Relaxed);
-    info!("Display task starting");
+    info!("Display present task starting");
 
     let spi = ctx.spi.take().expect("SPI bus unavailable");
     let cs = ctx.cs.take().expect("CS pin unavailable");
     let dc = ctx.dc.take().expect("DC pin unavailable");
     let rst = ctx.rst.take().expect("RST pin unavailable");
+    let pipeline = ctx.pipeline;
+    let staging = &mut *ctx.dma_staging;
     let spi_device = SimpleSpiDevice::new(spi, cs);
     let interface = SpiInterface::new(spi_device, dc);
     let mut delay = AsyncDelay::new();
 
-    // ST7789 color tuning:
-    // Many ST7789-based IPS panels ship with RGB subpixel order and require
-    // color inversion enabled for correct appearance. The previous configuration
-    // used BGR without inversion which produced incorrect hues on this module
-    // (e.g. cyan rendered as deep blue, dark backgrounds appeared too bright).
-    //
-    // If colors still look off on other panels, try toggling these options
-    // per lcd-async's troubleshooting guide:
-    //   - .color_order(lcd_async::options::ColorOrder::Bgr)
-    //   - .invert_colors(lcd_async::options::ColorInversion::Normal)
     let mut display = Builder::new(ST7789, interface)
         .invert_colors(lcd_async::options::ColorInversion::Inverted)
         .color_order(lcd_async::options::ColorOrder::Rgb)
@@ -4504,75 +5400,18 @@ async fn display_task(
         .await
         .expect("display init");
 
-    {
-        let mut frame =
-            RawFrameBuf::<Rgb565, _>::new(&mut ctx.framebuffer[..], DISPLAY_WIDTH, DISPLAY_HEIGHT);
-        // 首帧改为整屏高亮测试图，便于快速确认 LCD/背光是否工作正常。
-        let bytes = frame.as_mut_bytes();
-        for chunk in bytes.chunks_mut(2) {
-            chunk[0] = 0xFF;
-            chunk[1] = 0xFF;
-        }
-    }
+    DISPLAY_FORCE_FULL_RENDER.store(true, Ordering::Relaxed);
 
-    log_framebuffer_span("color-bars-fill", &ctx.framebuffer[..]);
-    log_framebuffer_samples("color-bars-fill", &ctx.framebuffer[..]);
-
-    // 首帧采用分块推送，降低长事务对调度的影响；可在调试时整体禁止 SPI 更新，以隔离 UART 问题。
-    if ENABLE_DISPLAY_SPI_UPDATES {
-        let bytes_per_row = DISPLAY_WIDTH * 2;
-        let mut y = 0usize;
-        while y < DISPLAY_HEIGHT {
-            let rows = core::cmp::min(DISPLAY_CHUNK_ROWS, DISPLAY_HEIGHT - y);
-            let start = y * bytes_per_row;
-            let end = start + rows * bytes_per_row;
-            info!("display: init chunk y={} rows={}", y, rows);
-            display
-                .show_raw_data(
-                    0,
-                    y as u16,
-                    DISPLAY_WIDTH as u16,
-                    rows as u16,
-                    &ctx.framebuffer[start..end],
-                )
-                .await
-                .expect("frame push (chunked init)");
-            info!("display: init chunk done y={} rows={}", y, rows);
-
-            for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
-                yield_now().await;
-            }
-            y += rows;
-        }
-        info!("Color bars rendered");
-        #[cfg(not(feature = "net_http"))]
-        ctx.previous_framebuffer
-            .copy_from_slice(&ctx.framebuffer[..]);
-    } else {
-        info!("Color bars rendering skipped: display SPI updates disabled for UART A/B test");
-    }
-
-    let mut last_push_ms = timestamp_ms() as u32;
-    // 为 FPS 统计维护一个滑动窗口：每个窗口至少 500ms，统计窗口内的帧数并据此估算 FPS。
-    let mut fps_window_start_ms = last_push_ms;
-    let mut fps_window_frames: u32 = 0;
-    let mut last_fps: u32 = 0;
-    let mut last_panel_visible: bool = false;
-    let mut last_preview_active: bool = false;
-    let mut last_preview_mode: LoadMode = LoadMode::Cc;
-    let mut last_ui_view: control::UiView = control::UiView::Main;
+    let mut last_present_ms = now_ms32();
     let screen_cfg =
         ScreenPowerConfig::new(SCREEN_DIM_AFTER_MS, SCREEN_OFF_AFTER_MS, SCREEN_DIM_MAX_PCT);
     let mut screen_power = ScreenPowerModel::new(BACKLIGHT_DEFAULT_PCT);
     let mut last_backlight_pct: u8 = BACKLIGHT_DEFAULT_PCT;
     let mut backlight_pwm_attached: bool = true;
     let mut display_sleeping: bool = false;
-    let mut screen_force_full_render: bool = false;
-    loop {
-        let now = timestamp_ms() as u32;
 
-        // Screen power management (Plan #0015): only auto-dim/off when LOAD is OFF,
-        // and consume the first input in OFF so it cannot trigger UI actions.
+    loop {
+        let now = now_ms32();
         let last_user_activity_ms = LAST_USER_ACTIVITY_MS.load(Ordering::Relaxed);
         let load_enabled = control.lock().await.output_enabled;
         let tick = screen_power.tick(screen_cfg, now, last_user_activity_ms, load_enabled);
@@ -4618,8 +5457,14 @@ async fn display_task(
 
                     display.sleep(&mut delay).await.expect("display sleep");
                     display_sleeping = true;
-                    screen_force_full_render = true;
-                    last_push_ms = now;
+                    DISPLAY_FORCE_FULL_RENDER.store(true, Ordering::Relaxed);
+                    last_present_ms = now;
+
+                    let mut guard = pipeline.state.lock().await;
+                    if guard.pending_idx.take().is_some() {
+                        guard.dropped_frames = guard.dropped_frames.wrapping_add(1);
+                        DISPLAY_PENDING_DROPS.store(guard.dropped_frames, Ordering::Relaxed);
+                    }
                 }
                 (ScreenPowerState::Off, ScreenPowerState::Active) => {
                     if display_sleeping {
@@ -4627,7 +5472,6 @@ async fn display_task(
                         display_sleeping = false;
                     }
                     unsafe {
-                        // Some controllers require DISPON after SLP OUT.
                         use lcd_async::dcs::{EnterNormalMode, InterfaceExt as _, SetDisplayOn};
                         let dcs = display.dcs();
                         dcs.write_command(EnterNormalMode)
@@ -4643,7 +5487,7 @@ async fn display_task(
                         backlight_pwm_attached = true;
                     }
                     last_backlight_pct = tick.target_backlight_pct;
-                    screen_force_full_render = true;
+                    DISPLAY_FORCE_FULL_RENDER.store(true, Ordering::Relaxed);
                 }
                 _ => {}
             }
@@ -4652,8 +5496,6 @@ async fn display_task(
         } else if tick.target_backlight_pct != last_backlight_pct
             && tick.state != ScreenPowerState::Off
         {
-            // Keep the backlight aligned with the policy even if we re-enter a state
-            // (e.g. after a firmware brightness change in future work).
             set_backlight_pct(backlight_channel, tick.target_backlight_pct, "sync");
             if !backlight_pwm_attached {
                 backlight_pwm_connect(backlight_pin);
@@ -4666,430 +5508,61 @@ async fn display_task(
             cooperative_delay_ms(20).await;
             continue;
         }
-        let dt_ms = now.wrapping_sub(last_push_ms);
-        if dt_ms >= DISPLAY_MIN_FRAME_INTERVAL_MS {
-            let frame_idx = DISPLAY_FRAME_COUNT
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1);
-            let log_this_frame = frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
-            if log_this_frame {
-                // 短期内每帧打印，之后按固定间隔抽样。
-                info!("display: rendering frame {} (dt_ms={})", frame_idx, dt_ms);
-            }
 
-            // 进入本分辨率周期内的有效一帧，计入 FPS 统计窗口。
-            fps_window_frames = fps_window_frames.wrapping_add(1);
-
-            let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
-            let (
-                overlay_preset_id,
-                output_enabled,
-                overlay_mode,
-                active_target_milli,
-                active_target_unit,
-                adjust_digit,
-                ui_view,
-                pd_saved,
-                allow_extended_voltage,
-                pd_draft,
-                pd_focus,
-                pd_digit,
-                preview_panel,
-                panel_visible,
-                panel_vm,
-            ) = {
-                let guard = control.lock().await;
-                let preview_active = (1..=(control::PRESET_COUNT as u8)).contains(&preview_id);
-                let overlay_preset_id = if preview_active {
-                    preview_id
-                } else {
-                    guard.active_preset_id
-                };
-                let overlay_idx = overlay_preset_id.saturating_sub(1) as usize;
-                let overlay_preset = if overlay_idx < control::PRESET_COUNT {
-                    guard.presets[overlay_idx]
-                } else {
-                    guard.active_preset()
-                };
-                let overlay_mode = match overlay_preset.mode {
-                    LoadMode::Cv => LoadMode::Cv,
-                    LoadMode::Cp => LoadMode::Cp,
-                    LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
-                };
-                let active_preset = guard.active_preset();
-                let active_mode = match active_preset.mode {
-                    LoadMode::Cv => LoadMode::Cv,
-                    LoadMode::Cp => LoadMode::Cp,
-                    LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
-                };
-                let (active_target_milli, active_target_unit) = match active_mode {
-                    LoadMode::Cv => (active_preset.target_v_mv, 'V'),
-                    LoadMode::Cp => (active_preset.target_p_mw as i32, 'W'),
-                    LoadMode::Cc | LoadMode::Reserved(_) => (active_preset.target_i_ma, 'A'),
-                };
-                let preview_panel = if preview_active {
-                    use ui::preset_panel::{format_av_3dp, format_power_2dp};
-                    let target_text = match overlay_mode {
-                        LoadMode::Cv => format_av_3dp(overlay_preset.target_v_mv, 'V'),
-                        LoadMode::Cp => format_power_2dp(overlay_preset.target_p_mw as i32),
-                        _ => format_av_3dp(overlay_preset.target_i_ma, 'A'),
-                    };
-                    Some((
-                        target_text,
-                        format_av_3dp(overlay_preset.min_v_mv, 'V'),
-                        format_av_3dp(overlay_preset.max_i_ma_total, 'A'),
-                        format_power_2dp(overlay_preset.max_p_mw as i32),
-                    ))
-                } else {
-                    None
-                };
-                (
-                    overlay_preset_id,
-                    guard.output_enabled,
-                    overlay_mode,
-                    active_target_milli,
-                    active_target_unit,
-                    coerce_adjust_digit_for_mode(active_mode, guard.adjust_digit),
-                    guard.ui_view,
-                    guard.pd_saved,
-                    guard.allow_extended_voltage,
-                    guard.pd_draft,
-                    guard.pd_settings_focus,
-                    guard.pd_settings_digit,
-                    preview_panel,
-                    preset_panel_visible(guard.ui_view),
-                    if preset_panel_visible(guard.ui_view) {
-                        Some(build_preset_panel_vm(&guard))
-                    } else {
-                        None
-                    },
-                )
-            };
-
-            let preview_active = preview_panel.is_some();
-            let mut force_full_render = screen_force_full_render
-                || panel_visible
-                || (panel_visible != last_panel_visible)
-                || frame_idx == 1;
-            if ui_view != last_ui_view {
-                force_full_render = true;
-            }
-            if preview_active != last_preview_active {
-                force_full_render = true;
-            }
-            if preview_active && last_preview_active && overlay_mode != last_preview_mode {
-                force_full_render = true;
-            }
-            last_panel_visible = panel_visible;
-            last_preview_active = preview_active;
-            if preview_active {
-                last_preview_mode = overlay_mode;
-            }
-            last_ui_view = ui_view;
-            if force_full_render && screen_force_full_render {
-                screen_force_full_render = false;
-            }
-
-            let (snapshot, mask, pd_status_for_panel) = {
-                let mut guard = telemetry.lock().await;
-                guard.snapshot.blink_on = ((now / 500) & 1) == 0;
-                let uv_latched_raw = guard
-                    .last_status
-                    .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
-                    .unwrap_or(false);
-                let uv_latched = uv_latched_raw;
-                let link_up = LINK_UP.load(Ordering::Relaxed);
-                let link_alarm_latched = prompt_tone::is_link_alarm_latched();
-                let hello_seen = HELLO_SEEN.load(Ordering::Relaxed);
-                let trip_alarm_abbrev =
-                    prompt_tone::trip_alarm_reason().map(|reason| reason.abbrev());
-                let blocked_enable_abbrev = if output_enabled {
-                    None
-                } else {
-                    recent_enable_block_abbrev(now)
-                };
-                let pd_status = guard.last_pd_status.as_ref();
-                let pd_attached = pd_status.map(|status| status.attached).unwrap_or(false);
-                let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
-                let pd_wants_non_safe5v = pd_config_allows_non_safe5v(pd_saved, pd_status);
-                let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
-                let pd_target_mv = Some(pd_button_display_target_mv(
-                    pd_saved,
-                    pd_status,
-                    allow_extended_voltage,
-                ));
-                let pd_target_available = true;
-
-                guard.snapshot.pd_display_mode = pd_display_mode;
-                guard.snapshot.pd_target_mv = pd_target_mv;
-                guard.snapshot.pd_target_available = pd_target_available;
-
-                let prev_pd_state = guard.snapshot.pd_state;
-                // If we recently attempted a non-Safe5V request but the contract is still stuck
-                // at 5V after a grace window, treat it as a failure and latch red state.
-                if allow_extended_voltage
-                    && pd_wants_non_safe5v
-                    && pd_attached
-                    && pd_contract_mv == control::PdConfig::DEFAULT_TARGET_MV
-                {
-                    let since = PD_RETRY_WINDOW_START_MS.load(Ordering::Relaxed);
-                    if since != 0 && now.wrapping_sub(since) > PD_T_PD_MS {
-                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
-                        reset_pd_extended_voltage_retry_window();
-                    }
-                }
-                let pd_failure_latched = PD_EXTENDED_FAILURE_LATCH.load(Ordering::Relaxed);
-                // This button intentionally reflects the persisted extended-voltage gate rather
-                // than the last observed contract; link/attach reachability is shown elsewhere.
-                guard.snapshot.pd_state = if !allow_extended_voltage {
-                    ui::PdButtonState::Safe5vOnly
-                } else if pd_failure_latched {
-                    ui::PdButtonState::ExtendedFailed
-                } else {
-                    ui::PdButtonState::ExtendedAllowed
-                };
-                if prev_pd_state != guard.snapshot.pd_state {
-                    info!(
-                        "pd_button: state {:?}->{:?} allow_extended_voltage={} attached={} failure_latched={} display_target_mv={}",
-                        prev_pd_state,
-                        guard.snapshot.pd_state,
-                        allow_extended_voltage,
-                        pd_attached,
-                        pd_failure_latched,
-                        pd_target_mv.unwrap_or(0)
-                    );
-                }
-                guard.snapshot.set_control_overlay(
-                    overlay_preset_id,
-                    output_enabled,
-                    overlay_mode,
-                    uv_latched,
-                    link_up,
-                    link_alarm_latched,
-                    hello_seen,
-                    trip_alarm_abbrev,
-                    blocked_enable_abbrev,
-                );
-                guard.snapshot.preset_preview_active = preview_active;
-                if let Some((target, v_lim, i_lim, p_lim)) = preview_panel {
-                    guard.snapshot.preset_preview_target_text = target;
-                    guard.snapshot.preset_preview_v_lim_text = v_lim;
-                    guard.snapshot.preset_preview_i_lim_text = i_lim;
-                    guard.snapshot.preset_preview_p_lim_text = p_lim;
-                } else {
-                    guard.snapshot.preset_preview_target_text.clear();
-                    guard.snapshot.preset_preview_v_lim_text.clear();
-                    guard.snapshot.preset_preview_i_lim_text.clear();
-                    guard.snapshot.preset_preview_p_lim_text.clear();
-                }
-                guard.snapshot.set_control_row(
-                    active_target_milli,
-                    active_target_unit,
-                    adjust_digit,
-                );
-                let pd_status = guard.last_pd_status.clone();
-                let (snapshot, mask) = guard.diff_for_render();
-                (snapshot, mask, pd_status)
-            };
-
-            let full_screen_view = match ui_view {
-                control::UiView::PdSettings => true,
-                #[cfg(feature = "audio_menu")]
-                control::UiView::AudioMenu => true,
-                _ => false,
-            };
-
-            if !full_screen_view && mask.is_empty() && !force_full_render {
-                if log_this_frame {
-                    info!(
-                        "display: frame {} skipped (no UI changes, dt_ms={})",
-                        frame_idx, dt_ms
-                    );
-                }
-            } else {
-                {
-                    let mut frame = RawFrameBuf::<Rgb565, _>::new(
-                        &mut ctx.framebuffer[..],
-                        DISPLAY_WIDTH,
-                        DISPLAY_HEIGHT,
-                    );
-                    match ui_view {
-                        control::UiView::PdSettings => {
-                            let vm = build_pd_settings_vm(
-                                pd_draft,
-                                pd_focus,
-                                pd_digit,
-                                pd_status_for_panel.as_ref(),
-                            );
-                            ui::pd_settings::render_pd_settings(&mut frame, &vm);
-                        }
-                        #[cfg(feature = "audio_menu")]
-                        control::UiView::AudioMenu => {
-                            ui::audio_menu::render_audio_menu(&mut frame);
-                        }
-                        _ => {
-                            if force_full_render || mask.touch_marker {
-                                // 首帧：完整绘制静态布局 + 动态内容。
-                                ui::render(&mut frame, &snapshot);
-                            } else {
-                                // 后续帧：仅按掩码重绘受影响区域。
-                                ui::render_partial(&mut frame, &snapshot, &mask);
-                            }
-                            if let Some(vm) = panel_vm.as_ref() {
-                                ui::preset_panel::render_preset_panel(&mut frame, vm);
-                            }
-                        }
-                    }
-                    // 在左上角叠加 FPS 信息，使用上一统计窗口得到的整数 FPS。
-                    ui::render_fps_overlay(&mut frame, last_fps);
-                    ui::render_touch_marker(&mut frame, touch::load_touch_marker());
-                }
-
-                if frame_idx <= FRAME_SAMPLE_FRAMES {
-                    log_framebuffer_span("rendered-frame", &ctx.framebuffer[..]);
-                    log_framebuffer_samples("rendered-frame", &ctx.framebuffer[..]);
-                }
-            }
-
-            let mut dirty_rows = 0usize;
-            let mut dirty_spans = 0usize;
-
-            if ENABLE_DISPLAY_SPI_UPDATES {
-                #[cfg(not(feature = "net_http"))]
-                {
-                    let bytes_per_row = DISPLAY_WIDTH * 2;
-                    let mut change_map = [false; DISPLAY_HEIGHT];
-                    for row in 0..DISPLAY_HEIGHT {
-                        let offset = row * bytes_per_row;
-                        change_map[row] = ctx.framebuffer[offset..offset + bytes_per_row]
-                            != ctx.previous_framebuffer[offset..offset + bytes_per_row];
-                    }
-
-                    let mut row = 0usize;
-                    while row < DISPLAY_HEIGHT {
-                        if !change_map[row] {
-                            row += 1;
-                            continue;
-                        }
-
-                        let start_row = row;
-                        row += 1;
-                        let mut gap_rows = 0usize;
-                        while row < DISPLAY_HEIGHT {
-                            if change_map[row] {
-                                gap_rows = 0;
-                                row += 1;
-                            } else if gap_rows < DISPLAY_DIRTY_MERGE_GAP_ROWS {
-                                gap_rows += 1;
-                                row += 1;
-                            } else {
-                                break;
-                            }
-                        }
-
-                        let rows_changed = row - start_row;
-                        let start_idx = start_row * bytes_per_row;
-                        let end_idx = start_idx + rows_changed * bytes_per_row;
-                        display
-                            .show_raw_data(
-                                0,
-                                start_row as u16,
-                                DISPLAY_WIDTH as u16,
-                                rows_changed as u16,
-                                &ctx.framebuffer[start_idx..end_idx],
-                            )
-                            .await
-                            .expect("frame push (dirty)");
-                        ctx.previous_framebuffer[start_idx..end_idx]
-                            .copy_from_slice(&ctx.framebuffer[start_idx..end_idx]);
-                        dirty_rows += rows_changed;
-                        dirty_spans += 1;
-                    }
-
-                    if dirty_spans >= DISPLAY_DIRTY_SPAN_FALLBACK {
-                        // 如果脏区 span 过多，则退回整帧推送；否则保持行级增量更新。
-                        display
-                            .show_raw_data(
-                                0,
-                                0,
-                                DISPLAY_WIDTH as u16,
-                                DISPLAY_HEIGHT as u16,
-                                &ctx.framebuffer[..],
-                            )
-                            .await
-                            .expect("frame push (full fallback)");
-                        ctx.previous_framebuffer
-                            .copy_from_slice(&ctx.framebuffer[..]);
-                        dirty_rows = DISPLAY_HEIGHT;
-                        dirty_spans = 1;
-                    }
-                }
-
-                #[cfg(feature = "net_http")]
-                {
-                    // 在启用 Wi‑Fi/HTTP 的构建中，为了节省 DRAM，仅保留单帧缓冲，
-                    // 这里退化为“整帧推送”，但必须分块（避免单次大事务卡住 SPI/DMA）。
-                    let bytes_per_row = DISPLAY_WIDTH * 2;
-                    let mut y = 0usize;
-                    let mut spans = 0usize;
-                    while y < DISPLAY_HEIGHT {
-                        let rows = core::cmp::min(DISPLAY_CHUNK_ROWS, DISPLAY_HEIGHT - y);
-                        let start = y * bytes_per_row;
-                        let end = start + rows * bytes_per_row;
-                        display
-                            .show_raw_data(
-                                0,
-                                y as u16,
-                                DISPLAY_WIDTH as u16,
-                                rows as u16,
-                                &ctx.framebuffer[start..end],
-                            )
-                            .await
-                            .expect("frame push (full chunked)");
-                        spans += 1;
-
-                        for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
-                            yield_now().await;
-                        }
-                        y += rows;
-                    }
-                    dirty_rows = DISPLAY_HEIGHT;
-                    dirty_spans = spans;
-                }
-            } else {
-                dirty_rows = 0;
-                dirty_spans = 0;
-            }
-
-            if log_this_frame {
-                info!(
-                    "display: frame {} push complete (dirty_rows={} dirty_spans={})",
-                    frame_idx, dirty_rows, dirty_spans
-                );
-            }
-
-            // 每当统计窗口达到 ≥500ms 时，计算一次 FPS 并打印日志。
-            let window_elapsed = now.wrapping_sub(fps_window_start_ms);
-            if window_elapsed >= 500 {
-                let fps = if window_elapsed > 0 {
-                    (fps_window_frames.saturating_mul(1000)) / window_elapsed
-                } else {
-                    0
-                };
-                last_fps = fps;
-                info!(
-                    "display: fps window_ms={} frames={} fps={}",
-                    window_elapsed, fps_window_frames, fps
-                );
-                fps_window_frames = 0;
-                fps_window_start_ms = now;
-            }
-
-            last_push_ms = now;
-        } else {
-            // 未到下一帧的最小间隔，主动让出避免忙等占用整个 Core。
+        if now.wrapping_sub(last_present_ms) < DISPLAY_MIN_FRAME_INTERVAL_MS {
             yield_now().await;
+            continue;
         }
+
+        let pending = {
+            let mut guard = pipeline.state.lock().await;
+            if let Some(idx) = guard.pending_idx.take() {
+                guard.presenting_idx = Some(idx);
+                Some((idx, guard.plans[idx]))
+            } else {
+                None
+            }
+        };
+
+        let Some((idx, plan)) = pending else {
+            yield_now().await;
+            continue;
+        };
+
+        let log_this_frame = plan.generation <= FRAME_SAMPLE_FRAMES || plan.generation % 32 == 0;
+        let present_start_ms = now_ms32();
+        if ENABLE_DISPLAY_SPI_UPDATES {
+            let framebuffer = pipeline.arena.framebuffer(idx);
+            for rect in plan.rects() {
+                push_dirty_rect_to_display(&mut display, staging, framebuffer, *rect)
+                    .await
+                    .expect("frame push");
+            }
+        }
+        let present_ms = now_ms32().wrapping_sub(present_start_ms);
+        DISPLAY_PRESENT_COUNT.fetch_add(1, Ordering::Relaxed);
+        DISPLAY_LAST_PRESENT_MS.store(present_ms, Ordering::Relaxed);
+        if plan.full_refresh {
+            DISPLAY_PRESENT_FULL_COUNT.fetch_add(1, Ordering::Relaxed);
+        }
+        DISPLAY_PRESENT_DIRTY_ROWS.fetch_add(plan.dirty_rows as u32, Ordering::Relaxed);
+
+        {
+            let mut guard = pipeline.state.lock().await;
+            if guard.presenting_idx == Some(idx) {
+                guard.presenting_idx = None;
+            }
+            guard.displayed_idx = idx;
+        }
+
+        if log_this_frame {
+            info!(
+                "display: present gen={} complete (dirty_rows={} dirty_rects={} full={} present_ms={})",
+                plan.generation, plan.dirty_rows, plan.rect_count, plan.full_refresh, present_ms,
+            );
+        }
+
+        last_present_ms = now_ms32();
     }
 }
 
@@ -5536,7 +6009,13 @@ fn rate_limited_framing_warn(frame_len: usize, declared_payload_len: usize, drop
 
 #[esp_rtos::main]
 async fn main(spawner: Spawner) {
-    let peripherals = hal::init(hal::Config::default());
+    let hal_config = hal::Config::default().with_psram(hal::psram::PsramConfig {
+        size: hal::psram::PsramSize::AutoDetect,
+        ram_frequency: hal::psram::SpiRamFreq::Freq40m,
+        ..Default::default()
+    });
+    let peripherals = hal::init(hal_config);
+    let (psram_base, psram_len) = hal::psram::psram_raw_parts(&peripherals.PSRAM);
 
     #[cfg(feature = "net_http")]
     {
@@ -5700,7 +6179,7 @@ async fn main(spawner: Spawner) {
 
     // 配置 SPI2 并启用 DMA：收缩 DMA 缓冲区以降低一次搬运的负载。
     // 4 行（4*240*2=1920B）以内的块可以覆盖单次传输，DMA 缓冲 2048B 足够。
-    let (rx_buf, rx_desc, tx_buf, tx_desc) = esp_hal::dma_buffers!(2048);
+    let (rx_buf, rx_desc, tx_buf, tx_desc) = esp_hal::dma_buffers!(DISPLAY_DMA_STAGING_BYTES);
     let dma_rx_buf = DmaRxBuf::new(rx_desc, rx_buf).expect("dma rx buf");
     let dma_tx_buf = DmaTxBuf::new(tx_desc, tx_buf).expect("dma tx buf");
 
@@ -5827,20 +6306,28 @@ async fn main(spawner: Spawner) {
     let rgb_b_channel = RGB_STATUS_B_CHANNEL.init(rgb_b_channel);
     rgb_b_channel.set_duty(100).expect("rgb b duty init");
 
-    let framebuffer = &mut FRAMEBUFFER.init_with(|| Align32([0; FRAMEBUFFER_LEN])).0;
-    #[cfg(not(feature = "net_http"))]
-    let prev_framebuffer = &mut PREVIOUS_FRAMEBUFFER
-        .init_with(|| Align32([0; FRAMEBUFFER_LEN]))
+    let pipeline = DISPLAY_PIPELINE.init(DisplayPipeline::new(DisplayPsramArena::new(
+        psram_base, psram_len,
+    )));
+    pipeline.arena.clear_all();
+    let dma_staging = &mut DISPLAY_DMA_STAGING
+        .init_with(|| Align32([0; DISPLAY_DMA_STAGING_BYTES]))
         .0;
+    info!(
+        "display psram arena ready: base=0x{:x} size={} framebuffers={} staging_bytes={}",
+        pipeline.arena.base_addr(),
+        pipeline.arena.size(),
+        DISPLAY_BUFFER_COUNT,
+        DISPLAY_DMA_STAGING_BYTES,
+    );
 
     let resources = DISPLAY_RESOURCES.init(DisplayResources {
         spi: Some(spi),
         cs: Some(cs),
         dc: Some(dc),
         rst: Some(rst),
-        framebuffer,
-        #[cfg(not(feature = "net_http"))]
-        previous_framebuffer: prev_framebuffer,
+        pipeline,
+        dma_staging,
     });
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
@@ -6023,16 +6510,19 @@ async fn main(spawner: Spawner) {
             rgb_b_channel,
         ))
         .expect("touch_spring_task spawn");
-    info!("spawning display task");
+    info!("spawning display render task");
     spawner
-        .spawn(display_task(
+        .spawn(display_render_task(pipeline, telemetry, control))
+        .expect("display_render_task spawn");
+    info!("spawning display present task");
+    spawner
+        .spawn(display_present_task(
             resources,
-            telemetry,
             control,
             backlight_channel,
             backlight_pin,
         ))
-        .expect("display_task spawn");
+        .expect("display_present_task spawn");
     info!("spawning touch task");
     spawner
         .spawn(touch::touch_task(ctp_int, ctp_rst))
@@ -6206,12 +6696,24 @@ async fn stats_task(telemetry: &'static TelemetryMutex) {
             let pt_tick_enq = prompt_tone::TICKS_ENQUEUE_TOTAL.load(Ordering::Relaxed);
             let pt_tick_play = prompt_tone::TICKS_PLAY_TOTAL.load(Ordering::Relaxed);
             let pt_tick_pending = prompt_tone::pending_ticks();
+            let display_render_ms = DISPLAY_LAST_RENDER_MS.load(Ordering::Relaxed);
+            let display_clone_ms = DISPLAY_LAST_CLONE_MS.load(Ordering::Relaxed);
+            let display_present_ms = DISPLAY_LAST_PRESENT_MS.load(Ordering::Relaxed);
+            let display_present_full_count = DISPLAY_PRESENT_FULL_COUNT.load(Ordering::Relaxed);
+            let display_present_dirty_rows = DISPLAY_PRESENT_DIRTY_ROWS.load(Ordering::Relaxed);
+            let display_pending_drops = DISPLAY_PENDING_DROPS.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}, tick_enq={}, tick_play={}, tick_pending={}",
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, display_render_ms={}, display_clone_ms={}, display_present_ms={}, display_present_full_count={}, display_present_dirty_rows={}, display_pending_drops={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}, tick_enq={}, tick_play={}, tick_pending={}",
                 ok,
                 de,
                 df,
                 ut,
+                display_render_ms,
+                display_clone_ms,
+                display_present_ms,
+                display_present_full_count,
+                display_present_dirty_rows,
+                display_pending_drops,
                 sp_tx,
                 sp_ack,
                 sp_retx,

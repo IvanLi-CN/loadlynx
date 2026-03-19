@@ -64,3 +64,4 @@
 | ID   | Title | Status | Spec | Last | Notes |
 |-----:|-------|--------|------|------|-------|
 | w4cpd | Dashboard 扩展电压开关与 PD 设置入口重构 | 已完成 | `w4cpd-dashboard-extended-voltage-toggle/SPEC.md` | 2026-03-10 | PR #70；实现已完成；HIL 可选 |
+| y4sf4 | Digital Display PSRAM/DMA Pipeline | 已完成 | `y4sf4-display-psram-dma-pipeline/SPEC.md` | 2026-03-19 | PR #71；PSRAM 专用 framebuffer arena、多缓冲 present、真实 present-FPS、细粒度 dirty rect、pending 背压 |

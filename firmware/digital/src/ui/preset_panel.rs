@@ -88,7 +88,7 @@ pub enum PresetPanelHit {
     Save,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PresetPanelVm {
     pub active_preset_id: u8,
     pub editing_preset_id: u8,
@@ -103,6 +103,10 @@ pub struct PresetPanelVm {
     pub v_lim_text: String<8>,
     pub i_lim_text: String<8>,
     pub p_lim_text: String<8>,
+}
+
+pub fn push_panel_dirty_rect(rects: &mut super::DirtyRects) {
+    super::push_logical_dirty_rect(rects, PANEL_LEFT, PANEL_TOP, PANEL_RIGHT, PANEL_BOTTOM);
 }
 
 pub fn render_preset_panel(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, vm: &PresetPanelVm) {
