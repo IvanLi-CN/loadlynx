@@ -61,7 +61,10 @@ const MAIN_DIGITS_RIGHT: i32 = 170;
 // 以完全覆盖 32x50 的七段字体（area.top = top+28，高度 50 → bottom=top+78）。
 const CARD_BG_TOP_OFFSET: i32 = 6;
 const CARD_BG_BOTTOM_OFFSET: i32 = 80;
-const MAIN_VALUE_LEFT: i32 = 24;
+// `draw_seven_seg_value()` right-aligns `99.99` / `999.9` inside `MAIN_DIGITS_RIGHT`.
+// The widest main metric can start around x=18, so partial clears must extend left of 24
+// or stale leading segments remain visible when the value shrinks.
+const MAIN_VALUE_LEFT: i32 = 16;
 const MAIN_VALUE_RIGHT: i32 = 182;
 const MAIN_VALUE_TOP_OFFSET: i32 = 26;
 const MAIN_VALUE_BOTTOM_OFFSET: i32 = 76;
@@ -248,7 +251,7 @@ pub struct UiChangeMask {
     pub load_row: bool,
     pub channel_currents: bool,
     pub control_row: bool,
-    pub telemetry_lines: bool,
+    pub telemetry_line_mask: u8,
     pub wifi_status: bool,
     pub touch_marker: bool,
 }
@@ -258,13 +261,21 @@ impl UiChangeMask {
         self.main_voltage || self.main_current || self.main_power
     }
 
+    pub fn has_telemetry_lines(&self) -> bool {
+        self.telemetry_line_mask != 0
+    }
+
+    pub fn mark_telemetry_line_dirty(&mut self, line_idx: usize) {
+        self.telemetry_line_mask |= telemetry_line_bit(line_idx);
+    }
+
     pub fn is_empty(&self) -> bool {
         !(self.has_main_metrics()
             || self.voltage_pair
             || self.load_row
             || self.channel_currents
             || self.control_row
-            || self.telemetry_lines
+            || self.has_telemetry_lines()
             || self.wifi_status
             || self.touch_marker)
     }
@@ -278,6 +289,7 @@ pub struct DirtyRect {
     pub y: u16,
     pub width: u16,
     pub height: u16,
+    pub needs_base_copy: bool,
 }
 
 impl DirtyRect {
@@ -287,11 +299,36 @@ impl DirtyRect {
             y,
             width,
             height,
+            needs_base_copy: false,
         }
+    }
+
+    pub const fn with_base_copy(mut self, needs_base_copy: bool) -> Self {
+        self.needs_base_copy = needs_base_copy;
+        self
+    }
+
+    pub fn same_region(&self, other: &Self) -> bool {
+        self.x == other.x
+            && self.y == other.y
+            && self.width == other.width
+            && self.height == other.height
     }
 }
 
 pub type DirtyRects = Vec<DirtyRect, DIRTY_RECT_CAPACITY>;
+
+pub const fn telemetry_line_bit(line_idx: usize) -> u8 {
+    1u8 << line_idx
+}
+
+pub const fn telemetry_line_all_mask() -> u8 {
+    (1u8 << TELEMETRY_LINE_COUNT) - 1
+}
+
+pub const fn telemetry_alert_line_bit() -> u8 {
+    telemetry_line_bit(TELEMETRY_LINE_COUNT - 1)
+}
 
 fn logical_to_physical_dirty_rect(
     left: i32,
@@ -323,6 +360,19 @@ fn logical_to_physical_dirty_rect(
     ))
 }
 
+fn push_logical_dirty_rect_with_copy(
+    rects: &mut DirtyRects,
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+    needs_base_copy: bool,
+) {
+    if let Some(rect) = logical_to_physical_dirty_rect(left, top, right, bottom) {
+        let _ = rects.push(rect.with_base_copy(needs_base_copy));
+    }
+}
+
 pub(super) fn push_logical_dirty_rect(
     rects: &mut DirtyRects,
     left: i32,
@@ -330,9 +380,7 @@ pub(super) fn push_logical_dirty_rect(
     right: i32,
     bottom: i32,
 ) {
-    if let Some(rect) = logical_to_physical_dirty_rect(left, top, right, bottom) {
-        let _ = rects.push(rect);
-    }
+    push_logical_dirty_rect_with_copy(rects, left, top, right, bottom, false);
 }
 
 pub fn full_screen_dirty_rect() -> DirtyRect {
@@ -355,6 +403,11 @@ fn push_main_metric_value_dirty_rect(rects: &mut DirtyRects, top: i32) {
         MAIN_VALUE_RIGHT,
         top + MAIN_VALUE_BOTTOM_OFFSET,
     );
+}
+
+fn push_telemetry_line_dirty_rect(rects: &mut DirtyRects, line_idx: usize) {
+    let top = TELEMETRY_TOP + (line_idx as i32) * TELEMETRY_LINE_HEIGHT;
+    push_logical_dirty_rect(rects, 198, top, LOGICAL_WIDTH, top + TELEMETRY_LINE_HEIGHT);
 }
 
 pub fn collect_partial_dirty_rects(
@@ -409,21 +462,16 @@ pub fn collect_partial_dirty_rects(
         push_logical_dirty_rect(dirty_rects, 190, 0, LOGICAL_WIDTH, VOLTAGE_PAIR_TOP);
     }
 
-    if mask.telemetry_lines {
+    if mask.has_telemetry_lines() {
         for line_idx in 0..TELEMETRY_LINE_COUNT {
-            let top = TELEMETRY_TOP + (line_idx as i32) * TELEMETRY_LINE_HEIGHT;
-            push_logical_dirty_rect(
-                dirty_rects,
-                198,
-                top,
-                LOGICAL_WIDTH,
-                top + TELEMETRY_LINE_HEIGHT,
-            );
+            if (mask.telemetry_line_mask & telemetry_line_bit(line_idx)) != 0 {
+                push_telemetry_line_dirty_rect(dirty_rects, line_idx);
+            }
         }
     }
 
     let redraw_preview = curr.preset_preview_active
-        && (mask.control_row || mask.voltage_pair || mask.load_row || mask.telemetry_lines);
+        && (mask.control_row || mask.voltage_pair || mask.load_row || mask.has_telemetry_lines());
     if redraw_preview {
         push_logical_dirty_rect(
             dirty_rects,
@@ -603,20 +651,24 @@ pub fn render_partial(
         draw_control_row(&mut canvas, curr);
     }
 
-    if mask.telemetry_lines {
+    if mask.has_telemetry_lines() {
         // 底部状态文本逐行擦除，避免 run time 这类短字符串更新时整块闪动。
         for line_idx in 0..TELEMETRY_LINE_COUNT {
+            if (mask.telemetry_line_mask & telemetry_line_bit(line_idx)) == 0 {
+                continue;
+            }
+
             let top = TELEMETRY_TOP + (line_idx as i32) * TELEMETRY_LINE_HEIGHT;
             canvas.fill_rect(
                 Rect::new(198, top, LOGICAL_WIDTH, top + TELEMETRY_LINE_HEIGHT),
                 rgb(0x080f19),
             );
+            draw_telemetry_line(&mut canvas, curr, line_idx);
         }
-        draw_telemetry(&mut canvas, curr);
     }
 
     let redraw_preview = curr.preset_preview_active
-        && (mask.control_row || mask.voltage_pair || mask.load_row || mask.telemetry_lines);
+        && (mask.control_row || mask.voltage_pair || mask.load_row || mask.has_telemetry_lines());
     if redraw_preview {
         // Preset preview info panel overlays part of the right-side info column; redraw it last so
         // partial updates do not accidentally wipe it while the gesture is still held.
@@ -631,7 +683,7 @@ pub fn render_partial(
 }
 
 /// 在左上角叠加显示 FPS 信息。
-/// 参数 `fps` 通常来自 display_task 中按 500ms 窗口统计得到的整数 FPS。
+/// 参数 `fps` 来自 display task 的 present 完成统计窗口。
 pub fn render_fps_overlay(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, fps: u32) {
     let bytes = frame.as_mut_bytes();
     let mut canvas = Canvas::new(bytes, DISPLAY_WIDTH, DISPLAY_HEIGHT);
@@ -1097,29 +1149,33 @@ fn draw_mirror_bar_in_bounds(
     }
 }
 
-fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
-    let lines = data.status_lines();
-    let mut baseline = TELEMETRY_TOP;
-    for (idx, line) in lines.iter().enumerate() {
-        let mut color = rgb(0xdfe7ff);
-        if idx + 1 == lines.len() {
-            // Bottom-right "reason" line should blink on any abnormal condition.
-            let ctl_alert = data.fault_flags != 0
-                || data.link_alarm_latched
-                || data.trip_alarm_abbrev.is_some()
-                || data.blocked_enable_abbrev.is_some()
-                || data.uv_latched
-                || !data.link_up;
-            if ctl_alert && !line.is_empty() {
-                color = if data.blink_on {
-                    rgb(0xff5252)
-                } else {
-                    rgb(0xffffff)
-                };
-            }
+fn draw_telemetry_line(canvas: &mut Canvas, data: &UiSnapshot, line_idx: usize) {
+    let top = TELEMETRY_TOP + (line_idx as i32) * TELEMETRY_LINE_HEIGHT;
+    let line = data.status_lines[line_idx].as_str();
+    let is_alert_line = line_idx + 1 == TELEMETRY_LINE_COUNT;
+    let mut color = rgb(0xdfe7ff);
+    if is_alert_line {
+        // Bottom-right "reason" line should blink on any abnormal condition.
+        let ctl_alert = data.fault_flags != 0
+            || data.link_alarm_latched
+            || data.trip_alarm_abbrev.is_some()
+            || data.blocked_enable_abbrev.is_some()
+            || data.uv_latched
+            || !data.link_up;
+        if ctl_alert && !line.is_empty() {
+            color = if data.blink_on {
+                rgb(0xff5252)
+            } else {
+                rgb(0xffffff)
+            };
         }
-        draw_small_text(canvas, line.as_str(), 198, baseline, color, 0);
-        baseline += 12;
+    }
+    draw_small_text(canvas, line, 198, top, color, 0);
+}
+
+fn draw_telemetry(canvas: &mut Canvas, data: &UiSnapshot) {
+    for line_idx in 0..TELEMETRY_LINE_COUNT {
+        draw_telemetry_line(canvas, data, line_idx);
     }
 }
 
@@ -2034,8 +2090,8 @@ impl UiSnapshot {
         [run, core, exhaust, mcu, ctl]
     }
 
-    pub fn status_lines(&self) -> [String<20>; 5] {
-        self.status_lines.clone()
+    pub fn status_lines(&self) -> &[String<20>; 5] {
+        &self.status_lines
     }
 }
 

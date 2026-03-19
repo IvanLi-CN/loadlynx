@@ -225,6 +225,7 @@ const FRAMEBUFFER_LEN: usize = DISPLAY_WIDTH * DISPLAY_HEIGHT * 2;
 const TPS82130_ENABLE_DELAY_MS: u32 = 10;
 // 显示最小帧间隔（毫秒）：33ms ≈ 30FPS，与 analog 侧 30Hz FAST_STATUS 节奏对齐。
 const DISPLAY_MIN_FRAME_INTERVAL_MS: u32 = 33;
+const DISPLAY_FPS_WINDOW_MS: u32 = 1_000;
 const DISPLAY_BUFFER_COUNT: usize = 3;
 const DISPLAY_DMA_STAGING_BYTES: usize = 8 * 1024;
 // Larger DMA bursts reduce the visible right-to-left sweep on the rotated panel.
@@ -4447,8 +4448,15 @@ impl TelemetryModel {
                 mask.load_row = true;
             }
 
-            if prev.status_lines != current.status_lines {
-                mask.telemetry_lines = true;
+            for (line_idx, (prev_line, curr_line)) in prev
+                .status_lines
+                .iter()
+                .zip(current.status_lines.iter())
+                .enumerate()
+            {
+                if prev_line != curr_line {
+                    mask.mark_telemetry_line_dirty(line_idx);
+                }
             }
             let ctl_alert = current.fault_flags != 0
                 || current.link_alarm_latched
@@ -4457,7 +4465,7 @@ impl TelemetryModel {
                 || current.uv_latched
                 || !current.link_up;
             if ctl_alert && prev.blink_on != current.blink_on {
-                mask.telemetry_lines = true;
+                mask.telemetry_line_mask |= ui::telemetry_alert_line_bit();
             }
             if prev.wifi_status != current.wifi_status {
                 mask.wifi_status = true;
@@ -4472,7 +4480,7 @@ impl TelemetryModel {
             mask.channel_currents = true;
             mask.control_row = true;
             mask.load_row = true;
-            mask.telemetry_lines = true;
+            mask.telemetry_line_mask = ui::telemetry_line_all_mask();
             mask.wifi_status = true;
             mask.touch_marker = true;
         }
@@ -4799,10 +4807,13 @@ fn merge_pending_dirty_rects(
     }
 
     for rect in pending_plan.rects() {
-        if dirty_rects.iter().any(|existing| *existing == *rect) {
+        if dirty_rects
+            .iter()
+            .any(|existing| existing.same_region(rect))
+        {
             continue;
         }
-        if dirty_rects.push(*rect).is_err() {
+        if dirty_rects.push(rect.with_base_copy(true)).is_err() {
             return true;
         }
     }
@@ -4903,7 +4914,7 @@ async fn display_render_task(
 
         let mut fps_dirty = false;
         let window_elapsed = now.wrapping_sub(fps_window_start_ms);
-        if window_elapsed >= 500 {
+        if window_elapsed >= DISPLAY_FPS_WINDOW_MS {
             let presented_total = DISPLAY_PRESENT_COUNT.load(Ordering::Relaxed);
             let presented_frames = presented_total.wrapping_sub(fps_window_presented);
             let fps = if window_elapsed > 0 {
@@ -5246,7 +5257,9 @@ async fn display_render_task(
         let clone_start_ms = now_ms32();
         if !full_refresh {
             for rect in dirty_rects.iter() {
-                pipeline.arena.copy_rect(target_idx, base_idx, *rect);
+                if rect.needs_base_copy {
+                    pipeline.arena.copy_rect(target_idx, base_idx, *rect);
+                }
             }
         }
         let clone_ms = now_ms32().wrapping_sub(clone_start_ms);
