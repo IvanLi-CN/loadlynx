@@ -3894,6 +3894,18 @@ fn build_pd_settings_vm(
         pps_pdos = s.pps_pdos.clone();
     }
 
+    if !attached
+        && !fixed_pdos.iter().any(|pdo| {
+            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
+        })
+    {
+        let _ = fixed_pdos.push(loadlynx_protocol::FixedPdo {
+            pos: control::EPR_FIXED_28V_OBJECT_POS,
+            mv: control::EPR_FIXED_28V_MV,
+            max_ma: control::EPR_FIXED_28V_MAX_MA,
+        });
+    }
+
     // Fixed selection: if not explicitly selected, fall back to target_mv matching for legacy blobs.
     let fixed_object_pos = if draft.fixed_object_pos != 0 {
         draft.fixed_object_pos
@@ -8340,6 +8352,19 @@ fn build_pd_sink_request(
                 });
             }
 
+            if let Some(target_mv) = offline_epr_fixed_target(fixed_object_pos, cfg.target_mv) {
+                if i_req_ma > control::EPR_FIXED_28V_MAX_MA {
+                    return None;
+                }
+
+                return Some(PdSinkRequest {
+                    mode,
+                    target_mv,
+                    object_pos: control::EPR_FIXED_28V_OBJECT_POS,
+                    i_req_ma,
+                });
+            }
+
             None
         }
         control::PdMode::Pps => {
@@ -8371,6 +8396,14 @@ fn build_pd_sink_request(
                 i_req_ma,
             })
         }
+    }
+}
+
+fn offline_epr_fixed_target(object_pos: u8, target_mv: u32) -> Option<u32> {
+    if object_pos == control::EPR_FIXED_28V_OBJECT_POS && target_mv == control::EPR_FIXED_28V_MV {
+        Some(control::EPR_FIXED_28V_MV)
+    } else {
+        None
     }
 }
 

@@ -1823,6 +1823,7 @@ async fn handle_presets_update(
         // ApplyPreset and any mode change MUST force output OFF (if this affects the active preset).
         if guard.active_preset_id == preset.preset_id && prev_mode != preset.mode {
             guard.output_enabled = false;
+            crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
         }
 
         // Persist presets blob to EEPROM (saved snapshot is the persisted baseline).
@@ -1840,6 +1841,7 @@ async fn handle_presets_update(
             guard.saved = old_saved;
             guard.dirty = old_dirty;
             guard.output_enabled = old_output;
+            crate::DESIRED_OUTPUT_ENABLED.store(old_output, Ordering::Relaxed);
             write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
             return Err("503 Service Unavailable");
         }
@@ -1984,6 +1986,7 @@ async fn handle_control_update(
     {
         let mut guard = control.lock().await;
         guard.output_enabled = parsed.output_enabled;
+        crate::DESIRED_OUTPUT_ENABLED.store(parsed.output_enabled, Ordering::Relaxed);
         bump_control_rev();
     }
 

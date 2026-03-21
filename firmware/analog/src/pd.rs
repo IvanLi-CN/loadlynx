@@ -38,8 +38,6 @@ pub const PD_MODE_AVS: u8 = 2;
 pub const PD_TARGET_5V_MV: u32 = 5_000;
 pub const PD_TARGET_20V_MV: u32 = 20_000;
 pub const PD_TARGET_28V_MV: u32 = 28_000;
-const PD_EPR_FIXED_28V_OBJECT_POS: u8 = 8;
-const PD_EPR_FIXED_28V_MAX_MA: u32 = 5_000;
 
 pub static PD_DESIRED_MODE: AtomicU8 = AtomicU8::new(PD_MODE_FIXED);
 pub static PD_DESIRED_OBJECT_POS: AtomicU8 = AtomicU8::new(1);
@@ -331,8 +329,6 @@ impl AnalogDpm {
             }
         }
 
-        self.push_inferred_28v_fixed_pdo(caps);
-
         if !self.caps_logged {
             self.caps_logged = true;
             let mut has_20v = false;
@@ -355,28 +351,6 @@ impl AnalogDpm {
                 v5_max_ma
             );
         }
-    }
-
-    fn push_inferred_28v_fixed_pdo(&mut self, caps: &source_capabilities::SourceCapabilities) {
-        if self.epr_active || !caps.epr_mode_capable() {
-            return;
-        }
-        if self
-            .fixed_pdos
-            .iter()
-            .any(|pdo| pdo.pos == PD_EPR_FIXED_28V_OBJECT_POS || pdo.mv == PD_TARGET_28V_MV)
-        {
-            return;
-        }
-
-        // Break the SPR->EPR discovery chicken-and-egg: before EPR entry we only have the SPR
-        // Source_Capabilities message, but an EPR-capable source can still surface a read-only
-        // inferred 28V rail so the digital UI/API can offer the standard PDO#8 selection.
-        let _ = self.fixed_pdos.push(FixedPdo {
-            pos: PD_EPR_FIXED_28V_OBJECT_POS,
-            mv: PD_TARGET_28V_MV,
-            max_ma: PD_EPR_FIXED_28V_MAX_MA,
-        });
     }
 
     fn desired_mode() -> u8 {
