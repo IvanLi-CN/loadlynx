@@ -74,6 +74,8 @@ jobs:
 
       - name: Check code formatting (digital)
         working-directory: firmware/digital
+        env:
+          RUSTUP_TOOLCHAIN: 1.90.0
         run: cargo fmt --all -- --check
 
       - name: Install ESP Rust toolchain (espup, xtensa-esp32s3)
