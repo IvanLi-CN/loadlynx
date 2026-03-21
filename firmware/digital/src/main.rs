@@ -3848,6 +3848,36 @@ fn i_req_within_pdo_limit(i_req_ma: u32, max_ma: u32) -> bool {
             .unwrap_or(true)
 }
 
+fn source_max_power_mw(status: &PdStatus) -> u32 {
+    let fixed_max = status
+        .fixed_pdos
+        .iter()
+        .map(|pdo| pdo.mv.saturating_mul(pdo.max_ma))
+        .max()
+        .unwrap_or(0);
+    let pps_max = status
+        .pps_pdos
+        .iter()
+        .map(|pdo| pdo.max_mv.saturating_mul(pdo.max_ma))
+        .max()
+        .unwrap_or(0);
+    fixed_max.max(pps_max)
+}
+
+fn clamp_synthetic_epr_i_req_ma(status: &PdStatus, target_mv: u32, i_req_ma: u32) -> u32 {
+    if target_mv == 0 {
+        return i_req_ma.max(50);
+    }
+
+    let max_power_mw = source_max_power_mw(status);
+    if max_power_mw == 0 {
+        return i_req_ma.max(50);
+    }
+
+    let inferred_limit_ma = max_power_mw.saturating_mul(1_000) / target_mv;
+    i_req_ma.min(inferred_limit_ma.max(50)).max(50)
+}
+
 fn pd_button_display_mode(
     saved: control::PdConfig,
     allow_extended_voltage: bool,
@@ -8393,6 +8423,7 @@ fn build_pd_sink_request(
             if let Some(target_mv) =
                 control::supported_epr_fixed_target(fixed_object_pos, cfg.target_mv)
             {
+                let i_req_ma = clamp_synthetic_epr_i_req_ma(status, target_mv, i_req_ma);
                 return Some(PdSinkRequest {
                     mode,
                     target_mv,
