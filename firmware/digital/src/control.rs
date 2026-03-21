@@ -1,3 +1,5 @@
+use core::sync::atomic::Ordering;
+
 use loadlynx_calibration_format as calfmt;
 use loadlynx_protocol::LoadMode;
 
@@ -410,6 +412,7 @@ impl ControlState {
 
         // Safety: activation always forces output OFF.
         self.output_enabled = false;
+        crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
     }
 
     /// Set the mode for the current `editing_preset_id`.
@@ -432,6 +435,7 @@ impl ControlState {
 
         if self.editing_preset_id == self.active_preset_id {
             self.output_enabled = false;
+            crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -661,7 +665,7 @@ pub fn decode_pd_blob(
         return Err(PdBlobError::InvalidTarget(target_mv));
     }
     let max_target_mv = match mode {
-        PdMode::Fixed => PdConfig::MAX_FIXED_TARGET_MV,
+        PdMode::Fixed => MAX_SUPPORTED_FIXED_TARGET_MV,
         PdMode::Pps => PdConfig::MAX_PPS_TARGET_MV,
     };
     if ver >= 2 && (target_mv < PdConfig::MIN_AUGMENTED_TARGET_MV || target_mv > max_target_mv) {
@@ -820,6 +824,22 @@ mod tests {
         let blob = encode_pd_blob(&cfg, true);
         let err = decode_pd_blob(&blob).unwrap_err();
         assert_eq!(err, PdBlobError::InvalidTarget(28_000));
+    }
+
+    #[test]
+    fn pd_blob_rejects_fixed_target_above_28v() {
+        let cfg = PdConfig {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 9,
+            pps_object_pos: 0,
+            target_mv: 36_000,
+            pps_target_mv: 9_000,
+            i_req_ma: 3_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let err = decode_pd_blob(&blob).unwrap_err();
+        assert_eq!(err, PdBlobError::InvalidTarget(36_000));
     }
 
     #[test]

@@ -449,6 +449,7 @@ static TOUCH_SPRING_LAST_BASELINE: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_LAST_DELTA_ABS: AtomicU32 = AtomicU32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static DESIRED_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
 static PD_RETRY_WINDOW_START_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_V_LOCAL_MV: AtomicI32 = AtomicI32::new(0);
@@ -518,6 +519,11 @@ fn screen_power_state_to_u8(state: ScreenPowerState) -> u8 {
 #[inline]
 fn screen_power_state_is_off() -> bool {
     SCREEN_POWER_STATE.load(Ordering::Relaxed) == SCREEN_POWER_STATE_OFF
+}
+
+#[inline]
+fn store_desired_output_enabled(enabled: bool) {
+    DESIRED_OUTPUT_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 #[inline]
@@ -1188,6 +1194,7 @@ async fn encoder_task(
                                 let prev = guard.output_enabled;
                                 if prev {
                                     guard.output_enabled = false;
+                                    store_desired_output_enabled(false);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1205,6 +1212,7 @@ async fn encoder_task(
                                     );
                                 } else {
                                     guard.output_enabled = true;
+                                    store_desired_output_enabled(true);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_on_ok();
                                     info!(
@@ -1608,6 +1616,7 @@ async fn touch_spring_task(
 
                         if guard.output_enabled {
                             guard.output_enabled = false;
+                            store_desired_output_enabled(false);
                             bump_control_rev();
                             prompt_tone::enqueue_load_off_ok();
                             info!(
@@ -1632,6 +1641,7 @@ async fn touch_spring_task(
                             info!("touch_spring: LOAD enable blocked (reason={})", reason);
                         } else {
                             guard.output_enabled = true;
+                            store_desired_output_enabled(true);
                             bump_control_rev();
                             prompt_tone::enqueue_load_on_ok();
                             info!(
@@ -1686,6 +1696,7 @@ async fn touch_spring_task(
 
                                 if guard.output_enabled {
                                     guard.output_enabled = false;
+                                    store_desired_output_enabled(false);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1710,6 +1721,7 @@ async fn touch_spring_task(
                                     info!("touch_spring: LOAD enable blocked (reason={})", reason);
                                 } else {
                                     guard.output_enabled = true;
+                                    store_desired_output_enabled(true);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_on_ok();
                                     info!(
@@ -3297,6 +3309,7 @@ async fn touch_ui_task(
                                     let mut guard = control.lock().await;
                                     if guard.output_enabled {
                                         guard.output_enabled = false;
+                                        store_desired_output_enabled(false);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_off_ok();
                                     } else if let Some(reason) = current_load_enable_block_abbrev(
@@ -3307,6 +3320,7 @@ async fn touch_ui_task(
                                         info!("touch: LOAD enable blocked (reason={})", reason);
                                     } else {
                                         guard.output_enabled = true;
+                                        store_desired_output_enabled(true);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_on_ok();
                                     }
@@ -4683,7 +4697,7 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
 }
 
 async fn apply_fast_status(
-    control: &'static ControlMutex,
+    _control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
     status: &FastStatus,
 ) {
@@ -4711,7 +4725,7 @@ async fn apply_fast_status(
         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Uvlo);
     }
     let enabled = status.enable;
-    let desired_output_enabled = { control.lock().await.output_enabled };
+    let desired_output_enabled = DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed);
     // Non-fatal warning class: while the load is still enabled, the analog side may report
     // that it is power-limited or current-limited. Emit a periodic warning beep so the user
     // can notice the limiting condition without stopping the load.
@@ -6811,6 +6825,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
             if guard.output_enabled {
                 if reason_appeared {
                     guard.output_enabled = false;
+                    store_desired_output_enabled(false);
                     bump_control_rev();
                     if let Some(r) = reason {
                         info!("LOAD forced OFF (reason={})", r);
@@ -6861,6 +6876,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
                         guard.output_enabled = false;
+                        store_desired_output_enabled(false);
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Ocp);
                         info!(
@@ -6871,6 +6887,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
                         guard.output_enabled = false;
+                        store_desired_output_enabled(false);
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Opp);
                         info!(
