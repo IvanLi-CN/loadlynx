@@ -3801,6 +3801,13 @@ pub(crate) fn normalized_pd_config_for_status(
     cfg
 }
 
+fn pd_mode_target_mv(cfg: &control::PdConfig) -> u32 {
+    match cfg.mode {
+        control::PdMode::Fixed => cfg.target_mv,
+        control::PdMode::Pps => cfg.pps_target_mv,
+    }
+}
+
 fn pd_button_display_mode(
     saved: control::PdConfig,
     allow_extended_voltage: bool,
@@ -3837,7 +3844,7 @@ fn pd_button_display_target_mv(
                 persisted
             }
         }
-        control::PdMode::Pps => cfg.target_mv.clamp(
+        control::PdMode::Pps => cfg.pps_target_mv.clamp(
             control::PdConfig::MIN_AUGMENTED_TARGET_MV,
             control::PdConfig::MAX_PPS_TARGET_MV,
         ),
@@ -7847,7 +7854,7 @@ async fn setmode_tx_task(
                 mode: pd_cfg.mode,
                 fixed_object_pos: pd_cfg.fixed_object_pos,
                 pps_object_pos: pd_cfg.pps_object_pos,
-                target_mv: pd_cfg.target_mv,
+                target_mv: pd_mode_target_mv(&pd_cfg),
                 i_req_ma: pd_cfg.i_req_ma,
             }
         };
@@ -7992,7 +7999,7 @@ async fn setmode_tx_task(
                     warn!(
                         "pd_sink_request skipped: missing PDO/APDO (mode={:?}, target_mv={}, have_status={})",
                         pd_cfg.mode,
-                        pd_cfg.target_mv,
+                        pd_mode_target_mv(&pd_cfg),
                         pd_status.is_some()
                     );
                 }
@@ -8346,9 +8353,10 @@ fn build_pd_sink_request(
         }
         control::PdMode::Pps => {
             let pps_object_pos = cfg.pps_object_pos;
+            let pps_target_mv = cfg.pps_target_mv;
             if pps_object_pos == 0
                 || pps_object_pos > control::MAX_PD_OBJECT_POS
-                || cfg.target_mv == 0
+                || pps_target_mv == 0
             {
                 return None;
             }
@@ -8360,14 +8368,14 @@ fn build_pd_sink_request(
                 .find(|(idx, p)| pdo_pos(p.pos, *idx) == pps_object_pos)
                 .map(|(_idx, p)| *p)?;
 
-            if cfg.target_mv < apdo.min_mv || cfg.target_mv > apdo.max_mv || i_req_ma > apdo.max_ma
+            if pps_target_mv < apdo.min_mv || pps_target_mv > apdo.max_mv || i_req_ma > apdo.max_ma
             {
                 return None;
             }
 
             Some(PdSinkRequest {
                 mode,
-                target_mv: cfg.target_mv,
+                target_mv: pps_target_mv,
                 object_pos: pps_object_pos,
                 i_req_ma,
             })
