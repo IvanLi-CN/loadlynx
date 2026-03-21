@@ -2,3 +2,7 @@
 	path = ft6336u-async
 	url = https://github.com/IvanLi-CN/ft6336u-async
 	branch = main
+[submodule "third_party/embassy"]
+	path = third_party/embassy
+	url = https://github.com/IvanLi-CN/embassy.git
+	branch = main

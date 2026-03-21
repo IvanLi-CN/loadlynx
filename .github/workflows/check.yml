@@ -5,13 +5,23 @@ on:
     branches: [ main ]
     paths:
       - 'firmware/analog/**'
+      - 'firmware/digital/**'
+      - 'third_party/embassy'
       - 'libs/**'
+      - '.gitmodules'
+      - 'justfile'
+      - 'Justfile'
       - '.github/workflows/**'
   pull_request:
     branches: [ main ]
     paths:
       - 'firmware/analog/**'
+      - 'firmware/digital/**'
+      - 'third_party/embassy'
       - 'libs/**'
+      - '.gitmodules'
+      - 'justfile'
+      - 'Justfile'
       - '.github/workflows/**'
 
 jobs:
@@ -19,10 +29,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code (no submodules)
+      - name: Checkout code (with submodules)
         uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: recursive
 
       - name: Install Rust toolchain (STM32G431, thumbv7em-none-eabihf)
         uses: dtolnay/rust-toolchain@v1
@@ -65,3 +75,25 @@ jobs:
             echo "Build failed: ELF not found at $ARTIFACT" && exit 1
           fi
           echo "Build successful: size $(stat -c%s "$ARTIFACT" 2>/dev/null || stat -f%z "$ARTIFACT") bytes"
+
+      - name: Check code formatting (digital)
+        working-directory: firmware/digital
+        run: cargo +1.90 fmt --all -- --check
+
+      - name: Install ESP Rust toolchain (espup, xtensa-esp32s3)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          cargo install espup --locked
+          espup install --targets esp32s3
+
+      - name: Install just
+        run: cargo install just --locked
+
+      - name: Build digital firmware (release)
+        env:
+          DIGITAL_WIFI_SSID: codex_dummy
+          DIGITAL_WIFI_PSK: codex_dummy
+        run: |
+          . "$HOME/export-esp.sh"
+          just d-build

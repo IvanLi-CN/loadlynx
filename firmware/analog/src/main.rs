@@ -26,13 +26,14 @@ use loadlynx_protocol::{
     CRC_LEN, CalKind, Error as ProtocolError, FAST_STATUS_MODE_CC, FAST_STATUS_MODE_CP,
     FAST_STATUS_MODE_CV, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
     FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello, LoadMode,
-    MSG_CAL_MODE, MSG_SET_MODE, MSG_SET_POINT, PdStatus, STATE_FLAG_CURRENT_LIMITED,
-    STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD, STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE,
-    STATE_FLAG_UV_LATCHED, SlipDecoder, SoftReset, SoftResetReason, decode_cal_mode_frame,
-    decode_cal_write_frame, decode_frame, decode_limit_profile_frame, decode_pd_sink_request_frame,
-    decode_set_enable_frame, decode_set_mode_frame, decode_set_point_frame,
-    decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame,
-    encode_pd_status_frame, encode_soft_reset_frame, slip_encode,
+    MSG_CAL_MODE, MSG_SET_MODE, MSG_SET_POINT, PD_MAX_FIXED_PDOS, PdStatus,
+    STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD, STATE_FLAG_POWER_LIMITED,
+    STATE_FLAG_REMOTE_ACTIVE, STATE_FLAG_UV_LATCHED, SlipDecoder, SoftReset, SoftResetReason,
+    decode_cal_mode_frame, decode_cal_write_frame, decode_frame, decode_limit_profile_frame,
+    decode_pd_sink_request_frame, decode_set_enable_frame, decode_set_mode_frame,
+    decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
+    encode_fast_status_frame, encode_hello_frame, encode_pd_status_frame, encode_soft_reset_frame,
+    slip_encode,
 };
 use static_cell::StaticCell;
 
@@ -218,7 +219,7 @@ const CP_PTERM_POS_FREEZE_TICKS: u32 = control_ticks_from_ms(CP_PTERM_POS_FREEZE
 // It is useful for regression and for "internal acceptance" when external instrumentation
 // (scope-based P(t)=V(t)*I(t)) is unavailable.
 const CP_PERF_PERIOD_US: u32 = 100;
-const CP_PERF_SAMPLES: usize = 512;
+const CP_PERF_SAMPLES: usize = 128;
 const CP_PERF_WINDOW_CONSECUTIVE: usize = 3;
 const CP_PERF_SMOOTH_WINDOW_SAMPLES: usize = 5;
 const CP_FS_L_MW: u32 = 10_000;
@@ -726,8 +727,8 @@ async fn fast_status_tx_task(
 
     let mut raw_frame = [0u8; 192];
     let mut slip_frame = [0u8; 384];
-    let mut pd_raw = [0u8; 256];
-    let mut pd_slip = [0u8; 512];
+    let mut pd_raw = [0u8; 512];
+    let mut pd_slip = [0u8; 1024];
     let mut pd_beat = 0u8;
 
     loop {
@@ -1211,6 +1212,7 @@ async fn main(_spawner: Spawner) -> ! {
     // Clock config:
     // Align with the reference PD sink bring-up (pd-sink-stm32g431cbu6-rs):
     // - SYSCLK = 170MHz (PLL1_R)
+    // - ADC12 kernel clock = SYSCLK (170MHz, internally prescaled by the ADC driver)
     // - CLK48 = HSI48 (for UCPD)
     let mut config = stm32::Config::default();
     {
@@ -1227,17 +1229,30 @@ async fn main(_spawner: Spawner) -> ! {
             source: PllSource::HSI,
             prediv: PllPreDiv::DIV4,
             mul: PllMul::MUL85,
-            divp: None,
+            divp: Some(PllPDiv::DIV4),
             divq: None,
             divr: Some(PllRDiv::DIV2),
         });
         config.rcc.sys = Sysclk::PLL1_R;
+        config.rcc.boost = true;
 
         config.enable_ucpd1_dead_battery = true;
     }
     let p = stm32::init(config);
 
     info!("LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)");
+    {
+        let clocks = embassy_stm32::rcc::clocks(&p.RCC);
+        info!(
+            "RCC clocks: sys={:?} pll1_p={:?} pll1_q={:?} hclk1={:?} pclk1={:?} pclk2={:?}",
+            clocks.sys.to_hertz(),
+            clocks.pll1_p.to_hertz(),
+            clocks.pll1_q.to_hertz(),
+            clocks.hclk1.to_hertz(),
+            clocks.pclk1.to_hertz(),
+            clocks.pclk2.to_hertz()
+        );
+    }
 
     // Ensure the DBCC pins don't load/distort the CC lines.
     // On this board they may be tied to the USB-C CC nets for dead-battery behavior.
@@ -1305,11 +1320,11 @@ async fn main(_spawner: Spawner) -> ! {
     }
 
     // 将 RX 端转换为环形缓冲 UART，以避免在任务之间存在调度间隙时丢字节。
-    // 115200 baud ≈ 11.5 kB/s; 4 KiB buffer provides ~350ms of headroom for
-    // bursty traffic (e.g. calibration curve writes) without triggering overruns.
-    static UART_RX_DMA_BUF: StaticCell<[u8; 4096]> = StaticCell::new();
+    // 115200 baud ≈ 11.5 kB/s; 2 KiB buffer provides ~175ms of headroom while
+    // leaving enough SRAM for the control loop, PD state machine, and stack.
+    static UART_RX_DMA_BUF: StaticCell<[u8; 2048]> = StaticCell::new();
     let uart_rx_ring: RingBufferedUartRx<'static> =
-        uart_rx.into_ring_buffered(UART_RX_DMA_BUF.init([0; 4096]));
+        uart_rx.into_ring_buffered(UART_RX_DMA_BUF.init([0; 2048]));
 
     // 启动独立任务接收 SetPoint 控制消息。
     if let Err(e) = _spawner.spawn(uart_setpoint_rx_task(uart_rx_ring, uart_tx_shared)) {
@@ -3496,17 +3511,24 @@ async fn uart_setpoint_rx_task(
                                                                                 loadlynx_protocol::PdSinkMode::Pps => {
                                                                                     Some(pd::PD_MODE_PPS)
                                                                                 }
+                                                                                loadlynx_protocol::PdSinkMode::Avs => {
+                                                                                    Some(pd::PD_MODE_AVS)
+                                                                                }
                                                                                 loadlynx_protocol::PdSinkMode::Unknown(_) => None,
                                                                             };
 
                                                                             match mode {
                                                                                 None => (true, "unsupported mode"),
                                                                                 Some(mode) => {
-                                                                                    let object_pos = req.object_pos.max(1);
-                                                                                    if object_pos == 0 || object_pos > 14 {
+                                                                                    let object_pos = req.object_pos;
+                                                                                    if object_pos == 0
+                                                                                        || object_pos
+                                                                                            > PD_MAX_FIXED_PDOS
+                                                                                                as u8
+                                                                                    {
                                                                                         (true, "invalid object_pos")
                                                                                     } else if req.target_mv < 3_000
-                                                                                        || req.target_mv > 21_000
+                                                                                        || req.target_mv > 48_000
                                                                                     {
                                                                                         (true, "invalid target_mv")
                                                                                     } else if req.i_req_ma > 10_000 {

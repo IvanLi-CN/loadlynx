@@ -449,6 +449,7 @@ static TOUCH_SPRING_LAST_BASELINE: AtomicU32 = AtomicU32::new(0);
 static TOUCH_SPRING_LAST_DELTA_ABS: AtomicU32 = AtomicU32::new(0);
 /// Digital-side CC load switch (default OFF on boot).
 pub(crate) static LOAD_SWITCH_ENABLED: AtomicBool = AtomicBool::new(false);
+pub(crate) static DESIRED_OUTPUT_ENABLED: AtomicBool = AtomicBool::new(false);
 static PD_LAST_APPLY_MS: AtomicU32 = AtomicU32::new(0);
 static PD_RETRY_WINDOW_START_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_V_LOCAL_MV: AtomicI32 = AtomicI32::new(0);
@@ -518,6 +519,11 @@ fn screen_power_state_to_u8(state: ScreenPowerState) -> u8 {
 #[inline]
 fn screen_power_state_is_off() -> bool {
     SCREEN_POWER_STATE.load(Ordering::Relaxed) == SCREEN_POWER_STATE_OFF
+}
+
+#[inline]
+fn store_desired_output_enabled(enabled: bool) {
+    DESIRED_OUTPUT_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 #[inline]
@@ -1117,7 +1123,14 @@ async fn encoder_task(
                                                 .find(|(idx, p)| {
                                                     pdo_pos(p.pos, *idx) == vm.fixed_object_pos
                                                 })
-                                                .map(|(_idx, p)| p.max_ma)
+                                                .and_then(|(_idx, p)| {
+                                                    control::effective_pdo_i_req_limit(
+                                                        None,
+                                                        vm.fixed_object_pos,
+                                                        p.mv,
+                                                        p.max_ma,
+                                                    )
+                                                })
                                                 .unwrap_or(10_000)
                                         }
                                     }
@@ -1188,6 +1201,7 @@ async fn encoder_task(
                                 let prev = guard.output_enabled;
                                 if prev {
                                     guard.output_enabled = false;
+                                    store_desired_output_enabled(false);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1205,6 +1219,7 @@ async fn encoder_task(
                                     );
                                 } else {
                                     guard.output_enabled = true;
+                                    store_desired_output_enabled(true);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_on_ok();
                                     info!(
@@ -1608,6 +1623,7 @@ async fn touch_spring_task(
 
                         if guard.output_enabled {
                             guard.output_enabled = false;
+                            store_desired_output_enabled(false);
                             bump_control_rev();
                             prompt_tone::enqueue_load_off_ok();
                             info!(
@@ -1632,6 +1648,7 @@ async fn touch_spring_task(
                             info!("touch_spring: LOAD enable blocked (reason={})", reason);
                         } else {
                             guard.output_enabled = true;
+                            store_desired_output_enabled(true);
                             bump_control_rev();
                             prompt_tone::enqueue_load_on_ok();
                             info!(
@@ -1686,6 +1703,7 @@ async fn touch_spring_task(
 
                                 if guard.output_enabled {
                                     guard.output_enabled = false;
+                                    store_desired_output_enabled(false);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1710,6 +1728,7 @@ async fn touch_spring_task(
                                     info!("touch_spring: LOAD enable blocked (reason={})", reason);
                                 } else {
                                     guard.output_enabled = true;
+                                    store_desired_output_enabled(true);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_on_ok();
                                     info!(
@@ -2884,8 +2903,10 @@ async fn touch_ui_task(
                                             // Keep Fixed display/request voltage in sync without
                                             // touching the sticky PPS cache.
                                             guard.pd_draft.target_mv = pdo.mv;
-                                            guard.pd_draft.i_req_ma =
-                                                guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
+                                            guard.pd_draft.i_req_ma = clamp_i_req_to_pdo_limit(
+                                                guard.pd_draft.i_req_ma,
+                                                pdo.max_ma,
+                                            );
                                         }
                                         bump_control_rev();
                                     }
@@ -3030,8 +3051,10 @@ async fn touch_ui_task(
                                                 // Keep Fixed display/request voltage in sync without
                                                 // touching the sticky PPS cache.
                                                 guard.pd_draft.target_mv = pdo.mv;
-                                                guard.pd_draft.i_req_ma =
-                                                    guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
+                                                guard.pd_draft.i_req_ma = clamp_i_req_to_pdo_limit(
+                                                    guard.pd_draft.i_req_ma,
+                                                    pdo.max_ma,
+                                                );
                                                 bump_control_rev();
                                                 prompt_tone::enqueue_ui_ok();
                                             } else {
@@ -3297,6 +3320,7 @@ async fn touch_ui_task(
                                     let mut guard = control.lock().await;
                                     if guard.output_enabled {
                                         guard.output_enabled = false;
+                                        store_desired_output_enabled(false);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_off_ok();
                                     } else if let Some(reason) = current_load_enable_block_abbrev(
@@ -3307,6 +3331,7 @@ async fn touch_ui_task(
                                         info!("touch: LOAD enable blocked (reason={})", reason);
                                     } else {
                                         guard.output_enabled = true;
+                                        store_desired_output_enabled(true);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_on_ok();
                                     }
@@ -3785,8 +3810,10 @@ pub(crate) fn pd_fixed_target_mv(cfg: control::PdConfig, status: Option<&PdStatu
         }
     }
 
-    cfg.target_mv
-        .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000)
+    cfg.target_mv.clamp(
+        control::PdConfig::DEFAULT_TARGET_MV,
+        control::PdConfig::MAX_FIXED_TARGET_MV,
+    )
 }
 
 pub(crate) fn normalized_pd_config_for_status(
@@ -3797,6 +3824,37 @@ pub(crate) fn normalized_pd_config_for_status(
         cfg.target_mv = pd_fixed_target_mv(cfg, status);
     }
     cfg
+}
+
+fn pd_mode_target_mv(cfg: &control::PdConfig) -> u32 {
+    match cfg.mode {
+        control::PdMode::Fixed => cfg.target_mv,
+        control::PdMode::Pps => cfg.pps_target_mv,
+    }
+}
+
+fn clamp_i_req_to_pdo_limit(i_req_ma: u32, max_ma: u32) -> u32 {
+    control::clamp_i_req_to_effective_pdo_limit(None, 0, 0, max_ma, i_req_ma)
+}
+
+fn i_req_within_pdo_limit(
+    status: Option<&PdStatus>,
+    object_pos: u8,
+    target_mv: u32,
+    max_ma: u32,
+    i_req_ma: u32,
+) -> bool {
+    control::i_req_within_effective_pdo_limit(status, object_pos, target_mv, max_ma, i_req_ma)
+}
+
+fn clamp_synthetic_epr_i_req_ma(status: &PdStatus, target_mv: u32, i_req_ma: u32) -> u32 {
+    control::clamp_i_req_to_effective_pdo_limit(
+        Some(status),
+        control::EPR_FIXED_28V_OBJECT_POS,
+        target_mv,
+        control::UNKNOWN_PDO_MAX_MA,
+        i_req_ma,
+    )
 }
 
 fn pd_button_display_mode(
@@ -3815,26 +3873,29 @@ fn pd_button_display_mode(
 
 fn pd_button_display_target_mv(
     saved: control::PdConfig,
-    status: Option<&PdStatus>,
     allow_extended_voltage: bool,
+    status: Option<&PdStatus>,
 ) -> u32 {
-    let cfg = control::PdConfig::effective(saved, allow_extended_voltage);
-    match cfg.mode {
+    match saved.mode {
         // Dashboard line2 should prefer the persisted target, but legacy blobs may have a stale
         // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
         // from `PD_STATUS`, prefer that value to avoid misleading UI output.
         control::PdMode::Fixed => {
-            let persisted = cfg
-                .target_mv
-                .clamp(control::PdConfig::DEFAULT_TARGET_MV, 21_000);
-            let derived = pd_fixed_target_mv(cfg, status);
-            if derived != persisted {
+            let persisted = saved.target_mv.clamp(
+                control::PdConfig::DEFAULT_TARGET_MV,
+                control::PdConfig::MAX_FIXED_TARGET_MV,
+            );
+            let derived = pd_fixed_target_mv(saved, status);
+            if allow_extended_voltage && derived != persisted {
                 derived
             } else {
                 persisted
             }
         }
-        control::PdMode::Pps => cfg.target_mv.clamp(3_000, 21_000),
+        control::PdMode::Pps => saved.pps_target_mv.clamp(
+            control::PdConfig::MIN_AUGMENTED_TARGET_MV,
+            control::PdConfig::MAX_PPS_TARGET_MV,
+        ),
     }
 }
 
@@ -3862,8 +3923,28 @@ fn build_pd_settings_vm(
         attached = s.attached;
         contract_mv = s.contract_mv;
         contract_ma = s.contract_ma;
-        fixed_pdos = s.fixed_pdos.clone();
+        // The protocol still exposes all fixed PDOs read-only, but this release only allows
+        // user selection up through the 28V EPR fixed rail.
+        for pdo in s.fixed_pdos.iter().copied() {
+            if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                let _ = fixed_pdos.push(pdo);
+            }
+        }
         pps_pdos = s.pps_pdos.clone();
+    }
+
+    // Keep the supported 28V EPR fixed rail selectable while detached, and also for attached
+    // sources that have already proven the EPR-capable bit in their SPR capabilities.
+    if control::can_advertise_synthetic_epr_fixed(status)
+        && !fixed_pdos.iter().any(|pdo| {
+            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
+        })
+    {
+        let _ = fixed_pdos.push(loadlynx_protocol::FixedPdo {
+            pos: control::EPR_FIXED_28V_OBJECT_POS,
+            mv: control::EPR_FIXED_28V_MV,
+            max_ma: control::UNKNOWN_PDO_MAX_MA,
+        });
     }
 
     // Fixed selection: if not explicitly selected, fall back to target_mv matching for legacy blobs.
@@ -3880,7 +3961,8 @@ fn build_pd_settings_vm(
 
     let pps_object_pos = draft.pps_object_pos;
 
-    let fixed_selected = if fixed_object_pos != 0 {
+    let fixed_selected = if fixed_object_pos != 0 && fixed_object_pos <= control::MAX_PD_OBJECT_POS
+    {
         fixed_pdos
             .iter()
             .enumerate()
@@ -3889,8 +3971,7 @@ fn build_pd_settings_vm(
     } else {
         None
     };
-
-    let pps_selected = if pps_object_pos != 0 {
+    let pps_selected = if pps_object_pos != 0 && pps_object_pos <= control::MAX_PD_OBJECT_POS {
         pps_pdos
             .iter()
             .enumerate()
@@ -3903,21 +3984,41 @@ fn build_pd_settings_vm(
     let mut selection_missing = false;
     let apply_enabled = if !attached {
         match draft.mode {
-            control::PdMode::Fixed => draft.fixed_object_pos != 0 && draft.i_req_ma >= 50,
+            control::PdMode::Fixed => {
+                draft.fixed_object_pos != 0
+                    && draft.fixed_object_pos <= control::MAX_PD_OBJECT_POS
+                    && draft.target_mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV
+                    && draft.i_req_ma >= 50
+            }
             control::PdMode::Pps => {
                 draft.pps_object_pos != 0
-                    && (3_000..=21_000).contains(&draft.pps_target_mv)
+                    && draft.pps_object_pos <= control::MAX_PD_OBJECT_POS
+                    && (control::PdConfig::MIN_AUGMENTED_TARGET_MV
+                        ..=control::PdConfig::MAX_PPS_TARGET_MV)
+                        .contains(&draft.pps_target_mv)
                     && draft.i_req_ma >= 50
             }
         }
     } else {
         match draft.mode {
             control::PdMode::Fixed => match fixed_selected {
-                Some(pdo) => draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma,
+                Some(pdo) if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV => {
+                    i_req_within_pdo_limit(
+                        status,
+                        fixed_object_pos,
+                        pdo.mv,
+                        pdo.max_ma,
+                        draft.i_req_ma,
+                    )
+                }
                 None => {
                     if fixed_object_pos != 0 {
                         selection_missing = true;
                     }
+                    false
+                }
+                Some(_) => {
+                    selection_missing = true;
                     false
                 }
             },
@@ -4108,12 +4209,15 @@ async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
     if changed {
         let s = guard.last_pd_status.as_ref().unwrap();
         info!(
-            "PD_STATUS update: attached={} contract={}mV {}mA fixed_pdos={} pps_pdos={}",
+            "PD_STATUS update: attached={} contract={}mV {}mA fixed_pdos={} pps_pdos={} epr_capable={} epr_active={} epr_avs_pdos={}",
             s.attached,
             s.contract_mv,
             s.contract_ma,
             s.fixed_pdos.len(),
-            s.pps_pdos.len()
+            s.pps_pdos.len(),
+            s.epr_capable,
+            s.epr_active,
+            s.epr_avs_pdos.len()
         );
     }
 }
@@ -4639,7 +4743,11 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
     }
 }
 
-async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
+async fn apply_fast_status(
+    _control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+    status: &FastStatus,
+) {
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fault_flags = status.fault_flags;
     LAST_FAULT_FLAGS.store(fault_flags, Ordering::Relaxed);
@@ -4664,6 +4772,7 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Uvlo);
     }
     let enabled = status.enable;
+    let desired_output_enabled = DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed);
     // Non-fatal warning class: while the load is still enabled, the analog side may report
     // that it is power-limited or current-limited. Emit a periodic warning beep so the user
     // can notice the limiting condition without stopping the load.
@@ -4677,11 +4786,14 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
 
     // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
     // 避免模拟侧未完全实现 LINK_GOOD 时 UI 误报 OFFLINE。
+    //
+    // `FastStatus.enable=false` 只表示当前输出没开，并不等价于“校准缺失”。
+    // 只有在数字侧已经请求开启输出、而模拟侧仍未进入 enable 时，才归类为 CalMissing。
     let state = if !link_up && !link_flag {
         AnalogState::Offline
     } else if fault_flags != 0 {
         AnalogState::Faulted
-    } else if enabled {
+    } else if enabled || !desired_output_enabled || uv_latched {
         AnalogState::Ready
     } else {
         AnalogState::CalMissing
@@ -5061,8 +5173,8 @@ async fn display_render_task(
             let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
             let pd_target_mv = Some(pd_button_display_target_mv(
                 pd_saved,
-                pd_status,
                 allow_extended_voltage,
+                pd_status,
             ));
             let pd_target_available = true;
 
@@ -5617,6 +5729,7 @@ fn log_framebuffer_samples(label: &'static str, framebuffer: &[u8]) {
 #[embassy_executor::task]
 async fn uart_link_task(
     uart: &'static mut Uart<'static, Async>,
+    control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
     info!(
@@ -5637,7 +5750,7 @@ async fn uart_link_task(
     loop {
         match AsyncRead::read(uart, &mut chunk).await {
             Ok(n) if n > 0 => {
-                feed_decoder(&chunk[..n], &mut decoder, telemetry).await;
+                feed_decoder(&chunk[..n], &mut decoder, control, telemetry).await;
             }
             Ok(_) => {
                 continue;
@@ -5658,6 +5771,7 @@ async fn uart_link_task(
 async fn uart_link_task_dma(
     mut uhci_rx: uhci::UhciRx<'static, Async>,
     mut dma_rx: DmaRxBuf,
+    control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
     info!(
@@ -5695,7 +5809,7 @@ async fn uart_link_task_dma(
                 // When chunk_limit < dma buffer len, received bytes may wrap across descriptors.
                 // Always consume via the provided iterator to preserve ordering.
                 for chunk in buf_back.received_data() {
-                    feed_decoder(chunk, decoder, telemetry).await;
+                    feed_decoder(chunk, decoder, control, telemetry).await;
                 }
                 dma_rx = buf_back;
             }
@@ -5715,6 +5829,7 @@ async fn uart_link_task_dma(
 async fn feed_decoder(
     bytes: &[u8],
     decoder: &mut SlipDecoder<FAST_STATUS_SLIP_CAPACITY>,
+    control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
     for &byte in bytes {
@@ -5778,7 +5893,7 @@ async fn feed_decoder(
                         MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
                             Ok((_hdr, status)) => {
                                 record_link_activity();
-                                apply_fast_status(telemetry, &status).await;
+                                apply_fast_status(control, telemetry, &status).await;
                                 let total =
                                     FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                                 if total % 32 == 0 {
@@ -6556,13 +6671,13 @@ async fn main(spawner: Spawner) {
             let dma_rx = uhci_dma_buf_opt.take().expect("uhci dma buf missing");
             info!("spawning uart link task (UHCI DMA)");
             spawner
-                .spawn(uart_link_task_dma(uhci_rx, dma_rx, telemetry))
+                .spawn(uart_link_task_dma(uhci_rx, dma_rx, control, telemetry))
                 .expect("uart_link_task_dma spawn");
         } else {
             let uart1 = uart1.expect("uart1 missing");
             info!("spawning uart link task (async no-DMA)");
             spawner
-                .spawn(uart_link_task(uart1, telemetry))
+                .spawn(uart_link_task(uart1, control, telemetry))
                 .expect("uart_link_task spawn");
         }
     } else {
@@ -6757,6 +6872,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
             if guard.output_enabled {
                 if reason_appeared {
                     guard.output_enabled = false;
+                    store_desired_output_enabled(false);
                     bump_control_rev();
                     if let Some(r) = reason {
                         info!("LOAD forced OFF (reason={})", r);
@@ -6807,6 +6923,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
                         guard.output_enabled = false;
+                        store_desired_output_enabled(false);
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Ocp);
                         info!(
@@ -6817,6 +6934,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
                         guard.output_enabled = false;
+                        store_desired_output_enabled(false);
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Opp);
                         info!(
@@ -7768,10 +7886,14 @@ async fn setmode_tx_task(
                 guard.allow_extended_voltage,
             )
         };
-        if pd_cfg.target_mv < 3_000 || pd_cfg.target_mv > 21_000 {
+        if pd_cfg.target_mv < control::PdConfig::MIN_AUGMENTED_TARGET_MV
+            || pd_cfg.target_mv > control::PdConfig::MAX_FIXED_TARGET_MV
+        {
             pd_cfg.target_mv = 5_000;
         }
-        if pd_cfg.pps_target_mv < 3_000 || pd_cfg.pps_target_mv > 21_000 {
+        if pd_cfg.pps_target_mv < control::PdConfig::MIN_AUGMENTED_TARGET_MV
+            || pd_cfg.pps_target_mv > control::PdConfig::MAX_PPS_TARGET_MV
+        {
             pd_cfg.pps_target_mv = control::PdConfig::DEFAULT_TARGET_MV;
         }
         pd_cfg.i_req_ma = pd_cfg.i_req_ma.clamp(50, 10_000);
@@ -7789,6 +7911,7 @@ async fn setmode_tx_task(
                 mode: match req.mode {
                     PdSinkMode::Fixed => control::PdMode::Fixed,
                     PdSinkMode::Pps => control::PdMode::Pps,
+                    PdSinkMode::Avs => pd_cfg.mode,
                     PdSinkMode::Unknown(_) => pd_cfg.mode,
                 },
                 fixed_object_pos: pd_cfg.fixed_object_pos,
@@ -7801,7 +7924,7 @@ async fn setmode_tx_task(
                 mode: pd_cfg.mode,
                 fixed_object_pos: pd_cfg.fixed_object_pos,
                 pps_object_pos: pd_cfg.pps_object_pos,
-                target_mv: pd_cfg.target_mv,
+                target_mv: pd_mode_target_mv(&pd_cfg),
                 i_req_ma: pd_cfg.i_req_ma,
             }
         };
@@ -7946,7 +8069,7 @@ async fn setmode_tx_task(
                     warn!(
                         "pd_sink_request skipped: missing PDO/APDO (mode={:?}, target_mv={}, have_status={})",
                         pd_cfg.mode,
-                        pd_cfg.target_mv,
+                        pd_mode_target_mv(&pd_cfg),
                         pd_status.is_some()
                     );
                 }
@@ -8247,35 +8370,66 @@ fn build_pd_sink_request(
                     .find(|(_idx, pdo)| pdo.mv == cfg.target_mv)
                     .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))?
             };
+            if fixed_object_pos > control::MAX_PD_OBJECT_POS {
+                return None;
+            }
 
             let pdo = status
                 .fixed_pdos
                 .iter()
                 .enumerate()
                 .find(|(idx, p)| pdo_pos(p.pos, *idx) == fixed_object_pos)
-                .map(|(_idx, p)| *p)?;
+                .map(|(_idx, p)| *p);
 
-            // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
-            // source's advertised 5V maximum instead of rejecting the request.
-            let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {
-                i_req_ma.min(pdo.max_ma)
-            } else {
-                i_req_ma
-            };
-            if i_req_ma > pdo.max_ma {
-                return None;
+            if let Some(pdo) = pdo {
+                if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                    return None;
+                }
+                // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
+                // source's advertised 5V maximum instead of rejecting the request.
+                let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {
+                    i_req_ma.min(pdo.max_ma)
+                } else if control::supported_epr_fixed_target(fixed_object_pos, pdo.mv).is_some() {
+                    // Synthetic 28V selections can be saved before the real EPR fixed PDO is
+                    // visible; once it appears, keep the request live by clamping to the
+                    // now-advertised current limit instead of dropping the contract request.
+                    i_req_ma.min(pdo.max_ma)
+                } else {
+                    i_req_ma
+                };
+                if i_req_ma > pdo.max_ma {
+                    return None;
+                }
+
+                return Some(PdSinkRequest {
+                    mode,
+                    target_mv: pdo.mv,
+                    object_pos: fixed_object_pos,
+                    i_req_ma,
+                });
             }
 
-            Some(PdSinkRequest {
-                mode,
-                target_mv: pdo.mv,
-                object_pos: fixed_object_pos,
-                i_req_ma,
-            })
+            if let Some(target_mv) =
+                control::supported_epr_fixed_target(fixed_object_pos, cfg.target_mv)
+            {
+                let i_req_ma = clamp_synthetic_epr_i_req_ma(status, target_mv, i_req_ma);
+                return Some(PdSinkRequest {
+                    mode,
+                    target_mv,
+                    object_pos: control::EPR_FIXED_28V_OBJECT_POS,
+                    i_req_ma,
+                });
+            }
+
+            None
         }
         control::PdMode::Pps => {
             let pps_object_pos = cfg.pps_object_pos;
-            if pps_object_pos == 0 || cfg.target_mv == 0 {
+            let pps_target_mv = cfg.pps_target_mv;
+            if pps_object_pos == 0
+                || pps_object_pos > control::MAX_PD_OBJECT_POS
+                || pps_target_mv == 0
+            {
                 return None;
             }
 
@@ -8286,14 +8440,14 @@ fn build_pd_sink_request(
                 .find(|(idx, p)| pdo_pos(p.pos, *idx) == pps_object_pos)
                 .map(|(_idx, p)| *p)?;
 
-            if cfg.target_mv < apdo.min_mv || cfg.target_mv > apdo.max_mv || i_req_ma > apdo.max_ma
+            if pps_target_mv < apdo.min_mv || pps_target_mv > apdo.max_mv || i_req_ma > apdo.max_ma
             {
                 return None;
             }
 
             Some(PdSinkRequest {
                 mode,
-                target_mv: cfg.target_mv,
+                target_mv: pps_target_mv,
                 object_pos: pps_object_pos,
                 i_req_ma,
             })

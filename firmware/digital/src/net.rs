@@ -1823,6 +1823,7 @@ async fn handle_presets_update(
         // ApplyPreset and any mode change MUST force output OFF (if this affects the active preset).
         if guard.active_preset_id == preset.preset_id && prev_mode != preset.mode {
             guard.output_enabled = false;
+            crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
         }
 
         // Persist presets blob to EEPROM (saved snapshot is the persisted baseline).
@@ -1840,6 +1841,7 @@ async fn handle_presets_update(
             guard.saved = old_saved;
             guard.dirty = old_dirty;
             guard.output_enabled = old_output;
+            crate::DESIRED_OUTPUT_ENABLED.store(old_output, Ordering::Relaxed);
             write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
             return Err("503 Service Unavailable");
         }
@@ -1984,6 +1986,7 @@ async fn handle_control_update(
     {
         let mut guard = control.lock().await;
         guard.output_enabled = parsed.output_enabled;
+        crate::DESIRED_OUTPUT_ENABLED.store(parsed.output_enabled, Ordering::Relaxed);
         bump_control_rev();
     }
 
@@ -2221,6 +2224,8 @@ async fn render_pd_view_json(
         buf.push_str(",\"contract_ma\":null");
         buf.push_str(",\"fixed_pdos\":[]");
         buf.push_str(",\"pps_pdos\":[]");
+        buf.push_str(",\"epr_active\":false");
+        buf.push_str(",\"epr_avs_pdos\":[]");
         buf.push_str(",\"allow_extended_voltage\":");
         buf.push_str(if allow_extended_voltage {
             "true"
@@ -2288,8 +2293,9 @@ async fn render_pd_view_json(
 
     // Capabilities
     buf.push_str(",\"fixed_pdos\":[");
+    let mut fixed_count = 0usize;
     for (i, pdo) in status.fixed_pdos.iter().enumerate() {
-        if i != 0 {
+        if fixed_count != 0 {
             buf.push(',');
         }
         let pos = if pdo.pos != 0 { pdo.pos } else { (i + 1) as u8 };
@@ -2299,6 +2305,23 @@ async fn render_pd_view_json(
             pos,
             pdo.mv,
             pdo.max_ma
+        );
+        fixed_count += 1;
+    }
+    if control::can_advertise_synthetic_epr_fixed(Some(&status))
+        && !status.fixed_pdos.iter().any(|pdo| {
+            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
+        })
+    {
+        if fixed_count != 0 {
+            buf.push(',');
+        }
+        let _ = core::write!(
+            buf,
+            "{{\"pos\":{},\"mv\":{},\"max_ma\":{}}}",
+            control::EPR_FIXED_28V_OBJECT_POS,
+            control::EPR_FIXED_28V_MV,
+            control::UNKNOWN_PDO_MAX_MA
         );
     }
     buf.push(']');
@@ -2316,6 +2339,26 @@ async fn render_pd_view_json(
             pdo.min_mv,
             pdo.max_mv,
             pdo.max_ma
+        );
+    }
+    buf.push(']');
+
+    buf.push_str(",\"epr_active\":");
+    buf.push_str(if status.epr_active { "true" } else { "false" });
+
+    buf.push_str(",\"epr_avs_pdos\":[");
+    for (i, pdo) in status.epr_avs_pdos.iter().enumerate() {
+        if i != 0 {
+            buf.push(',');
+        }
+        let pos = if pdo.pos != 0 { pdo.pos } else { (i + 8) as u8 };
+        let _ = core::write!(
+            buf,
+            "{{\"pos\":{},\"min_mv\":{},\"max_mv\":{},\"pdp_w\":{}}}",
+            pos,
+            pdo.min_mv,
+            pdo.max_mv,
+            pdo.pdp_w
         );
     }
     buf.push(']');
@@ -2496,10 +2539,10 @@ async fn handle_pd_update(
         return Err("400 Bad Request");
     }
 
-    // Only requests that update `saved` (and therefore may want to apply immediately) require an
-    // active digital<->analog link + live PD_STATUS for capability validation. Gate-only updates
-    // must be allowed offline so callers can lock the device back to Safe5V even if the analog
-    // board is disconnected/unhealthy.
+    // Requests that update `saved` still require an active digital<->analog link plus live
+    // PD_STATUS so we can validate against the current partner when attached, or allow detached
+    // synthetic EPR selections to be persisted safely. Gate-only updates must be allowed offline
+    // so callers can lock the device back to Safe5V even if the analog board is disconnected.
     if updates_saved_cfg {
         let link_up = LINK_UP.load(Ordering::Relaxed);
         if !link_up {
@@ -2542,17 +2585,6 @@ async fn handle_pd_update(
             );
             "409 Conflict"
         })?;
-
-        if !status.attached {
-            write_error_body(
-                body_out,
-                "NOT_ATTACHED",
-                "PD not attached; refusing apply",
-                true,
-                None,
-            );
-            return Err("409 Conflict");
-        }
 
         Some(status)
     } else {
@@ -2609,6 +2641,21 @@ async fn handle_pd_update(
             );
             return Err("400 Bad Request");
         }
+        if object_pos > control::MAX_PD_OBJECT_POS {
+            let details = format!(
+                r#"{{"object_pos":{},"max_object_pos":{}}}"#,
+                object_pos,
+                control::MAX_PD_OBJECT_POS
+            );
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "object_pos exceeds supported PD object position range",
+                false,
+                Some(&details),
+            );
+            return Err("422 Unprocessable Entity");
+        }
         if i_req_ma < 50 {
             write_error_body(
                 body_out,
@@ -2659,33 +2706,80 @@ async fn handle_pd_update(
         cfg.i_req_ma = i_req_ma;
         match mode {
             control::PdMode::Fixed => {
-                let Some(pdo) = find_fixed(object_pos) else {
-                    let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "selected PDO not present in capabilities",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
-                };
-                if i_req_ma > pdo.max_ma {
-                    let details = format!(
-                        r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                        i_req_ma, pdo.max_ma, object_pos
-                    );
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "i_req_ma exceeds PDO Imax",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
+                if let Some(pdo) = find_fixed(object_pos) {
+                    if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                        let details = format!(
+                            r#"{{"object_pos":{},"target_mv":{},"max_supported_fixed_mv":{}}}"#,
+                            object_pos,
+                            pdo.mv,
+                            control::MAX_SUPPORTED_FIXED_TARGET_MV
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "selected fixed PDO exceeds supported voltage range",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    if i_req_ma > pdo.max_ma {
+                        let details = format!(
+                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                            i_req_ma, pdo.max_ma, object_pos
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "i_req_ma exceeds PDO Imax",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    cfg.fixed_object_pos = object_pos;
+                    cfg.target_mv = pdo.mv;
+                } else {
+                    if control::can_advertise_synthetic_epr_fixed(Some(status))
+                        && let Some((target_mv, max_ma)) =
+                            control::supported_epr_fixed_selection(object_pos)
+                    {
+                        let effective_max_ma = control::effective_pdo_i_req_limit(
+                            Some(status),
+                            object_pos,
+                            target_mv,
+                            max_ma,
+                        );
+                        if effective_max_ma.is_some_and(|limit| i_req_ma > limit) {
+                            let details = format!(
+                                r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                                i_req_ma,
+                                effective_max_ma.unwrap_or(max_ma),
+                                object_pos
+                            );
+                            write_error_body(
+                                body_out,
+                                "LIMIT_VIOLATION",
+                                "i_req_ma exceeds PDO Imax",
+                                false,
+                                Some(&details),
+                            );
+                            return Err("422 Unprocessable Entity");
+                        }
+                        cfg.fixed_object_pos = object_pos;
+                        cfg.target_mv = target_mv;
+                    } else {
+                        let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "selected PDO not present in capabilities",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
                 }
-                cfg.fixed_object_pos = object_pos;
-                cfg.target_mv = pdo.mv;
             }
             control::PdMode::Pps => {
                 let Some(apdo) = find_pps(object_pos) else {
@@ -2829,6 +2923,8 @@ async fn handle_pd_update(
             body_out.push_str(",\"contract_ma\":null");
             body_out.push_str(",\"fixed_pdos\":[]");
             body_out.push_str(",\"pps_pdos\":[]");
+            body_out.push_str(",\"epr_active\":false");
+            body_out.push_str(",\"epr_avs_pdos\":[]");
             body_out.push_str(",\"allow_extended_voltage\":");
             body_out.push_str(if allow_extended_voltage {
                 "true"

@@ -1,5 +1,7 @@
+use core::sync::atomic::Ordering;
+
 use loadlynx_calibration_format as calfmt;
-use loadlynx_protocol::LoadMode;
+use loadlynx_protocol::{LoadMode, PdStatus};
 
 use crate::ui::preset_panel::{PresetPanelDigit, PresetPanelField};
 
@@ -194,6 +196,9 @@ pub struct PdConfig {
 impl PdConfig {
     pub const DEFAULT_TARGET_MV: u32 = 5_000;
     pub const DEFAULT_I_REQ_MA: u32 = 3_000;
+    pub const MIN_AUGMENTED_TARGET_MV: u32 = 3_000;
+    pub const MAX_PPS_TARGET_MV: u32 = 21_000;
+    pub const MAX_FIXED_TARGET_MV: u32 = 48_000;
 
     pub const fn default() -> Self {
         Self {
@@ -238,8 +243,10 @@ impl PdConfig {
     }
 
     pub fn toggle_target(&mut self) -> bool {
-        let next = if self.target_mv == 20_000 {
+        let next = if self.target_mv >= 28_000 {
             5_000
+        } else if self.target_mv >= 20_000 {
+            28_000
         } else {
             20_000
         };
@@ -250,6 +257,112 @@ impl PdConfig {
             true
         }
     }
+}
+
+pub const EPR_FIXED_28V_OBJECT_POS: u8 = 8;
+pub const EPR_FIXED_28V_MV: u32 = 28_000;
+pub const EPR_FIXED_28V_MAX_MA: u32 = 5_000;
+pub const UNKNOWN_PDO_MAX_MA: u32 = 0;
+pub const MAX_PD_OBJECT_POS: u8 = 16;
+pub const MAX_SUPPORTED_FIXED_TARGET_MV: u32 = EPR_FIXED_28V_MV;
+
+pub const fn supported_epr_fixed_selection(object_pos: u8) -> Option<(u32, u32)> {
+    if object_pos == EPR_FIXED_28V_OBJECT_POS {
+        Some((EPR_FIXED_28V_MV, UNKNOWN_PDO_MAX_MA))
+    } else {
+        None
+    }
+}
+
+pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Option<u32> {
+    if let Some((mv, _max_ma)) = supported_epr_fixed_selection(object_pos) {
+        if target_mv == mv {
+            return Some(mv);
+        }
+    }
+    None
+}
+
+/// USB PD R3.2 v1.1 Tables 10.12 / 10.13 make 28V Fixed the baseline EPR fixed rail once the
+/// source advertises the SPR-side EPR-capable bit; before EPR entry the sink has to surface that
+/// row synthetically because the real EPR Fixed PDOs are not visible yet.
+pub fn can_advertise_synthetic_epr_fixed(status: Option<&PdStatus>) -> bool {
+    status.map(|s| !s.attached || s.epr_capable).unwrap_or(true)
+}
+
+// Fixed/PPS paths report mV * mA and AVS exposes PDP in watts, so keep the common unit in uW.
+pub fn source_max_power_uw(status: &PdStatus) -> u32 {
+    let fixed_max = status
+        .fixed_pdos
+        .iter()
+        .map(|pdo| pdo.mv.saturating_mul(pdo.max_ma))
+        .max()
+        .unwrap_or(0);
+    let pps_max = status
+        .pps_pdos
+        .iter()
+        .map(|pdo| pdo.max_mv.saturating_mul(pdo.max_ma))
+        .max()
+        .unwrap_or(0);
+    let epr_max = status
+        .epr_avs_pdos
+        .iter()
+        .map(|pdo| u32::from(pdo.pdp_w).saturating_mul(1_000_000))
+        .max()
+        .unwrap_or(0);
+    fixed_max.max(pps_max).max(epr_max)
+}
+
+pub fn effective_pdo_i_req_limit(
+    status: Option<&PdStatus>,
+    object_pos: u8,
+    target_mv: u32,
+    advertised_max_ma: u32,
+) -> Option<u32> {
+    if advertised_max_ma != UNKNOWN_PDO_MAX_MA {
+        return Some(advertised_max_ma);
+    }
+
+    let status = status?;
+    if !status.attached || target_mv == 0 {
+        return None;
+    }
+    if supported_epr_fixed_target(object_pos, target_mv).is_none() {
+        return None;
+    }
+
+    let max_power_uw = source_max_power_uw(status);
+    if max_power_uw == 0 {
+        return None;
+    }
+
+    Some((max_power_uw / target_mv).clamp(50, EPR_FIXED_28V_MAX_MA))
+}
+
+pub fn i_req_within_effective_pdo_limit(
+    status: Option<&PdStatus>,
+    object_pos: u8,
+    target_mv: u32,
+    advertised_max_ma: u32,
+    i_req_ma: u32,
+) -> bool {
+    i_req_ma >= 50
+        && effective_pdo_i_req_limit(status, object_pos, target_mv, advertised_max_ma)
+            .map(|limit| i_req_ma <= limit)
+            .unwrap_or(true)
+}
+
+pub fn clamp_i_req_to_effective_pdo_limit(
+    status: Option<&PdStatus>,
+    object_pos: u8,
+    target_mv: u32,
+    advertised_max_ma: u32,
+    i_req_ma: u32,
+) -> u32 {
+    effective_pdo_i_req_limit(status, object_pos, target_mv, advertised_max_ma)
+        .map(|limit| i_req_ma.min(limit))
+        .unwrap_or(i_req_ma)
+        .max(50)
 }
 
 #[derive(Clone, Debug)]
@@ -366,6 +479,7 @@ impl ControlState {
 
         // Safety: activation always forces output OFF.
         self.output_enabled = false;
+        crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
     }
 
     /// Set the mode for the current `editing_preset_id`.
@@ -388,6 +502,7 @@ impl ControlState {
 
         if self.editing_preset_id == self.active_preset_id {
             self.output_enabled = false;
+            crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
         }
     }
 }
@@ -549,7 +664,7 @@ pub fn decode_presets_blob(
 // ---- EEPROM PD config blob -------------------------------------------------
 
 const PD_MAGIC: [u8; 4] = *b"LLPD";
-const PD_FMT_VERSION: u8 = 5;
+const PD_FMT_VERSION: u8 = 6;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PdBlobError {
@@ -590,7 +705,7 @@ pub fn decode_pd_blob(
         return Err(PdBlobError::InvalidMagic);
     }
     let ver = bytes[4];
-    if ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != PD_FMT_VERSION {
+    if ver != 1 && ver != 2 && ver != 3 && ver != 4 && ver != 5 && ver != PD_FMT_VERSION {
         return Err(PdBlobError::UnsupportedVersion(ver));
     }
 
@@ -616,7 +731,11 @@ pub fn decode_pd_blob(
     if ver == 1 && target_mv != 5_000 && target_mv != 20_000 {
         return Err(PdBlobError::InvalidTarget(target_mv));
     }
-    if ver >= 2 && (target_mv < 3_000 || target_mv > 21_000) {
+    let max_target_mv = match mode {
+        PdMode::Fixed => MAX_SUPPORTED_FIXED_TARGET_MV,
+        PdMode::Pps => PdConfig::MAX_PPS_TARGET_MV,
+    };
+    if ver >= 2 && (target_mv < PdConfig::MIN_AUGMENTED_TARGET_MV || target_mv > max_target_mv) {
         return Err(PdBlobError::InvalidTarget(target_mv));
     }
 
@@ -628,7 +747,9 @@ pub fn decode_pd_blob(
     let allow_extended_voltage = if ver >= 4 { bytes[16] != 0 } else { false };
     let (target_mv, pps_target_mv) = if ver >= 5 {
         let cached = get_u32_le(bytes, 17);
-        let cached = if (3_000..=21_000).contains(&cached) {
+        let cached = if (PdConfig::MIN_AUGMENTED_TARGET_MV..=PdConfig::MAX_PPS_TARGET_MV)
+            .contains(&cached)
+        {
             cached
         } else {
             PdConfig::DEFAULT_TARGET_MV
@@ -712,6 +833,55 @@ mod tests {
     }
 
     #[test]
+    fn pd_blob_roundtrip_preserves_28v_fixed_target() {
+        let cfg = PdConfig {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 8,
+            pps_object_pos: 0,
+            target_mv: 28_000,
+            pps_target_mv: 9_000,
+            i_req_ma: 5_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let (decoded, allow_extended_voltage) = decode_pd_blob(&blob).expect("decode v6 blob");
+        assert_eq!(decoded, cfg);
+        assert!(allow_extended_voltage);
+    }
+
+    #[test]
+    fn pd_blob_rejects_pps_target_above_21v() {
+        let cfg = PdConfig {
+            mode: PdMode::Pps,
+            fixed_object_pos: 0,
+            pps_object_pos: 2,
+            target_mv: 28_000,
+            pps_target_mv: 28_000,
+            i_req_ma: 3_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let err = decode_pd_blob(&blob).unwrap_err();
+        assert_eq!(err, PdBlobError::InvalidTarget(28_000));
+    }
+
+    #[test]
+    fn pd_blob_rejects_fixed_target_above_28v() {
+        let cfg = PdConfig {
+            mode: PdMode::Fixed,
+            fixed_object_pos: 9,
+            pps_object_pos: 0,
+            target_mv: 36_000,
+            pps_target_mv: 9_000,
+            i_req_ma: 3_000,
+        };
+
+        let blob = encode_pd_blob(&cfg, true);
+        let err = decode_pd_blob(&blob).unwrap_err();
+        assert_eq!(err, PdBlobError::InvalidTarget(36_000));
+    }
+
+    #[test]
     fn pd_blob_v3_fixed_keeps_target_voltage() {
         let legacy = PdConfig {
             mode: PdMode::Fixed,
@@ -749,5 +919,117 @@ mod tests {
         assert_eq!(decoded.target_mv, 20_000);
         assert_eq!(decoded.pps_target_mv, 20_000);
         assert!(allow_extended_voltage);
+    }
+
+    #[test]
+    fn supported_epr_fixed_selection_only_advertises_28v() {
+        assert_eq!(
+            supported_epr_fixed_selection(EPR_FIXED_28V_OBJECT_POS),
+            Some((EPR_FIXED_28V_MV, UNKNOWN_PDO_MAX_MA))
+        );
+        assert_eq!(supported_epr_fixed_selection(9), None);
+    }
+
+    #[test]
+    fn supported_epr_fixed_target_requires_matching_voltage() {
+        assert_eq!(
+            supported_epr_fixed_target(EPR_FIXED_28V_OBJECT_POS, EPR_FIXED_28V_MV),
+            Some(EPR_FIXED_28V_MV)
+        );
+        assert_eq!(
+            supported_epr_fixed_target(EPR_FIXED_28V_OBJECT_POS, 20_000),
+            None
+        );
+    }
+
+    #[test]
+    fn synthetic_epr_fixed_advertises_when_detached_or_epr_capable() {
+        let detached = PdStatus {
+            attached: false,
+            ..PdStatus::default()
+        };
+        let attached_spr_only = PdStatus {
+            attached: true,
+            epr_capable: false,
+            ..PdStatus::default()
+        };
+        let attached_epr_capable = PdStatus {
+            attached: true,
+            epr_capable: true,
+            ..PdStatus::default()
+        };
+
+        assert!(can_advertise_synthetic_epr_fixed(None));
+        assert!(can_advertise_synthetic_epr_fixed(Some(&detached)));
+        assert!(!can_advertise_synthetic_epr_fixed(Some(&attached_spr_only)));
+        assert!(can_advertise_synthetic_epr_fixed(Some(
+            &attached_epr_capable
+        )));
+    }
+
+    #[test]
+    fn effective_pdo_i_req_limit_uses_attached_source_power_for_synthetic_28v() {
+        let mut status = PdStatus {
+            attached: true,
+            epr_capable: true,
+            ..PdStatus::default()
+        };
+        let _ = status.fixed_pdos.push(loadlynx_protocol::FixedPdo {
+            pos: 4,
+            mv: 20_000,
+            max_ma: 5_000,
+        });
+
+        assert_eq!(
+            effective_pdo_i_req_limit(
+                Some(&status),
+                EPR_FIXED_28V_OBJECT_POS,
+                EPR_FIXED_28V_MV,
+                UNKNOWN_PDO_MAX_MA
+            ),
+            Some(3_571)
+        );
+        assert!(!i_req_within_effective_pdo_limit(
+            Some(&status),
+            EPR_FIXED_28V_OBJECT_POS,
+            EPR_FIXED_28V_MV,
+            UNKNOWN_PDO_MAX_MA,
+            3_600
+        ));
+        assert_eq!(
+            clamp_i_req_to_effective_pdo_limit(
+                Some(&status),
+                EPR_FIXED_28V_OBJECT_POS,
+                EPR_FIXED_28V_MV,
+                UNKNOWN_PDO_MAX_MA,
+                3_600
+            ),
+            3_571
+        );
+    }
+
+    #[test]
+    fn effective_pdo_i_req_limit_caps_synthetic_28v_at_fixed_5a() {
+        let mut status = PdStatus {
+            attached: true,
+            epr_capable: true,
+            ..PdStatus::default()
+        };
+        let _ = status.epr_avs_pdos.push(loadlynx_protocol::EprAvsPdo {
+            pos: 10,
+            min_mv: 15_000,
+            max_mv: 28_000,
+            pdp_w: 240,
+        });
+
+        assert_eq!(
+            effective_pdo_i_req_limit(
+                Some(&status),
+                EPR_FIXED_28V_OBJECT_POS,
+                EPR_FIXED_28V_MV,
+                UNKNOWN_PDO_MAX_MA
+            ),
+            Some(EPR_FIXED_28V_MAX_MA)
+        );
     }
 }

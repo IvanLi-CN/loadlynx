@@ -10,16 +10,20 @@ use embassy_stm32::ucpd::{
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex, signal::Signal};
 use embassy_time::{Duration, Timer, with_timeout};
 use loadlynx_protocol::{
-    FixedPdo, FixedPdoList, PdStatus, PpsPdo, PpsPdoList, encode_pd_status_frame, slip_encode,
+    EprAvsPdo, EprAvsPdoList, FixedPdo, FixedPdoList, PdStatus, PpsPdo, PpsPdoList,
+    encode_pd_status_frame, slip_encode,
 };
 use uom::si::electric_current::milliampere as uom_milliampere;
 use uom::si::electric_potential::millivolt as uom_millivolt;
-use usbpd::protocol_layer::message::pdo;
-use usbpd::protocol_layer::message::request;
-use usbpd::protocol_layer::message::units::ElectricCurrent;
+use uom::si::power::watt as uom_watt;
+use usbpd::protocol_layer::message::data::epr_mode;
+use usbpd::protocol_layer::message::data::request;
+use usbpd::protocol_layer::message::data::sink_capabilities;
+use usbpd::protocol_layer::message::data::source_capabilities;
 use usbpd::sink::device_policy_manager::{DevicePolicyManager, Event};
 use usbpd::sink::policy_engine::Sink;
 use usbpd::timers::Timer as UsbPdTimer;
+use usbpd::units::{ElectricCurrent, ElectricPotential, Power};
 use usbpd_traits::{Driver, DriverRxError, DriverTxError};
 
 use embassy_stm32::mode::Async as UartAsync;
@@ -29,9 +33,11 @@ pub const MSG_PD_SINK_REQUEST: u8 = 0x27;
 
 pub const PD_MODE_FIXED: u8 = 0;
 pub const PD_MODE_PPS: u8 = 1;
+pub const PD_MODE_AVS: u8 = 2;
 
 pub const PD_TARGET_5V_MV: u32 = 5_000;
 pub const PD_TARGET_20V_MV: u32 = 20_000;
+pub const PD_TARGET_28V_MV: u32 = 28_000;
 
 pub static PD_DESIRED_MODE: AtomicU8 = AtomicU8::new(PD_MODE_FIXED);
 pub static PD_DESIRED_OBJECT_POS: AtomicU8 = AtomicU8::new(1);
@@ -50,8 +56,8 @@ async fn send_pd_status_frame(
     uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
     status: &PdStatus,
 ) {
-    let mut raw = [0u8; 256];
-    let mut slip = [0u8; 512];
+    let mut raw = [0u8; 512];
+    let mut slip = [0u8; 1024];
 
     let seq = PD_STATUS_SEQ.fetch_add(1, Ordering::Relaxed);
     let frame_len = match encode_pd_status_frame(seq, status, &mut raw) {
@@ -152,7 +158,7 @@ struct UcpdDriver<'d> {
 }
 
 impl<'d> Driver for UcpdDriver<'d> {
-    async fn wait_for_vbus(&self) {}
+    async fn wait_for_vbus(&mut self) {}
 
     async fn receive(&mut self, buffer: &mut [u8]) -> Result<usize, DriverRxError> {
         if !self.rx_wait_logged {
@@ -248,10 +254,14 @@ struct AnalogDpm {
     uart_tx: &'static Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
     fixed_pdos: FixedPdoList,
     pps_pdos: PpsPdoList,
+    epr_avs_pdos: EprAvsPdoList,
     contract_mv: u32,
     contract_ma: u32,
     pending_contract_mv: u32,
     pending_contract_ma: u32,
+    epr_capable: bool,
+    epr_active: bool,
+    epr_entry_failed: bool,
     followup_desired_request: bool,
     caps_logged: bool,
 }
@@ -262,38 +272,62 @@ impl AnalogDpm {
             uart_tx,
             fixed_pdos: FixedPdoList::new(),
             pps_pdos: PpsPdoList::new(),
+            epr_avs_pdos: EprAvsPdoList::new(),
             contract_mv: 0,
             contract_ma: 0,
             pending_contract_mv: 0,
             pending_contract_ma: 0,
+            epr_capable: false,
+            epr_active: false,
+            epr_entry_failed: false,
             followup_desired_request: false,
             caps_logged: false,
         }
     }
 
-    fn update_pdos(&mut self, caps: &pdo::SourceCapabilities) {
+    fn update_pdos(&mut self, caps: &source_capabilities::SourceCapabilities) {
         self.fixed_pdos.clear();
         self.pps_pdos.clear();
+        self.epr_avs_pdos.clear();
+        self.epr_capable = caps.epr_mode_capable();
+        self.epr_active = caps.is_epr_capabilities();
 
         for (idx, cap) in caps.pdos().iter().enumerate() {
+            if cap.is_zero_padding() {
+                continue;
+            }
             let pos = idx.saturating_add(1) as u8;
             match cap {
-                pdo::PowerDataObject::FixedSupply(fixed) => {
+                source_capabilities::PowerDataObject::FixedSupply(fixed) => {
                     let mv = fixed.voltage().get::<uom_millivolt>();
                     let max_ma = fixed.max_current().get::<uom_milliampere>();
                     let _ = self.fixed_pdos.push(FixedPdo { pos, mv, max_ma });
                 }
-                pdo::PowerDataObject::Augmented(pdo::Augmented::Spr(spr)) => {
-                    let min_mv = spr.min_voltage().get::<uom_millivolt>();
-                    let max_mv = spr.max_voltage().get::<uom_millivolt>();
-                    let max_ma = spr.max_current().get::<uom_milliampere>();
-                    let _ = self.pps_pdos.push(PpsPdo {
-                        pos,
-                        min_mv,
-                        max_mv,
-                        max_ma,
-                    });
-                }
+                source_capabilities::PowerDataObject::Augmented(aug) => match aug {
+                    source_capabilities::Augmented::Spr(spr) => {
+                        let min_mv = spr.min_voltage().get::<uom_millivolt>();
+                        let max_mv = spr.max_voltage().get::<uom_millivolt>();
+                        let max_ma = spr.max_current().get::<uom_milliampere>();
+                        let _ = self.pps_pdos.push(PpsPdo {
+                            pos,
+                            min_mv,
+                            max_mv,
+                            max_ma,
+                        });
+                    }
+                    source_capabilities::Augmented::Epr(avs) => {
+                        let min_mv = avs.min_voltage().get::<uom_millivolt>();
+                        let max_mv = avs.max_voltage().get::<uom_millivolt>();
+                        let pdp_w = avs.pd_power().get::<uom_watt>() as u16;
+                        let _ = self.epr_avs_pdos.push(EprAvsPdo {
+                            pos,
+                            min_mv,
+                            max_mv,
+                            pdp_w,
+                        });
+                    }
+                    source_capabilities::Augmented::Unknown(_) => {}
+                },
                 _ => {}
             }
         }
@@ -311,29 +345,69 @@ impl AnalogDpm {
                 }
             }
             info!(
-                "PD caps: fixed_pdos={} pps_pdos={} has_20v={} v5_max_ma={}mA",
+                "PD caps: fixed_pdos={} pps_pdos={} epr_capable={} epr_avs_pdos={} epr_active={} has_20v={} v5_max_ma={}mA",
                 self.fixed_pdos.len(),
                 self.pps_pdos.len(),
+                self.epr_capable,
+                self.epr_avs_pdos.len(),
+                self.epr_active,
                 has_20v,
                 v5_max_ma
             );
         }
     }
 
-    fn build_request(&mut self, caps: &pdo::SourceCapabilities) -> request::PowerSource {
-        let desired_mode = PD_DESIRED_MODE.load(Ordering::Relaxed);
-        let mut object_pos = PD_DESIRED_OBJECT_POS.load(Ordering::Relaxed);
-        if object_pos == 0 {
-            object_pos = 1;
+    fn desired_mode() -> u8 {
+        PD_DESIRED_MODE.load(Ordering::Relaxed)
+    }
+
+    fn desired_object_pos() -> u8 {
+        let object_pos = PD_DESIRED_OBJECT_POS.load(Ordering::Relaxed);
+        if object_pos == 0 { 1 } else { object_pos }
+    }
+
+    fn desired_target_mv() -> u32 {
+        PD_DESIRED_TARGET_MV.load(Ordering::Relaxed)
+    }
+
+    fn desired_i_req_ma() -> u32 {
+        PD_DESIRED_I_REQ_MA.load(Ordering::Relaxed).max(50)
+    }
+
+    fn desired_requires_epr(&self) -> bool {
+        match Self::desired_mode() {
+            PD_MODE_FIXED => {
+                Self::desired_object_pos() >= 8 || Self::desired_target_mv() > PD_TARGET_20V_MV
+            }
+            PD_MODE_AVS => true,
+            _ => false,
         }
-        let desired_mv = PD_DESIRED_TARGET_MV.load(Ordering::Relaxed);
-        let desired_i_req_ma = PD_DESIRED_I_REQ_MA.load(Ordering::Relaxed).max(50);
+    }
+
+    fn desired_epr_operational_pdp(&self) -> Power {
+        let target_mv = Self::desired_target_mv().max(PD_TARGET_28V_MV);
+        let i_req_ma = Self::desired_i_req_ma();
+        let desired_watts = target_mv
+            .saturating_mul(i_req_ma)
+            .div_ceil(1_000_000)
+            .max(1);
+        Power::new::<uom_watt>(desired_watts)
+    }
+
+    fn build_request(
+        &mut self,
+        caps: &source_capabilities::SourceCapabilities,
+    ) -> request::PowerSource {
+        let desired_mode = Self::desired_mode();
+        let object_pos = Self::desired_object_pos();
+        let desired_mv = Self::desired_target_mv();
+        let desired_i_req_ma = Self::desired_i_req_ma();
 
         match desired_mode {
             PD_MODE_FIXED => {
                 let idx = object_pos.saturating_sub(1) as usize;
                 match caps.pdos().get(idx) {
-                    Some(pdo::PowerDataObject::FixedSupply(fixed)) => {
+                    Some(source_capabilities::PowerDataObject::FixedSupply(fixed)) => {
                         let mv = fixed.voltage().get::<uom_millivolt>();
                         if desired_mv != 0 && desired_mv != mv {
                             warn!(
@@ -352,15 +426,30 @@ impl AnalogDpm {
                             raw_current = 0x3ff;
                         }
 
-                        let req = request::PowerSource::FixedVariableSupply(
-                            request::FixedVariableSupply(0)
-                                .with_raw_operating_current(raw_current)
-                                .with_raw_max_operating_current(raw_current)
-                                .with_object_position(object_pos)
-                                .with_capability_mismatch(mismatch)
-                                .with_no_usb_suspend(true)
-                                .with_usb_communications_capable(true),
-                        );
+                        let req = if mv > PD_TARGET_20V_MV {
+                            request::PowerSource::EprRequest(request::EprRequestDataObject {
+                                rdo: request::FixedVariableSupply(0)
+                                    .with_raw_operating_current(raw_current)
+                                    .with_raw_max_operating_current(raw_current)
+                                    .with_object_position(object_pos)
+                                    .with_capability_mismatch(mismatch)
+                                    .with_no_usb_suspend(true)
+                                    .with_usb_communications_capable(true)
+                                    .with_epr_mode_capable(true)
+                                    .0,
+                                pdo: source_capabilities::PowerDataObject::FixedSupply(*fixed),
+                            })
+                        } else {
+                            request::PowerSource::FixedVariableSupply(
+                                request::FixedVariableSupply(0)
+                                    .with_raw_operating_current(raw_current)
+                                    .with_raw_max_operating_current(raw_current)
+                                    .with_object_position(object_pos)
+                                    .with_capability_mismatch(mismatch)
+                                    .with_no_usb_suspend(true)
+                                    .with_usb_communications_capable(true),
+                            )
+                        };
 
                         self.pending_contract_mv = mv;
                         self.pending_contract_ma = i_req_ma;
@@ -383,8 +472,8 @@ impl AnalogDpm {
             PD_MODE_PPS => {
                 let idx = object_pos.saturating_sub(1) as usize;
                 match caps.pdos().get(idx) {
-                    Some(pdo::PowerDataObject::Augmented(aug)) => {
-                        let pdo::Augmented::Spr(spr) = *aug else {
+                    Some(source_capabilities::PowerDataObject::Augmented(aug)) => {
+                        let source_capabilities::Augmented::Spr(spr) = *aug else {
                             warn!(
                                 "PD PPS request: object_pos={} is not a PPS APDO (fallback Safe5V)",
                                 object_pos
@@ -432,6 +521,27 @@ impl AnalogDpm {
                     }
                 }
             }
+            PD_MODE_AVS => {
+                let voltage = ElectricPotential::new::<uom_millivolt>(desired_mv);
+                let current = ElectricCurrent::new::<uom_milliampere>(desired_i_req_ma);
+                match request::PowerSource::new_epr_avs(
+                    request::CurrentRequest::Specific(current),
+                    voltage,
+                    caps,
+                ) {
+                    Ok(req) => {
+                        self.pending_contract_mv = desired_mv;
+                        self.pending_contract_ma = desired_i_req_ma;
+                        return req;
+                    }
+                    Err(_) => {
+                        warn!(
+                            "PD AVS request: target_mv={}mV not covered by EPR AVS caps (fallback Safe5V)",
+                            desired_mv
+                        );
+                    }
+                }
+            }
             _ => {
                 warn!(
                     "PD sink request: unsupported mode={} (fallback Safe5V)",
@@ -443,7 +553,10 @@ impl AnalogDpm {
         self.build_safe5v_request(caps)
     }
 
-    fn build_safe5v_request(&mut self, caps: &pdo::SourceCapabilities) -> request::PowerSource {
+    fn build_safe5v_request(
+        &mut self,
+        caps: &source_capabilities::SourceCapabilities,
+    ) -> request::PowerSource {
         let vsafe = caps.vsafe_5v().unwrap();
         let max_ma = vsafe.max_current().get::<uom_milliampere>();
         let desired_i_req_ma = PD_DESIRED_I_REQ_MA.load(Ordering::Relaxed).max(50);
@@ -455,10 +568,22 @@ impl AnalogDpm {
             caps,
         )
         .unwrap();
+        let req = if self.desired_requires_epr() {
+            match req {
+                request::PowerSource::FixedVariableSupply(rdo) => {
+                    request::PowerSource::FixedVariableSupply(rdo.with_epr_mode_capable(true))
+                }
+                other => other,
+            }
+        } else {
+            req
+        };
 
         info!(
-            "PD request: stage=safe5v i_req={}mA (max={}mA)",
-            i_req_ma, max_ma
+            "PD request: stage=safe5v i_req={}mA (max={}mA) epr_capable={}",
+            i_req_ma,
+            max_ma,
+            self.desired_requires_epr()
         );
         self.pending_contract_mv = vsafe.voltage().get::<uom_millivolt>();
         self.pending_contract_ma = i_req_ma;
@@ -473,6 +598,9 @@ impl AnalogDpm {
                 contract_ma: self.contract_ma,
                 fixed_pdos: self.fixed_pdos.clone(),
                 pps_pdos: self.pps_pdos.clone(),
+                epr_capable: self.epr_capable,
+                epr_active: self.epr_active,
+                epr_avs_pdos: self.epr_avs_pdos.clone(),
             }
         } else {
             PdStatus {
@@ -492,7 +620,7 @@ impl AnalogDpm {
 impl DevicePolicyManager for AnalogDpm {
     async fn request(
         &mut self,
-        source_capabilities: &pdo::SourceCapabilities,
+        source_capabilities: &source_capabilities::SourceCapabilities,
     ) -> request::PowerSource {
         self.update_pdos(source_capabilities);
         // Emit PD_STATUS as soon as capabilities are known.
@@ -502,9 +630,9 @@ impl DevicePolicyManager for AnalogDpm {
         // then request the desired policy from `get_event()` once the policy engine enters Ready.
         //
         // Some sources are picky when requesting higher voltages (or PPS) immediately.
-        let desired_mode = PD_DESIRED_MODE.load(Ordering::Relaxed);
-        let desired_mv = PD_DESIRED_TARGET_MV.load(Ordering::Relaxed);
-        let desired_pos = PD_DESIRED_OBJECT_POS.load(Ordering::Relaxed);
+        let desired_mode = Self::desired_mode();
+        let desired_mv = Self::desired_target_mv();
+        let desired_pos = Self::desired_object_pos();
         let stage_safe5v =
             desired_mode != PD_MODE_FIXED || desired_mv != PD_TARGET_5V_MV || desired_pos != 1;
 
@@ -529,15 +657,75 @@ impl DevicePolicyManager for AnalogDpm {
         }
     }
 
-    async fn get_event(&mut self, source_capabilities: &pdo::SourceCapabilities) -> Event {
+    async fn get_event(
+        &mut self,
+        source_capabilities: &source_capabilities::SourceCapabilities,
+    ) -> Event {
         if self.followup_desired_request {
             self.followup_desired_request = false;
+            if self.desired_requires_epr() && !source_capabilities.is_epr_capabilities() {
+                if self.epr_entry_failed {
+                    info!("PD request: retrying EPR entry after a fresh followup request");
+                    self.epr_entry_failed = false;
+                }
+                if source_capabilities.epr_mode_capable() {
+                    let pdp = self.desired_epr_operational_pdp();
+                    info!(
+                        "PD request: stage=followup enter-epr pdp={}W",
+                        pdp.get::<uom_watt>()
+                    );
+                    return Event::EnterEprMode(pdp);
+                }
+                warn!("PD request: EPR target requested but source is not EPR capable");
+                return Event::None;
+            }
+
             info!("PD request: stage=followup desired");
             return Event::RequestPower(self.build_request(source_capabilities));
         }
 
         PD_RENEGOTIATE_SIGNAL.wait().await;
+
+        if self.epr_active && !self.desired_requires_epr() {
+            info!("PD request: exit EPR for SPR target");
+            return Event::ExitEprMode;
+        }
+
+        if !self.epr_active && self.desired_requires_epr() {
+            if self.epr_entry_failed {
+                info!("PD request: retrying EPR entry after explicit renegotiation");
+                self.epr_entry_failed = false;
+            }
+            if source_capabilities.epr_mode_capable() {
+                let pdp = self.desired_epr_operational_pdp();
+                info!("PD request: enter EPR pdp={}W", pdp.get::<uom_watt>());
+                return Event::EnterEprMode(pdp);
+            }
+            warn!("PD request: EPR target requested but source is not EPR capable");
+            return Event::None;
+        }
+
         Event::RequestPower(self.build_request(source_capabilities))
+    }
+
+    async fn epr_mode_entry_failed(&mut self, reason: epr_mode::DataEnterFailed) {
+        self.epr_active = false;
+        self.epr_entry_failed = true;
+        warn!("PD EPR mode entry failed: {:?}", reason);
+        self.send_pd_status(true).await;
+    }
+
+    fn sink_capabilities(&self) -> sink_capabilities::SinkCapabilities {
+        let mut caps = sink_capabilities::SinkCapabilities::new_vsafe5v_only(
+            (Self::desired_i_req_ma() / 10).min(0x3ff) as u16,
+        );
+        if self.desired_requires_epr()
+            && let Some(sink_capabilities::SinkPowerDataObject::FixedSupply(fixed)) =
+                caps.0.first_mut()
+        {
+            *fixed = fixed.with_higher_capability(true);
+        }
+        caps
     }
 }
 
