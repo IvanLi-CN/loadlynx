@@ -38,6 +38,8 @@ pub const PD_MODE_AVS: u8 = 2;
 pub const PD_TARGET_5V_MV: u32 = 5_000;
 pub const PD_TARGET_20V_MV: u32 = 20_000;
 pub const PD_TARGET_28V_MV: u32 = 28_000;
+const PD_EPR_FIXED_28V_OBJECT_POS: u8 = 8;
+const PD_EPR_FIXED_28V_MAX_MA: u32 = 5_000;
 
 pub static PD_DESIRED_MODE: AtomicU8 = AtomicU8::new(PD_MODE_FIXED);
 pub static PD_DESIRED_OBJECT_POS: AtomicU8 = AtomicU8::new(1);
@@ -329,6 +331,8 @@ impl AnalogDpm {
             }
         }
 
+        self.push_inferred_28v_fixed_pdo(caps);
+
         if !self.caps_logged {
             self.caps_logged = true;
             let mut has_20v = false;
@@ -351,6 +355,29 @@ impl AnalogDpm {
                 v5_max_ma
             );
         }
+    }
+
+    fn push_inferred_28v_fixed_pdo(&mut self, caps: &source_capabilities::SourceCapabilities) {
+        if self.epr_active || !caps.epr_mode_capable() {
+            return;
+        }
+        if self
+            .fixed_pdos
+            .iter()
+            .any(|pdo| pdo.pos == PD_EPR_FIXED_28V_OBJECT_POS || pdo.mv == PD_TARGET_28V_MV)
+        {
+            return;
+        }
+
+        // Break the SPR->EPR discovery chicken-and-egg: before EPR entry we only have the SPR
+        // Source_Capabilities message, but an EPR-capable source can still surface a read-only
+        // inferred 28V rail so the digital UI/API can offer the standard PDO#8 selection.
+        let inferred_max_ma = inferred_epr_fixed_28v_max_ma(caps);
+        let _ = self.fixed_pdos.push(FixedPdo {
+            pos: PD_EPR_FIXED_28V_OBJECT_POS,
+            mv: PD_TARGET_28V_MV,
+            max_ma: inferred_max_ma,
+        });
     }
 
     fn desired_mode() -> u8 {
@@ -610,6 +637,41 @@ impl AnalogDpm {
         }
         send_pd_status_frame(self.uart_tx, &status).await;
     }
+}
+
+fn inferred_epr_fixed_28v_max_ma(caps: &source_capabilities::SourceCapabilities) -> u32 {
+    let max_power_mw = caps
+        .pdos()
+        .iter()
+        .filter_map(|pdo| match pdo {
+            source_capabilities::PowerDataObject::FixedSupply(fixed) => Some(
+                fixed
+                    .voltage()
+                    .get::<uom_millivolt>()
+                    .saturating_mul(fixed.max_current().get::<uom_milliampere>())
+                    / 1_000,
+            ),
+            source_capabilities::PowerDataObject::Augmented(
+                source_capabilities::Augmented::Spr(spr),
+            ) => Some(
+                spr.max_voltage()
+                    .get::<uom_millivolt>()
+                    .saturating_mul(spr.max_current().get::<uom_milliampere>())
+                    / 1_000,
+            ),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0);
+
+    if max_power_mw == 0 {
+        return PD_EPR_FIXED_28V_MAX_MA;
+    }
+
+    max_power_mw
+        .saturating_mul(1_000)
+        .saturating_div(PD_TARGET_28V_MV)
+        .clamp(50, PD_EPR_FIXED_28V_MAX_MA)
 }
 
 impl DevicePolicyManager for AnalogDpm {

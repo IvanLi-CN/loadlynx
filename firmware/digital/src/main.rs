@@ -3836,29 +3836,24 @@ fn pd_button_display_mode(
     }
 }
 
-fn pd_button_display_target_mv(
-    saved: control::PdConfig,
-    status: Option<&PdStatus>,
-    allow_extended_voltage: bool,
-) -> u32 {
-    let cfg = control::PdConfig::effective(saved, allow_extended_voltage);
-    match cfg.mode {
+fn pd_button_display_target_mv(saved: control::PdConfig, status: Option<&PdStatus>) -> u32 {
+    match saved.mode {
         // Dashboard line2 should prefer the persisted target, but legacy blobs may have a stale
         // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
         // from `PD_STATUS`, prefer that value to avoid misleading UI output.
         control::PdMode::Fixed => {
-            let persisted = cfg.target_mv.clamp(
+            let persisted = saved.target_mv.clamp(
                 control::PdConfig::DEFAULT_TARGET_MV,
                 control::PdConfig::MAX_FIXED_TARGET_MV,
             );
-            let derived = pd_fixed_target_mv(cfg, status);
+            let derived = pd_fixed_target_mv(saved, status);
             if derived != persisted {
                 derived
             } else {
                 persisted
             }
         }
-        control::PdMode::Pps => cfg.pps_target_mv.clamp(
+        control::PdMode::Pps => saved.pps_target_mv.clamp(
             control::PdConfig::MIN_AUGMENTED_TARGET_MV,
             control::PdConfig::MAX_PPS_TARGET_MV,
         ),
@@ -5124,11 +5119,7 @@ async fn display_render_task(
             let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
             let pd_wants_non_safe5v = pd_config_allows_non_safe5v(pd_saved, pd_status);
             let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
-            let pd_target_mv = Some(pd_button_display_target_mv(
-                pd_saved,
-                pd_status,
-                allow_extended_voltage,
-            ));
+            let pd_target_mv = Some(pd_button_display_target_mv(pd_saved, pd_status));
             let pd_target_available = true;
 
             guard.snapshot.pd_display_mode = pd_display_mode;
