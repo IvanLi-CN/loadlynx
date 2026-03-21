@@ -3861,7 +3861,13 @@ fn source_max_power_mw(status: &PdStatus) -> u32 {
         .map(|pdo| pdo.max_mv.saturating_mul(pdo.max_ma))
         .max()
         .unwrap_or(0);
-    fixed_max.max(pps_max)
+    let epr_max = status
+        .epr_avs_pdos
+        .iter()
+        .map(|pdo| u32::from(pdo.pdp_w).saturating_mul(1_000))
+        .max()
+        .unwrap_or(0);
+    fixed_max.max(pps_max).max(epr_max)
 }
 
 fn clamp_synthetic_epr_i_req_ma(status: &PdStatus, target_mv: u32, i_req_ma: u32) -> u32 {

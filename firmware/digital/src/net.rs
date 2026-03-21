@@ -2293,8 +2293,9 @@ async fn render_pd_view_json(
 
     // Capabilities
     buf.push_str(",\"fixed_pdos\":[");
+    let mut fixed_count = 0usize;
     for (i, pdo) in status.fixed_pdos.iter().enumerate() {
-        if i != 0 {
+        if fixed_count != 0 {
             buf.push(',');
         }
         let pos = if pdo.pos != 0 { pdo.pos } else { (i + 1) as u8 };
@@ -2304,6 +2305,23 @@ async fn render_pd_view_json(
             pos,
             pdo.mv,
             pdo.max_ma
+        );
+        fixed_count += 1;
+    }
+    if control::can_advertise_synthetic_epr_fixed(Some(&status))
+        && !status.fixed_pdos.iter().any(|pdo| {
+            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
+        })
+    {
+        if fixed_count != 0 {
+            buf.push(',');
+        }
+        let _ = core::write!(
+            buf,
+            "{{\"pos\":{},\"mv\":{},\"max_ma\":{}}}",
+            control::EPR_FIXED_28V_OBJECT_POS,
+            control::EPR_FIXED_28V_MV,
+            control::UNKNOWN_PDO_MAX_MA
         );
     }
     buf.push(']');
