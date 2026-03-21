@@ -9,6 +9,8 @@ on:
       - 'third_party/embassy'
       - 'libs/**'
       - '.gitmodules'
+      - 'justfile'
+      - 'Justfile'
       - '.github/workflows/**'
   pull_request:
     branches: [ main ]
@@ -18,6 +20,8 @@ on:
       - 'third_party/embassy'
       - 'libs/**'
       - '.gitmodules'
+      - 'justfile'
+      - 'Justfile'
       - '.github/workflows/**'
 
 jobs:
