@@ -26,13 +26,14 @@ use loadlynx_protocol::{
     CRC_LEN, CalKind, Error as ProtocolError, FAST_STATUS_MODE_CC, FAST_STATUS_MODE_CP,
     FAST_STATUS_MODE_CV, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE,
     FAULT_SINK_OVER_TEMP, FLAG_IS_ACK, FastStatus, FrameHeader, HEADER_LEN, Hello, LoadMode,
-    MSG_CAL_MODE, MSG_SET_MODE, MSG_SET_POINT, PdStatus, STATE_FLAG_CURRENT_LIMITED,
-    STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD, STATE_FLAG_POWER_LIMITED, STATE_FLAG_REMOTE_ACTIVE,
-    STATE_FLAG_UV_LATCHED, SlipDecoder, SoftReset, SoftResetReason, decode_cal_mode_frame,
-    decode_cal_write_frame, decode_frame, decode_limit_profile_frame, decode_pd_sink_request_frame,
-    decode_set_enable_frame, decode_set_mode_frame, decode_set_point_frame,
-    decode_soft_reset_frame, encode_ack_only_frame, encode_fast_status_frame, encode_hello_frame,
-    encode_pd_status_frame, encode_soft_reset_frame, slip_encode,
+    MSG_CAL_MODE, MSG_SET_MODE, MSG_SET_POINT, PD_MAX_FIXED_PDOS, PdStatus,
+    STATE_FLAG_CURRENT_LIMITED, STATE_FLAG_ENABLED, STATE_FLAG_LINK_GOOD, STATE_FLAG_POWER_LIMITED,
+    STATE_FLAG_REMOTE_ACTIVE, STATE_FLAG_UV_LATCHED, SlipDecoder, SoftReset, SoftResetReason,
+    decode_cal_mode_frame, decode_cal_write_frame, decode_frame, decode_limit_profile_frame,
+    decode_pd_sink_request_frame, decode_set_enable_frame, decode_set_mode_frame,
+    decode_set_point_frame, decode_soft_reset_frame, encode_ack_only_frame,
+    encode_fast_status_frame, encode_hello_frame, encode_pd_status_frame, encode_soft_reset_frame,
+    slip_encode,
 };
 use static_cell::StaticCell;
 
@@ -3520,7 +3521,11 @@ async fn uart_setpoint_rx_task(
                                                                                 None => (true, "unsupported mode"),
                                                                                 Some(mode) => {
                                                                                     let object_pos = req.object_pos;
-                                                                                    if object_pos == 0 || object_pos > 14 {
+                                                                                    if object_pos == 0
+                                                                                        || object_pos
+                                                                                            > PD_MAX_FIXED_PDOS
+                                                                                                as u8
+                                                                                    {
                                                                                         (true, "invalid object_pos")
                                                                                     } else if req.target_mv < 3_000
                                                                                         || req.target_mv > 48_000
