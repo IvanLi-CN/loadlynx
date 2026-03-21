@@ -261,6 +261,7 @@ impl PdConfig {
 
 pub const EPR_FIXED_28V_OBJECT_POS: u8 = 8;
 pub const EPR_FIXED_28V_MV: u32 = 28_000;
+pub const EPR_FIXED_28V_MAX_MA: u32 = 5_000;
 pub const UNKNOWN_PDO_MAX_MA: u32 = 0;
 pub const MAX_PD_OBJECT_POS: u8 = 16;
 pub const MAX_SUPPORTED_FIXED_TARGET_MV: u32 = EPR_FIXED_28V_MV;
@@ -335,7 +336,7 @@ pub fn effective_pdo_i_req_limit(
         return None;
     }
 
-    Some((max_power_uw / target_mv).max(50))
+    Some((max_power_uw / target_mv).clamp(50, EPR_FIXED_28V_MAX_MA))
 }
 
 pub fn i_req_within_effective_pdo_limit(
@@ -1004,6 +1005,31 @@ mod tests {
                 3_600
             ),
             3_571
+        );
+    }
+
+    #[test]
+    fn effective_pdo_i_req_limit_caps_synthetic_28v_at_fixed_5a() {
+        let mut status = PdStatus {
+            attached: true,
+            epr_capable: true,
+            ..PdStatus::default()
+        };
+        let _ = status.epr_avs_pdos.push(loadlynx_protocol::EprAvsPdo {
+            pos: 10,
+            min_mv: 15_000,
+            max_mv: 28_000,
+            pdp_w: 240,
+        });
+
+        assert_eq!(
+            effective_pdo_i_req_limit(
+                Some(&status),
+                EPR_FIXED_28V_OBJECT_POS,
+                EPR_FIXED_28V_MV,
+                UNKNOWN_PDO_MAX_MA
+            ),
+            Some(EPR_FIXED_28V_MAX_MA)
         );
     }
 }

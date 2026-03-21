@@ -3876,10 +3876,6 @@ fn pd_button_display_target_mv(
     allow_extended_voltage: bool,
     status: Option<&PdStatus>,
 ) -> u32 {
-    if !allow_extended_voltage {
-        return control::PdConfig::effective(saved, false).target_mv;
-    }
-
     match saved.mode {
         // Dashboard line2 should prefer the persisted target, but legacy blobs may have a stale
         // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
@@ -3890,7 +3886,7 @@ fn pd_button_display_target_mv(
                 control::PdConfig::MAX_FIXED_TARGET_MV,
             );
             let derived = pd_fixed_target_mv(saved, status);
-            if derived != persisted {
+            if allow_extended_voltage && derived != persisted {
                 derived
             } else {
                 persisted
