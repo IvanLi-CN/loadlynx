@@ -4649,7 +4649,11 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
     }
 }
 
-async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStatus) {
+async fn apply_fast_status(
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+    status: &FastStatus,
+) {
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fault_flags = status.fault_flags;
     LAST_FAULT_FLAGS.store(fault_flags, Ordering::Relaxed);
@@ -4674,6 +4678,7 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Uvlo);
     }
     let enabled = status.enable;
+    let desired_output_enabled = { control.lock().await.output_enabled };
     // Non-fatal warning class: while the load is still enabled, the analog side may report
     // that it is power-limited or current-limited. Emit a periodic warning beep so the user
     // can notice the limiting condition without stopping the load.
@@ -4687,11 +4692,14 @@ async fn apply_fast_status(telemetry: &'static TelemetryMutex, status: &FastStat
 
     // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
     // 避免模拟侧未完全实现 LINK_GOOD 时 UI 误报 OFFLINE。
+    //
+    // `FastStatus.enable=false` 只表示当前输出没开，并不等价于“校准缺失”。
+    // 只有在数字侧已经请求开启输出、而模拟侧仍未进入 enable 时，才归类为 CalMissing。
     let state = if !link_up && !link_flag {
         AnalogState::Offline
     } else if fault_flags != 0 {
         AnalogState::Faulted
-    } else if enabled {
+    } else if enabled || !desired_output_enabled || uv_latched {
         AnalogState::Ready
     } else {
         AnalogState::CalMissing
@@ -5627,6 +5635,7 @@ fn log_framebuffer_samples(label: &'static str, framebuffer: &[u8]) {
 #[embassy_executor::task]
 async fn uart_link_task(
     uart: &'static mut Uart<'static, Async>,
+    control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
     info!(
@@ -5647,7 +5656,7 @@ async fn uart_link_task(
     loop {
         match AsyncRead::read(uart, &mut chunk).await {
             Ok(n) if n > 0 => {
-                feed_decoder(&chunk[..n], &mut decoder, telemetry).await;
+                feed_decoder(&chunk[..n], &mut decoder, control, telemetry).await;
             }
             Ok(_) => {
                 continue;
@@ -5668,6 +5677,7 @@ async fn uart_link_task(
 async fn uart_link_task_dma(
     mut uhci_rx: uhci::UhciRx<'static, Async>,
     mut dma_rx: DmaRxBuf,
+    control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
     info!(
@@ -5705,7 +5715,7 @@ async fn uart_link_task_dma(
                 // When chunk_limit < dma buffer len, received bytes may wrap across descriptors.
                 // Always consume via the provided iterator to preserve ordering.
                 for chunk in buf_back.received_data() {
-                    feed_decoder(chunk, decoder, telemetry).await;
+                    feed_decoder(chunk, decoder, control, telemetry).await;
                 }
                 dma_rx = buf_back;
             }
@@ -5725,6 +5735,7 @@ async fn uart_link_task_dma(
 async fn feed_decoder(
     bytes: &[u8],
     decoder: &mut SlipDecoder<FAST_STATUS_SLIP_CAPACITY>,
+    control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
     for &byte in bytes {
@@ -5788,7 +5799,7 @@ async fn feed_decoder(
                         MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
                             Ok((_hdr, status)) => {
                                 record_link_activity();
-                                apply_fast_status(telemetry, &status).await;
+                                apply_fast_status(control, telemetry, &status).await;
                                 let total =
                                     FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                                 if total % 32 == 0 {
@@ -6566,13 +6577,13 @@ async fn main(spawner: Spawner) {
             let dma_rx = uhci_dma_buf_opt.take().expect("uhci dma buf missing");
             info!("spawning uart link task (UHCI DMA)");
             spawner
-                .spawn(uart_link_task_dma(uhci_rx, dma_rx, telemetry))
+                .spawn(uart_link_task_dma(uhci_rx, dma_rx, control, telemetry))
                 .expect("uart_link_task_dma spawn");
         } else {
             let uart1 = uart1.expect("uart1 missing");
             info!("spawning uart link task (async no-DMA)");
             spawner
-                .spawn(uart_link_task(uart1, telemetry))
+                .spawn(uart_link_task(uart1, control, telemetry))
                 .expect("uart_link_task spawn");
         }
     } else {
