@@ -19,10 +19,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code (no submodules)
+      - name: Checkout code (with submodules)
         uses: actions/checkout@v4
         with:
-          submodules: false
+          submodules: recursive
 
       - name: Install Rust toolchain (STM32G431, thumbv7em-none-eabihf)
         uses: dtolnay/rust-toolchain@v1
