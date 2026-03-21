@@ -289,7 +289,8 @@ pub fn can_advertise_synthetic_epr_fixed(status: Option<&PdStatus>) -> bool {
     status.map(|s| !s.attached || s.epr_capable).unwrap_or(true)
 }
 
-pub fn source_max_power_mw(status: &PdStatus) -> u32 {
+// Fixed/PPS paths report mV * mA and AVS exposes PDP in watts, so keep the common unit in uW.
+pub fn source_max_power_uw(status: &PdStatus) -> u32 {
     let fixed_max = status
         .fixed_pdos
         .iter()
@@ -305,7 +306,7 @@ pub fn source_max_power_mw(status: &PdStatus) -> u32 {
     let epr_max = status
         .epr_avs_pdos
         .iter()
-        .map(|pdo| u32::from(pdo.pdp_w).saturating_mul(1_000))
+        .map(|pdo| u32::from(pdo.pdp_w).saturating_mul(1_000_000))
         .max()
         .unwrap_or(0);
     fixed_max.max(pps_max).max(epr_max)
@@ -329,12 +330,12 @@ pub fn effective_pdo_i_req_limit(
         return None;
     }
 
-    let max_power_mw = source_max_power_mw(status);
-    if max_power_mw == 0 {
+    let max_power_uw = source_max_power_uw(status);
+    if max_power_uw == 0 {
         return None;
     }
 
-    Some((max_power_mw.saturating_mul(1_000) / target_mv).max(50))
+    Some((max_power_uw / target_mv).max(50))
 }
 
 pub fn i_req_within_effective_pdo_limit(
