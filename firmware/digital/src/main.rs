@@ -3836,7 +3836,15 @@ fn pd_button_display_mode(
     }
 }
 
-fn pd_button_display_target_mv(saved: control::PdConfig, status: Option<&PdStatus>) -> u32 {
+fn pd_button_display_target_mv(
+    saved: control::PdConfig,
+    allow_extended_voltage: bool,
+    status: Option<&PdStatus>,
+) -> u32 {
+    if !allow_extended_voltage {
+        return control::PdConfig::effective(saved, false).target_mv;
+    }
+
     match saved.mode {
         // Dashboard line2 should prefer the persisted target, but legacy blobs may have a stale
         // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
@@ -3894,11 +3902,11 @@ fn build_pd_settings_vm(
         pps_pdos = s.pps_pdos.clone();
     }
 
-    if !attached
-        && !fixed_pdos.iter().any(|pdo| {
-            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
-        })
-    {
+    // Keep the supported 28V EPR fixed rail selectable in settings even before the source enters
+    // EPR. The live PD status still only reports source-proven capabilities.
+    if !fixed_pdos.iter().any(|pdo| {
+        pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
+    }) {
         let _ = fixed_pdos.push(loadlynx_protocol::FixedPdo {
             pos: control::EPR_FIXED_28V_OBJECT_POS,
             mv: control::EPR_FIXED_28V_MV,
@@ -5123,7 +5131,11 @@ async fn display_render_task(
             let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
             let pd_wants_non_safe5v = pd_config_allows_non_safe5v(pd_saved, pd_status);
             let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
-            let pd_target_mv = Some(pd_button_display_target_mv(pd_saved, pd_status));
+            let pd_target_mv = Some(pd_button_display_target_mv(
+                pd_saved,
+                allow_extended_voltage,
+                pd_status,
+            ));
             let pd_target_available = true;
 
             guard.snapshot.pd_display_mode = pd_display_mode;
@@ -8352,7 +8364,9 @@ fn build_pd_sink_request(
                 });
             }
 
-            if let Some(target_mv) = offline_epr_fixed_target(fixed_object_pos, cfg.target_mv) {
+            if let Some(target_mv) =
+                control::supported_epr_fixed_target(fixed_object_pos, cfg.target_mv)
+            {
                 if i_req_ma > control::EPR_FIXED_28V_MAX_MA {
                     return None;
                 }
@@ -8396,14 +8410,6 @@ fn build_pd_sink_request(
                 i_req_ma,
             })
         }
-    }
-}
-
-fn offline_epr_fixed_target(object_pos: u8, target_mv: u32) -> Option<u32> {
-    if object_pos == control::EPR_FIXED_28V_OBJECT_POS && target_mv == control::EPR_FIXED_28V_MV {
-        Some(control::EPR_FIXED_28V_MV)
-    } else {
-        None
     }
 }
 

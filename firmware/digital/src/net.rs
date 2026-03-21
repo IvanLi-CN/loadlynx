@@ -2733,15 +2733,36 @@ async fn handle_pd_update(
                     cfg.fixed_object_pos = object_pos;
                     cfg.target_mv = pdo.mv;
                 } else {
-                    let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "selected PDO not present in capabilities",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
+                    if let Some((target_mv, max_ma)) =
+                        control::supported_epr_fixed_selection(object_pos)
+                    {
+                        if i_req_ma > max_ma {
+                            let details = format!(
+                                r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                                i_req_ma, max_ma, object_pos
+                            );
+                            write_error_body(
+                                body_out,
+                                "LIMIT_VIOLATION",
+                                "i_req_ma exceeds PDO Imax",
+                                false,
+                                Some(&details),
+                            );
+                            return Err("422 Unprocessable Entity");
+                        }
+                        cfg.fixed_object_pos = object_pos;
+                        cfg.target_mv = target_mv;
+                    } else {
+                        let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "selected PDO not present in capabilities",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
                 }
             }
             control::PdMode::Pps => {

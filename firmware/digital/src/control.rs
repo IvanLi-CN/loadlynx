@@ -265,6 +265,23 @@ pub const EPR_FIXED_28V_MAX_MA: u32 = 5_000;
 pub const MAX_PD_OBJECT_POS: u8 = 14;
 pub const MAX_SUPPORTED_FIXED_TARGET_MV: u32 = EPR_FIXED_28V_MV;
 
+pub const fn supported_epr_fixed_selection(object_pos: u8) -> Option<(u32, u32)> {
+    if object_pos == EPR_FIXED_28V_OBJECT_POS {
+        Some((EPR_FIXED_28V_MV, EPR_FIXED_28V_MAX_MA))
+    } else {
+        None
+    }
+}
+
+pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Option<u32> {
+    if let Some((mv, _max_ma)) = supported_epr_fixed_selection(object_pos) {
+        if target_mv == mv {
+            return Some(mv);
+        }
+    }
+    None
+}
+
 #[derive(Clone, Debug)]
 pub struct ControlState {
     /// Mutable in-RAM working presets.
@@ -819,5 +836,26 @@ mod tests {
         assert_eq!(decoded.target_mv, 20_000);
         assert_eq!(decoded.pps_target_mv, 20_000);
         assert!(allow_extended_voltage);
+    }
+
+    #[test]
+    fn supported_epr_fixed_selection_only_advertises_28v() {
+        assert_eq!(
+            supported_epr_fixed_selection(EPR_FIXED_28V_OBJECT_POS),
+            Some((EPR_FIXED_28V_MV, EPR_FIXED_28V_MAX_MA))
+        );
+        assert_eq!(supported_epr_fixed_selection(9), None);
+    }
+
+    #[test]
+    fn supported_epr_fixed_target_requires_matching_voltage() {
+        assert_eq!(
+            supported_epr_fixed_target(EPR_FIXED_28V_OBJECT_POS, EPR_FIXED_28V_MV),
+            Some(EPR_FIXED_28V_MV)
+        );
+        assert_eq!(
+            supported_epr_fixed_target(EPR_FIXED_28V_OBJECT_POS, 20_000),
+            None
+        );
     }
 }
