@@ -406,14 +406,15 @@ impl AnalogDpm {
         }
     }
 
-    fn desired_epr_operational_pdp(&self) -> Power {
+    fn desired_epr_operational_pdp(&self, caps: &source_capabilities::SourceCapabilities) -> Power {
         let target_mv = Self::desired_target_mv().max(PD_TARGET_28V_MV);
         let i_req_ma = Self::desired_i_req_ma();
-        let watts = target_mv
+        let desired_watts = target_mv
             .saturating_mul(i_req_ma)
             .div_ceil(1_000_000)
             .max(1);
-        Power::new::<uom_watt>(watts)
+        let capped_watts = desired_watts.min(source_max_power_w(caps).max(1));
+        Power::new::<uom_watt>(capped_watts)
     }
 
     fn build_request(
@@ -690,7 +691,7 @@ impl DevicePolicyManager for AnalogDpm {
                     self.epr_entry_failed = false;
                 }
                 if source_capabilities.epr_mode_capable() {
-                    let pdp = self.desired_epr_operational_pdp();
+                    let pdp = self.desired_epr_operational_pdp(source_capabilities);
                     info!(
                         "PD request: stage=followup enter-epr pdp={}W",
                         pdp.get::<uom_watt>()
@@ -718,7 +719,7 @@ impl DevicePolicyManager for AnalogDpm {
                 self.epr_entry_failed = false;
             }
             if source_capabilities.epr_mode_capable() {
-                let pdp = self.desired_epr_operational_pdp();
+                let pdp = self.desired_epr_operational_pdp(source_capabilities);
                 info!("PD request: enter EPR pdp={}W", pdp.get::<uom_watt>());
                 return Event::EnterEprMode(pdp);
             }
@@ -748,6 +749,31 @@ impl DevicePolicyManager for AnalogDpm {
         }
         caps
     }
+}
+
+fn source_max_power_w(caps: &source_capabilities::SourceCapabilities) -> u32 {
+    caps.pdos()
+        .iter()
+        .filter_map(|pdo| match pdo {
+            source_capabilities::PowerDataObject::FixedSupply(fixed) => Some(
+                fixed
+                    .voltage()
+                    .get::<uom_millivolt>()
+                    .saturating_mul(fixed.max_current().get::<uom_milliampere>())
+                    / 1_000_000,
+            ),
+            source_capabilities::PowerDataObject::Augmented(
+                source_capabilities::Augmented::Spr(spr),
+            ) => Some(
+                spr.max_voltage()
+                    .get::<uom_millivolt>()
+                    .saturating_mul(spr.max_current().get::<uom_milliampere>())
+                    / 1_000_000,
+            ),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
 }
 
 #[embassy_executor::task]
