@@ -666,6 +666,7 @@ pub struct PdStatus {
     pub contract_ma: u32,
     pub fixed_pdos: FixedPdoList,
     pub pps_pdos: PpsPdoList,
+    pub epr_capable: bool,
     pub epr_active: bool,
     pub epr_avs_pdos: EprAvsPdoList,
 }
@@ -676,7 +677,7 @@ impl<C> Encode<C> for PdStatus {
         e: &mut Encoder<W>,
         ctx: &mut C,
     ) -> Result<(), minicbor::encode::Error<W::Error>> {
-        e.map(7)?;
+        e.map(8)?;
         e.u8(0)?;
         e.bool(self.attached)?;
         e.u8(1)?;
@@ -694,8 +695,10 @@ impl<C> Encode<C> for PdStatus {
             e.encode_with(*pdo, ctx)?;
         }
         e.u8(5)?;
-        e.bool(self.epr_active)?;
+        e.bool(self.epr_capable)?;
         e.u8(6)?;
+        e.bool(self.epr_active)?;
+        e.u8(7)?;
         e.array(self.epr_avs_pdos.len() as u64)?;
         for pdo in self.epr_avs_pdos.iter() {
             e.encode_with(*pdo, ctx)?;
@@ -721,8 +724,9 @@ impl<'b, C> Decode<'b, C> for PdStatus {
                 2 => status.contract_ma = d.u32()?,
                 3 => status.fixed_pdos = decode_fixed_pdo_list(d, ctx)?,
                 4 => status.pps_pdos = decode_pps_pdo_list(d, ctx)?,
-                5 => status.epr_active = d.bool()?,
-                6 => status.epr_avs_pdos = decode_epr_avs_pdo_list(d, ctx)?,
+                5 => status.epr_capable = d.bool()?,
+                6 => status.epr_active = d.bool()?,
+                7 => status.epr_avs_pdos = decode_epr_avs_pdo_list(d, ctx)?,
                 _ => d.skip()?,
             }
         }
@@ -1996,6 +2000,7 @@ mod tests {
             contract_ma: 5_000,
             fixed_pdos,
             pps_pdos,
+            epr_capable: true,
             epr_active: true,
             epr_avs_pdos,
         };
@@ -2009,6 +2014,7 @@ mod tests {
         assert_eq!(decoded.fixed_pdos.len(), 2);
         assert_eq!(decoded.fixed_pdos[1].pos, 4);
         assert_eq!(decoded.fixed_pdos[1].mv, 20_000);
+        assert!(decoded.epr_capable);
         assert!(decoded.epr_active);
         assert_eq!(decoded.epr_avs_pdos.len(), 1);
         assert_eq!(decoded.epr_avs_pdos[0].pdp_w, 140);

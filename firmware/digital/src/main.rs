@@ -3958,11 +3958,13 @@ fn build_pd_settings_vm(
         pps_pdos = s.pps_pdos.clone();
     }
 
-    // Keep the supported 28V EPR fixed rail selectable in settings even before the source enters
-    // EPR. The live PD status still only reports source-proven capabilities.
-    if !fixed_pdos.iter().any(|pdo| {
-        pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
-    }) {
+    // Keep the supported 28V EPR fixed rail selectable while detached, and also for attached
+    // sources that have already proven the EPR-capable bit in their SPR capabilities.
+    if control::can_advertise_synthetic_epr_fixed(status)
+        && !fixed_pdos.iter().any(|pdo| {
+            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
+        })
+    {
         let _ = fixed_pdos.push(loadlynx_protocol::FixedPdo {
             pos: control::EPR_FIXED_28V_OBJECT_POS,
             mv: control::EPR_FIXED_28V_MV,
@@ -4226,12 +4228,13 @@ async fn apply_pd_status(telemetry: &'static TelemetryMutex, status: PdStatus) {
     if changed {
         let s = guard.last_pd_status.as_ref().unwrap();
         info!(
-            "PD_STATUS update: attached={} contract={}mV {}mA fixed_pdos={} pps_pdos={} epr_active={} epr_avs_pdos={}",
+            "PD_STATUS update: attached={} contract={}mV {}mA fixed_pdos={} pps_pdos={} epr_capable={} epr_active={} epr_avs_pdos={}",
             s.attached,
             s.contract_mv,
             s.contract_ma,
             s.fixed_pdos.len(),
             s.pps_pdos.len(),
+            s.epr_capable,
             s.epr_active,
             s.epr_avs_pdos.len()
         );

@@ -2733,8 +2733,9 @@ async fn handle_pd_update(
                     cfg.fixed_object_pos = object_pos;
                     cfg.target_mv = pdo.mv;
                 } else {
-                    if let Some((target_mv, max_ma)) =
-                        control::supported_epr_fixed_selection(object_pos)
+                    if control::can_advertise_synthetic_epr_fixed(Some(status))
+                        && let Some((target_mv, max_ma)) =
+                            control::supported_epr_fixed_selection(object_pos)
                     {
                         if max_ma != control::UNKNOWN_PDO_MAX_MA && i_req_ma > max_ma {
                             let details = format!(

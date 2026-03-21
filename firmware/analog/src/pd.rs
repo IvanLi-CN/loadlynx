@@ -259,6 +259,7 @@ struct AnalogDpm {
     contract_ma: u32,
     pending_contract_mv: u32,
     pending_contract_ma: u32,
+    epr_capable: bool,
     epr_active: bool,
     epr_entry_failed: bool,
     followup_desired_request: bool,
@@ -276,6 +277,7 @@ impl AnalogDpm {
             contract_ma: 0,
             pending_contract_mv: 0,
             pending_contract_ma: 0,
+            epr_capable: false,
             epr_active: false,
             epr_entry_failed: false,
             followup_desired_request: false,
@@ -287,6 +289,7 @@ impl AnalogDpm {
         self.fixed_pdos.clear();
         self.pps_pdos.clear();
         self.epr_avs_pdos.clear();
+        self.epr_capable = caps.epr_mode_capable();
         self.epr_active = caps.is_epr_capabilities();
 
         for (idx, cap) in caps.pdos().iter().enumerate() {
@@ -342,9 +345,10 @@ impl AnalogDpm {
                 }
             }
             info!(
-                "PD caps: fixed_pdos={} pps_pdos={} epr_avs_pdos={} epr_active={} has_20v={} v5_max_ma={}mA",
+                "PD caps: fixed_pdos={} pps_pdos={} epr_capable={} epr_avs_pdos={} epr_active={} has_20v={} v5_max_ma={}mA",
                 self.fixed_pdos.len(),
                 self.pps_pdos.len(),
+                self.epr_capable,
                 self.epr_avs_pdos.len(),
                 self.epr_active,
                 has_20v,
@@ -594,6 +598,7 @@ impl AnalogDpm {
                 contract_ma: self.contract_ma,
                 fixed_pdos: self.fixed_pdos.clone(),
                 pps_pdos: self.pps_pdos.clone(),
+                epr_capable: self.epr_capable,
                 epr_active: self.epr_active,
                 epr_avs_pdos: self.epr_avs_pdos.clone(),
             }

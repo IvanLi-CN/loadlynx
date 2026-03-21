@@ -1,7 +1,7 @@
 use core::sync::atomic::Ordering;
 
 use loadlynx_calibration_format as calfmt;
-use loadlynx_protocol::LoadMode;
+use loadlynx_protocol::{LoadMode, PdStatus};
 
 use crate::ui::preset_panel::{PresetPanelDigit, PresetPanelField};
 
@@ -280,6 +280,10 @@ pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Optio
         }
     }
     None
+}
+
+pub fn can_advertise_synthetic_epr_fixed(status: Option<&PdStatus>) -> bool {
+    status.map(|s| !s.attached || s.epr_capable).unwrap_or(true)
 }
 
 #[derive(Clone, Debug)]
@@ -857,5 +861,30 @@ mod tests {
             supported_epr_fixed_target(EPR_FIXED_28V_OBJECT_POS, 20_000),
             None
         );
+    }
+
+    #[test]
+    fn synthetic_epr_fixed_only_advertises_when_detached_or_epr_capable() {
+        let detached = PdStatus {
+            attached: false,
+            ..PdStatus::default()
+        };
+        let attached_spr_only = PdStatus {
+            attached: true,
+            epr_capable: false,
+            ..PdStatus::default()
+        };
+        let attached_epr_capable = PdStatus {
+            attached: true,
+            epr_capable: true,
+            ..PdStatus::default()
+        };
+
+        assert!(can_advertise_synthetic_epr_fixed(None));
+        assert!(can_advertise_synthetic_epr_fixed(Some(&detached)));
+        assert!(!can_advertise_synthetic_epr_fixed(Some(&attached_spr_only)));
+        assert!(can_advertise_synthetic_epr_fixed(Some(
+            &attached_epr_capable
+        )));
     }
 }
