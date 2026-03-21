@@ -5,13 +5,17 @@ on:
     branches: [ main ]
     paths:
       - 'firmware/analog/**'
+      - 'third_party/embassy'
       - 'libs/**'
+      - '.gitmodules'
       - '.github/workflows/**'
   pull_request:
     branches: [ main ]
     paths:
       - 'firmware/analog/**'
+      - 'third_party/embassy'
       - 'libs/**'
+      - '.gitmodules'
       - '.github/workflows/**'
 
 jobs:

@@ -3875,7 +3875,13 @@ fn build_pd_settings_vm(
         attached = s.attached;
         contract_mv = s.contract_mv;
         contract_ma = s.contract_ma;
-        fixed_pdos = s.fixed_pdos.clone();
+        // The protocol still exposes all fixed PDOs read-only, but this release only allows
+        // user selection up through the 28V EPR fixed rail.
+        for pdo in s.fixed_pdos.iter().copied() {
+            if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                let _ = fixed_pdos.push(pdo);
+            }
+        }
         pps_pdos = s.pps_pdos.clone();
     }
 
