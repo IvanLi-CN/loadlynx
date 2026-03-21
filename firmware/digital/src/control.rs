@@ -260,6 +260,7 @@ impl PdConfig {
 pub const EPR_FIXED_28V_OBJECT_POS: u8 = 8;
 pub const EPR_FIXED_28V_MV: u32 = 28_000;
 pub const EPR_FIXED_28V_MAX_MA: u32 = 5_000;
+pub const MAX_PD_OBJECT_POS: u8 = 14;
 pub const EPR_FIXED_36V_OBJECT_POS: u8 = 9;
 pub const EPR_FIXED_36V_MV: u32 = 36_000;
 pub const EPR_FIXED_36V_MAX_MA: u32 = 5_000;

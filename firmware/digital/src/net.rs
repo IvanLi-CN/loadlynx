@@ -2631,6 +2631,21 @@ async fn handle_pd_update(
             );
             return Err("400 Bad Request");
         }
+        if object_pos > control::MAX_PD_OBJECT_POS {
+            let details = format!(
+                r#"{{"object_pos":{},"max_object_pos":{}}}"#,
+                object_pos,
+                control::MAX_PD_OBJECT_POS
+            );
+            write_error_body(
+                body_out,
+                "LIMIT_VIOLATION",
+                "object_pos exceeds supported PD object position range",
+                false,
+                Some(&details),
+            );
+            return Err("422 Unprocessable Entity");
+        }
         if i_req_ma < 50 {
             write_error_body(
                 body_out,

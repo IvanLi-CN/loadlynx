@@ -3520,7 +3520,7 @@ async fn uart_setpoint_rx_task(
                                                                                 None => (true, "unsupported mode"),
                                                                                 Some(mode) => {
                                                                                     let object_pos = req.object_pos;
-                                                                                    if object_pos == 0 || object_pos > 15 {
+                                                                                    if object_pos == 0 || object_pos > 14 {
                                                                                         (true, "invalid object_pos")
                                                                                     } else if req.target_mv < 3_000
                                                                                         || req.target_mv > 48_000

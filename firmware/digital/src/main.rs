@@ -3886,7 +3886,8 @@ fn build_pd_settings_vm(
 
     let pps_object_pos = draft.pps_object_pos;
 
-    let fixed_selected = if fixed_object_pos != 0 {
+    let fixed_selected = if fixed_object_pos != 0 && fixed_object_pos <= control::MAX_PD_OBJECT_POS
+    {
         fixed_pdos
             .iter()
             .enumerate()
@@ -3898,7 +3899,7 @@ fn build_pd_settings_vm(
     let inferred_fixed_selected =
         control::infer_epr_fixed_selection(fixed_object_pos, Some(draft.target_mv));
 
-    let pps_selected = if pps_object_pos != 0 {
+    let pps_selected = if pps_object_pos != 0 && pps_object_pos <= control::MAX_PD_OBJECT_POS {
         pps_pdos
             .iter()
             .enumerate()
@@ -3911,9 +3912,14 @@ fn build_pd_settings_vm(
     let mut selection_missing = false;
     let apply_enabled = if !attached {
         match draft.mode {
-            control::PdMode::Fixed => draft.fixed_object_pos != 0 && draft.i_req_ma >= 50,
+            control::PdMode::Fixed => {
+                draft.fixed_object_pos != 0
+                    && draft.fixed_object_pos <= control::MAX_PD_OBJECT_POS
+                    && draft.i_req_ma >= 50
+            }
             control::PdMode::Pps => {
                 draft.pps_object_pos != 0
+                    && draft.pps_object_pos <= control::MAX_PD_OBJECT_POS
                     && (control::PdConfig::MIN_AUGMENTED_TARGET_MV
                         ..=control::PdConfig::MAX_PPS_TARGET_MV)
                         .contains(&draft.pps_target_mv)
@@ -8280,6 +8286,9 @@ fn build_pd_sink_request(
                     .find(|(_idx, pdo)| pdo.mv == cfg.target_mv)
                     .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))?
             };
+            if fixed_object_pos > control::MAX_PD_OBJECT_POS {
+                return None;
+            }
 
             let pdo = status
                 .fixed_pdos
@@ -8327,7 +8336,10 @@ fn build_pd_sink_request(
         }
         control::PdMode::Pps => {
             let pps_object_pos = cfg.pps_object_pos;
-            if pps_object_pos == 0 || cfg.target_mv == 0 {
+            if pps_object_pos == 0
+                || pps_object_pos > control::MAX_PD_OBJECT_POS
+                || cfg.target_mv == 0
+            {
                 return None;
             }
 
