@@ -12,11 +12,11 @@ cortex-m-rt = "0.7.5"
 critical-section = "1.1"
 static_cell = "2.1.0"
 
-# Embassy (crates.io + patched embassy-stm32 in submodule)
-embassy-executor = { version = "0.9", features = ["arch-cortex-m", "executor-thread", "defmt"] }
+# Embassy (patched stm32 stack from submodule)
+embassy-executor = { path = "../../third_party/embassy/embassy-executor", features = ["arch-cortex-m", "executor-thread", "defmt"] }
 # Match the reference PD sink bring-up (pd-sink-stm32g431cbu6-rs): higher tick rate avoids
 # timer prescaler overflow and improves scheduling granularity at 170MHz SYSCLK.
-embassy-time = { version = "0.5", features = ["defmt", "tick-hz-1_000_000"] }
+embassy-time = { path = "../../third_party/embassy/embassy-time", features = ["defmt", "tick-hz-1_000_000"] }
 embassy-stm32 = { path = "../../third_party/embassy/embassy-stm32", features = [
   "defmt",
   "time-driver-any",
@@ -24,9 +24,9 @@ embassy-stm32 = { path = "../../third_party/embassy/embassy-stm32", features = [
   "memory-x",
   "exti",
 ] }
-embassy-sync = { version = "0.5", features = ["defmt"] }
-embassy-embedded-hal = { version = "0.5" }
-embassy-futures = { version = "0.1" }
+embassy-sync = { path = "../../third_party/embassy/embassy-sync", features = ["defmt"] }
+embassy-embedded-hal = { path = "../../third_party/embassy/embassy-embedded-hal" }
+embassy-futures = { path = "../../third_party/embassy/embassy-futures" }
 loadlynx-protocol = { path = "../../libs/protocol", features = ["defmt"] }
 stm32-metapac = { version = "18.0.0", features = ["stm32g431cb"] }
 libm = "0.2.8"
