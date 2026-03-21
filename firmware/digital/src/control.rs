@@ -282,8 +282,11 @@ pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Optio
     None
 }
 
+/// USB PD R3.2 v1.1 Tables 10.12 / 10.13 make 28V Fixed the baseline EPR fixed rail once the
+/// source advertises the SPR-side EPR-capable bit; before EPR entry the sink has to surface that
+/// row synthetically because the real EPR Fixed PDOs are not visible yet.
 pub fn can_advertise_synthetic_epr_fixed(status: Option<&PdStatus>) -> bool {
-    status.map(|s| !s.attached).unwrap_or(true)
+    status.map(|s| !s.attached || s.epr_capable).unwrap_or(true)
 }
 
 #[derive(Clone, Debug)]
@@ -864,7 +867,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_epr_fixed_only_advertises_when_detached() {
+    fn synthetic_epr_fixed_advertises_when_detached_or_epr_capable() {
         let detached = PdStatus {
             attached: false,
             ..PdStatus::default()
@@ -883,7 +886,7 @@ mod tests {
         assert!(can_advertise_synthetic_epr_fixed(None));
         assert!(can_advertise_synthetic_epr_fixed(Some(&detached)));
         assert!(!can_advertise_synthetic_epr_fixed(Some(&attached_spr_only)));
-        assert!(!can_advertise_synthetic_epr_fixed(Some(
+        assert!(can_advertise_synthetic_epr_fixed(Some(
             &attached_epr_capable
         )));
     }
