@@ -1123,7 +1123,14 @@ async fn encoder_task(
                                                 .find(|(idx, p)| {
                                                     pdo_pos(p.pos, *idx) == vm.fixed_object_pos
                                                 })
-                                                .and_then(|(_idx, p)| pdo_i_req_limit(p.max_ma))
+                                                .and_then(|(_idx, p)| {
+                                                    control::effective_pdo_i_req_limit(
+                                                        None,
+                                                        vm.fixed_object_pos,
+                                                        p.mv,
+                                                        p.max_ma,
+                                                    )
+                                                })
                                                 .unwrap_or(10_000)
                                         }
                                     }
@@ -3826,62 +3833,28 @@ fn pd_mode_target_mv(cfg: &control::PdConfig) -> u32 {
     }
 }
 
-fn pdo_i_req_limit(max_ma: u32) -> Option<u32> {
-    if max_ma == control::UNKNOWN_PDO_MAX_MA {
-        None
-    } else {
-        Some(max_ma)
-    }
-}
-
 fn clamp_i_req_to_pdo_limit(i_req_ma: u32, max_ma: u32) -> u32 {
-    pdo_i_req_limit(max_ma)
-        .map(|limit| i_req_ma.min(limit))
-        .unwrap_or(i_req_ma)
-        .max(50)
+    control::clamp_i_req_to_effective_pdo_limit(None, 0, 0, max_ma, i_req_ma)
 }
 
-fn i_req_within_pdo_limit(i_req_ma: u32, max_ma: u32) -> bool {
-    i_req_ma >= 50
-        && pdo_i_req_limit(max_ma)
-            .map(|limit| i_req_ma <= limit)
-            .unwrap_or(true)
-}
-
-fn source_max_power_mw(status: &PdStatus) -> u32 {
-    let fixed_max = status
-        .fixed_pdos
-        .iter()
-        .map(|pdo| pdo.mv.saturating_mul(pdo.max_ma))
-        .max()
-        .unwrap_or(0);
-    let pps_max = status
-        .pps_pdos
-        .iter()
-        .map(|pdo| pdo.max_mv.saturating_mul(pdo.max_ma))
-        .max()
-        .unwrap_or(0);
-    let epr_max = status
-        .epr_avs_pdos
-        .iter()
-        .map(|pdo| u32::from(pdo.pdp_w).saturating_mul(1_000))
-        .max()
-        .unwrap_or(0);
-    fixed_max.max(pps_max).max(epr_max)
+fn i_req_within_pdo_limit(
+    status: Option<&PdStatus>,
+    object_pos: u8,
+    target_mv: u32,
+    max_ma: u32,
+    i_req_ma: u32,
+) -> bool {
+    control::i_req_within_effective_pdo_limit(status, object_pos, target_mv, max_ma, i_req_ma)
 }
 
 fn clamp_synthetic_epr_i_req_ma(status: &PdStatus, target_mv: u32, i_req_ma: u32) -> u32 {
-    if target_mv == 0 {
-        return i_req_ma.max(50);
-    }
-
-    let max_power_mw = source_max_power_mw(status);
-    if max_power_mw == 0 {
-        return i_req_ma.max(50);
-    }
-
-    let inferred_limit_ma = max_power_mw.saturating_mul(1_000) / target_mv;
-    i_req_ma.min(inferred_limit_ma.max(50)).max(50)
+    control::clamp_i_req_to_effective_pdo_limit(
+        Some(status),
+        control::EPR_FIXED_28V_OBJECT_POS,
+        target_mv,
+        control::UNKNOWN_PDO_MAX_MA,
+        i_req_ma,
+    )
 }
 
 fn pd_button_display_mode(
@@ -4034,7 +4007,13 @@ fn build_pd_settings_vm(
         match draft.mode {
             control::PdMode::Fixed => match fixed_selected {
                 Some(pdo) if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV => {
-                    i_req_within_pdo_limit(draft.i_req_ma, pdo.max_ma)
+                    i_req_within_pdo_limit(
+                        status,
+                        fixed_object_pos,
+                        pdo.mv,
+                        pdo.max_ma,
+                        draft.i_req_ma,
+                    )
                 }
                 None => {
                     if fixed_object_pos != 0 {
@@ -8413,6 +8392,11 @@ fn build_pd_sink_request(
                 // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
                 // source's advertised 5V maximum instead of rejecting the request.
                 let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {
+                    i_req_ma.min(pdo.max_ma)
+                } else if control::supported_epr_fixed_target(fixed_object_pos, pdo.mv).is_some() {
+                    // Synthetic 28V selections can be saved before the real EPR fixed PDO is
+                    // visible; once it appears, keep the request live by clamping to the
+                    // now-advertised current limit instead of dropping the contract request.
                     i_req_ma.min(pdo.max_ma)
                 } else {
                     i_req_ma

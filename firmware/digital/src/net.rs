@@ -2744,10 +2744,18 @@ async fn handle_pd_update(
                         && let Some((target_mv, max_ma)) =
                             control::supported_epr_fixed_selection(object_pos)
                     {
-                        if max_ma != control::UNKNOWN_PDO_MAX_MA && i_req_ma > max_ma {
+                        let effective_max_ma = control::effective_pdo_i_req_limit(
+                            Some(status),
+                            object_pos,
+                            target_mv,
+                            max_ma,
+                        );
+                        if effective_max_ma.is_some_and(|limit| i_req_ma > limit) {
                             let details = format!(
                                 r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                                i_req_ma, max_ma, object_pos
+                                i_req_ma,
+                                effective_max_ma.unwrap_or(max_ma),
+                                object_pos
                             );
                             write_error_body(
                                 body_out,
