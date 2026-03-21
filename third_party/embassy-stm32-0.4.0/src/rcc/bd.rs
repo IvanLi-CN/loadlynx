@@ -1,6 +1,6 @@
-use core::sync::atomic::{Ordering, compiler_fence};
+use core::sync::atomic::{compiler_fence, Ordering};
 
-use crate::pac::common::{RW, Reg};
+use crate::pac::common::{Reg, RW};
 pub use crate::pac::rcc::vals::Rtcsel as RtcClockSource;
 use crate::time::Hertz;
 

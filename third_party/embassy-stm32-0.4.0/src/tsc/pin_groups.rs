@@ -1,11 +1,11 @@
 use core::marker::PhantomData;
 use core::ops::BitOr;
 
-use super::Instance;
 use super::errors::GroupError;
 use super::io_pin::*;
-use crate::Peri;
+use super::Instance;
 use crate::gpio::{AfType, AnyPin, OutputType, Speed};
+use crate::Peri;
 
 /// Pin type definition to control IO parameters
 #[derive(PartialEq, Clone, Copy)]
@@ -464,13 +464,13 @@ macro_rules! impl_set_io {
 macro_rules! group_impl {
     ($group:ident, $trait1:ident, $trait2:ident, $trait3:ident, $trait4:ident) => {
         impl<
-            'd,
-            T: Instance,
-            R1: pin_roles::Role,
-            R2: pin_roles::Role,
-            R3: pin_roles::Role,
-            R4: pin_roles::Role,
-        > PinGroupWithRoles<'d, T, $group, R1, R2, R3, R4>
+                'd,
+                T: Instance,
+                R1: pin_roles::Role,
+                R2: pin_roles::Role,
+                R3: pin_roles::Role,
+                R4: pin_roles::Role,
+            > PinGroupWithRoles<'d, T, $group, R1, R2, R3, R4>
         {
             impl_set_io!(set_io1, $group, $trait1, 0);
             impl_set_io!(set_io2, $group, $trait2, 1);

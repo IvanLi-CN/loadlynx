@@ -9,7 +9,7 @@ use embassy_sync::waitqueue::AtomicWaker;
 use crate::dma::Transfer;
 use crate::gpio::{AfType, Pull};
 use crate::interrupt::typelevel::Interrupt;
-use crate::{Peri, interrupt, rcc};
+use crate::{interrupt, rcc, Peri};
 
 /// Interrupt handler.
 pub struct InterruptHandler<T: Instance> {

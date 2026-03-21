@@ -1,4 +1,4 @@
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 use vcell::VolatileCell;
 

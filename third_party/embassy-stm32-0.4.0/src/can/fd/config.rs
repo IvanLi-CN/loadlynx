@@ -1,7 +1,7 @@
 //! Configuration for FDCAN Module
 // Note: This file is copied and modified from fdcan crate by Richard Meadows
 
-use core::num::{NonZeroU8, NonZeroU16};
+use core::num::{NonZeroU16, NonZeroU8};
 
 /// Configures the bit timings.
 ///

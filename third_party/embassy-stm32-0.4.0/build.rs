@@ -9,8 +9,8 @@ use proc_macro2::{Ident, TokenStream};
 use quote::{format_ident, quote};
 use stm32_metapac::metadata::ir::BitOffset;
 use stm32_metapac::metadata::{
-    ALL_CHIPS, ALL_PERIPHERAL_VERSIONS, METADATA, MemoryRegion, MemoryRegionKind,
-    PeripheralRccKernelClock, PeripheralRccRegister, PeripheralRegisters, StopMode,
+    MemoryRegion, MemoryRegionKind, PeripheralRccKernelClock, PeripheralRccRegister,
+    PeripheralRegisters, StopMode, ALL_CHIPS, ALL_PERIPHERAL_VERSIONS, METADATA,
 };
 
 #[path = "./build_common.rs"]

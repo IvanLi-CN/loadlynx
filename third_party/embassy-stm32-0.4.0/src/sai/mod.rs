@@ -9,12 +9,12 @@ use embassy_hal_internal::PeripheralType;
 pub use crate::dma::word;
 #[cfg(not(gpdma))]
 use crate::dma::{
-    Channel, ReadableRingBuffer, Request, TransferOptions, WritableRingBuffer, ringbuffer,
+    ringbuffer, Channel, ReadableRingBuffer, Request, TransferOptions, WritableRingBuffer,
 };
 use crate::gpio::{AfType, AnyPin, OutputType, Pull, SealedPin as _, Speed};
-use crate::pac::sai::{Sai as Regs, vals};
+use crate::pac::sai::{vals, Sai as Regs};
 use crate::rcc::{self, RccPeripheral};
-use crate::{Peri, peripherals};
+use crate::{peripherals, Peri};
 
 /// SAI error
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

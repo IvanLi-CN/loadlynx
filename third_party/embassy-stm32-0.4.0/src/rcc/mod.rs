@@ -36,7 +36,7 @@ mod _version;
 pub use _version::*;
 use stm32_metapac::RCC;
 
-pub use crate::_generated::{Clocks, mux};
+pub use crate::_generated::{mux, Clocks};
 use crate::time::Hertz;
 
 #[cfg(feature = "low-power")]
@@ -95,11 +95,9 @@ pub(crate) unsafe fn get_freqs() -> &'static Clocks {
 #[cfg(feature = "_dual-core")]
 /// Safety: Reads a mutable global.
 pub(crate) unsafe fn get_freqs() -> &'static Clocks {
-    unwrap!(
-        CLOCK_FREQS_PTR
-            .load(core::sync::atomic::Ordering::SeqCst)
-            .as_ref()
-    )
+    unwrap!(CLOCK_FREQS_PTR
+        .load(core::sync::atomic::Ordering::SeqCst)
+        .as_ref())
     .assume_init_ref()
 }
 

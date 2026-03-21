@@ -6,7 +6,7 @@ use pac::adc::vals::{
 #[cfg(stm32wba)]
 use pac::adc::vals::{Chselrmod, Cont, Dmacfg, Exten, OversamplingRatio, Ovss, Smpsel};
 
-use super::{AdcChannel, AnyAdcChannel, RxDma4, SealedAdcChannel, blocking_delay_us};
+use super::{blocking_delay_us, AdcChannel, AnyAdcChannel, RxDma4, SealedAdcChannel};
 use crate::dma::Transfer;
 #[cfg(stm32u5)]
 pub use crate::pac::adc::regs::Adc4Chselrmod0 as Chselr;
@@ -19,7 +19,7 @@ pub use crate::pac::adc::vals::{
 #[cfg(stm32wba)]
 pub use crate::pac::adc::vals::{Presc, Res as Resolution, SampleTime};
 use crate::time::Hertz;
-use crate::{Peri, pac, rcc};
+use crate::{pac, rcc, Peri};
 
 const MAX_ADC_CLK_FREQ: Hertz = Hertz::mhz(55);
 

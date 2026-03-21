@@ -2,7 +2,7 @@
 
 use core::future::Future;
 use core::pin::Pin;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 use core::task::{Context, Poll};
 
 use embassy_hal_internal::Peri;
@@ -10,8 +10,8 @@ use embassy_sync::waitqueue::AtomicWaker;
 
 use super::word::{Word, WordSize};
 use super::{AnyChannel, Channel, Dir, Request, STATE};
-use crate::interrupt::Priority;
 use crate::interrupt::typelevel::Interrupt;
+use crate::interrupt::Priority;
 use crate::pac;
 use crate::pac::gpdma::vals;
 

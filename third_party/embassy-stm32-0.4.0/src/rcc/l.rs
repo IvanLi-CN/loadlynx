@@ -505,9 +505,9 @@ pub use pll::*;
 
 #[cfg(any(stm32l0, stm32l1))]
 mod pll {
-    use super::{PllInstance, pll_enable};
-    use crate::pac::RCC;
+    use super::{pll_enable, PllInstance};
     pub use crate::pac::rcc::vals::{Plldiv as PllDiv, Pllmul as PllMul, Pllsrc as PllSource};
+    use crate::pac::RCC;
     use crate::time::Hertz;
 
     #[derive(Clone, Copy)]
@@ -575,12 +575,12 @@ mod pll {
 
 #[cfg(any(stm32l4, stm32l5, stm32wb, stm32wl, stm32u0))]
 mod pll {
-    use super::{PllInstance, pll_enable};
-    use crate::pac::RCC;
+    use super::{pll_enable, PllInstance};
     pub use crate::pac::rcc::vals::{
         Pllm as PllPreDiv, Plln as PllMul, Pllp as PllPDiv, Pllq as PllQDiv, Pllr as PllRDiv,
         Pllsrc as PllSource,
     };
+    use crate::pac::RCC;
     use crate::time::Hertz;
 
     #[derive(Clone, Copy)]

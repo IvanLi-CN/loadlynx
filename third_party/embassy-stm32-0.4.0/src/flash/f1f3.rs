@@ -1,5 +1,5 @@
 use core::ptr::write_volatile;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 use super::{FlashSector, WRITE_SIZE};
 use crate::flash::Error;

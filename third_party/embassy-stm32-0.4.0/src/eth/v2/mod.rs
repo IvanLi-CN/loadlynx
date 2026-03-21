@@ -1,7 +1,7 @@
 mod descriptors;
 
 use core::marker::PhantomData;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 use embassy_hal_internal::Peri;
 use stm32_metapac::syscfg::vals::EthSelPhy;

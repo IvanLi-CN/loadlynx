@@ -9,7 +9,7 @@ use super::blocking_delay_us;
 use crate::adc::{Adc, AdcChannel, Instance, Resolution, SampleTime};
 use crate::interrupt::typelevel::Interrupt;
 use crate::peripherals::ADC1;
-use crate::{Peri, interrupt, rcc};
+use crate::{interrupt, rcc, Peri};
 
 mod watchdog_v1;
 pub use watchdog_v1::WatchdogChannels;

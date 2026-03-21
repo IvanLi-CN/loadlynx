@@ -22,7 +22,7 @@ pub(crate) use util::*;
 pub(crate) mod ringbuffer;
 pub mod word;
 
-use embassy_hal_internal::{PeripheralType, impl_peripheral};
+use embassy_hal_internal::{impl_peripheral, PeripheralType};
 
 use crate::interrupt;
 

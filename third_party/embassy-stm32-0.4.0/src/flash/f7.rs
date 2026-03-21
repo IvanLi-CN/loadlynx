@@ -1,5 +1,5 @@
 use core::ptr::write_volatile;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 use super::{FlashSector, WRITE_SIZE};
 use crate::flash::Error;
@@ -105,7 +105,7 @@ unsafe fn blocking_wait_ready() -> Result<(), Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::flash::{FlashBank, get_sector};
+    use crate::flash::{get_sector, FlashBank};
 
     #[test]
     #[cfg(stm32f732)]

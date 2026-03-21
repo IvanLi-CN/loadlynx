@@ -12,14 +12,14 @@ use embassy_hal_internal::PeripheralType;
 pub use enums::*;
 use stm32_metapac::octospi::vals::{PhaseMode, SizeInBits};
 
-use crate::dma::{ChannelAndRequest, word};
+use crate::dma::{word, ChannelAndRequest};
 use crate::gpio::{AfType, AnyPin, OutputType, Pull, SealedPin as _, Speed};
 use crate::mode::{Async, Blocking, Mode as PeriMode};
-use crate::pac::octospi::{Octospi as Regs, vals};
+use crate::pac::octospi::{vals, Octospi as Regs};
 #[cfg(octospim_v1)]
 use crate::pac::octospim::Octospim;
 use crate::rcc::{self, RccPeripheral};
-use crate::{Peri, peripherals};
+use crate::{peripherals, Peri};
 
 /// OPSI driver config.
 #[derive(Clone, Copy)]

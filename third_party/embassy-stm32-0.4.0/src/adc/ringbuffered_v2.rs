@@ -1,13 +1,13 @@
 use core::marker::PhantomData;
 use core::mem;
-use core::sync::atomic::{Ordering, compiler_fence};
+use core::sync::atomic::{compiler_fence, Ordering};
 
 use stm32_metapac::adc::vals::SampleTime;
 
 use crate::adc::{Adc, AdcChannel, Instance, RxDma};
 use crate::dma::{Priority, ReadableRingBuffer, TransferOptions};
 use crate::pac::adc::vals;
-use crate::{Peri, rcc};
+use crate::{rcc, Peri};
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct OverrunError;
@@ -191,7 +191,8 @@ impl<'d, T: Instance> RingBufferedAdc<'d, T> {
                 let new_l: Sequence = sequence;
                 trace!(
                     "Setting sequence length from {:?} to {:?}",
-                    prev as u8, new_l as u8
+                    prev as u8,
+                    new_l as u8
                 );
                 r.set_l(sequence.into())
             } else {

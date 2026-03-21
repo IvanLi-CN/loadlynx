@@ -8,12 +8,12 @@ use pac::adccommon::vals::Presc;
 use stm32_metapac::adc::vals::{Adstp, Dmacfg, Dmaen};
 
 use super::{
-    Adc, AdcChannel, AnyAdcChannel, Instance, Resolution, RxDma, SampleTime, blocking_delay_us,
+    blocking_delay_us, Adc, AdcChannel, AnyAdcChannel, Instance, Resolution, RxDma, SampleTime,
 };
 use crate::adc::SealedAdcChannel;
 use crate::dma::Transfer;
 use crate::time::Hertz;
-use crate::{Peri, pac, rcc};
+use crate::{pac, rcc, Peri};
 
 /// Default VREF voltage used for sample conversion to millivolts.
 pub const VREF_DEFAULT_MV: u32 = 3300;

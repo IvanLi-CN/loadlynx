@@ -7,9 +7,9 @@ use stm32_metapac::timer::vals;
 use super::low_level::Timer;
 pub use super::{Ch1, Ch2};
 use super::{GeneralInstance4Channel, TimerPin};
-use crate::Peri;
 use crate::gpio::{AfType, AnyPin, Pull};
 use crate::timer::TimerChannel;
+use crate::Peri;
 
 /// Counting direction
 pub enum Direction {

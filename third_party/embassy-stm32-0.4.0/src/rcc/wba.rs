@@ -8,9 +8,9 @@ pub use crate::pac::rcc::vals::{
     Pllm as PllPreDiv, Plln as PllMul, Pllsrc as PllSource, Ppre as APBPrescaler, Sai1sel,
     Sw as Sysclk,
 };
-use crate::pac::{FLASH, RCC};
 #[cfg(all(peri_usb_otg_hs))]
-pub use crate::pac::{SYSCFG, syscfg::vals::Usbrefcksel};
+pub use crate::pac::{syscfg::vals::Usbrefcksel, SYSCFG};
+use crate::pac::{FLASH, RCC};
 use crate::rcc::LSI_FREQ;
 use crate::time::Hertz;
 

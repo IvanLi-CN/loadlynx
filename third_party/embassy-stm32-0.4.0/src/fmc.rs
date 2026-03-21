@@ -4,7 +4,7 @@ use core::marker::PhantomData;
 use embassy_hal_internal::PeripheralType;
 
 use crate::gpio::{AfType, OutputType, Pull, Speed};
-use crate::{Peri, rcc};
+use crate::{rcc, Peri};
 
 /// FMC driver
 pub struct Fmc<'d, T: Instance> {

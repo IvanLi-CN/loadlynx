@@ -1,6 +1,6 @@
 use embassy_hal_internal::drop::OnDrop;
 
-use super::{Blocking, EEPROM_BASE, EEPROM_SIZE, Error, Flash, family};
+use super::{family, Blocking, Error, Flash, EEPROM_BASE, EEPROM_SIZE};
 
 #[cfg(eeprom)]
 impl<'d> Flash<'d, Blocking> {

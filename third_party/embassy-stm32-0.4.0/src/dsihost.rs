@@ -7,7 +7,7 @@ use embassy_hal_internal::PeripheralType;
 //use crate::gpio::{AnyPin, SealedPin};
 use crate::gpio::{AfType, AnyPin, OutputType, Speed};
 use crate::rcc::{self, RccPeripheral};
-use crate::{Peri, peripherals};
+use crate::{peripherals, Peri};
 
 /// Performs a busy-wait delay for a specified number of microseconds.
 pub fn blocking_delay_ms(ms: u32) {

@@ -1,9 +1,9 @@
 use core::ptr::write_volatile;
-use core::sync::atomic::{AtomicBool, Ordering, fence};
+use core::sync::atomic::{fence, AtomicBool, Ordering};
 
 use pac::flash::regs::Sr;
 
-use super::{FlashBank, FlashSector, WRITE_SIZE, get_flash_regions};
+use super::{get_flash_regions, FlashBank, FlashSector, WRITE_SIZE};
 use crate::flash::Error;
 use crate::pac;
 

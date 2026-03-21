@@ -13,11 +13,11 @@ use embassy_usb_driver::{
     Event, Unsupported,
 };
 
-use crate::pac::USBRAM;
 use crate::pac::usb::regs;
 use crate::pac::usb::vals::{EpType, Stat};
+use crate::pac::USBRAM;
 use crate::rcc::RccPeripheral;
-use crate::{Peri, interrupt};
+use crate::{interrupt, Peri};
 
 /// Interrupt handler.
 pub struct InterruptHandler<T: Instance> {

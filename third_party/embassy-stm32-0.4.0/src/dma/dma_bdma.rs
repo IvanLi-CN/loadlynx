@@ -1,6 +1,6 @@
-use core::future::{Future, poll_fn};
+use core::future::{poll_fn, Future};
 use core::pin::Pin;
-use core::sync::atomic::{AtomicUsize, Ordering, fence};
+use core::sync::atomic::{fence, AtomicUsize, Ordering};
 use core::task::{Context, Poll, Waker};
 
 use embassy_hal_internal::Peri;

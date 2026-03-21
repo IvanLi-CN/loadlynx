@@ -10,7 +10,7 @@ use crate::pac::dac;
 use crate::rcc::{self, RccPeripheral};
 #[cfg(stm32g4)]
 use crate::time::Hertz;
-use crate::{Peri, pac, peripherals};
+use crate::{pac, peripherals, Peri};
 
 mod tsel;
 use embassy_hal_internal::PeripheralType;

@@ -1,17 +1,17 @@
 use core::marker::PhantomData;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 use embassy_hal_internal::drop::OnDrop;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
 
 use super::{
-    Async, Error, FLASH_BASE, FLASH_SIZE, Flash, FlashLayout, WRITE_SIZE, blocking_read,
-    ensure_sector_aligned, family, get_flash_regions, get_sector,
+    blocking_read, ensure_sector_aligned, family, get_flash_regions, get_sector, Async, Error,
+    Flash, FlashLayout, FLASH_BASE, FLASH_SIZE, WRITE_SIZE,
 };
 use crate::interrupt::InterruptExt;
 use crate::peripherals::FLASH;
-use crate::{Peri, interrupt};
+use crate::{interrupt, Peri};
 
 pub(super) static REGION_ACCESS: Mutex<CriticalSectionRawMutex, ()> = Mutex::new(());
 
@@ -20,7 +20,7 @@ impl<'d> Flash<'d, Async> {
     pub fn new(
         p: Peri<'d, FLASH>,
         _irq: impl interrupt::typelevel::Binding<crate::interrupt::typelevel::FLASH, InterruptHandler>
-        + 'd,
+            + 'd,
     ) -> Self {
         crate::interrupt::FLASH.unpend();
         unsafe { crate::interrupt::FLASH.enable() };

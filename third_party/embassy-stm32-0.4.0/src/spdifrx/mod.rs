@@ -6,16 +6,16 @@ use core::marker::PhantomData;
 
 use embassy_sync::waitqueue::AtomicWaker;
 
-#[cfg(not(gpdma))]
-use crate::dma::ReadableRingBuffer;
 use crate::dma::ringbuffer::Error as RingbufferError;
 pub use crate::dma::word;
+#[cfg(not(gpdma))]
+use crate::dma::ReadableRingBuffer;
 use crate::dma::{Channel, TransferOptions};
 use crate::gpio::{AfType, AnyPin, Pull, SealedPin as _};
 use crate::interrupt::typelevel::Interrupt;
 use crate::pac::spdifrx::Spdifrx as Regs;
 use crate::rcc::{RccInfo, SealedRccPeripheral};
-use crate::{Peri, interrupt, peripherals};
+use crate::{interrupt, peripherals, Peri};
 
 /// Possible S/PDIF preamble types.
 #[allow(dead_code)]

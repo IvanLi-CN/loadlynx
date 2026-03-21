@@ -2,18 +2,18 @@ use core::marker::PhantomData;
 
 use embassy_hal_internal::PeripheralType;
 use embassy_usb_driver::{EndpointAddress, EndpointAllocError, EndpointType, Event, Unsupported};
-pub use embassy_usb_synopsys_otg::Config;
-use embassy_usb_synopsys_otg::otg_v1::Otg;
 use embassy_usb_synopsys_otg::otg_v1::vals::Dspd;
+use embassy_usb_synopsys_otg::otg_v1::Otg;
+pub use embassy_usb_synopsys_otg::Config;
 use embassy_usb_synopsys_otg::{
-    Bus as OtgBus, ControlPipe, Driver as OtgDriver, Endpoint, In, OtgInstance, Out, PhyType,
-    State, on_interrupt as on_interrupt_impl,
+    on_interrupt as on_interrupt_impl, Bus as OtgBus, ControlPipe, Driver as OtgDriver, Endpoint,
+    In, OtgInstance, Out, PhyType, State,
 };
 
 use crate::gpio::{AfType, OutputType, Speed};
 use crate::interrupt::typelevel::Interrupt;
 use crate::rcc::{self, RccPeripheral};
-use crate::{Peri, interrupt};
+use crate::{interrupt, Peri};
 
 const MAX_EP_COUNT: usize = 9;
 

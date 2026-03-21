@@ -19,7 +19,7 @@ use crate::interrupt::typelevel::Interrupt;
 use crate::mode::Async;
 use crate::mode::{Blocking, Mode};
 use crate::peripherals::HASH;
-use crate::{Peri, interrupt, pac, peripherals, rcc};
+use crate::{interrupt, pac, peripherals, rcc, Peri};
 
 #[cfg(hash_v1)]
 const NUM_CONTEXT_REGS: usize = 51;

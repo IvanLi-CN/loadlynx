@@ -14,11 +14,11 @@ use super::{
     CaptureCompareInterruptHandler, Channel, ExternalTriggerPin, GeneralInstance4Channel, TimerPin,
 };
 pub use super::{Ch1, Ch2};
-use crate::Peri;
 use crate::gpio::{AfType, AnyPin, Pull};
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::pac::timer::vals::Etp;
 use crate::time::Hertz;
+use crate::Peri;
 
 /// External input marker type.
 pub enum Ext {}

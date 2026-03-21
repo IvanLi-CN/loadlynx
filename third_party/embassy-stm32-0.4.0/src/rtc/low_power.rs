@@ -1,4 +1,4 @@
-use super::{DateTimeError, Rtc, RtcError, bcd2_to_byte};
+use super::{bcd2_to_byte, DateTimeError, Rtc, RtcError};
 use crate::peripherals::RTC;
 use crate::rtc::SealedInstance;
 

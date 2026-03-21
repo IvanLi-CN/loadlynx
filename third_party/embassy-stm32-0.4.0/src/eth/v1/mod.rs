@@ -4,7 +4,7 @@ mod rx_desc;
 mod tx_desc;
 
 use core::marker::PhantomData;
-use core::sync::atomic::{Ordering, fence};
+use core::sync::atomic::{fence, Ordering};
 
 use embassy_hal_internal::Peri;
 use stm32_metapac::eth::vals::{
@@ -192,7 +192,7 @@ impl<'d, T: Instance, P: Phy> Ethernet<'d, T, P> {
             w.set_apcs(Apcs::STRIP); // automatic padding and crc stripping
             w.set_fes(Fes::FES100); // fast ethernet speed
             w.set_dm(Dm::FULL_DUPLEX); // full duplex
-            // TODO: Carrier sense ? ECRSFD
+                                       // TODO: Carrier sense ? ECRSFD
         });
 
         // Set the mac to pass all multicast packets

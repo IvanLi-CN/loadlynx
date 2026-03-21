@@ -4,11 +4,11 @@ use pac::adc::vals::Dmacfg;
 use pac::adc::vals::{OversamplingRatio, OversamplingShift, Rovsm, Trovs};
 
 use super::{
-    Adc, AdcChannel, AnyAdcChannel, Instance, Resolution, RxDma, SampleTime, SealedAdcChannel,
-    blocking_delay_us,
+    blocking_delay_us, Adc, AdcChannel, AnyAdcChannel, Instance, Resolution, RxDma, SampleTime,
+    SealedAdcChannel,
 };
 use crate::dma::Transfer;
-use crate::{Peri, pac, rcc};
+use crate::{pac, rcc, Peri};
 
 /// Default VREF voltage used for sample conversion to millivolts.
 pub const VREF_DEFAULT_MV: u32 = 3300;
