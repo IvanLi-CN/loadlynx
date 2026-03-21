@@ -3915,6 +3915,7 @@ fn build_pd_settings_vm(
             control::PdMode::Fixed => {
                 draft.fixed_object_pos != 0
                     && draft.fixed_object_pos <= control::MAX_PD_OBJECT_POS
+                    && draft.target_mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV
                     && draft.i_req_ma >= 50
             }
             control::PdMode::Pps => {
@@ -3929,7 +3930,9 @@ fn build_pd_settings_vm(
     } else {
         match draft.mode {
             control::PdMode::Fixed => match fixed_selected {
-                Some(pdo) => draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma,
+                Some(pdo) if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV => {
+                    draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma
+                }
                 None => match inferred_fixed_selected {
                     Some((_hint_pos, _hint_mv, hint_max_ma)) => {
                         draft.i_req_ma >= 50 && draft.i_req_ma <= hint_max_ma
@@ -3941,6 +3944,10 @@ fn build_pd_settings_vm(
                         false
                     }
                 },
+                Some(_) => {
+                    selection_missing = true;
+                    false
+                }
             },
             control::PdMode::Pps => {
                 if pps_object_pos == 0 {
@@ -8298,6 +8305,9 @@ fn build_pd_sink_request(
                 .map(|(_idx, p)| *p);
 
             if let Some(pdo) = pdo {
+                if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                    return None;
+                }
                 // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
                 // source's advertised 5V maximum instead of rejecting the request.
                 let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {

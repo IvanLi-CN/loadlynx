@@ -2697,6 +2697,22 @@ async fn handle_pd_update(
         match mode {
             control::PdMode::Fixed => {
                 if let Some(pdo) = find_fixed(object_pos) {
+                    if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                        let details = format!(
+                            r#"{{"object_pos":{},"target_mv":{},"max_supported_fixed_mv":{}}}"#,
+                            object_pos,
+                            pdo.mv,
+                            control::MAX_SUPPORTED_FIXED_TARGET_MV
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "selected fixed PDO exceeds supported voltage range",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
                     if i_req_ma > pdo.max_ma {
                         let details = format!(
                             r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,

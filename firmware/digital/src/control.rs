@@ -261,46 +261,31 @@ pub const EPR_FIXED_28V_OBJECT_POS: u8 = 8;
 pub const EPR_FIXED_28V_MV: u32 = 28_000;
 pub const EPR_FIXED_28V_MAX_MA: u32 = 5_000;
 pub const MAX_PD_OBJECT_POS: u8 = 14;
-pub const EPR_FIXED_36V_OBJECT_POS: u8 = 9;
-pub const EPR_FIXED_36V_MV: u32 = 36_000;
-pub const EPR_FIXED_36V_MAX_MA: u32 = 5_000;
-pub const EPR_FIXED_48V_OBJECT_POS: u8 = 10;
-pub const EPR_FIXED_48V_MV: u32 = 48_000;
-pub const EPR_FIXED_48V_MAX_MA: u32 = 5_000;
-
-const EPR_FIXED_BOOTSTRAP_SELECTIONS: [(u8, u32, u32); 3] = [
-    (
-        EPR_FIXED_28V_OBJECT_POS,
-        EPR_FIXED_28V_MV,
-        EPR_FIXED_28V_MAX_MA,
-    ),
-    (
-        EPR_FIXED_36V_OBJECT_POS,
-        EPR_FIXED_36V_MV,
-        EPR_FIXED_36V_MAX_MA,
-    ),
-    (
-        EPR_FIXED_48V_OBJECT_POS,
-        EPR_FIXED_48V_MV,
-        EPR_FIXED_48V_MAX_MA,
-    ),
-];
+pub const MAX_SUPPORTED_FIXED_TARGET_MV: u32 = EPR_FIXED_28V_MV;
 
 /// Infer the standard EPR fixed selection before live EPR capabilities are available.
 ///
 /// This breaks the SPR->EPR chicken-and-egg: the digital side can persist/send an EPR Fixed
 /// target, and the analog sink can then perform Safe5V -> EnterEprMode -> EPR Fixed request.
 pub fn infer_epr_fixed_selection(object_pos: u8, target_mv: Option<u32>) -> Option<(u8, u32, u32)> {
-    let by_pos = EPR_FIXED_BOOTSTRAP_SELECTIONS
-        .iter()
-        .copied()
-        .find(|(pos, _mv, _max_ma)| *pos == object_pos);
-    let by_target = target_mv.and_then(|mv| {
-        EPR_FIXED_BOOTSTRAP_SELECTIONS
-            .iter()
-            .copied()
-            .find(|(_pos, hint_mv, _max_ma)| *hint_mv == mv)
-    });
+    let by_pos = if object_pos == EPR_FIXED_28V_OBJECT_POS {
+        Some((
+            EPR_FIXED_28V_OBJECT_POS,
+            EPR_FIXED_28V_MV,
+            EPR_FIXED_28V_MAX_MA,
+        ))
+    } else {
+        None
+    };
+    let by_target = if target_mv == Some(EPR_FIXED_28V_MV) {
+        Some((
+            EPR_FIXED_28V_OBJECT_POS,
+            EPR_FIXED_28V_MV,
+            EPR_FIXED_28V_MAX_MA,
+        ))
+    } else {
+        None
+    };
 
     match (by_pos, by_target) {
         (Some(pos_hint), Some(target_hint)) if pos_hint == target_hint => Some(pos_hint),
@@ -811,48 +796,12 @@ mod tests {
                 EPR_FIXED_28V_MAX_MA,
             ))
         );
-        assert_eq!(
-            infer_epr_fixed_selection(EPR_FIXED_36V_OBJECT_POS, None),
-            Some((
-                EPR_FIXED_36V_OBJECT_POS,
-                EPR_FIXED_36V_MV,
-                EPR_FIXED_36V_MAX_MA,
-            ))
-        );
-        assert_eq!(
-            infer_epr_fixed_selection(0, Some(EPR_FIXED_36V_MV)),
-            Some((
-                EPR_FIXED_36V_OBJECT_POS,
-                EPR_FIXED_36V_MV,
-                EPR_FIXED_36V_MAX_MA,
-            ))
-        );
-        assert_eq!(
-            infer_epr_fixed_selection(EPR_FIXED_48V_OBJECT_POS, None),
-            Some((
-                EPR_FIXED_48V_OBJECT_POS,
-                EPR_FIXED_48V_MV,
-                EPR_FIXED_48V_MAX_MA,
-            ))
-        );
-        assert_eq!(
-            infer_epr_fixed_selection(0, Some(EPR_FIXED_48V_MV)),
-            Some((
-                EPR_FIXED_48V_OBJECT_POS,
-                EPR_FIXED_48V_MV,
-                EPR_FIXED_48V_MAX_MA,
-            ))
-        );
     }
 
     #[test]
     fn infer_epr_fixed_selection_rejects_conflicting_target() {
         assert_eq!(
             infer_epr_fixed_selection(EPR_FIXED_28V_OBJECT_POS, Some(36_000)),
-            None
-        );
-        assert_eq!(
-            infer_epr_fixed_selection(EPR_FIXED_36V_OBJECT_POS, Some(EPR_FIXED_48V_MV)),
             None
         );
     }
