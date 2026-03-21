@@ -283,7 +283,7 @@ pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Optio
 }
 
 pub fn can_advertise_synthetic_epr_fixed(status: Option<&PdStatus>) -> bool {
-    status.map(|s| !s.attached || s.epr_capable).unwrap_or(true)
+    status.map(|s| !s.attached).unwrap_or(true)
 }
 
 #[derive(Clone, Debug)]
@@ -864,7 +864,7 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_epr_fixed_only_advertises_when_detached_or_epr_capable() {
+    fn synthetic_epr_fixed_only_advertises_when_detached() {
         let detached = PdStatus {
             attached: false,
             ..PdStatus::default()
@@ -883,7 +883,7 @@ mod tests {
         assert!(can_advertise_synthetic_epr_fixed(None));
         assert!(can_advertise_synthetic_epr_fixed(Some(&detached)));
         assert!(!can_advertise_synthetic_epr_fixed(Some(&attached_spr_only)));
-        assert!(can_advertise_synthetic_epr_fixed(Some(
+        assert!(!can_advertise_synthetic_epr_fixed(Some(
             &attached_epr_capable
         )));
     }

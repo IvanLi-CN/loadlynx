@@ -2539,10 +2539,10 @@ async fn handle_pd_update(
         return Err("400 Bad Request");
     }
 
-    // Only requests that update `saved` (and therefore may want to apply immediately) require an
-    // active digital<->analog link + live PD_STATUS for capability validation. Gate-only updates
-    // must be allowed offline so callers can lock the device back to Safe5V even if the analog
-    // board is disconnected/unhealthy.
+    // Requests that update `saved` still require an active digital<->analog link plus live
+    // PD_STATUS so we can validate against the current partner when attached, or allow detached
+    // synthetic EPR selections to be persisted safely. Gate-only updates must be allowed offline
+    // so callers can lock the device back to Safe5V even if the analog board is disconnected.
     if updates_saved_cfg {
         let link_up = LINK_UP.load(Ordering::Relaxed);
         if !link_up {
@@ -2585,17 +2585,6 @@ async fn handle_pd_update(
             );
             "409 Conflict"
         })?;
-
-        if !status.attached {
-            write_error_body(
-                body_out,
-                "NOT_ATTACHED",
-                "PD not attached; refusing apply",
-                true,
-                None,
-            );
-            return Err("409 Conflict");
-        }
 
         Some(status)
     } else {
