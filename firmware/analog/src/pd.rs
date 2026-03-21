@@ -564,10 +564,22 @@ impl AnalogDpm {
             caps,
         )
         .unwrap();
+        let req = if self.desired_requires_epr() {
+            match req {
+                request::PowerSource::FixedVariableSupply(rdo) => {
+                    request::PowerSource::FixedVariableSupply(rdo.with_epr_mode_capable(true))
+                }
+                other => other,
+            }
+        } else {
+            req
+        };
 
         info!(
-            "PD request: stage=safe5v i_req={}mA (max={}mA)",
-            i_req_ma, max_ma
+            "PD request: stage=safe5v i_req={}mA (max={}mA) epr_capable={}",
+            i_req_ma,
+            max_ma,
+            self.desired_requires_epr()
         );
         self.pending_contract_mv = vsafe.voltage().get::<uom_millivolt>();
         self.pending_contract_ma = i_req_ma;
@@ -668,7 +680,6 @@ impl DevicePolicyManager for AnalogDpm {
         }
 
         PD_RENEGOTIATE_SIGNAL.wait().await;
-        self.epr_entry_failed = false;
 
         if self.epr_active && !self.desired_requires_epr() {
             info!("PD request: exit EPR for SPR target");
@@ -676,6 +687,10 @@ impl DevicePolicyManager for AnalogDpm {
         }
 
         if !self.epr_active && self.desired_requires_epr() {
+            if self.epr_entry_failed {
+                warn!("PD request: suppressing EPR re-entry after prior failure");
+                return Event::None;
+            }
             if source_capabilities.epr_mode_capable() {
                 let pdp = self.desired_epr_operational_pdp();
                 info!("PD request: enter EPR pdp={}W", pdp.get::<uom_watt>());

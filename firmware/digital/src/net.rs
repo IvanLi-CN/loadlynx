@@ -2681,7 +2681,43 @@ async fn handle_pd_update(
         cfg.i_req_ma = i_req_ma;
         match mode {
             control::PdMode::Fixed => {
-                let Some(pdo) = find_fixed(object_pos) else {
+                if let Some(pdo) = find_fixed(object_pos) {
+                    if i_req_ma > pdo.max_ma {
+                        let details = format!(
+                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                            i_req_ma, pdo.max_ma, object_pos
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "i_req_ma exceeds PDO Imax",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    cfg.fixed_object_pos = object_pos;
+                    cfg.target_mv = pdo.mv;
+                } else if let Some((hint_pos, hint_mv, hint_max_ma)) =
+                    control::infer_epr_fixed_selection(object_pos, parsed.target_mv)
+                {
+                    if i_req_ma > hint_max_ma {
+                        let details = format!(
+                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{},"target_mv":{}}}"#,
+                            i_req_ma, hint_max_ma, hint_pos, hint_mv
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "i_req_ma exceeds inferred EPR fixed Imax",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    cfg.fixed_object_pos = hint_pos;
+                    cfg.target_mv = hint_mv;
+                } else {
                     let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
                     write_error_body(
                         body_out,
@@ -2691,23 +2727,7 @@ async fn handle_pd_update(
                         Some(&details),
                     );
                     return Err("422 Unprocessable Entity");
-                };
-                if i_req_ma > pdo.max_ma {
-                    let details = format!(
-                        r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                        i_req_ma, pdo.max_ma, object_pos
-                    );
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "i_req_ma exceeds PDO Imax",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
                 }
-                cfg.fixed_object_pos = object_pos;
-                cfg.target_mv = pdo.mv;
             }
             control::PdMode::Pps => {
                 let Some(apdo) = find_pps(object_pos) else {

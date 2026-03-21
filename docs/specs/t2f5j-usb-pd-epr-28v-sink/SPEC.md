@@ -2,10 +2,10 @@
 
 ## 状态
 
-- Status: 部分完成（3/4）
+- Status: 已完成（软件链路已验，28V 成功合同待补验）
 - Created: 2026-03-19
-- Last: 2026-03-19
-- Notes: PR #72；实现与构建已完成；模拟板启动已恢复；HIL 当前受外部 PD source 未 attach 阻塞
+- Last: 2026-03-21
+- Notes: PR #72；实现与构建已完成；模拟板启动已恢复；HIL 已观察到 Safe5V -> EnterEprMode；当前 100W 线材返回 `CableNotEprCapable`；主人接受按“软件链路已可用、28V 成功合同待 EPR 线材补验”收口
 
 ## 背景 / 问题陈述
 
@@ -176,20 +176,22 @@
 
 ## Visual Evidence (PR)
 
-待实现阶段补充真实 HIL / UI 证据。
+- 构建证据：`just a-build`、`just d-build`
+- HIL 证据：已观察到 `PD request: stage=followup enter-epr pdp=34W`
+- 当前 bench 结论：对端在 EPR mode entry 阶段返回 `CableNotEprCapable`，因此合同停留在 `5V`
 
 ## 实现里程碑（Milestones / Delivery checklist）
 
 - [x] M1: 新 spec / index 落盘，并冻结 EPR fixed 28V 的范围与验收口径。
 - [x] M2: 模拟板升级到 `usbpd 2.0.0` 并完成 EPR fixed 28V 协商路径接入。
 - [x] M3: 共享协议与数字侧模型/UI/API 支持 28V fixed + EPR 只读状态。
-- [ ] M4: 构建、测试与 HIL 完成，具备 merge-ready 证据。
+- [x] M4: 构建、测试完成；HIL 已证明软件可进入 EPR mode entry，28V 成功合同待后续 EPR 线材补验。
 
 ## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：现有硬件在 28V 下的电源路径与热裕量仍需真机确认。
 - 风险：`usbpd 2.0.0` 的 API 迁移面较大，模拟板可能需要一起调整 `embassy-futures` / `heapless` 的依赖兼容。
 - 风险：`embassy-stm32 0.4.0` 在 STM32G4 上对 ADC/DAC 时钟元数据存在启动期误判；当前分支已通过本地 vendored patch 绕过，但上游仍待确认。
-- 风险：当前 HIL 环境下设备未进入 PD attach（`GET /api/v1/pd => attached=false`），因此数字侧拿不到 live PDO 列表，也无法在线切换到 28V fixed 目标完成合同验证。
-- 假设：本轮 HIL 环境可用，且现有 Type-C/PD 前端硬件满足 EPR sink 基本条件。
+- 风险：当前 bench 只有 SPR/100W 线材，EPR mode entry 返回 `CableNotEprCapable`；因此 `28V` 成功合同仍需在明确支持 `USB PD 3.1 EPR` 的线材上补验。
+- 假设：本轮 HIL 所用电源支持 EPR fixed 28V，当前未达成 28V 合同的主要外部限制为线材链路能力。
 - 假设：AVS 只读不会影响本轮 28V fixed 的用户理解。

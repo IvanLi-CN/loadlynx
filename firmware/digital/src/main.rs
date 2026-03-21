@@ -8268,25 +8268,44 @@ fn build_pd_sink_request(
                 .iter()
                 .enumerate()
                 .find(|(idx, p)| pdo_pos(p.pos, *idx) == fixed_object_pos)
-                .map(|(_idx, p)| *p)?;
+                .map(|(_idx, p)| *p);
 
-            // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
-            // source's advertised 5V maximum instead of rejecting the request.
-            let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {
-                i_req_ma.min(pdo.max_ma)
-            } else {
-                i_req_ma
-            };
-            if i_req_ma > pdo.max_ma {
-                return None;
+            if let Some(pdo) = pdo {
+                // Safe5V policy may keep a higher user-saved Ireq; clamp 5V requests to the
+                // source's advertised 5V maximum instead of rejecting the request.
+                let i_req_ma = if pdo.mv == control::PdConfig::DEFAULT_TARGET_MV {
+                    i_req_ma.min(pdo.max_ma)
+                } else {
+                    i_req_ma
+                };
+                if i_req_ma > pdo.max_ma {
+                    return None;
+                }
+
+                return Some(PdSinkRequest {
+                    mode,
+                    target_mv: pdo.mv,
+                    object_pos: fixed_object_pos,
+                    i_req_ma,
+                });
             }
 
-            Some(PdSinkRequest {
-                mode,
-                target_mv: pdo.mv,
-                object_pos: fixed_object_pos,
-                i_req_ma,
-            })
+            if let Some((hint_pos, hint_mv, hint_max_ma)) =
+                control::infer_epr_fixed_selection(fixed_object_pos, Some(cfg.target_mv))
+            {
+                if i_req_ma > hint_max_ma {
+                    return None;
+                }
+
+                return Some(PdSinkRequest {
+                    mode,
+                    target_mv: hint_mv,
+                    object_pos: hint_pos,
+                    i_req_ma,
+                });
+            }
+
+            None
         }
         control::PdMode::Pps => {
             let pps_object_pos = cfg.pps_object_pos;
