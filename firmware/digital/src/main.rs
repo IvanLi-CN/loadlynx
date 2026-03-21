@@ -3918,9 +3918,6 @@ fn build_pd_settings_vm(
     } else {
         None
     };
-    let inferred_fixed_selected =
-        control::infer_epr_fixed_selection(fixed_object_pos, Some(draft.target_mv));
-
     let pps_selected = if pps_object_pos != 0 && pps_object_pos <= control::MAX_PD_OBJECT_POS {
         pps_pdos
             .iter()
@@ -3955,17 +3952,12 @@ fn build_pd_settings_vm(
                 Some(pdo) if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV => {
                     draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma
                 }
-                None => match inferred_fixed_selected {
-                    Some((_hint_pos, _hint_mv, hint_max_ma)) => {
-                        draft.i_req_ma >= 50 && draft.i_req_ma <= hint_max_ma
+                None => {
+                    if fixed_object_pos != 0 {
+                        selection_missing = true;
                     }
-                    None => {
-                        if fixed_object_pos != 0 {
-                            selection_missing = true;
-                        }
-                        false
-                    }
-                },
+                    false
+                }
                 Some(_) => {
                     selection_missing = true;
                     false
@@ -8344,21 +8336,6 @@ fn build_pd_sink_request(
                     mode,
                     target_mv: pdo.mv,
                     object_pos: fixed_object_pos,
-                    i_req_ma,
-                });
-            }
-
-            if let Some((hint_pos, hint_mv, hint_max_ma)) =
-                control::infer_epr_fixed_selection(fixed_object_pos, Some(cfg.target_mv))
-            {
-                if i_req_ma > hint_max_ma {
-                    return None;
-                }
-
-                return Some(PdSinkRequest {
-                    mode,
-                    target_mv: hint_mv,
-                    object_pos: hint_pos,
                     i_req_ma,
                 });
             }
