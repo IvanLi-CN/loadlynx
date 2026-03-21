@@ -372,11 +372,10 @@ impl AnalogDpm {
         // Break the SPR->EPR discovery chicken-and-egg: before EPR entry we only have the SPR
         // Source_Capabilities message, but an EPR-capable source can still surface a read-only
         // inferred 28V rail so the digital UI/API can offer the standard PDO#8 selection.
-        let inferred_max_ma = inferred_epr_fixed_28v_max_ma(caps);
         let _ = self.fixed_pdos.push(FixedPdo {
             pos: PD_EPR_FIXED_28V_OBJECT_POS,
             mv: PD_TARGET_28V_MV,
-            max_ma: inferred_max_ma,
+            max_ma: PD_EPR_FIXED_28V_MAX_MA,
         });
     }
 
@@ -637,41 +636,6 @@ impl AnalogDpm {
         }
         send_pd_status_frame(self.uart_tx, &status).await;
     }
-}
-
-fn inferred_epr_fixed_28v_max_ma(caps: &source_capabilities::SourceCapabilities) -> u32 {
-    let max_power_mw = caps
-        .pdos()
-        .iter()
-        .filter_map(|pdo| match pdo {
-            source_capabilities::PowerDataObject::FixedSupply(fixed) => Some(
-                fixed
-                    .voltage()
-                    .get::<uom_millivolt>()
-                    .saturating_mul(fixed.max_current().get::<uom_milliampere>())
-                    / 1_000,
-            ),
-            source_capabilities::PowerDataObject::Augmented(
-                source_capabilities::Augmented::Spr(spr),
-            ) => Some(
-                spr.max_voltage()
-                    .get::<uom_millivolt>()
-                    .saturating_mul(spr.max_current().get::<uom_milliampere>())
-                    / 1_000,
-            ),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0);
-
-    if max_power_mw == 0 {
-        return PD_EPR_FIXED_28V_MAX_MA;
-    }
-
-    max_power_mw
-        .saturating_mul(1_000)
-        .saturating_div(PD_TARGET_28V_MV)
-        .clamp(50, PD_EPR_FIXED_28V_MAX_MA)
 }
 
 impl DevicePolicyManager for AnalogDpm {
