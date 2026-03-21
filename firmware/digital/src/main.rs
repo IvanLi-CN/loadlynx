@@ -3895,6 +3895,8 @@ fn build_pd_settings_vm(
     } else {
         None
     };
+    let inferred_fixed_selected =
+        control::infer_epr_fixed_selection(fixed_object_pos, Some(draft.target_mv));
 
     let pps_selected = if pps_object_pos != 0 {
         pps_pdos
@@ -3922,12 +3924,17 @@ fn build_pd_settings_vm(
         match draft.mode {
             control::PdMode::Fixed => match fixed_selected {
                 Some(pdo) => draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma,
-                None => {
-                    if fixed_object_pos != 0 {
-                        selection_missing = true;
+                None => match inferred_fixed_selected {
+                    Some((_hint_pos, _hint_mv, hint_max_ma)) => {
+                        draft.i_req_ma >= 50 && draft.i_req_ma <= hint_max_ma
                     }
-                    false
-                }
+                    None => {
+                        if fixed_object_pos != 0 {
+                            selection_missing = true;
+                        }
+                        false
+                    }
+                },
             },
             control::PdMode::Pps => {
                 if pps_object_pos == 0 {

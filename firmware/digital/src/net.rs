@@ -2698,6 +2698,25 @@ async fn handle_pd_update(
                     }
                     cfg.fixed_object_pos = object_pos;
                     cfg.target_mv = pdo.mv;
+                } else if let Some((hint_pos, hint_mv, hint_max_ma)) =
+                    control::infer_epr_fixed_selection(object_pos, parsed.target_mv)
+                {
+                    if i_req_ma > hint_max_ma {
+                        let details = format!(
+                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{},"target_mv":{}}}"#,
+                            i_req_ma, hint_max_ma, hint_pos, hint_mv
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "i_req_ma exceeds inferred EPR fixed Imax",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    cfg.fixed_object_pos = hint_pos;
+                    cfg.target_mv = hint_mv;
                 } else {
                     let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
                     write_error_body(
