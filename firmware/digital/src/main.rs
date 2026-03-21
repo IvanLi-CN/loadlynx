@@ -1123,7 +1123,7 @@ async fn encoder_task(
                                                 .find(|(idx, p)| {
                                                     pdo_pos(p.pos, *idx) == vm.fixed_object_pos
                                                 })
-                                                .map(|(_idx, p)| p.max_ma)
+                                                .and_then(|(_idx, p)| pdo_i_req_limit(p.max_ma))
                                                 .unwrap_or(10_000)
                                         }
                                     }
@@ -2896,8 +2896,10 @@ async fn touch_ui_task(
                                             // Keep Fixed display/request voltage in sync without
                                             // touching the sticky PPS cache.
                                             guard.pd_draft.target_mv = pdo.mv;
-                                            guard.pd_draft.i_req_ma =
-                                                guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
+                                            guard.pd_draft.i_req_ma = clamp_i_req_to_pdo_limit(
+                                                guard.pd_draft.i_req_ma,
+                                                pdo.max_ma,
+                                            );
                                         }
                                         bump_control_rev();
                                     }
@@ -3042,8 +3044,10 @@ async fn touch_ui_task(
                                                 // Keep Fixed display/request voltage in sync without
                                                 // touching the sticky PPS cache.
                                                 guard.pd_draft.target_mv = pdo.mv;
-                                                guard.pd_draft.i_req_ma =
-                                                    guard.pd_draft.i_req_ma.min(pdo.max_ma).max(50);
+                                                guard.pd_draft.i_req_ma = clamp_i_req_to_pdo_limit(
+                                                    guard.pd_draft.i_req_ma,
+                                                    pdo.max_ma,
+                                                );
                                                 bump_control_rev();
                                                 prompt_tone::enqueue_ui_ok();
                                             } else {
@@ -3822,6 +3826,28 @@ fn pd_mode_target_mv(cfg: &control::PdConfig) -> u32 {
     }
 }
 
+fn pdo_i_req_limit(max_ma: u32) -> Option<u32> {
+    if max_ma == control::UNKNOWN_PDO_MAX_MA {
+        None
+    } else {
+        Some(max_ma)
+    }
+}
+
+fn clamp_i_req_to_pdo_limit(i_req_ma: u32, max_ma: u32) -> u32 {
+    pdo_i_req_limit(max_ma)
+        .map(|limit| i_req_ma.min(limit))
+        .unwrap_or(i_req_ma)
+        .max(50)
+}
+
+fn i_req_within_pdo_limit(i_req_ma: u32, max_ma: u32) -> bool {
+    i_req_ma >= 50
+        && pdo_i_req_limit(max_ma)
+            .map(|limit| i_req_ma <= limit)
+            .unwrap_or(true)
+}
+
 fn pd_button_display_mode(
     saved: control::PdConfig,
     allow_extended_voltage: bool,
@@ -3910,7 +3936,7 @@ fn build_pd_settings_vm(
         let _ = fixed_pdos.push(loadlynx_protocol::FixedPdo {
             pos: control::EPR_FIXED_28V_OBJECT_POS,
             mv: control::EPR_FIXED_28V_MV,
-            max_ma: control::EPR_FIXED_28V_MAX_MA,
+            max_ma: control::UNKNOWN_PDO_MAX_MA,
         });
     }
 
@@ -3970,7 +3996,7 @@ fn build_pd_settings_vm(
         match draft.mode {
             control::PdMode::Fixed => match fixed_selected {
                 Some(pdo) if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV => {
-                    draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma
+                    i_req_within_pdo_limit(draft.i_req_ma, pdo.max_ma)
                 }
                 None => {
                     if fixed_object_pos != 0 {
@@ -8367,10 +8393,6 @@ fn build_pd_sink_request(
             if let Some(target_mv) =
                 control::supported_epr_fixed_target(fixed_object_pos, cfg.target_mv)
             {
-                if i_req_ma > control::EPR_FIXED_28V_MAX_MA {
-                    return None;
-                }
-
                 return Some(PdSinkRequest {
                     mode,
                     target_mv,

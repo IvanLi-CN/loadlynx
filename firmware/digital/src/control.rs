@@ -261,13 +261,13 @@ impl PdConfig {
 
 pub const EPR_FIXED_28V_OBJECT_POS: u8 = 8;
 pub const EPR_FIXED_28V_MV: u32 = 28_000;
-pub const EPR_FIXED_28V_MAX_MA: u32 = 5_000;
-pub const MAX_PD_OBJECT_POS: u8 = 14;
+pub const UNKNOWN_PDO_MAX_MA: u32 = 0;
+pub const MAX_PD_OBJECT_POS: u8 = 16;
 pub const MAX_SUPPORTED_FIXED_TARGET_MV: u32 = EPR_FIXED_28V_MV;
 
 pub const fn supported_epr_fixed_selection(object_pos: u8) -> Option<(u32, u32)> {
     if object_pos == EPR_FIXED_28V_OBJECT_POS {
-        Some((EPR_FIXED_28V_MV, EPR_FIXED_28V_MAX_MA))
+        Some((EPR_FIXED_28V_MV, UNKNOWN_PDO_MAX_MA))
     } else {
         None
     }
@@ -842,7 +842,7 @@ mod tests {
     fn supported_epr_fixed_selection_only_advertises_28v() {
         assert_eq!(
             supported_epr_fixed_selection(EPR_FIXED_28V_OBJECT_POS),
-            Some((EPR_FIXED_28V_MV, EPR_FIXED_28V_MAX_MA))
+            Some((EPR_FIXED_28V_MV, UNKNOWN_PDO_MAX_MA))
         );
         assert_eq!(supported_epr_fixed_selection(9), None);
     }

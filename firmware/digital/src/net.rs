@@ -2736,7 +2736,7 @@ async fn handle_pd_update(
                     if let Some((target_mv, max_ma)) =
                         control::supported_epr_fixed_selection(object_pos)
                     {
-                        if i_req_ma > max_ma {
+                        if max_ma != control::UNKNOWN_PDO_MAX_MA && i_req_ma > max_ma {
                             let details = format!(
                                 r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
                                 i_req_ma, max_ma, object_pos

@@ -1063,7 +1063,11 @@ fn draw_list_row_fixed(
     );
 
     let mut mid = String::<16>::new();
-    let _ = write!(&mut mid, "Imax {}", format_a_short(pdo.max_ma).as_str());
+    if pdo.max_ma == crate::control::UNKNOWN_PDO_MAX_MA {
+        let _ = mid.push_str("Imax --");
+    } else {
+        let _ = write!(&mut mid, "Imax {}", format_a_short(pdo.max_ma).as_str());
+    }
     let text_y = rect.top + 8;
     let info_x = rect.left + 58;
     let dim = rgb(COLOR_TEXT_DIM);
@@ -1169,11 +1173,15 @@ fn draw_selected_fixed_summary(canvas: &mut Canvas, vm: &PdSettingsVm, rect: Rec
         let _ = write!(&mut line1, "Fixed {}", format_v_short(pdo.mv).as_str());
         let pos = effective_pos(pdo.pos, idx);
         let _ = write!(&mut line2_left, "PDO{}", pos);
-        let _ = write!(
-            &mut line2_right,
-            "Imax {}",
-            format_a_short(pdo.max_ma).as_str()
-        );
+        if pdo.max_ma == crate::control::UNKNOWN_PDO_MAX_MA {
+            let _ = line2_right.push_str("Imax --");
+        } else {
+            let _ = write!(
+                &mut line2_right,
+                "Imax {}",
+                format_a_short(pdo.max_ma).as_str()
+            );
+        }
     } else if vm.fixed_object_pos == 0 {
         let _ = line1.push_str("Fixed (select PDO)");
         let _ = line2_left.push_str("Tap a row to select");
