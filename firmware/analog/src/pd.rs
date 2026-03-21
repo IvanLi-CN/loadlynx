@@ -660,8 +660,8 @@ impl DevicePolicyManager for AnalogDpm {
             self.followup_desired_request = false;
             if self.desired_requires_epr() && !source_capabilities.is_epr_capabilities() {
                 if self.epr_entry_failed {
-                    warn!("PD request: suppressing automatic EPR re-entry after prior failure");
-                    return Event::None;
+                    info!("PD request: retrying EPR entry after a fresh followup request");
+                    self.epr_entry_failed = false;
                 }
                 if source_capabilities.epr_mode_capable() {
                     let pdp = self.desired_epr_operational_pdp();
@@ -688,8 +688,8 @@ impl DevicePolicyManager for AnalogDpm {
 
         if !self.epr_active && self.desired_requires_epr() {
             if self.epr_entry_failed {
-                warn!("PD request: suppressing EPR re-entry after prior failure");
-                return Event::None;
+                info!("PD request: retrying EPR entry after explicit renegotiation");
+                self.epr_entry_failed = false;
             }
             if source_capabilities.epr_mode_capable() {
                 let pdp = self.desired_epr_operational_pdp();
