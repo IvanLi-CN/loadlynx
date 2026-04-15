@@ -2210,16 +2210,10 @@ async fn handle_cc_update(
             );
             return Err("409 Conflict");
         }
-        AnalogState::CalMissing => {
-            write_error_body(
-                body_out,
-                "ANALOG_NOT_READY",
-                "analog board calibration missing or not ready",
-                true,
-                None,
-            );
-            return Err("409 Conflict");
-        }
+        // See handle_control_update(): CalMissing is not a reliable calibration indicator.
+        // Blocking here would break calibration-page Set Output before the current-channel
+        // override gets a chance to drive the SetMode path.
+        AnalogState::CalMissing => {}
         AnalogState::Offline => {
             write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
             return Err("503 Service Unavailable");
