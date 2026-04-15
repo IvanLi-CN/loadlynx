@@ -1200,8 +1200,7 @@ async fn encoder_task(
                             control::UiView::Main => {
                                 let prev = guard.output_enabled;
                                 if prev {
-                                    guard.output_enabled = false;
-                                    store_desired_output_enabled(false);
+                                    guard.force_output_off();
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1622,8 +1621,7 @@ async fn touch_spring_task(
                         };
 
                         if guard.output_enabled {
-                            guard.output_enabled = false;
-                            store_desired_output_enabled(false);
+                            guard.force_output_off();
                             bump_control_rev();
                             prompt_tone::enqueue_load_off_ok();
                             info!(
@@ -1702,8 +1700,7 @@ async fn touch_spring_task(
                                 };
 
                                 if guard.output_enabled {
-                                    guard.output_enabled = false;
-                                    store_desired_output_enabled(false);
+                                    guard.force_output_off();
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -3319,8 +3316,7 @@ async fn touch_ui_task(
                                 Hit::LoadToggle => {
                                     let mut guard = control.lock().await;
                                     if guard.output_enabled {
-                                        guard.output_enabled = false;
-                                        store_desired_output_enabled(false);
+                                        guard.force_output_off();
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_off_ok();
                                     } else if let Some(reason) = current_load_enable_block_abbrev(
@@ -6871,8 +6867,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
             let mut guard = control.lock().await;
             if guard.output_enabled {
                 if reason_appeared {
-                    guard.output_enabled = false;
-                    store_desired_output_enabled(false);
+                    guard.force_output_off();
                     bump_control_rev();
                     if let Some(r) = reason {
                         info!("LOAD forced OFF (reason={})", r);
@@ -6922,8 +6917,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                     if ocp_over_streak >= TRIP_STREAK_TICKS {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
-                        guard.output_enabled = false;
-                        store_desired_output_enabled(false);
+                        guard.force_output_off();
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Ocp);
                         info!(
@@ -6933,8 +6927,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                     } else if opp_over_streak >= TRIP_STREAK_TICKS {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
-                        guard.output_enabled = false;
-                        store_desired_output_enabled(false);
+                        guard.force_output_off();
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Opp);
                         info!(
@@ -7856,12 +7849,14 @@ async fn setmode_tx_task(
             prev_pd_link_up = false;
         }
 
+        let cal_mode = { calibration.lock().await.cal_mode };
         let (rev_now, desired_cmd, mut pd_cfg, allow_extended_voltage) = {
             let guard = control.lock().await;
-            let p = guard.active_preset();
+            let effective = guard.effective_output_command(cal_mode);
+            let p = effective.preset;
             let cmd = SetMode {
-                preset_id: guard.active_preset_id,
-                output_enabled: guard.output_enabled,
+                preset_id: p.preset_id,
+                output_enabled: effective.output_enabled,
                 mode: match p.mode {
                     LoadMode::Cc => LoadMode::Cc,
                     LoadMode::Cv => LoadMode::Cv,

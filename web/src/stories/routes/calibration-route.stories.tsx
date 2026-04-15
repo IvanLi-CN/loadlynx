@@ -31,3 +31,20 @@ export const Default: Story = {
     }
   },
 };
+
+export const OutputControlApplied: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await canvas.findByRole("heading", { name: "Calibration" });
+
+    await userEvent.click(canvas.getByRole("tab", { name: "电流通道1" }));
+    await canvas.findByText("Output control (CC)");
+
+    await userEvent.click(canvas.getByRole("button", { name: "2A" }));
+    await userEvent.click(canvas.getByRole("button", { name: "Set Output" }));
+
+    await canvas.findByText("1.7100 A");
+    await canvas.findByText("1638");
+  },
+};

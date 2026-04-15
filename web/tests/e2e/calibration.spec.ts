@@ -61,6 +61,9 @@ test.describe("Calibration UI", () => {
     // Wait for raw current to appear.
     const currentStat = page.locator(".stat", { hasText: "Active Current" });
     await expect(currentStat.getByText("Raw:")).not.toContainText("--");
+    await expect(currentStat.locator(".stat-value")).toContainText("0.8550 A");
+    const dacStat = page.locator(".stat", { hasText: "DAC Code" });
+    await expect(dacStat.locator(".stat-value")).toContainText("819");
 
     // Advanced: subtract baseline current (e.g., adapters/fixtures).
     await page.locator("summary", { hasText: "高级选项" }).click();
@@ -116,6 +119,7 @@ test.describe("Calibration UI", () => {
     await page.getByRole("button", { name: "2A" }).click();
     await page.getByRole("button", { name: "Set Output" }).click();
     await expect(currentStat.locator(".stat-value")).toContainText("1.7100 A");
+    await expect(dacStat.locator(".stat-value")).toContainText("1638");
     await page.getByRole("button", { name: "Capture" }).click();
     expect(await draftRowsMA.count()).toBe(2);
 
