@@ -233,4 +233,34 @@ test.describe("Calibration UI", () => {
       page.getByText(/正在同步校准模式：等待设备切换到/i),
     ).toHaveCount(0);
   });
+
+  test("leaving calibration tears down calibration mode", async ({ page }) => {
+    await page.goto("/devices");
+    await page.getByRole("button", { name: "Add simulation device" }).click();
+
+    const deviceId = "mock-001";
+    const baseUrl = "mock://demo-1";
+
+    await page.goto(`/${deviceId}/calibration`);
+    await page.getByRole("tab", { name: "电流通道1" }).click();
+    await page.getByRole("button", { name: "1A" }).click();
+    await page.getByRole("button", { name: "Set Output" }).click();
+
+    const modeBadge = page.locator(".badge", { hasText: "cal_mode:" });
+    await expect(modeBadge).toContainText("current_ch1");
+
+    await page.goto("/devices");
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async (targetBaseUrl) => {
+            const { getStatus } = await import("/src/api/client.ts");
+            const status = await getStatus(targetBaseUrl);
+            return status.raw.cal_kind ?? null;
+          }, baseUrl),
+        { timeout: 5_000 },
+      )
+      .toBe(null);
+  });
 });

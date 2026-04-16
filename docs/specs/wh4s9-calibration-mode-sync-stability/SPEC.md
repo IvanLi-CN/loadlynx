@@ -83,7 +83,7 @@
 ### Edge cases / errors
 
 - 若设备真实 offline / faulted，仍允许页面展示 offline 状态并阻止校准写入；本规格不改变该语义。
-- 离开 calibration 页时，`DeviceLayout` 的 best-effort `off` 仍保留；本规格仅移除 calibration 页面内部重复的 cleanup `off`。
+- 离开 calibration 页时，设备必须回到 `off`；同设备子路由切换可由 `DeviceLayout` 统一 cleanup，但 calibration route 在整棵设备路由被卸载时仍要保证 best-effort `off` 不丢失。
 - 空 draft 不再用于保存 calibration points，但 `active_tab` 的恢复逻辑必须可从已有 draft 中稳定生效。
 
 ## 验收标准（Acceptance Criteria）

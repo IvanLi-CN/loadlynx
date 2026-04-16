@@ -1,5 +1,6 @@
 import type { QueryObserverResult } from "@tanstack/react-query";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useRouterState } from "@tanstack/react-router";
 import Decimal from "decimal.js";
 import {
   useCallback,
@@ -590,6 +591,11 @@ function expectedCalKindForTab(tab: CalibrationTab): number {
   }
 }
 
+function isDeviceSubroutePath(pathname: string, deviceId: string): boolean {
+  const prefix = `/${deviceId}`;
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
 function statusInExpectedCalMode(
   status: FastStatusView | null,
   expectedCalKind: number,
@@ -609,6 +615,9 @@ function DeviceCalibrationPage({
   deviceId: string;
   baseUrl: string;
 }) {
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
   const [activeTab, setActiveTab] = useState<CalibrationTab>(() => {
     if (typeof window === "undefined") {
       return "voltage";
@@ -618,6 +627,8 @@ function DeviceCalibrationPage({
       "voltage"
     );
   });
+  const latestPathnameRef = useRef(pathname);
+  latestPathnameRef.current = pathname;
   const [isPageVisible, setIsPageVisible] = useState(() =>
     typeof document === "undefined"
       ? true
@@ -655,6 +666,26 @@ function DeviceCalibrationPage({
       // Best-effort; do not block device switches on cleanup failures.
     });
   }, [baseUrl]);
+
+  useEffect(() => {
+    return () => {
+      if (isMockBaseUrl(baseUrl)) {
+        return;
+      }
+
+      const nextPathname = latestPathnameRef.current;
+      if (
+        isDeviceSubroutePath(nextPathname, deviceId) &&
+        !/\/calibration$/.test(nextPathname)
+      ) {
+        return;
+      }
+
+      postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
+        // Best-effort; DeviceLayout already handles same-device route changes.
+      });
+    };
+  }, [baseUrl, deviceId]);
 
   // Live status stream (includes optional RAW fields in calibration mode).
   const [status, setStatus] = useState<FastStatusView | null>(null);
