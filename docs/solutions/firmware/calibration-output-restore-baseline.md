@@ -10,6 +10,7 @@
 
 - **current calibration 入口必须同步 live output flag。** 一旦从正常模式切入 `current_ch1/current_ch2`，`ControlState.output_enabled` 就必须立刻对齐当前 calibration override 的有效输出状态；否则 UI 会把“正常模式下的 ON”误认为“校准模式下仍在输出”。
 - **只有收到 analog 的 `CAL_MODE` ACK 后，才允许切换数字侧的 calibration mode 状态。** 先把 `cal_mode`/live output 改掉，会让数字侧 `SetMode` 目标和真实硬件模式脱节；校准模式切换必须以 ACK 作为生效边界。
+- **若 `CAL_MODE` ACK 丢失，仍要允许匹配的 `FastStatus.cal_kind` 把数字侧追平。** 否则 analog 已切到 calibration mode，但数字侧还停在旧 mode 时，`/api/v1/cc`、`/api/v1/control` 与本地 LOAD 语义会永久分叉。
 - **ACK 生效顺序要先收口 control state，再发布新的 `cal_mode`。** `setmode_tx_task()` 会分两把锁读取 calibration mode 和 `ControlState`；如果先发布新 mode、后清理 calibration override，就会短暂把正常 preset 和校准态遗留的 `output_enabled=true` 拼在一起，下发错误的瞬时 `SetMode`。
 - **进入 calibration 时要先捕获 restore baseline。** 这个 baseline 表示“离开 calibration 后正常 preset 应恢复到什么输出状态”，它和 calibration 期间的临时 ON/OFF 不是同一个概念。
 - **calibration 期间的开关只能改 override，不应覆盖 restore baseline。** 无论是 `/api/v1/control`、`/api/v1/cc`，还是实体 LOAD 开关，在 current calibration 内都应只改变 override 的 `output_enabled`，不能把“退出 calibration 时恢复什么”改写掉。

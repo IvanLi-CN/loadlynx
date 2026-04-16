@@ -338,6 +338,7 @@ use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
 pub struct CalibrationState {
     pub profile: ActiveProfile,
     pub cal_mode: CalKind,
+    pub pending_cal_mode: Option<CalKind>,
 }
 
 impl CalibrationState {
@@ -345,6 +346,7 @@ impl CalibrationState {
         Self {
             profile,
             cal_mode: CalKind::Off,
+            pending_cal_mode: None,
         }
     }
 }
@@ -4768,7 +4770,8 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
 }
 
 async fn apply_fast_status(
-    _control: &'static ControlMutex,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
     status: &FastStatus,
 ) {
@@ -4823,6 +4826,24 @@ async fn apply_fast_status(
         AnalogState::CalMissing
     };
     ANALOG_STATE.store(state as u8, Ordering::Relaxed);
+
+    let observed_cal_mode = status.cal_kind.map(CalKind::from).unwrap_or(CalKind::Off);
+    let reconcile_cal_mode = {
+        let mut guard = calibration.lock().await;
+        if guard.pending_cal_mode == Some(observed_cal_mode) {
+            if guard.cal_mode == observed_cal_mode {
+                guard.pending_cal_mode = None;
+                None
+            } else {
+                Some(observed_cal_mode)
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(kind) = reconcile_cal_mode {
+        net::apply_calibration_mode(kind, calibration, control).await;
+    }
 
     let mut guard = telemetry.lock().await;
     guard.update_from_status(status);
@@ -5934,7 +5955,7 @@ async fn feed_decoder(
                         MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
                             Ok((_hdr, status)) => {
                                 record_link_activity();
-                                apply_fast_status(control, telemetry, &status).await;
+                                apply_fast_status(control, calibration, telemetry, &status).await;
                                 let total =
                                     FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                                 if total % 32 == 0 {

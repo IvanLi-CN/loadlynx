@@ -853,11 +853,15 @@ function DeviceCalibrationPage({
   });
 
   useEffect(() => {
-    if (!statusFallbackQuery.data) {
+    if (!statusFallbackQuery.data || statusFallbackQuery.dataUpdatedAt === 0) {
       return;
     }
     publishStatusSnapshot(statusFallbackQuery.data);
-  }, [publishStatusSnapshot, statusFallbackQuery.data]);
+  }, [
+    publishStatusSnapshot,
+    statusFallbackQuery.data,
+    statusFallbackQuery.dataUpdatedAt,
+  ]);
 
   useEffect(() => {
     if (

@@ -884,6 +884,7 @@ async fn handle_http_connection(
                         )
                         .await?;
                     } else {
+                        calibration.lock().await.pending_cal_mode = Some(kind);
                         body.clear();
                         body.push_str(r#"{"ok":true}"#);
                         write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
@@ -4081,7 +4082,11 @@ pub(crate) async fn apply_calibration_mode(
         // remains conservative (old current-calibration mode + restored/off
         // control state), instead of briefly emitting the active preset with
         // calibration-time output_enabled=true.
-        calibration.lock().await.cal_mode = kind;
+        let mut guard = calibration.lock().await;
+        guard.cal_mode = kind;
+        if guard.pending_cal_mode == Some(kind) {
+            guard.pending_cal_mode = None;
+        }
     }
     if mode_changed || state_changed {
         bump_control_rev();

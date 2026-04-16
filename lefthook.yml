@@ -9,4 +9,4 @@ pre-commit:
 commit-msg:
   commands:
     commitlint:
-      run: bash -lc 'ROOT="$(git rev-parse --git-common-dir)/.."; MSG="$1"; cd "$ROOT" && npm exec -- commitlint --config "$ROOT/commitlint.config.cjs" --edit "$MSG"' -- {1}
+      run: bash -lc 'ROOT="$(git rev-parse --show-toplevel)"; MSG="$1"; cd "$ROOT" && npm exec -- commitlint --config "$ROOT/commitlint.config.cjs" --edit "$MSG"' -- {1}
