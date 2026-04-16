@@ -589,20 +589,13 @@ impl ControlState {
                     output_enabled: false,
                     target_i_ma: 0,
                 });
-            let max_i_ma_total = crate::LIMIT_PROFILE_DEFAULT
-                .max_i_ma
-                .min(HARD_MAX_I_MA_TOTAL);
+            let mut preset = active;
+            let max_i_ma_total = preset.max_i_ma_total.min(HARD_MAX_I_MA_TOTAL);
+            preset.mode = LoadMode::Cc;
+            preset.target_p_mw = 0;
+            preset.target_i_ma = override_state.target_i_ma.min(max_i_ma_total);
             return EffectiveOutputCommand {
-                preset: Preset {
-                    preset_id: self.active_preset_id,
-                    mode: LoadMode::Cc,
-                    target_p_mw: 0,
-                    target_i_ma: override_state.target_i_ma.min(max_i_ma_total),
-                    target_v_mv: active.target_v_mv,
-                    min_v_mv: 0,
-                    max_i_ma_total,
-                    max_p_mw: crate::LIMIT_PROFILE_DEFAULT.max_p_mw,
-                },
+                preset,
                 output_enabled: override_state.output_enabled && override_state.target_i_ma != 0,
             };
         }
@@ -1230,17 +1223,19 @@ mod tests {
         crate::DESIRED_OUTPUT_ENABLED.store(true, Ordering::Relaxed);
         state.output_enabled = true;
         state.presets[0].target_i_ma = 900;
+        state.presets[0].target_v_mv = 12_500;
+        state.presets[0].min_v_mv = 11_200;
         state.presets[0].max_i_ma_total = 1_200;
+        state.presets[0].max_p_mw = 18_500;
         state.set_calibration_cc_override(2_000, true);
 
         let current = state.effective_output_command(CalKind::CurrentCh1);
         assert_eq!(current.preset.mode, LoadMode::Cc);
-        assert_eq!(current.preset.target_i_ma, 2_000);
-        assert_eq!(current.preset.min_v_mv, 0);
-        assert_eq!(
-            current.preset.max_i_ma_total,
-            crate::LIMIT_PROFILE_DEFAULT.max_i_ma
-        );
+        assert_eq!(current.preset.target_i_ma, 1_200);
+        assert_eq!(current.preset.target_v_mv, 12_500);
+        assert_eq!(current.preset.min_v_mv, 11_200);
+        assert_eq!(current.preset.max_i_ma_total, 1_200);
+        assert_eq!(current.preset.max_p_mw, 18_500);
         assert!(current.output_enabled);
         assert!(state.output_enabled);
         assert!(crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));

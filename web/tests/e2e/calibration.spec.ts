@@ -219,8 +219,16 @@ test.describe("Calibration UI", () => {
     await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
       /tab-active/,
     );
+    const draftCurrentTable = page.locator("table", { hasText: "Value (A)" });
+    const draftRows = draftCurrentTable.locator("tbody tr");
+    await expect(draftRows).toHaveCount(2);
+
+    await page.getByLabel("Meter Reading (Remote) (A)").fill("2.050000");
+    await page.getByRole("button", { name: "Capture" }).click();
+
     await expect(modeBadge).toContainText("current_ch2");
     await expect(currentStat.getByText("Raw:")).not.toContainText("--");
+    await expect(draftRows).toHaveCount(3);
     await expect(
       page.getByText(/正在同步校准模式：等待设备切换到/i),
     ).toHaveCount(0);

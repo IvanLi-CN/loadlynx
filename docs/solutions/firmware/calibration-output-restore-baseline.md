@@ -11,6 +11,7 @@
 - **current calibration 入口必须同步 live output flag。** 一旦从正常模式切入 `current_ch1/current_ch2`，`ControlState.output_enabled` 就必须立刻对齐当前 calibration override 的有效输出状态；否则 UI 会把“正常模式下的 ON”误认为“校准模式下仍在输出”。
 - **进入 calibration 时要先捕获 restore baseline。** 这个 baseline 表示“离开 calibration 后正常 preset 应恢复到什么输出状态”，它和 calibration 期间的临时 ON/OFF 不是同一个概念。
 - **calibration 期间的开关只能改 override，不应覆盖 restore baseline。** 无论是 `/api/v1/control`、`/api/v1/cc`，还是实体 LOAD 开关，在 current calibration 内都应只改变 override 的 `output_enabled`，不能把“退出 calibration 时恢复什么”改写掉。
+- **calibration override 不能绕过 active preset 的保护线。** `SetMode` 期间看到的 effective preset 可以改成临时 CC target，但仍必须保留当前 active preset 的 `min_v_mv / max_i_ma_total / max_p_mw`；否则校准态会静默丢掉 UVLO/OCP/OPP。
 - **真正需要清空 restore baseline 的场景应是保护性关断。** 例如 UVLO、OCP/OPP、链路保护等强制 OFF，可以视为正常模式也不该自动恢复；用户在 calibration 内的普通开关则不属于这种场景。
 
 ## 推荐实现模式
