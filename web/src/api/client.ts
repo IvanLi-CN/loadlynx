@@ -506,6 +506,29 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     calibration,
   };
 
+  if (baseUrl.toLowerCase().includes("calibration-output-applied")) {
+    state.calibrationMode = "current_ch1";
+    state.cc = {
+      ...state.cc,
+      enable: true,
+      target_i_ma: 2_000,
+      effective_i_ma: 2_000,
+      i_total_ma: 1_900,
+      p_main_mw: 22_800,
+    };
+    state.status = {
+      ...state.status,
+      raw: {
+        ...state.status.raw,
+        enable: true,
+        target_value: 2_000,
+        i_local_ma: 1_710,
+        i_remote_ma: 190,
+        calc_p_mw: 22_800,
+      },
+    };
+  }
+
   mockDevices.set(baseUrl, state);
   return state;
 }

@@ -162,4 +162,67 @@ test.describe("Calibration UI", () => {
 
     await page.goto("/");
   });
+
+  test("restores the saved current tab without mode mismatch", async ({
+    page,
+  }) => {
+    await page.goto("/devices");
+    await page.getByRole("button", { name: "Add simulation device" }).click();
+
+    const deviceId = "mock-001";
+    const baseUrl = "mock://demo-1";
+
+    await page.addInitScript(
+      ({ seededDeviceId, seededBaseUrl }) => {
+        const key = `loadlynx:calibration-draft:v4:${seededDeviceId}:${encodeURIComponent(seededBaseUrl)}`;
+        for (const version of [2, 3, 4]) {
+          window.localStorage.removeItem(
+            `loadlynx:calibration-draft:v${version}:${seededDeviceId}:${encodeURIComponent(seededBaseUrl)}`,
+          );
+        }
+        window.localStorage.setItem(
+          key,
+          JSON.stringify({
+            version: 4,
+            saved_at: "2026-04-16T00:00:00.000Z",
+            device_id: seededDeviceId,
+            base_url: seededBaseUrl,
+            active_tab: "current_ch2",
+            draft_profile: {
+              v_local_points: [],
+              v_remote_points: [],
+              current_ch1_points: [],
+              current_ch2_points: [
+                [[5300, 685], 989600],
+                [[10680, 1375], 1984700],
+              ],
+            },
+          }),
+        );
+      },
+      { seededDeviceId: deviceId, seededBaseUrl: baseUrl },
+    );
+
+    await page.goto(`/${deviceId}/calibration`);
+    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
+      /tab-active/,
+    );
+
+    const modeBadge = page.locator(".badge", { hasText: "cal_mode:" });
+    await expect(modeBadge).toContainText("current_ch2");
+
+    const currentStat = page.locator(".stat", { hasText: "Active Current" });
+    await expect(currentStat.getByText("Raw:")).not.toContainText("--");
+
+    await page.reload();
+
+    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
+      /tab-active/,
+    );
+    await expect(modeBadge).toContainText("current_ch2");
+    await expect(currentStat.getByText("Raw:")).not.toContainText("--");
+    await expect(
+      page.getByText(/正在同步校准模式：等待设备切换到/i),
+    ).toHaveCount(0);
+  });
 });
