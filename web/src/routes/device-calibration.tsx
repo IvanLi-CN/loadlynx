@@ -781,6 +781,23 @@ function DeviceCalibrationPage({
     setStatus(statusFallbackQuery.data);
   }, [statusFallbackQuery.data]);
 
+  useEffect(() => {
+    if (
+      statusStreamPaused ||
+      statusStreamConnected ||
+      !statusFallbackQuery.isError ||
+      statusFallbackQuery.fetchStatus === "fetching"
+    ) {
+      return;
+    }
+    setStatus(null);
+  }, [
+    statusFallbackQuery.fetchStatus,
+    statusFallbackQuery.isError,
+    statusStreamConnected,
+    statusStreamPaused,
+  ]);
+
   const isOffline =
     status === null ||
     status.analog_state === "offline" ||

@@ -1196,12 +1196,12 @@ async fn encoder_task(
                 } else {
                     // Release: if we didn't fire long action, treat as short press.
                     if down_since_ms.is_some() && !long_action_fired {
+                        let cal_mode = { calibration.lock().await.cal_mode };
                         let mut guard = control.lock().await;
                         match guard.ui_view {
                             control::UiView::Main => {
                                 let prev = guard.output_enabled;
                                 if prev {
-                                    let cal_mode = { calibration.lock().await.cal_mode };
                                     guard.disable_output_for_mode(cal_mode);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
@@ -1218,22 +1218,19 @@ async fn encoder_task(
                                         "encoder short-press: LOAD enable blocked (reason={})",
                                         reason
                                     );
+                                } else if !guard.enable_output_for_mode(cal_mode) {
+                                    prompt_tone::enqueue_ui_fail();
+                                    info!(
+                                        "encoder short-press: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={})",
+                                        guard.active_preset_id
+                                    );
                                 } else {
-                                    let cal_mode = { calibration.lock().await.cal_mode };
-                                    if !guard.enable_output_for_mode(cal_mode) {
-                                        prompt_tone::enqueue_ui_fail();
-                                        info!(
-                                            "encoder short-press: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={})",
-                                            guard.active_preset_id
-                                        );
-                                    } else {
-                                        bump_control_rev();
-                                        prompt_tone::enqueue_load_on_ok();
-                                        info!(
-                                            "encoder short-press: LOAD OFF -> ON (preset_id={})",
-                                            guard.active_preset_id
-                                        );
-                                    }
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_load_on_ok();
+                                    info!(
+                                        "encoder short-press: LOAD OFF -> ON (preset_id={})",
+                                        guard.active_preset_id
+                                    );
                                 }
                             }
                             control::UiView::PresetPanel => {
@@ -1622,6 +1619,7 @@ async fn touch_spring_task(
 
                     #[cfg(not(feature = "audio_menu"))]
                     if !consume {
+                        let cal_mode = { calibration.lock().await.cal_mode };
                         let mut guard = control.lock().await;
                         let preset = guard.active_preset();
                         let setpoint_zero = match preset.mode {
@@ -1631,7 +1629,6 @@ async fn touch_spring_task(
                         };
 
                         if guard.output_enabled {
-                            let cal_mode = { calibration.lock().await.cal_mode };
                             guard.disable_output_for_mode(cal_mode);
                             bump_control_rev();
                             prompt_tone::enqueue_load_off_ok();
@@ -1655,24 +1652,21 @@ async fn touch_spring_task(
                             prompt_tone::enqueue_ui_fail();
                             record_enable_block(reason);
                             info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                        } else if !guard.enable_output_for_mode(cal_mode) {
+                            TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                            last_touch_block_ms = Some(now);
+                            prompt_tone::enqueue_ui_fail();
+                            info!(
+                                "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
                         } else {
-                            let cal_mode = { calibration.lock().await.cal_mode };
-                            if !guard.enable_output_for_mode(cal_mode) {
-                                TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                                last_touch_block_ms = Some(now);
-                                prompt_tone::enqueue_ui_fail();
-                                info!(
-                                    "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
-                                    guard.active_preset_id, preset.mode
-                                );
-                            } else {
-                                bump_control_rev();
-                                prompt_tone::enqueue_load_on_ok();
-                                info!(
-                                    "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
-                                    guard.active_preset_id, preset.mode
-                                );
-                            }
+                            bump_control_rev();
+                            prompt_tone::enqueue_load_on_ok();
+                            info!(
+                                "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
                         }
                     }
                 }
@@ -1711,6 +1705,7 @@ async fn touch_spring_task(
                         if !p.long_fired {
                             let view = { control.lock().await.ui_view };
                             if view != control::UiView::AudioMenu {
+                                let cal_mode = { calibration.lock().await.cal_mode };
                                 let mut guard = control.lock().await;
                                 let preset = guard.active_preset();
                                 let setpoint_zero = match preset.mode {
@@ -1720,7 +1715,6 @@ async fn touch_spring_task(
                                 };
 
                                 if guard.output_enabled {
-                                    let cal_mode = { calibration.lock().await.cal_mode };
                                     guard.disable_output_for_mode(cal_mode);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
@@ -1744,25 +1738,21 @@ async fn touch_spring_task(
                                     prompt_tone::enqueue_ui_fail();
                                     record_enable_block(reason);
                                     info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                                } else if !guard.enable_output_for_mode(cal_mode) {
+                                    TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                                    last_touch_block_ms = Some(now);
+                                    prompt_tone::enqueue_ui_fail();
+                                    info!(
+                                        "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                        guard.active_preset_id, preset.mode
+                                    );
                                 } else {
-                                    let cal_mode = { calibration.lock().await.cal_mode };
-                                    if !guard.enable_output_for_mode(cal_mode) {
-                                        TOUCH_SPRING_ENABLE_BLOCK_TOTAL
-                                            .fetch_add(1, Ordering::Relaxed);
-                                        last_touch_block_ms = Some(now);
-                                        prompt_tone::enqueue_ui_fail();
-                                        info!(
-                                            "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
-                                            guard.active_preset_id, preset.mode
-                                        );
-                                    } else {
-                                        bump_control_rev();
-                                        prompt_tone::enqueue_load_on_ok();
-                                        info!(
-                                            "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
-                                            guard.active_preset_id, preset.mode
-                                        );
-                                    }
+                                    bump_control_rev();
+                                    prompt_tone::enqueue_load_on_ok();
+                                    info!(
+                                        "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                                        guard.active_preset_id, preset.mode
+                                    );
                                 }
                             }
                         }
@@ -3346,9 +3336,9 @@ async fn touch_ui_task(
                                     last_tab_tap = None;
                                 }
                                 Hit::LoadToggle => {
+                                    let cal_mode = { calibration.lock().await.cal_mode };
                                     let mut guard = control.lock().await;
                                     if guard.output_enabled {
-                                        let cal_mode = { calibration.lock().await.cal_mode };
                                         guard.disable_output_for_mode(cal_mode);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_off_ok();
@@ -3358,17 +3348,12 @@ async fn touch_ui_task(
                                         prompt_tone::enqueue_ui_fail();
                                         record_enable_block(reason);
                                         info!("touch: LOAD enable blocked (reason={})", reason);
+                                    } else if !guard.enable_output_for_mode(cal_mode) {
+                                        prompt_tone::enqueue_ui_fail();
+                                        info!("touch: LOAD enable blocked (reason=SETPOINT_ZERO)");
                                     } else {
-                                        let cal_mode = { calibration.lock().await.cal_mode };
-                                        if !guard.enable_output_for_mode(cal_mode) {
-                                            prompt_tone::enqueue_ui_fail();
-                                            info!(
-                                                "touch: LOAD enable blocked (reason=SETPOINT_ZERO)"
-                                            );
-                                        } else {
-                                            bump_control_rev();
-                                            prompt_tone::enqueue_load_on_ok();
-                                        }
+                                        bump_control_rev();
+                                        prompt_tone::enqueue_load_on_ok();
                                     }
                                     last_tab_tap = None;
                                 }
