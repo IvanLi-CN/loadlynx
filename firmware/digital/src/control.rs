@@ -496,21 +496,65 @@ impl ControlState {
         self.set_live_output_enabled(effective_output_enabled);
     }
 
-    pub fn enable_output_for_mode(&mut self, cal_mode: CalKind) -> bool {
-        if calibration_mode_uses_cc_override(cal_mode) {
-            let target_i_ma = self
-                .calibration_cc_override
-                .map(|override_state| override_state.target_i_ma)
-                .unwrap_or(0);
-            if target_i_ma == 0 {
+    pub fn sync_live_output_for_mode(&mut self, cal_mode: CalKind) -> bool {
+        if !calibration_mode_uses_cc_override(cal_mode) {
+            return false;
+        }
+
+        let restore_output_enabled = self
+            .calibration_cc_restore_output_enabled
+            .or(Some(self.output_enabled));
+        let effective_output_enabled = self.effective_output_command(cal_mode).output_enabled;
+        let changed = self.calibration_cc_restore_output_enabled != restore_output_enabled
+            || self.output_enabled != effective_output_enabled;
+        if changed {
+            self.restore_calibration_output_state(
+                effective_output_enabled,
+                self.calibration_cc_override,
+                restore_output_enabled,
+            );
+        }
+        changed
+    }
+
+    pub fn set_calibration_output_enabled(&mut self, output_enabled: bool) -> bool {
+        self.calibration_cc_restore_output_enabled
+            .get_or_insert(self.output_enabled);
+
+        if let Some(mut override_state) = self.calibration_cc_override {
+            if output_enabled && override_state.target_i_ma == 0 {
                 return false;
             }
-            self.set_calibration_cc_override(target_i_ma, true);
+            override_state.output_enabled = output_enabled && override_state.target_i_ma != 0;
+            self.calibration_cc_override = Some(override_state);
+            self.set_live_output_enabled(override_state.output_enabled);
             return true;
+        }
+
+        if output_enabled {
+            return false;
+        }
+
+        self.set_live_output_enabled(false);
+        true
+    }
+
+    pub fn enable_output_for_mode(&mut self, cal_mode: CalKind) -> bool {
+        if calibration_mode_uses_cc_override(cal_mode) {
+            return self.set_calibration_output_enabled(true);
         }
 
         self.set_normal_output_enabled(true);
         true
+    }
+
+    pub fn disable_output_for_mode(&mut self, cal_mode: CalKind) {
+        if calibration_mode_uses_cc_override(cal_mode) {
+            let _ = self.set_calibration_output_enabled(false);
+            return;
+        }
+
+        self.force_output_off();
     }
 
     pub fn clear_calibration_cc_override(&mut self, restore_normal_output: bool) -> bool {
@@ -1294,5 +1338,56 @@ mod tests {
         assert!(!state.enable_output_for_mode(CalKind::CurrentCh2));
         assert!(!state.output_enabled);
         assert!(!crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn entering_current_calibration_syncs_live_output_and_keeps_restore_state() {
+        let mut state = ControlState::new(default_presets(), PdConfig::default(), false);
+        state.output_enabled = true;
+        crate::DESIRED_OUTPUT_ENABLED.store(true, Ordering::Relaxed);
+
+        assert!(state.sync_live_output_for_mode(CalKind::CurrentCh1));
+        assert!(!state.output_enabled);
+        assert!(!crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
+        assert_eq!(state.calibration_restore_output_enabled(), Some(true));
+        assert!(
+            !state
+                .effective_output_command(CalKind::CurrentCh1)
+                .output_enabled
+        );
+
+        assert!(!state.clear_calibration_cc_override(true));
+        assert!(state.output_enabled);
+        assert!(crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
+
+        crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn disabling_current_calibration_output_preserves_normal_restore_state() {
+        let mut state = ControlState::new(default_presets(), PdConfig::default(), false);
+        state.output_enabled = true;
+        crate::DESIRED_OUTPUT_ENABLED.store(true, Ordering::Relaxed);
+
+        assert!(state.sync_live_output_for_mode(CalKind::CurrentCh1));
+        state.set_calibration_cc_override(1_500, true);
+        state.disable_output_for_mode(CalKind::CurrentCh1);
+
+        assert!(!state.output_enabled);
+        assert!(!crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
+        assert_eq!(state.calibration_restore_output_enabled(), Some(true));
+        assert_eq!(
+            state.calibration_cc_override,
+            Some(CalibrationCcOverride {
+                output_enabled: false,
+                target_i_ma: 1_500,
+            })
+        );
+
+        assert!(state.clear_calibration_cc_override(true));
+        assert!(state.output_enabled);
+        assert!(crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
+
+        crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
     }
 }

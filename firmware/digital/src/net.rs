@@ -2044,33 +2044,16 @@ async fn handle_control_update(
     {
         let mut guard = control.lock().await;
         if control::calibration_mode_uses_cc_override(cal_mode) {
-            if parsed.output_enabled {
-                if let Some(override_state) = guard.calibration_cc_override {
-                    if override_state.target_i_ma == 0 {
-                        write_error_body(
-                            body_out,
-                            "INVALID_STATE",
-                            "calibration output target not set; use /api/v1/cc first",
-                            false,
-                            None,
-                        );
-                        return Err("409 Conflict");
-                    }
-                    guard.set_calibration_cc_override(override_state.target_i_ma, true);
-                } else {
-                    write_error_body(
-                        body_out,
-                        "INVALID_STATE",
-                        "calibration output target not set; use /api/v1/cc first",
-                        false,
-                        None,
-                    );
-                    return Err("409 Conflict");
-                }
-            } else {
-                guard.force_output_off();
+            if !guard.set_calibration_output_enabled(parsed.output_enabled) {
+                write_error_body(
+                    body_out,
+                    "INVALID_STATE",
+                    "calibration output target not set; use /api/v1/cc first",
+                    false,
+                    None,
+                );
+                return Err("409 Conflict");
             }
-            guard.set_calibration_restore_output_enabled(parsed.output_enabled);
         } else {
             guard.set_normal_output_enabled(parsed.output_enabled);
         }
@@ -2258,9 +2241,6 @@ async fn handle_cc_update(
         }
         {
             let mut guard = control.lock().await;
-            if !load_enabled {
-                guard.set_calibration_restore_output_enabled(false);
-            }
             guard.set_calibration_cc_override(setpoint_i_ma, load_enabled);
         }
         bump_control_rev();
@@ -4082,9 +4062,14 @@ async fn apply_calibration_mode(
     };
 
     let mode_changed = prev_kind != kind;
-    let mut override_cleared = false;
+    let mut state_changed = false;
     if mode_changed {
         let mut guard = control.lock().await;
+        let entering_current_calibration = !control::calibration_mode_uses_cc_override(prev_kind)
+            && control::calibration_mode_uses_cc_override(kind);
+        if entering_current_calibration {
+            state_changed |= guard.sync_live_output_for_mode(kind);
+        }
         let leaving_current_calibration = control::calibration_mode_uses_cc_override(prev_kind)
             && !control::calibration_mode_uses_cc_override(kind);
         if leaving_current_calibration
@@ -4093,10 +4078,10 @@ async fn apply_calibration_mode(
         {
             guard.set_calibration_restore_output_enabled(false);
         }
-        override_cleared =
+        state_changed |=
             guard.clear_calibration_cc_override(!control::calibration_mode_uses_cc_override(kind));
     }
-    if mode_changed || override_cleared {
+    if mode_changed || state_changed {
         bump_control_rev();
     }
 }

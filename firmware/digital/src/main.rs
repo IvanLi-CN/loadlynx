@@ -1201,7 +1201,8 @@ async fn encoder_task(
                             control::UiView::Main => {
                                 let prev = guard.output_enabled;
                                 if prev {
-                                    guard.force_output_off();
+                                    let cal_mode = { calibration.lock().await.cal_mode };
+                                    guard.disable_output_for_mode(cal_mode);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1630,7 +1631,8 @@ async fn touch_spring_task(
                         };
 
                         if guard.output_enabled {
-                            guard.force_output_off();
+                            let cal_mode = { calibration.lock().await.cal_mode };
+                            guard.disable_output_for_mode(cal_mode);
                             bump_control_rev();
                             prompt_tone::enqueue_load_off_ok();
                             info!(
@@ -1718,7 +1720,8 @@ async fn touch_spring_task(
                                 };
 
                                 if guard.output_enabled {
-                                    guard.force_output_off();
+                                    let cal_mode = { calibration.lock().await.cal_mode };
+                                    guard.disable_output_for_mode(cal_mode);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -3345,7 +3348,8 @@ async fn touch_ui_task(
                                 Hit::LoadToggle => {
                                     let mut guard = control.lock().await;
                                     if guard.output_enabled {
-                                        guard.force_output_off();
+                                        let cal_mode = { calibration.lock().await.cal_mode };
+                                        guard.disable_output_for_mode(cal_mode);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_off_ok();
                                     } else if let Some(reason) = current_load_enable_block_abbrev(
