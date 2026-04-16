@@ -1943,6 +1943,7 @@ fn parse_control_update_json(body: &str) -> Result<ControlUpdateRequest, &'stati
 async fn ensure_output_enable_allowed(
     body_out: &mut String,
     control: &'static ControlMutex,
+    cal_mode: CalKind,
 ) -> Result<(), &'static str> {
     // Match the on-device LOAD gating semantics:
     // - fault_flags / link down => block enable
@@ -1992,7 +1993,14 @@ async fn ensure_output_enable_allowed(
     // Pre-check UVLO inhibit (V_main <= min_v) and refuse enabling so we don't
     // trigger an analog-side UVLO latch when the system is already undervoltage
     // before the enable attempt.
-    let min_v_mv = { control.lock().await.active_preset().min_v_mv };
+    let min_v_mv = {
+        control
+            .lock()
+            .await
+            .effective_output_command(cal_mode)
+            .preset
+            .min_v_mv
+    };
     if min_v_mv > 0 && crate::LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
         let v_main_mv = crate::LAST_V_MAIN_MV.load(Ordering::Relaxed);
         if v_main_mv <= min_v_mv.max(0) {
@@ -2038,7 +2046,7 @@ async fn handle_control_update(
 
     // Safety: enabling output requires a healthy link + ready analog.
     if parsed.output_enabled && needs_live_enable {
-        ensure_output_enable_allowed(body_out, control).await?;
+        ensure_output_enable_allowed(body_out, control, cal_mode).await?;
     }
 
     {
@@ -2237,7 +2245,7 @@ async fn handle_cc_update(
         let setpoint_i_ma = parsed.target_i_ma.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
         let load_enabled = parsed.enable && setpoint_i_ma != 0;
         if load_enabled {
-            ensure_output_enable_allowed(body_out, control).await?;
+            ensure_output_enable_allowed(body_out, control, cal_mode).await?;
         }
         {
             let mut guard = control.lock().await;

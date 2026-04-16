@@ -1198,6 +1198,7 @@ async fn encoder_task(
                     if down_since_ms.is_some() && !long_action_fired {
                         let cal_mode = { calibration.lock().await.cal_mode };
                         let mut guard = control.lock().await;
+                        let effective_preset = guard.effective_output_command(cal_mode).preset;
                         match guard.ui_view {
                             control::UiView::Main => {
                                 let prev = guard.output_enabled;
@@ -1210,7 +1211,7 @@ async fn encoder_task(
                                         guard.active_preset_id
                                     );
                                 } else if let Some(reason) =
-                                    current_load_enable_block_abbrev(guard.active_preset().min_v_mv)
+                                    current_load_enable_block_abbrev(effective_preset.min_v_mv)
                                 {
                                     prompt_tone::enqueue_ui_fail();
                                     record_enable_block(reason);
@@ -1621,7 +1622,7 @@ async fn touch_spring_task(
                     if !consume {
                         let cal_mode = { calibration.lock().await.cal_mode };
                         let mut guard = control.lock().await;
-                        let preset = guard.active_preset();
+                        let preset = guard.effective_output_command(cal_mode).preset;
                         let setpoint_zero = match preset.mode {
                             LoadMode::Cp => preset.target_p_mw == 0,
                             LoadMode::Cv => preset.target_v_mv == 0,
@@ -1707,7 +1708,7 @@ async fn touch_spring_task(
                             if view != control::UiView::AudioMenu {
                                 let cal_mode = { calibration.lock().await.cal_mode };
                                 let mut guard = control.lock().await;
-                                let preset = guard.active_preset();
+                                let preset = guard.effective_output_command(cal_mode).preset;
                                 let setpoint_zero = match preset.mode {
                                     LoadMode::Cp => preset.target_p_mw == 0,
                                     LoadMode::Cv => preset.target_v_mv == 0,
@@ -3338,13 +3339,15 @@ async fn touch_ui_task(
                                 Hit::LoadToggle => {
                                     let cal_mode = { calibration.lock().await.cal_mode };
                                     let mut guard = control.lock().await;
+                                    let effective_preset =
+                                        guard.effective_output_command(cal_mode).preset;
                                     if guard.output_enabled {
                                         guard.disable_output_for_mode(cal_mode);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_off_ok();
-                                    } else if let Some(reason) = current_load_enable_block_abbrev(
-                                        guard.active_preset().min_v_mv,
-                                    ) {
+                                    } else if let Some(reason) =
+                                        current_load_enable_block_abbrev(effective_preset.min_v_mv)
+                                    {
                                         prompt_tone::enqueue_ui_fail();
                                         record_enable_block(reason);
                                         info!("touch: LOAD enable blocked (reason={})", reason);

@@ -114,6 +114,7 @@ type ParsedCalibrationDraft = ParsedCalibrationDraftV4;
 const CALIBRATION_DRAFT_STORAGE_VERSION = 4;
 const CALIBRATION_CURRENT_OPTIONS_STORAGE_VERSION = 2;
 const CALIBRATION_STATUS_FALLBACK_REFETCH_MS = 500;
+const CALIBRATION_STATUS_STALE_TIMEOUT_MS = 2_500;
 
 const calibrationStatusRetryDelay = () => 200 + Math.random() * 300;
 
@@ -642,6 +643,7 @@ function DeviceCalibrationPage({
   const [statusStreamPaused, setStatusStreamPaused] = useState(false);
   const [statusStreamConnected, setStatusStreamConnected] = useState(false);
   const statusRef = useRef<FastStatusView | null>(status);
+  const lastStatusAtRef = useRef<number | null>(null);
   const statusWaitersRef = useRef<StatusWaiter[]>([]);
 
   const statusPauseDepthRef = useRef(0);
@@ -682,6 +684,7 @@ function DeviceCalibrationPage({
     if (!status) {
       return;
     }
+    lastStatusAtRef.current = Date.now();
     const remaining: StatusWaiter[] = [];
     for (const waiter of statusWaitersRef.current) {
       if (waiter.predicate(status)) {
@@ -729,6 +732,7 @@ function DeviceCalibrationPage({
   useEffect(() => {
     // Reset state while switching devices/URLs.
     void baseUrl;
+    lastStatusAtRef.current = null;
     setStatus(null);
     setStatusStreamConnected(false);
     rejectStatusWaiters(new Error("Status stream reset"));
@@ -790,7 +794,36 @@ function DeviceCalibrationPage({
     ) {
       return;
     }
-    setStatus(null);
+
+    const lastStatusAt = lastStatusAtRef.current;
+    if (lastStatusAt === null) {
+      setStatus(null);
+      return;
+    }
+
+    const remainingMs =
+      CALIBRATION_STATUS_STALE_TIMEOUT_MS - (Date.now() - lastStatusAt);
+    if (remainingMs <= 0) {
+      lastStatusAtRef.current = null;
+      setStatus(null);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (
+        statusPauseDepthRef.current === 0 &&
+        !statusStreamConnected &&
+        statusFallbackQuery.isError &&
+        statusFallbackQuery.fetchStatus !== "fetching"
+      ) {
+        lastStatusAtRef.current = null;
+        setStatus(null);
+      }
+    }, remainingMs);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
   }, [
     statusFallbackQuery.fetchStatus,
     statusFallbackQuery.isError,
