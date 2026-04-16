@@ -78,6 +78,7 @@
 - `Set Output` / `Capture`：
   - 在执行前必须通过同一 mode 协调入口确认设备已经进入当前页签对应的 calibration mode。
   - 若设备 mode 未对齐，则提示 mismatch，不直接消费错误 mode 的 RAW 数据。
+  - 当主人在 `current_ch1` / `current_ch2` 之间切换时，当前 calibration 的临时 CC output target 与输出开关状态必须保留，直到真正离开 current calibration 家族。
 
 ### Edge cases / errors
 
@@ -96,6 +97,9 @@
 - Given 主人切到某个 calibration tab，但设备仍处于旧 mode
   When 对齐尚未完成
   Then 页面明确显示“正在同步校准模式”，并把 RAW / DAC 保持为占位值，而不是复用旧 mode 的数据。
+- Given 主人在 `current_ch1` 已通过 `Set Output` 设定了临时电流目标
+  When 主人切到 `current_ch2` 再切回，且仍停留在 current calibration 家族内
+  Then 临时 CC override 仍然保留，不会因 current tab 切换被静默清空。
 - Given Storybook 的 `RestoresStoredCurrentTab` 场景
   When story 运行 play 覆盖
   Then 能稳定看到保存的 current 页签与对齐后的 `cal_mode`。

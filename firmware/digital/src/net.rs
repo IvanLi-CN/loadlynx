@@ -4061,32 +4061,27 @@ pub(crate) async fn apply_calibration_mode(
     calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
 ) {
-    let prev_kind = {
-        let mut guard = calibration.lock().await;
-        let prev_kind = guard.cal_mode;
-        guard.cal_mode = kind;
-        prev_kind
-    };
-
+    let prev_kind = { calibration.lock().await.cal_mode };
     let mode_changed = prev_kind != kind;
-    let mut state_changed = false;
-    if mode_changed {
+    let state_changed = if mode_changed {
         let mut guard = control.lock().await;
-        let entering_current_calibration = !control::calibration_mode_uses_cc_override(prev_kind)
-            && control::calibration_mode_uses_cc_override(kind);
-        if entering_current_calibration {
-            state_changed |= guard.sync_live_output_for_mode(kind);
-        }
         let leaving_current_calibration = control::calibration_mode_uses_cc_override(prev_kind)
             && !control::calibration_mode_uses_cc_override(kind);
-        if leaving_current_calibration
-            && guard.calibration_restore_output_enabled().unwrap_or(false)
-            && !output_enable_allowed_for_restore(guard.active_preset().min_v_mv)
-        {
-            guard.set_calibration_restore_output_enabled(false);
-        }
-        state_changed |=
-            guard.clear_calibration_cc_override(!control::calibration_mode_uses_cc_override(kind));
+        let allow_restore_output = !leaving_current_calibration
+            || output_enable_allowed_for_restore(guard.active_preset().min_v_mv);
+        guard.apply_calibration_mode_transition(prev_kind, kind, allow_restore_output)
+    } else {
+        false
+    };
+
+    if mode_changed {
+        // setmode_tx_task() snapshots calibration mode and ControlState under
+        // separate locks. Apply the control-side restore/override transition
+        // before publishing the new cal_mode so any transient mixed snapshot
+        // remains conservative (old current-calibration mode + restored/off
+        // control state), instead of briefly emitting the active preset with
+        // calibration-time output_enabled=true.
+        calibration.lock().await.cal_mode = kind;
     }
     if mode_changed || state_changed {
         bump_control_rev();
