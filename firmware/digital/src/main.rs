@@ -4997,6 +4997,7 @@ async fn display_render_task(
     let mut last_panel_visible: bool = false;
     let mut last_preview_active: bool = false;
     let mut last_preview_mode: LoadMode = LoadMode::Cc;
+    let mut last_calibration_mode: ui::CalibrationUiMode = ui::CalibrationUiMode::Off;
     let mut last_ui_view: control::UiView = control::UiView::Main;
     let mut last_panel_vm: Option<ui::preset_panel::PresetPanelVm> = None;
     let mut last_pd_settings_vm: Option<ui::pd_settings::PdSettingsVm> = None;
@@ -5150,6 +5151,9 @@ async fn display_render_task(
         if preview_active && last_preview_active && overlay_mode != last_preview_mode {
             force_full_render = true;
         }
+        if calibration_mode != last_calibration_mode {
+            force_full_render = true;
+        }
 
         let (snapshot, mut mask, pd_status_for_panel, touch_seq) = {
             let mut guard = telemetry.lock().await;
@@ -5245,6 +5249,10 @@ async fn display_render_task(
             let (snapshot, mask, touch_seq) = guard.diff_for_render();
             (snapshot, mask, pd_status, touch_seq)
         };
+
+        if calibration_mode != ui::CalibrationUiMode::Off && mask.control_row {
+            force_full_render = true;
+        }
 
         let touch_marker_dirty = ui::touch_marker_overlay_enabled() && mask.touch_marker;
         if !ui::touch_marker_overlay_enabled() {
@@ -5478,6 +5486,7 @@ async fn display_render_task(
         last_panel_visible = panel_visible;
         last_preview_active = preview_active;
         last_preview_mode = overlay_mode;
+        last_calibration_mode = calibration_mode;
         last_ui_view = ui_view;
         last_panel_vm = panel_vm;
         last_pd_settings_vm = pd_settings_vm;
