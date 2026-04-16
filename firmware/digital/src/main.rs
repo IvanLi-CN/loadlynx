@@ -338,6 +338,7 @@ use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
 pub struct CalibrationState {
     pub profile: ActiveProfile,
     pub cal_mode: CalKind,
+    pub pending_cal_mode: Option<CalKind>,
 }
 
 impl CalibrationState {
@@ -345,6 +346,7 @@ impl CalibrationState {
         Self {
             profile,
             cal_mode: CalKind::Off,
+            pending_cal_mode: None,
         }
     }
 }
@@ -814,6 +816,7 @@ async fn encoder_task(
     counter: pcnt::unit::Counter<'static, 0>,
     button: Input<'static>,
     control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
 ) {
     info!(
@@ -1195,13 +1198,14 @@ async fn encoder_task(
                 } else {
                     // Release: if we didn't fire long action, treat as short press.
                     if down_since_ms.is_some() && !long_action_fired {
+                        let cal_mode = { calibration.lock().await.cal_mode };
                         let mut guard = control.lock().await;
+                        let effective_preset = guard.effective_output_command(cal_mode).preset;
                         match guard.ui_view {
                             control::UiView::Main => {
                                 let prev = guard.output_enabled;
                                 if prev {
-                                    guard.output_enabled = false;
-                                    store_desired_output_enabled(false);
+                                    guard.disable_output_for_mode(cal_mode);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1209,7 +1213,7 @@ async fn encoder_task(
                                         guard.active_preset_id
                                     );
                                 } else if let Some(reason) =
-                                    current_load_enable_block_abbrev(guard.active_preset().min_v_mv)
+                                    current_load_enable_block_abbrev(effective_preset.min_v_mv)
                                 {
                                     prompt_tone::enqueue_ui_fail();
                                     record_enable_block(reason);
@@ -1217,9 +1221,13 @@ async fn encoder_task(
                                         "encoder short-press: LOAD enable blocked (reason={})",
                                         reason
                                     );
+                                } else if !guard.enable_output_for_mode(cal_mode) {
+                                    prompt_tone::enqueue_ui_fail();
+                                    info!(
+                                        "encoder short-press: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={})",
+                                        guard.active_preset_id
+                                    );
                                 } else {
-                                    guard.output_enabled = true;
-                                    store_desired_output_enabled(true);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_on_ok();
                                     info!(
@@ -1299,6 +1307,7 @@ async fn encoder_task(
 async fn touch_spring_task(
     _touch_pin: esp_hal::peripherals::GPIO14<'static>,
     control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     rgb_r: &'static ledc_channel::Channel<'static, LowSpeed>,
     rgb_g: &'static ledc_channel::Channel<'static, LowSpeed>,
     rgb_b: &'static ledc_channel::Channel<'static, LowSpeed>,
@@ -1613,8 +1622,9 @@ async fn touch_spring_task(
 
                     #[cfg(not(feature = "audio_menu"))]
                     if !consume {
+                        let cal_mode = { calibration.lock().await.cal_mode };
                         let mut guard = control.lock().await;
-                        let preset = guard.active_preset();
+                        let preset = guard.effective_output_command(cal_mode).preset;
                         let setpoint_zero = match preset.mode {
                             LoadMode::Cp => preset.target_p_mw == 0,
                             LoadMode::Cv => preset.target_v_mv == 0,
@@ -1622,8 +1632,7 @@ async fn touch_spring_task(
                         };
 
                         if guard.output_enabled {
-                            guard.output_enabled = false;
-                            store_desired_output_enabled(false);
+                            guard.disable_output_for_mode(cal_mode);
                             bump_control_rev();
                             prompt_tone::enqueue_load_off_ok();
                             info!(
@@ -1646,9 +1655,15 @@ async fn touch_spring_task(
                             prompt_tone::enqueue_ui_fail();
                             record_enable_block(reason);
                             info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                        } else if !guard.enable_output_for_mode(cal_mode) {
+                            TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                            last_touch_block_ms = Some(now);
+                            prompt_tone::enqueue_ui_fail();
+                            info!(
+                                "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                guard.active_preset_id, preset.mode
+                            );
                         } else {
-                            guard.output_enabled = true;
-                            store_desired_output_enabled(true);
                             bump_control_rev();
                             prompt_tone::enqueue_load_on_ok();
                             info!(
@@ -1693,8 +1708,9 @@ async fn touch_spring_task(
                         if !p.long_fired {
                             let view = { control.lock().await.ui_view };
                             if view != control::UiView::AudioMenu {
+                                let cal_mode = { calibration.lock().await.cal_mode };
                                 let mut guard = control.lock().await;
-                                let preset = guard.active_preset();
+                                let preset = guard.effective_output_command(cal_mode).preset;
                                 let setpoint_zero = match preset.mode {
                                     LoadMode::Cp => preset.target_p_mw == 0,
                                     LoadMode::Cv => preset.target_v_mv == 0,
@@ -1702,8 +1718,7 @@ async fn touch_spring_task(
                                 };
 
                                 if guard.output_enabled {
-                                    guard.output_enabled = false;
-                                    store_desired_output_enabled(false);
+                                    guard.disable_output_for_mode(cal_mode);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_off_ok();
                                     info!(
@@ -1726,9 +1741,15 @@ async fn touch_spring_task(
                                     prompt_tone::enqueue_ui_fail();
                                     record_enable_block(reason);
                                     info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                                } else if !guard.enable_output_for_mode(cal_mode) {
+                                    TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                                    last_touch_block_ms = Some(now);
+                                    prompt_tone::enqueue_ui_fail();
+                                    info!(
+                                        "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                        guard.active_preset_id, preset.mode
+                                    );
                                 } else {
-                                    guard.output_enabled = true;
-                                    store_desired_output_enabled(true);
                                     bump_control_rev();
                                     prompt_tone::enqueue_load_on_ok();
                                     info!(
@@ -1886,6 +1907,7 @@ async fn touch_spring_task(
 #[embassy_executor::task]
 async fn touch_ui_task(
     control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
     eeprom: &'static EepromMutex,
 ) {
@@ -3317,21 +3339,24 @@ async fn touch_ui_task(
                                     last_tab_tap = None;
                                 }
                                 Hit::LoadToggle => {
+                                    let cal_mode = { calibration.lock().await.cal_mode };
                                     let mut guard = control.lock().await;
+                                    let effective_preset =
+                                        guard.effective_output_command(cal_mode).preset;
                                     if guard.output_enabled {
-                                        guard.output_enabled = false;
-                                        store_desired_output_enabled(false);
+                                        guard.disable_output_for_mode(cal_mode);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_off_ok();
-                                    } else if let Some(reason) = current_load_enable_block_abbrev(
-                                        guard.active_preset().min_v_mv,
-                                    ) {
+                                    } else if let Some(reason) =
+                                        current_load_enable_block_abbrev(effective_preset.min_v_mv)
+                                    {
                                         prompt_tone::enqueue_ui_fail();
                                         record_enable_block(reason);
                                         info!("touch: LOAD enable blocked (reason={})", reason);
+                                    } else if !guard.enable_output_for_mode(cal_mode) {
+                                        prompt_tone::enqueue_ui_fail();
+                                        info!("touch: LOAD enable blocked (reason=SETPOINT_ZERO)");
                                     } else {
-                                        guard.output_enabled = true;
-                                        store_desired_output_enabled(true);
                                         bump_control_rev();
                                         prompt_tone::enqueue_load_on_ok();
                                     }
@@ -4528,7 +4553,8 @@ impl TelemetryModel {
                 mask.channel_currents = true;
             }
 
-            if prev.active_preset_id != current.active_preset_id
+            if prev.calibration_mode != current.calibration_mode
+                || prev.active_preset_id != current.active_preset_id
                 || prev.active_mode != current.active_mode
                 || prev.control_target_text != current.control_target_text
                 || prev.adjust_digit != current.adjust_digit
@@ -4744,7 +4770,8 @@ async fn wifi_ui_task(state: &'static net::WifiStateMutex, telemetry: &'static T
 }
 
 async fn apply_fast_status(
-    _control: &'static ControlMutex,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
     status: &FastStatus,
 ) {
@@ -4799,6 +4826,24 @@ async fn apply_fast_status(
         AnalogState::CalMissing
     };
     ANALOG_STATE.store(state as u8, Ordering::Relaxed);
+
+    let observed_cal_mode = status.cal_kind.map(CalKind::from).unwrap_or(CalKind::Off);
+    let reconcile_cal_mode = {
+        let mut guard = calibration.lock().await;
+        if guard.pending_cal_mode == Some(observed_cal_mode) {
+            if guard.cal_mode == observed_cal_mode {
+                guard.pending_cal_mode = None;
+                None
+            } else {
+                Some(observed_cal_mode)
+            }
+        } else {
+            None
+        }
+    };
+    if let Some(kind) = reconcile_cal_mode {
+        net::apply_calibration_mode(kind, calibration, control).await;
+    }
 
     let mut guard = telemetry.lock().await;
     guard.update_from_status(status);
@@ -4988,6 +5033,7 @@ where
 async fn display_render_task(
     pipeline: &'static DisplayPipeline,
     telemetry: &'static TelemetryMutex,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
 ) {
     info!("Display render task starting");
@@ -4999,6 +5045,7 @@ async fn display_render_task(
     let mut last_panel_visible: bool = false;
     let mut last_preview_active: bool = false;
     let mut last_preview_mode: LoadMode = LoadMode::Cc;
+    let mut last_calibration_mode: ui::CalibrationUiMode = ui::CalibrationUiMode::Off;
     let mut last_ui_view: control::UiView = control::UiView::Main;
     let mut last_panel_vm: Option<ui::preset_panel::PresetPanelVm> = None;
     let mut last_pd_settings_vm: Option<ui::pd_settings::PdSettingsVm> = None;
@@ -5045,8 +5092,10 @@ async fn display_render_task(
         }
 
         let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
+        let cal_mode = { calibration.lock().await.cal_mode };
         let (
             overlay_preset_id,
+            calibration_mode,
             output_enabled,
             overlay_mode,
             active_target_milli,
@@ -5080,16 +5129,16 @@ async fn display_render_task(
                 LoadMode::Cp => LoadMode::Cp,
                 LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
             };
-            let active_preset = guard.active_preset();
-            let active_mode = match active_preset.mode {
+            let effective = guard.effective_output_command(cal_mode);
+            let active_mode = match effective.preset.mode {
                 LoadMode::Cv => LoadMode::Cv,
                 LoadMode::Cp => LoadMode::Cp,
                 LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
             };
             let (active_target_milli, active_target_unit) = match active_mode {
-                LoadMode::Cv => (active_preset.target_v_mv, 'V'),
-                LoadMode::Cp => (active_preset.target_p_mw as i32, 'W'),
-                LoadMode::Cc | LoadMode::Reserved(_) => (active_preset.target_i_ma, 'A'),
+                LoadMode::Cv => (effective.preset.target_v_mv, 'V'),
+                LoadMode::Cp => (effective.preset.target_p_mw as i32, 'W'),
+                LoadMode::Cc | LoadMode::Reserved(_) => (effective.preset.target_i_ma, 'A'),
             };
             let preview_panel = if preview_active {
                 use ui::preset_panel::{format_av_3dp, format_power_2dp};
@@ -5109,7 +5158,8 @@ async fn display_render_task(
             };
             (
                 overlay_preset_id,
-                guard.output_enabled,
+                ui::CalibrationUiMode::from_cal_kind(cal_mode),
+                effective.output_enabled,
                 overlay_mode,
                 active_target_milli,
                 active_target_unit,
@@ -5147,6 +5197,9 @@ async fn display_render_task(
             force_full_render = true;
         }
         if preview_active && last_preview_active && overlay_mode != last_preview_mode {
+            force_full_render = true;
+        }
+        if calibration_mode != last_calibration_mode {
             force_full_render = true;
         }
 
@@ -5214,6 +5267,7 @@ async fn display_render_task(
                 );
             }
             guard.snapshot.set_control_overlay(
+                calibration_mode,
                 overlay_preset_id,
                 output_enabled,
                 overlay_mode,
@@ -5243,6 +5297,10 @@ async fn display_render_task(
             let (snapshot, mask, touch_seq) = guard.diff_for_render();
             (snapshot, mask, pd_status, touch_seq)
         };
+
+        if calibration_mode != ui::CalibrationUiMode::Off && mask.control_row {
+            force_full_render = true;
+        }
 
         let touch_marker_dirty = ui::touch_marker_overlay_enabled() && mask.touch_marker;
         if !ui::touch_marker_overlay_enabled() {
@@ -5476,6 +5534,7 @@ async fn display_render_task(
         last_panel_visible = panel_visible;
         last_preview_active = preview_active;
         last_preview_mode = overlay_mode;
+        last_calibration_mode = calibration_mode;
         last_ui_view = ui_view;
         last_panel_vm = panel_vm;
         last_pd_settings_vm = pd_settings_vm;
@@ -5729,6 +5788,7 @@ fn log_framebuffer_samples(label: &'static str, framebuffer: &[u8]) {
 #[embassy_executor::task]
 async fn uart_link_task(
     uart: &'static mut Uart<'static, Async>,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
@@ -5750,7 +5810,7 @@ async fn uart_link_task(
     loop {
         match AsyncRead::read(uart, &mut chunk).await {
             Ok(n) if n > 0 => {
-                feed_decoder(&chunk[..n], &mut decoder, control, telemetry).await;
+                feed_decoder(&chunk[..n], &mut decoder, calibration, control, telemetry).await;
             }
             Ok(_) => {
                 continue;
@@ -5771,6 +5831,7 @@ async fn uart_link_task(
 async fn uart_link_task_dma(
     mut uhci_rx: uhci::UhciRx<'static, Async>,
     mut dma_rx: DmaRxBuf,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
@@ -5809,7 +5870,7 @@ async fn uart_link_task_dma(
                 // When chunk_limit < dma buffer len, received bytes may wrap across descriptors.
                 // Always consume via the provided iterator to preserve ordering.
                 for chunk in buf_back.received_data() {
-                    feed_decoder(chunk, decoder, control, telemetry).await;
+                    feed_decoder(chunk, decoder, calibration, control, telemetry).await;
                 }
                 dma_rx = buf_back;
             }
@@ -5829,6 +5890,7 @@ async fn uart_link_task_dma(
 async fn feed_decoder(
     bytes: &[u8],
     decoder: &mut SlipDecoder<FAST_STATUS_SLIP_CAPACITY>,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
@@ -5893,7 +5955,7 @@ async fn feed_decoder(
                         MSG_FAST_STATUS => match decode_fast_status_frame(&frame) {
                             Ok((_hdr, status)) => {
                                 record_link_activity();
-                                apply_fast_status(control, telemetry, &status).await;
+                                apply_fast_status(control, calibration, telemetry, &status).await;
                                 let total =
                                     FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
                                 if total % 32 == 0 {
@@ -5980,6 +6042,8 @@ async fn feed_decoder(
                                 if hdr.flags & FLAG_IS_ACK != 0 {
                                     let total =
                                         CAL_MODE_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+                                    net::apply_calibration_mode(mode.kind, calibration, control)
+                                        .await;
                                     info!(
                                         "cal_mode ACK received: seq={} kind={:?} (ack_total={})",
                                         hdr.seq, mode.kind, total
@@ -6603,6 +6667,7 @@ async fn main(spawner: Spawner) {
                 encoder_counter,
                 encoder_button,
                 control,
+                calibration,
                 telemetry,
             ))
             .expect("encoder_task spawn");
@@ -6620,6 +6685,7 @@ async fn main(spawner: Spawner) {
         .spawn(touch_spring_task(
             peripherals.GPIO14,
             control,
+            calibration,
             rgb_r_channel,
             rgb_g_channel,
             rgb_b_channel,
@@ -6627,7 +6693,12 @@ async fn main(spawner: Spawner) {
         .expect("touch_spring_task spawn");
     info!("spawning display render task");
     spawner
-        .spawn(display_render_task(pipeline, telemetry, control))
+        .spawn(display_render_task(
+            pipeline,
+            telemetry,
+            calibration,
+            control,
+        ))
         .expect("display_render_task spawn");
     info!("spawning display present task");
     spawner
@@ -6644,7 +6715,7 @@ async fn main(spawner: Spawner) {
         .expect("touch_task spawn");
     info!("spawning touch-ui task");
     spawner
-        .spawn(touch_ui_task(control, telemetry, eeprom))
+        .spawn(touch_ui_task(control, calibration, telemetry, eeprom))
         .expect("touch_ui_task spawn");
     info!("spawning prompt tone task");
     audio_spawner
@@ -6671,13 +6742,19 @@ async fn main(spawner: Spawner) {
             let dma_rx = uhci_dma_buf_opt.take().expect("uhci dma buf missing");
             info!("spawning uart link task (UHCI DMA)");
             spawner
-                .spawn(uart_link_task_dma(uhci_rx, dma_rx, control, telemetry))
+                .spawn(uart_link_task_dma(
+                    uhci_rx,
+                    dma_rx,
+                    calibration,
+                    control,
+                    telemetry,
+                ))
                 .expect("uart_link_task_dma spawn");
         } else {
             let uart1 = uart1.expect("uart1 missing");
             info!("spawning uart link task (async no-DMA)");
             spawner
-                .spawn(uart_link_task(uart1, control, telemetry))
+                .spawn(uart_link_task(uart1, calibration, control, telemetry))
                 .expect("uart_link_task spawn");
         }
     } else {
@@ -6871,8 +6948,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
             let mut guard = control.lock().await;
             if guard.output_enabled {
                 if reason_appeared {
-                    guard.output_enabled = false;
-                    store_desired_output_enabled(false);
+                    guard.force_output_off();
                     bump_control_rev();
                     if let Some(r) = reason {
                         info!("LOAD forced OFF (reason={})", r);
@@ -6922,8 +6998,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                     if ocp_over_streak >= TRIP_STREAK_TICKS {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
-                        guard.output_enabled = false;
-                        store_desired_output_enabled(false);
+                        guard.force_output_off();
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Ocp);
                         info!(
@@ -6933,8 +7008,7 @@ async fn load_guard_task(control: &'static ControlMutex) {
                     } else if opp_over_streak >= TRIP_STREAK_TICKS {
                         ocp_over_streak = 0;
                         opp_over_streak = 0;
-                        guard.output_enabled = false;
-                        store_desired_output_enabled(false);
+                        guard.force_output_off();
                         bump_control_rev();
                         prompt_tone::latch_trip_alarm(prompt_tone::TripReason::Opp);
                         info!(
@@ -7856,12 +7930,14 @@ async fn setmode_tx_task(
             prev_pd_link_up = false;
         }
 
+        let cal_mode = { calibration.lock().await.cal_mode };
         let (rev_now, desired_cmd, mut pd_cfg, allow_extended_voltage) = {
             let guard = control.lock().await;
-            let p = guard.active_preset();
+            let effective = guard.effective_output_command(cal_mode);
+            let p = effective.preset;
             let cmd = SetMode {
-                preset_id: guard.active_preset_id,
-                output_enabled: guard.output_enabled,
+                preset_id: p.preset_id,
+                output_enabled: effective.output_enabled,
                 mode: match p.mode {
                     LoadMode::Cc => LoadMode::Cc,
                     LoadMode::Cv => LoadMode::Cv,

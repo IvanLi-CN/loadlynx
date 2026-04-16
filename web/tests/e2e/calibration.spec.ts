@@ -61,6 +61,9 @@ test.describe("Calibration UI", () => {
     // Wait for raw current to appear.
     const currentStat = page.locator(".stat", { hasText: "Active Current" });
     await expect(currentStat.getByText("Raw:")).not.toContainText("--");
+    await expect(currentStat.locator(".stat-value")).toContainText("0.8550 A");
+    const dacStat = page.locator(".stat", { hasText: "DAC Code" });
+    await expect(dacStat.locator(".stat-value")).toContainText("819");
 
     // Advanced: subtract baseline current (e.g., adapters/fixtures).
     await page.locator("summary", { hasText: "高级选项" }).click();
@@ -116,6 +119,7 @@ test.describe("Calibration UI", () => {
     await page.getByRole("button", { name: "2A" }).click();
     await page.getByRole("button", { name: "Set Output" }).click();
     await expect(currentStat.locator(".stat-value")).toContainText("1.7100 A");
+    await expect(dacStat.locator(".stat-value")).toContainText("1638");
     await page.getByRole("button", { name: "Capture" }).click();
     expect(await draftRowsMA.count()).toBe(2);
 
@@ -157,5 +161,106 @@ test.describe("Calibration UI", () => {
     ).toBeVisible();
 
     await page.goto("/");
+  });
+
+  test("restores the saved current tab without mode mismatch", async ({
+    page,
+  }) => {
+    await page.goto("/devices");
+    await page.getByRole("button", { name: "Add simulation device" }).click();
+
+    const deviceId = "mock-001";
+    const baseUrl = "mock://demo-1";
+
+    await page.addInitScript(
+      ({ seededDeviceId, seededBaseUrl }) => {
+        const key = `loadlynx:calibration-draft:v4:${seededDeviceId}:${encodeURIComponent(seededBaseUrl)}`;
+        for (const version of [2, 3, 4]) {
+          window.localStorage.removeItem(
+            `loadlynx:calibration-draft:v${version}:${seededDeviceId}:${encodeURIComponent(seededBaseUrl)}`,
+          );
+        }
+        window.localStorage.setItem(
+          key,
+          JSON.stringify({
+            version: 4,
+            saved_at: "2026-04-16T00:00:00.000Z",
+            device_id: seededDeviceId,
+            base_url: seededBaseUrl,
+            active_tab: "current_ch2",
+            draft_profile: {
+              v_local_points: [],
+              v_remote_points: [],
+              current_ch1_points: [],
+              current_ch2_points: [
+                [[5300, 685], 989600],
+                [[10680, 1375], 1984700],
+              ],
+            },
+          }),
+        );
+      },
+      { seededDeviceId: deviceId, seededBaseUrl: baseUrl },
+    );
+
+    await page.goto(`/${deviceId}/calibration`);
+    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
+      /tab-active/,
+    );
+
+    const modeBadge = page.locator(".badge", { hasText: "cal_mode:" });
+    await expect(modeBadge).toContainText("current_ch2");
+
+    const currentStat = page.locator(".stat", { hasText: "Active Current" });
+    await expect(currentStat.getByText("Raw:")).not.toContainText("--");
+
+    await page.reload();
+
+    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
+      /tab-active/,
+    );
+    const draftCurrentTable = page.locator("table", { hasText: "Value (A)" });
+    const draftRows = draftCurrentTable.locator("tbody tr");
+    await expect(draftRows).toHaveCount(2);
+
+    await page.getByLabel("Meter Reading (Remote) (A)").fill("2.050000");
+    await page.getByRole("button", { name: "Capture" }).click();
+
+    await expect(modeBadge).toContainText("current_ch2");
+    await expect(currentStat.getByText("Raw:")).not.toContainText("--");
+    await expect(draftRows).toHaveCount(3);
+    await expect(
+      page.getByText(/正在同步校准模式：等待设备切换到/i),
+    ).toHaveCount(0);
+  });
+
+  test("leaving calibration tears down calibration mode", async ({ page }) => {
+    await page.goto("/devices");
+    await page.getByRole("button", { name: "Add simulation device" }).click();
+
+    const deviceId = "mock-001";
+    const baseUrl = "mock://demo-1";
+
+    await page.goto(`/${deviceId}/calibration`);
+    await page.getByRole("tab", { name: "电流通道1" }).click();
+    await page.getByRole("button", { name: "1A" }).click();
+    await page.getByRole("button", { name: "Set Output" }).click();
+
+    const modeBadge = page.locator(".badge", { hasText: "cal_mode:" });
+    await expect(modeBadge).toContainText("current_ch1");
+
+    await page.goto("/devices");
+
+    await expect
+      .poll(
+        () =>
+          page.evaluate(async (targetBaseUrl) => {
+            const { getStatus } = await import("/src/api/client.ts");
+            const status = await getStatus(targetBaseUrl);
+            return status.raw.cal_kind ?? null;
+          }, baseUrl),
+        { timeout: 5_000 },
+      )
+      .toBe(null);
   });
 });

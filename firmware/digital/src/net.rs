@@ -871,7 +871,7 @@ async fn handle_http_connection(
             }
         }
         ("POST", "/api/v1/calibration/mode") => {
-            match handle_calibration_mode(body_str, &mut body, calibration).await {
+            match parse_calibration_mode_request(body_str, &mut body) {
                 Ok(kind) => {
                     if let Err(code) = enqueue_cal_uart(CalUartCommand::SetMode(kind)) {
                         write_error_body(&mut body, "UNAVAILABLE", code, true, None);
@@ -884,6 +884,9 @@ async fn handle_http_connection(
                         )
                         .await?;
                     } else {
+                        calibration.lock().await.pending_cal_mode = Some(kind);
+                        body.clear();
+                        body.push_str(r#"{"ok":true}"#);
                         write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                     }
                 }
@@ -909,7 +912,7 @@ async fn handle_http_connection(
             }
         }
         ("POST", "/api/v1/presets/apply") => {
-            match handle_presets_apply(body_str, &mut body, control, telemetry).await {
+            match handle_presets_apply(body_str, &mut body, control, calibration, telemetry).await {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
@@ -919,7 +922,7 @@ async fn handle_http_connection(
             }
         }
         ("GET", "/api/v1/control") => {
-            match render_control_view_json(&mut body, control, telemetry).await {
+            match render_control_view_json(&mut body, control, calibration, telemetry).await {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
@@ -929,7 +932,8 @@ async fn handle_http_connection(
             }
         }
         ("PUT", "/api/v1/control") | ("POST", "/api/v1/control") => {
-            match handle_control_update(body_str, &mut body, control, telemetry).await {
+            match handle_control_update(body_str, &mut body, control, calibration, telemetry).await
+            {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
@@ -938,14 +942,16 @@ async fn handle_http_connection(
                 }
             }
         }
-        ("GET", "/api/v1/cc") => match render_cc_view_json(&mut body, telemetry).await {
-            Ok(()) => {
-                write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+        ("GET", "/api/v1/cc") => {
+            match render_cc_view_json(&mut body, control, calibration, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => {
+                    write_http_response(socket, version, err, &body, cors_origin).await?;
+                }
             }
-            Err(err) => {
-                write_http_response(socket, version, err, &body, cors_origin).await?;
-            }
-        },
+        }
         ("GET", "/api/v1/pd") => match render_pd_view_json(&mut body, control, telemetry).await {
             Ok(()) => {
                 write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
@@ -955,7 +961,7 @@ async fn handle_http_connection(
             }
         },
         ("PUT", "/api/v1/cc") | ("POST", "/api/v1/cc") => {
-            match handle_cc_update(body_str, &mut body, telemetry).await {
+            match handle_cc_update(body_str, &mut body, control, calibration, telemetry).await {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
@@ -1617,14 +1623,17 @@ async fn render_presets_json(
 async fn render_control_view_json(
     buf: &mut String,
     control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
 ) -> Result<(), &'static str> {
+    let cal_mode = { calibration.lock().await.cal_mode };
     let (active_preset_id, output_enabled, preset) = {
         let guard = control.lock().await;
+        let effective = guard.effective_output_command(cal_mode);
         (
             guard.active_preset_id,
-            guard.output_enabled,
-            guard.active_preset(),
+            effective.output_enabled,
+            effective.preset,
         )
     };
 
@@ -1816,14 +1825,15 @@ async fn handle_presets_update(
         let old_saved = guard.saved;
         let old_dirty = guard.dirty;
         let old_output = guard.output_enabled;
+        let old_calibration_override = guard.calibration_cc_override;
+        let old_calibration_restore_output = guard.calibration_restore_output_enabled();
 
         let prev_mode = guard.presets[idx].mode;
         guard.presets[idx] = preset;
 
         // ApplyPreset and any mode change MUST force output OFF (if this affects the active preset).
         if guard.active_preset_id == preset.preset_id && prev_mode != preset.mode {
-            guard.output_enabled = false;
-            crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
+            guard.force_output_off();
         }
 
         // Persist presets blob to EEPROM (saved snapshot is the persisted baseline).
@@ -1840,8 +1850,11 @@ async fn handle_presets_update(
             guard.presets = old_presets;
             guard.saved = old_saved;
             guard.dirty = old_dirty;
-            guard.output_enabled = old_output;
-            crate::DESIRED_OUTPUT_ENABLED.store(old_output, Ordering::Relaxed);
+            guard.restore_calibration_output_state(
+                old_output,
+                old_calibration_override,
+                old_calibration_restore_output,
+            );
             write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
             return Err("503 Service Unavailable");
         }
@@ -1875,6 +1888,7 @@ async fn handle_presets_apply(
     body_in: &str,
     body_out: &mut String,
     control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
 ) -> Result<(), &'static str> {
     let parsed = match parse_presets_apply_json(body_in) {
@@ -1891,7 +1905,30 @@ async fn handle_presets_apply(
         bump_control_rev();
     }
 
-    render_control_view_json(body_out, control, telemetry).await
+    render_control_view_json(body_out, control, calibration, telemetry).await
+}
+
+fn output_enable_allowed_for_restore(min_v_mv: i32) -> bool {
+    if crate::LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
+        return false;
+    }
+    if !LINK_UP.load(Ordering::Relaxed) {
+        return false;
+    }
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted | AnalogState::Offline => return false,
+        AnalogState::CalMissing | AnalogState::Ready => {}
+    }
+
+    if min_v_mv > 0 && crate::LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
+        let v_main_mv = crate::LAST_V_MAIN_MV.load(Ordering::Relaxed);
+        if v_main_mv <= min_v_mv.max(0) {
+            return false;
+        }
+    }
+
+    true
 }
 
 struct ControlUpdateRequest {
@@ -1903,10 +1940,89 @@ fn parse_control_update_json(body: &str) -> Result<ControlUpdateRequest, &'stati
     Ok(ControlUpdateRequest { output_enabled })
 }
 
+async fn ensure_output_enable_allowed(
+    body_out: &mut String,
+    control: &'static ControlMutex,
+    cal_mode: CalKind,
+) -> Result<(), &'static str> {
+    // Match the on-device LOAD gating semantics:
+    // - fault_flags / link down => block enable
+    // - UVLO latch does NOT block enable (it is cleared on an OFF->ON edge analog-side)
+    if crate::LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
+        write_error_body(
+            body_out,
+            "ANALOG_FAULTED",
+            "analog board is faulted",
+            false,
+            None,
+        );
+        return Err("409 Conflict");
+    }
+    if !LINK_UP.load(Ordering::Relaxed) {
+        write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
+        return Err("503 Service Unavailable");
+    }
+    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted => {
+            write_error_body(
+                body_out,
+                "ANALOG_FAULTED",
+                "analog board is faulted",
+                false,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+        // NOTE: AnalogState::CalMissing currently means "not producing enable"
+        // (FastStatus.enable == false). This is NOT a reliable indicator of
+        // missing calibration, and blocking output ON here would create a
+        // deadlock: the UI cannot enable output, and the analog side can
+        // never transition into "Ready".
+        //
+        // True safety gating still happens on the analog side:
+        // CAL_READY / fault flags / uv_latched => effective output=0.
+        AnalogState::CalMissing => {}
+        AnalogState::Offline => {
+            write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
+            return Err("503 Service Unavailable");
+        }
+        AnalogState::Ready => {}
+    }
+
+    // Pre-check UVLO inhibit (V_main <= min_v) and refuse enabling so we don't
+    // trigger an analog-side UVLO latch when the system is already undervoltage
+    // before the enable attempt.
+    let min_v_mv = {
+        control
+            .lock()
+            .await
+            .effective_output_command(cal_mode)
+            .preset
+            .min_v_mv
+    };
+    if min_v_mv > 0 && crate::LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
+        let v_main_mv = crate::LAST_V_MAIN_MV.load(Ordering::Relaxed);
+        if v_main_mv <= min_v_mv.max(0) {
+            write_error_body(
+                body_out,
+                "UVLO",
+                "v_main below min_v; refusing enable",
+                true,
+                None,
+            );
+            return Err("409 Conflict");
+        }
+    }
+
+    Ok(())
+}
+
 async fn handle_control_update(
     body_in: &str,
     body_out: &mut String,
     control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
 ) -> Result<(), &'static str> {
     let parsed = match parse_control_update_json(body_in) {
@@ -1917,85 +2033,49 @@ async fn handle_control_update(
         }
     };
 
+    let cal_mode = { calibration.lock().await.cal_mode };
+    let needs_live_enable = if control::calibration_mode_uses_cc_override(cal_mode) {
+        let guard = control.lock().await;
+        guard
+            .calibration_cc_override
+            .map(|override_state| override_state.target_i_ma != 0)
+            .unwrap_or(false)
+    } else {
+        true
+    };
+
     // Safety: enabling output requires a healthy link + ready analog.
-    if parsed.output_enabled {
-        // Match the on-device LOAD gating semantics:
-        // - fault_flags / link down => block enable
-        // - UVLO latch does NOT block enable (it is cleared on an OFF->ON edge analog-side)
-        if crate::LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
-            write_error_body(
-                body_out,
-                "ANALOG_FAULTED",
-                "analog board is faulted",
-                false,
-                None,
-            );
-            return Err("409 Conflict");
-        }
-        if !LINK_UP.load(Ordering::Relaxed) {
-            write_error_body(body_out, "LINK_DOWN", "UART link is down", true, None);
-            return Err("503 Service Unavailable");
-        }
-        let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
-        match analog_state {
-            AnalogState::Faulted => {
+    if parsed.output_enabled && needs_live_enable {
+        ensure_output_enable_allowed(body_out, control, cal_mode).await?;
+    }
+
+    {
+        let mut guard = control.lock().await;
+        if control::calibration_mode_uses_cc_override(cal_mode) {
+            if !guard.set_calibration_output_enabled(parsed.output_enabled) {
                 write_error_body(
                     body_out,
-                    "ANALOG_FAULTED",
-                    "analog board is faulted",
+                    "INVALID_STATE",
+                    "calibration output target not set; use /api/v1/cc first",
                     false,
                     None,
                 );
                 return Err("409 Conflict");
             }
-            // NOTE: AnalogState::CalMissing currently means "not producing enable"
-            // (FastStatus.enable == false). This is NOT a reliable indicator of
-            // missing calibration, and blocking output ON here would create a
-            // deadlock: the UI cannot enable output, and the analog side can
-            // never transition into "Ready".
-            //
-            // True safety gating still happens on the analog side:
-            // CAL_READY / fault flags / uv_latched => effective output=0.
-            AnalogState::CalMissing => {}
-            AnalogState::Offline => {
-                write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
-                return Err("503 Service Unavailable");
-            }
-            AnalogState::Ready => {}
+        } else {
+            guard.set_normal_output_enabled(parsed.output_enabled);
         }
-
-        // Pre-check UVLO inhibit (V_main <= min_v) and refuse enabling so we don't
-        // trigger an analog-side UVLO latch when the system is already undervoltage
-        // before the enable attempt.
-        let min_v_mv = { control.lock().await.active_preset().min_v_mv };
-        if min_v_mv > 0 && crate::LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
-            let v_main_mv = crate::LAST_V_MAIN_MV.load(Ordering::Relaxed);
-            if v_main_mv <= min_v_mv.max(0) {
-                write_error_body(
-                    body_out,
-                    "UVLO",
-                    "v_main below min_v; refusing enable",
-                    true,
-                    None,
-                );
-                return Err("409 Conflict");
-            }
-        }
-    }
-
-    {
-        let mut guard = control.lock().await;
-        guard.output_enabled = parsed.output_enabled;
-        crate::DESIRED_OUTPUT_ENABLED.store(parsed.output_enabled, Ordering::Relaxed);
         bump_control_rev();
     }
 
-    render_control_view_json(body_out, control, telemetry).await
+    render_control_view_json(body_out, control, calibration, telemetry).await
 }
 
 /// Render the JSON body for `GET /api/v1/cc`.
 async fn render_cc_view_json(
     buf: &mut String,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
 ) -> Result<(), &'static str> {
     let link_up = LINK_UP.load(Ordering::Relaxed);
@@ -2038,13 +2118,23 @@ async fn render_cc_view_json(
         status.v_local_mv
     };
 
-    // Digital-side CC setpoint derived from the shared encoder value.
-    let setpoint_i_ma = {
-        let steps = ENCODER_VALUE.load(Ordering::SeqCst);
-        let raw = steps.saturating_mul(ENCODER_STEP_MA);
-        raw.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA)
+    let cal_mode = { calibration.lock().await.cal_mode };
+    let (setpoint_i_ma, load_enabled) = if control::calibration_mode_uses_cc_override(cal_mode) {
+        let effective = {
+            let guard = control.lock().await;
+            guard.effective_output_command(cal_mode)
+        };
+        (effective.preset.target_i_ma, effective.output_enabled)
+    } else {
+        // Digital-side CC setpoint derived from the shared encoder value.
+        let setpoint_i_ma = {
+            let steps = ENCODER_VALUE.load(Ordering::SeqCst);
+            let raw = steps.saturating_mul(ENCODER_STEP_MA);
+            raw.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA)
+        };
+        let load_enabled = LOAD_SWITCH_ENABLED.load(Ordering::SeqCst) && setpoint_i_ma != 0;
+        (setpoint_i_ma, load_enabled)
     };
-    let load_enabled = LOAD_SWITCH_ENABLED.load(Ordering::SeqCst) && setpoint_i_ma != 0;
     let effective_i_ma = if load_enabled { setpoint_i_ma } else { 0 };
 
     buf.clear();
@@ -2089,6 +2179,8 @@ async fn render_cc_view_json(
 async fn handle_cc_update(
     body_in: &str,
     body_out: &mut String,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
 ) -> Result<(), &'static str> {
     let link_up = LINK_UP.load(Ordering::Relaxed);
@@ -2109,16 +2201,10 @@ async fn handle_cc_update(
             );
             return Err("409 Conflict");
         }
-        AnalogState::CalMissing => {
-            write_error_body(
-                body_out,
-                "ANALOG_NOT_READY",
-                "analog board calibration missing or not ready",
-                true,
-                None,
-            );
-            return Err("409 Conflict");
-        }
+        // See handle_control_update(): CalMissing is not a reliable calibration indicator.
+        // Blocking here would break calibration-page Set Output before the current-channel
+        // override gets a chance to drive the SetMode path.
+        AnalogState::CalMissing => {}
         AnalogState::Offline => {
             write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
             return Err("503 Service Unavailable");
@@ -2154,6 +2240,21 @@ async fn handle_cc_update(
         return Err("422 Unprocessable Entity");
     }
 
+    let cal_mode = { calibration.lock().await.cal_mode };
+    if control::calibration_mode_uses_cc_override(cal_mode) {
+        let setpoint_i_ma = parsed.target_i_ma.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
+        let load_enabled = parsed.enable && setpoint_i_ma != 0;
+        if load_enabled {
+            ensure_output_enable_allowed(body_out, control, cal_mode).await?;
+        }
+        {
+            let mut guard = control.lock().await;
+            guard.set_calibration_cc_override(setpoint_i_ma, load_enabled);
+        }
+        bump_control_rev();
+        return render_cc_view_json(body_out, control, calibration, telemetry).await;
+    }
+
     // Update digital-side CC model (setpoint + load switch), applying rule A:
     // if setpoint becomes 0, force load_enabled=false (even if request asked for true).
     let max_steps = TARGET_I_MAX_MA / ENCODER_STEP_MA;
@@ -2165,7 +2266,7 @@ async fn handle_cc_update(
     LOAD_SWITCH_ENABLED.store(load_enabled, Ordering::SeqCst);
 
     // Reuse the GET /cc view to report the updated state back to the caller.
-    render_cc_view_json(body_out, telemetry).await
+    render_cc_view_json(body_out, control, calibration, telemetry).await
 }
 
 /// Render the JSON body for `GET /api/v1/pd`.
@@ -3935,10 +4036,9 @@ async fn handle_calibration_reset(
     Ok(Some(kind))
 }
 
-async fn handle_calibration_mode(
+fn parse_calibration_mode_request(
     body_in: &str,
     body_out: &mut String,
-    calibration: &'static CalibrationMutex,
 ) -> Result<CalKind, &'static str> {
     ensure_calibration_api_available(body_out)?;
     let kind_s = match parse_string_field(body_in, "kind") {
@@ -3948,20 +4048,47 @@ async fn handle_calibration_mode(
             return Err("400 Bad Request");
         }
     };
-    let kind = match parse_cal_mode_kind(kind_s) {
-        Ok(v) => v,
+    match parse_cal_mode_kind(kind_s) {
+        Ok(v) => Ok(v),
         Err(msg) => {
             write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
-            return Err("400 Bad Request");
+            Err("400 Bad Request")
         }
+    }
+}
+
+pub(crate) async fn apply_calibration_mode(
+    kind: CalKind,
+    calibration: &'static CalibrationMutex,
+    control: &'static ControlMutex,
+) {
+    let prev_kind = { calibration.lock().await.cal_mode };
+    let mode_changed = prev_kind != kind;
+    let state_changed = if mode_changed {
+        let mut guard = control.lock().await;
+        let leaving_current_calibration = control::calibration_mode_uses_cc_override(prev_kind)
+            && !control::calibration_mode_uses_cc_override(kind);
+        let allow_restore_output = !leaving_current_calibration
+            || output_enable_allowed_for_restore(guard.active_preset().min_v_mv);
+        guard.apply_calibration_mode_transition(prev_kind, kind, allow_restore_output)
+    } else {
+        false
     };
 
-    {
+    if mode_changed {
+        // setmode_tx_task() snapshots calibration mode and ControlState under
+        // separate locks. Apply the control-side restore/override transition
+        // before publishing the new cal_mode so any transient mixed snapshot
+        // remains conservative (old current-calibration mode + restored/off
+        // control state), instead of briefly emitting the active preset with
+        // calibration-time output_enabled=true.
         let mut guard = calibration.lock().await;
         guard.cal_mode = kind;
+        if guard.pending_cal_mode == Some(kind) {
+            guard.pending_cal_mode = None;
+        }
     }
-
-    body_out.clear();
-    body_out.push_str(r#"{"ok":true}"#);
-    Ok(kind)
+    if mode_changed || state_changed {
+        bump_control_rev();
+    }
 }

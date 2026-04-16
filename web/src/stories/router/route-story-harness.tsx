@@ -22,7 +22,13 @@ export const DEFAULT_MOCK_DEVICES: StoredDevice[] = [
 export function RouteStoryHarness(props: {
   initialPath: string;
   devices?: StoredDevice[];
+  beforeMount?: () => void;
 }) {
+  useState(() => {
+    props.beforeMount?.();
+    return null;
+  });
+
   const [queryClient] = useState(
     () =>
       new QueryClient({

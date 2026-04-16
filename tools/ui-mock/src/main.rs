@@ -13,6 +13,8 @@ mod preset_panel_mock;
 mod preset_preview_panel;
 
 mod control {
+    pub const UNKNOWN_PDO_MAX_MA: u32 = 0;
+
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub enum AdjustDigit {
         Ones,
@@ -126,7 +128,18 @@ fn render_pd_toggle_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Er
     base.main_power = 1.9;
     base.remote_voltage = 20.08;
     base.local_voltage = 20.09;
-    base.set_control_overlay(2, false, LoadMode::Cc, false, true, false, true, None, None);
+    base.set_control_overlay(
+        ui::CalibrationUiMode::Off,
+        2,
+        false,
+        LoadMode::Cc,
+        false,
+        true,
+        false,
+        true,
+        None,
+        None,
+    );
     base.set_control_row(3_000, 'A', control::AdjustDigit::DEFAULT);
     base.run_time.clear();
     let _ = base.run_time.push_str("01:03:48");
@@ -138,7 +151,7 @@ fn render_pd_toggle_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Er
     base.pd_target_available = true;
 
     let mut standby = base.clone();
-    standby.pd_state = ui::PdButtonState::Standby;
+    standby.pd_state = ui::PdButtonState::Safe5vOnly;
     render_snapshot(
         &out_dir.join("dashboard-pd-standby-20v.png"),
         &standby,
@@ -148,7 +161,7 @@ fn render_pd_toggle_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Er
     )?;
 
     let mut active = base;
-    active.pd_state = ui::PdButtonState::Active;
+    active.pd_state = ui::PdButtonState::ExtendedAllowed;
     render_snapshot(
         &out_dir.join("dashboard-pd-active-20v.png"),
         &active,
@@ -168,11 +181,22 @@ fn render_dashboard_pd_button_label_mocks_to_dir(
     let mut base = ui::UiSnapshot::demo();
     // Keep the base frame aligned with the documented design mocks so diffs are attributable
     // to the PD button copy rules only.
-    base.set_control_overlay(2, true, LoadMode::Cc, false, true, false, true, None, None);
+    base.set_control_overlay(
+        ui::CalibrationUiMode::Off,
+        2,
+        true,
+        LoadMode::Cc,
+        false,
+        true,
+        false,
+        true,
+        None,
+        None,
+    );
     base.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
 
     let mut detach = base.clone();
-    detach.pd_state = ui::PdButtonState::Standby;
+    detach.pd_state = ui::PdButtonState::Safe5vOnly;
     detach.pd_display_mode = ui::PdButtonDisplayMode::Detach;
     detach.pd_target_mv = None;
     detach.pd_target_available = false;
@@ -185,7 +209,7 @@ fn render_dashboard_pd_button_label_mocks_to_dir(
     )?;
 
     let mut fixed = base.clone();
-    fixed.pd_state = ui::PdButtonState::Active;
+    fixed.pd_state = ui::PdButtonState::ExtendedAllowed;
     fixed.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
     fixed.pd_target_mv = Some(20_000);
     fixed.pd_target_available = true;
@@ -198,7 +222,7 @@ fn render_dashboard_pd_button_label_mocks_to_dir(
     )?;
 
     let mut pps = base.clone();
-    pps.pd_state = ui::PdButtonState::Active;
+    pps.pd_state = ui::PdButtonState::ExtendedAllowed;
     pps.pd_display_mode = ui::PdButtonDisplayMode::Pps;
     pps.pd_target_mv = Some(20_000);
     pps.pd_target_available = true;
@@ -211,7 +235,7 @@ fn render_dashboard_pd_button_label_mocks_to_dir(
     )?;
 
     let mut fixed_unavail = base.clone();
-    fixed_unavail.pd_state = ui::PdButtonState::Active;
+    fixed_unavail.pd_state = ui::PdButtonState::ExtendedAllowed;
     fixed_unavail.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
     fixed_unavail.pd_target_mv = Some(20_000);
     fixed_unavail.pd_target_available = false;
@@ -224,7 +248,7 @@ fn render_dashboard_pd_button_label_mocks_to_dir(
     )?;
 
     let mut pps_na = base;
-    pps_na.pd_state = ui::PdButtonState::Active;
+    pps_na.pd_state = ui::PdButtonState::ExtendedAllowed;
     pps_na.pd_display_mode = ui::PdButtonDisplayMode::Pps;
     pps_na.pd_target_mv = None;
     pps_na.pd_target_available = false;
@@ -286,6 +310,81 @@ fn render_dashboard_pd_button_label_mocks(
     )
 }
 
+fn render_calibration_dashboard_mocks_to_dir(
+    out_dir: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(out_dir)?;
+
+    let mut ch1 = ui::UiSnapshot::demo();
+    ch1.main_voltage = 24.11;
+    ch1.main_current = 1.00;
+    ch1.main_power = 24.1;
+    ch1.remote_voltage = 24.09;
+    ch1.local_voltage = 24.12;
+    ch1.ch1_current = 1.00;
+    ch1.ch2_current = 0.00;
+    ch1.calibration_mode = ui::CalibrationUiMode::CurrentCh1;
+    ch1.set_control_overlay(
+        ui::CalibrationUiMode::CurrentCh1,
+        2,
+        true,
+        LoadMode::Cc,
+        false,
+        true,
+        false,
+        true,
+        None,
+        None,
+    );
+    ch1.set_control_row(1_000, 'A', control::AdjustDigit::DEFAULT);
+    ch1.pd_state = ui::PdButtonState::ExtendedAllowed;
+    ch1.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
+    ch1.pd_target_mv = Some(20_000);
+    ch1.pd_target_available = true;
+    render_snapshot(
+        &out_dir.join("dashboard-calibration-current-ch1.png"),
+        &ch1,
+        None,
+        None,
+        None,
+    )?;
+
+    let mut ch2 = ch1.clone();
+    ch2.main_current = 0.50;
+    ch2.main_power = 12.1;
+    ch2.ch1_current = 0.00;
+    ch2.ch2_current = 0.50;
+    ch2.calibration_mode = ui::CalibrationUiMode::CurrentCh2;
+    ch2.set_control_overlay(
+        ui::CalibrationUiMode::CurrentCh2,
+        2,
+        true,
+        LoadMode::Cc,
+        false,
+        true,
+        false,
+        true,
+        None,
+        None,
+    );
+    ch2.set_control_row(500, 'A', control::AdjustDigit::DEFAULT);
+    render_snapshot(
+        &out_dir.join("dashboard-calibration-current-ch2.png"),
+        &ch2,
+        None,
+        None,
+        None,
+    )?;
+
+    Ok(())
+}
+
+fn render_calibration_dashboard_mocks(repo_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    render_calibration_dashboard_mocks_to_dir(
+        &repo_root.join("docs/assets/main-display/calibration"),
+    )
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -298,6 +397,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let out_dir = repo_root.join("tmp/ui-mock/pd-button");
         return render_dashboard_pd_button_label_mocks_to_dir(&out_dir);
     }
+    if mode.as_deref() == Some("calibration") {
+        return render_calibration_dashboard_mocks(&repo_root);
+    }
+    if mode.as_deref() == Some("calibration-tmp") {
+        let out_dir = repo_root.join("tmp/ui-mock/calibration");
+        return render_calibration_dashboard_mocks_to_dir(&out_dir);
+    }
     if mode.as_deref() == Some("pd") {
         return render_pd_toggle_mocks(&repo_root);
     }
@@ -309,10 +415,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(&out_dir)?;
 
         let mut cc = ui::UiSnapshot::demo();
-        cc.set_control_overlay(2, true, LoadMode::Cc, false, true, false, true, None, None);
+        cc.set_control_overlay(
+            ui::CalibrationUiMode::Off,
+            2,
+            true,
+            LoadMode::Cc,
+            false,
+            true,
+            false,
+            true,
+            None,
+            None,
+        );
         cc.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
         // Match the shipped design mock for PD button appearance.
-        cc.pd_state = ui::PdButtonState::Active;
+        cc.pd_state = ui::PdButtonState::ExtendedAllowed;
         cc.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
         cc.pd_target_mv = Some(20_000);
         cc.pd_target_available = true;
@@ -323,7 +440,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let preset_dir = repo_root.join("docs/assets/on-device-preset-ui");
 
     let mut cc = ui::UiSnapshot::demo();
-    cc.set_control_overlay(2, true, LoadMode::Cc, false, true, false, true, None, None);
+    cc.set_control_overlay(
+        ui::CalibrationUiMode::Off,
+        2,
+        true,
+        LoadMode::Cc,
+        false,
+        true,
+        false,
+        true,
+        None,
+        None,
+    );
     cc.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
     render_snapshot(
         &out_dir.join("main-display-mock-cc.png"),
@@ -336,6 +464,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cc_blocked_lnk = cc.clone();
     cc_blocked_lnk.set_control_overlay(
+        ui::CalibrationUiMode::Off,
         2,
         false,
         LoadMode::Cc,
@@ -356,6 +485,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cc_blocked_uv = cc.clone();
     cc_blocked_uv.set_control_overlay(
+        ui::CalibrationUiMode::Off,
         2,
         false,
         LoadMode::Cc,
@@ -398,6 +528,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut cc_active_other = cc.clone();
     cc_active_other.set_control_overlay(
+        ui::CalibrationUiMode::Off,
         4,
         false,
         LoadMode::Cc,
@@ -442,7 +573,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     cv.main_voltage = 24.50;
     cv.remote_voltage = 24.52;
     cv.local_voltage = 24.47;
-    cv.set_control_overlay(2, false, LoadMode::Cv, false, true, false, true, None, None);
+    cv.set_control_overlay(
+        ui::CalibrationUiMode::Off,
+        2,
+        false,
+        LoadMode::Cv,
+        false,
+        true,
+        false,
+        true,
+        None,
+        None,
+    );
     cv.set_control_row(24_500, 'V', control::AdjustDigit::DEFAULT);
     render_snapshot(
         &out_dir.join("main-display-mock-cv.png"),

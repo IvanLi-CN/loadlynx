@@ -1,7 +1,15 @@
 import type { QueryObserverResult } from "@tanstack/react-query";
 import { useMutation, useQuery } from "@tanstack/react-query";
+import { useRouterState } from "@tanstack/react-router";
 import Decimal from "decimal.js";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import {
   getCalibrationProfile,
   getStatus,
@@ -106,6 +114,11 @@ type ParsedCalibrationDraft = ParsedCalibrationDraftV4;
 
 const CALIBRATION_DRAFT_STORAGE_VERSION = 4;
 const CALIBRATION_CURRENT_OPTIONS_STORAGE_VERSION = 2;
+const CALIBRATION_STATUS_FALLBACK_REFETCH_MS = 500;
+const CALIBRATION_STATUS_STALE_TIMEOUT_MS = 2_500;
+const CALIBRATION_STATUS_STREAM_STARTUP_TIMEOUT_MS = 1_500;
+
+const calibrationStatusRetryDelay = () => 200 + Math.random() * 300;
 
 function getCalibrationDraftStorageKey(
   deviceId: string,
@@ -578,6 +591,18 @@ function expectedCalKindForTab(tab: CalibrationTab): number {
   }
 }
 
+function isDeviceSubroutePath(pathname: string, deviceId: string): boolean {
+  const prefix = `/${deviceId}`;
+  return pathname === prefix || pathname.startsWith(`${prefix}/`);
+}
+
+function statusInExpectedCalMode(
+  status: FastStatusView | null,
+  expectedCalKind: number,
+): boolean {
+  return (status?.raw.cal_kind ?? null) === expectedCalKind;
+}
+
 export function DeviceCalibrationRoute() {
   const { deviceId, baseUrl } = useDeviceContext();
   return <DeviceCalibrationPage deviceId={deviceId} baseUrl={baseUrl} />;
@@ -590,21 +615,104 @@ function DeviceCalibrationPage({
   deviceId: string;
   baseUrl: string;
 }) {
-  const [activeTab, setActiveTab] = useState<CalibrationTab>("voltage");
+  const pathname = useRouterState({
+    select: (state) => state.location.pathname,
+  });
+  const [activeTab, setActiveTab] = useState<CalibrationTab>(() => {
+    if (typeof window === "undefined") {
+      return "voltage";
+    }
+    return (
+      readCalibrationDraftFromStorage(deviceId, baseUrl)?.active_tab ??
+      "voltage"
+    );
+  });
+  const latestPathnameRef = useRef(pathname);
+  latestPathnameRef.current = pathname;
+  const [isPageVisible, setIsPageVisible] = useState(() =>
+    typeof document === "undefined"
+      ? true
+      : document.visibilityState === "visible",
+  );
+  const previousCalibrationBaseUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (typeof document === "undefined") {
+      return undefined;
+    }
+
+    const handleVisibility = () => {
+      setIsPageVisible(document.visibilityState === "visible");
+    };
+
+    document.addEventListener("visibilitychange", handleVisibility);
+    return () => {
+      document.removeEventListener("visibilitychange", handleVisibility);
+    };
+  }, []);
+
+  useEffect(() => {
+    const previousBaseUrl = previousCalibrationBaseUrlRef.current;
+    previousCalibrationBaseUrlRef.current = baseUrl;
+    if (
+      !previousBaseUrl ||
+      previousBaseUrl === baseUrl ||
+      isMockBaseUrl(previousBaseUrl)
+    ) {
+      return;
+    }
+
+    postCalibrationMode(previousBaseUrl, { kind: "off" }).catch(() => {
+      // Best-effort; do not block device switches on cleanup failures.
+    });
+  }, [baseUrl]);
 
   useEffect(() => {
     return () => {
+      if (isMockBaseUrl(baseUrl)) {
+        return;
+      }
+
+      const nextPathname = latestPathnameRef.current;
+      if (
+        isDeviceSubroutePath(nextPathname, deviceId) &&
+        !/\/calibration$/.test(nextPathname)
+      ) {
+        return;
+      }
+
       postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
-        // Best-effort; do not block navigation or show UI errors here.
+        // Best-effort; DeviceLayout already handles same-device route changes.
       });
     };
-  }, [baseUrl]);
+  }, [baseUrl, deviceId]);
 
   // Live status stream (includes optional RAW fields in calibration mode).
   const [status, setStatus] = useState<FastStatusView | null>(null);
   const [statusStreamPaused, setStatusStreamPaused] = useState(false);
+  const [statusStreamConnected, setStatusStreamConnected] = useState(false);
+  const [statusFallbackArmed, setStatusFallbackArmed] = useState(false);
   const statusRef = useRef<FastStatusView | null>(status);
+  const lastStatusAtRef = useRef<number | null>(null);
   const statusWaitersRef = useRef<StatusWaiter[]>([]);
+
+  const publishStatusSnapshot = useCallback((view: FastStatusView | null) => {
+    statusRef.current = view;
+    if (view) {
+      lastStatusAtRef.current = Date.now();
+      const remaining: StatusWaiter[] = [];
+      for (const waiter of statusWaitersRef.current) {
+        if (waiter.predicate(view)) {
+          window.clearTimeout(waiter.timeoutId);
+          waiter.resolve(view);
+        } else {
+          remaining.push(waiter);
+        }
+      }
+      statusWaitersRef.current = remaining;
+    }
+    setStatus(view);
+  }, []);
 
   const statusPauseDepthRef = useRef(0);
   const withStatusStreamPaused = useCallback<WithStatusStreamPaused>(
@@ -641,19 +749,6 @@ function DeviceCalibrationPage({
 
   useEffect(() => {
     statusRef.current = status;
-    if (!status) {
-      return;
-    }
-    const remaining: StatusWaiter[] = [];
-    for (const waiter of statusWaitersRef.current) {
-      if (waiter.predicate(status)) {
-        window.clearTimeout(waiter.timeoutId);
-        waiter.resolve(status);
-      } else {
-        remaining.push(waiter);
-      }
-    }
-    statusWaitersRef.current = remaining;
   }, [status]);
 
   const waitForStatus = useCallback(
@@ -691,9 +786,12 @@ function DeviceCalibrationPage({
   useEffect(() => {
     // Reset state while switching devices/URLs.
     void baseUrl;
-    setStatus(null);
+    lastStatusAtRef.current = null;
+    publishStatusSnapshot(null);
+    setStatusStreamConnected(false);
+    setStatusFallbackArmed(false);
     rejectStatusWaiters(new Error("Status stream reset"));
-  }, [baseUrl, rejectStatusWaiters]);
+  }, [baseUrl, publishStatusSnapshot, rejectStatusWaiters]);
 
   useEffect(() => {
     if (statusStreamPaused) {
@@ -702,15 +800,115 @@ function DeviceCalibrationPage({
 
     const unsubscribe = subscribeStatusStream(
       baseUrl,
-      (view) => setStatus(view),
-      () => setStatus(null),
+      (view) => {
+        setStatusStreamConnected(true);
+        setStatusFallbackArmed(false);
+        publishStatusSnapshot(view);
+      },
+      () => {
+        setStatusStreamConnected(false);
+        setStatusFallbackArmed(true);
+      },
     );
 
     return () => {
       unsubscribe();
+      setStatusStreamConnected(false);
       rejectStatusWaiters(new Error("Status stream closed"));
     };
-  }, [baseUrl, rejectStatusWaiters, statusStreamPaused]);
+  }, [baseUrl, publishStatusSnapshot, rejectStatusWaiters, statusStreamPaused]);
+
+  useEffect(() => {
+    if (statusStreamPaused || statusStreamConnected || statusFallbackArmed) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (statusPauseDepthRef.current === 0 && !statusStreamConnected) {
+        setStatusFallbackArmed(true);
+      }
+    }, CALIBRATION_STATUS_STREAM_STARTUP_TIMEOUT_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [statusFallbackArmed, statusStreamConnected, statusStreamPaused]);
+
+  const statusFallbackQuery = useQuery<FastStatusView, HttpApiError>({
+    queryKey: ["device", deviceId, baseUrl, "status", "calibration-fallback"],
+    queryFn: () => getStatus(baseUrl),
+    enabled:
+      Boolean(baseUrl) &&
+      isPageVisible &&
+      statusFallbackArmed &&
+      !statusStreamPaused &&
+      !statusStreamConnected,
+    refetchInterval: isPageVisible
+      ? CALIBRATION_STATUS_FALLBACK_REFETCH_MS
+      : false,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: false,
+    retry: 2,
+    retryDelay: calibrationStatusRetryDelay,
+  });
+
+  useEffect(() => {
+    if (!statusFallbackQuery.data || statusFallbackQuery.dataUpdatedAt === 0) {
+      return;
+    }
+    publishStatusSnapshot(statusFallbackQuery.data);
+  }, [
+    publishStatusSnapshot,
+    statusFallbackQuery.data,
+    statusFallbackQuery.dataUpdatedAt,
+  ]);
+
+  useEffect(() => {
+    if (
+      statusStreamPaused ||
+      statusStreamConnected ||
+      !statusFallbackQuery.isError ||
+      statusFallbackQuery.fetchStatus === "fetching"
+    ) {
+      return;
+    }
+
+    const lastStatusAt = lastStatusAtRef.current;
+    if (lastStatusAt === null) {
+      publishStatusSnapshot(null);
+      return;
+    }
+
+    const remainingMs =
+      CALIBRATION_STATUS_STALE_TIMEOUT_MS - (Date.now() - lastStatusAt);
+    if (remainingMs <= 0) {
+      lastStatusAtRef.current = null;
+      publishStatusSnapshot(null);
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (
+        statusPauseDepthRef.current === 0 &&
+        !statusStreamConnected &&
+        statusFallbackQuery.isError &&
+        statusFallbackQuery.fetchStatus !== "fetching"
+      ) {
+        lastStatusAtRef.current = null;
+        publishStatusSnapshot(null);
+      }
+    }, remainingMs);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [
+    publishStatusSnapshot,
+    statusFallbackQuery.fetchStatus,
+    statusFallbackQuery.isError,
+    statusStreamConnected,
+    statusStreamPaused,
+  ]);
 
   const isOffline =
     status === null ||
@@ -719,6 +917,10 @@ function DeviceCalibrationPage({
 
   const deviceCalKind = status?.raw.cal_kind ?? null;
   const expectedCalKind = expectedCalKindForTab(activeTab);
+  const statusMatchesActiveTab = statusInExpectedCalMode(
+    status,
+    expectedCalKind,
+  );
 
   const profileQuery = useQuery<CalibrationProfile, HttpApiError>({
     queryKey: ["device", deviceId, "calibration", "profile"],
@@ -1250,7 +1452,7 @@ function DeviceCalibrationPage({
     profileQuery.data?.active.source === "factory-default";
 
   // Load draft from browser storage (or reset if none) while switching devices/URLs.
-  useEffect(() => {
+  useLayoutEffect(() => {
     clearToasts();
     setDraftProfile(makeEmptyDraftProfile());
     setPreviewProfile(null);
@@ -1351,7 +1553,7 @@ function DeviceCalibrationPage({
               maxDelayMs: 300,
             });
             snapshotAfterCalKind = snapshot.raw.cal_kind ?? null;
-            setStatus(snapshot);
+            publishStatusSnapshot(snapshot);
           } catch (err) {
             console.error(err);
           }
@@ -1393,7 +1595,7 @@ function DeviceCalibrationPage({
             firstDelayMs: 100,
             maxDelayMs: 400,
           });
-          setStatus(snapshot);
+          publishStatusSnapshot(snapshot);
           if ((snapshot.raw.cal_kind ?? null) === expectedCalKind) {
             return true;
           }
@@ -1421,6 +1623,7 @@ function DeviceCalibrationPage({
       expectedCalKind,
       isOffline,
       showAlert,
+      publishStatusSnapshot,
       waitForStatus,
       withStatusStreamPaused,
     ],
@@ -1499,7 +1702,7 @@ function DeviceCalibrationPage({
 
             <div className="flex flex-wrap items-center gap-2">
               <div
-                className={`badge ${deviceCalKind === expectedCalKind ? "badge-success" : "badge-warning"}`}
+                className={`badge ${statusMatchesActiveTab ? "badge-success" : "badge-warning"}`}
                 title={`device=${formatDeviceCalKind(deviceCalKind)} expected=${formatDeviceCalKind(expectedCalKind)}`}
               >
                 cal_mode: {formatDeviceCalKind(deviceCalKind)}
@@ -1575,6 +1778,19 @@ function DeviceCalibrationPage({
               </div>
             </div>
           )}
+
+          {!isOffline && !statusMatchesActiveTab ? (
+            <output className="alert alert-info text-sm py-2">
+              <span>
+                正在同步校准模式：等待设备切换到{" "}
+                <span className="font-mono">
+                  {formatDeviceCalKind(expectedCalKind)}
+                </span>
+                。在同步完成前，RAW / DAC
+                会保持占位，避免把旧模式的数据误显示到当前页签。
+              </span>
+            </output>
+          ) : null}
         </div>
       </div>
 
@@ -1608,7 +1824,8 @@ function DeviceCalibrationPage({
       {activeTab === "voltage" ? (
         <VoltageCalibration
           baseUrl={baseUrl}
-          status={status}
+          status={statusMatchesActiveTab ? status : null}
+          latestStatusRef={statusRef}
           ensureMode={ensureActiveTabCalMode}
           withStatusStreamPaused={withStatusStreamPaused}
           deviceProfile={profileQuery.data}
@@ -1633,7 +1850,8 @@ function DeviceCalibrationPage({
         <CurrentCalibration
           curve={activeTab}
           baseUrl={baseUrl}
-          status={status}
+          status={statusMatchesActiveTab ? status : null}
+          latestStatusRef={statusRef}
           ensureMode={ensureActiveTabCalMode}
           withStatusStreamPaused={withStatusStreamPaused}
           deviceProfile={profileQuery.data}
@@ -1727,6 +1945,7 @@ function DeviceCalibrationPage({
 function VoltageCalibration({
   baseUrl,
   status,
+  latestStatusRef,
   ensureMode,
   withStatusStreamPaused,
   deviceProfile,
@@ -1749,6 +1968,7 @@ function VoltageCalibration({
 }: {
   baseUrl: string;
   status: FastStatusView | null;
+  latestStatusRef: React.MutableRefObject<FastStatusView | null>;
   ensureMode: (action: string, opts?: { silent?: boolean }) => Promise<boolean>;
   withStatusStreamPaused: WithStatusStreamPaused;
   deviceProfile: CalibrationProfile | undefined;
@@ -1777,11 +1997,6 @@ function VoltageCalibration({
   const [confirmKind, setConfirmKind] = useState<
     "reset_draft" | "reset_device_voltage" | null
   >(null);
-
-  const statusRef = useRef<FastStatusView | null>(status);
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
 
   const effectivePreview = previewProfile ?? deviceProfile ?? null;
 
@@ -1820,8 +2035,8 @@ function VoltageCalibration({
     const ok = await ensureMode("Capture");
     if (!ok) return;
 
-    const rawLocal = statusRef.current?.raw.raw_v_nr_100uv;
-    const rawRemote = statusRef.current?.raw.raw_v_rmt_100uv;
+    const rawLocal = latestStatusRef.current?.raw.raw_v_nr_100uv;
+    const rawRemote = latestStatusRef.current?.raw.raw_v_rmt_100uv;
 
     if (rawLocal == null || rawRemote == null) {
       onAlert(
@@ -2520,6 +2735,7 @@ function CurrentCalibration({
   curve,
   baseUrl,
   status,
+  latestStatusRef,
   ensureMode,
   withStatusStreamPaused,
   deviceProfile,
@@ -2543,6 +2759,7 @@ function CurrentCalibration({
   curve: "current_ch1" | "current_ch2";
   baseUrl: string;
   status: FastStatusView | null;
+  latestStatusRef: React.MutableRefObject<FastStatusView | null>;
   ensureMode: (action: string, opts?: { silent?: boolean }) => Promise<boolean>;
   withStatusStreamPaused: WithStatusStreamPaused;
   deviceProfile: CalibrationProfile | undefined;
@@ -2588,11 +2805,6 @@ function CurrentCalibration({
 
   const baselineInput = baselineInputByCurve[curve];
   const baselineUa = baselineUaByCurve[curve];
-
-  const statusRef = useRef<FastStatusView | null>(status);
-  useEffect(() => {
-    statusRef.current = status;
-  }, [status]);
 
   const setBaselineInputForCurve = useCallback(
     (value: string) => {
@@ -2824,7 +3036,7 @@ function CurrentCalibration({
     const ok = await ensureMode("Capture");
     if (!ok) return;
 
-    const latest = statusRef.current;
+    const latest = latestStatusRef.current;
     const rawCur = latest?.raw.raw_cur_100uv;
     const rawDac = latest?.raw.raw_dac_code;
 
