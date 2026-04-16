@@ -638,6 +638,30 @@ function DeviceCalibrationPage({
     };
   }, []);
 
+  useEffect(() => {
+    if (typeof window === "undefined" || isMockBaseUrl(baseUrl)) {
+      return undefined;
+    }
+
+    // React StrictMode tears effects down once during mount rehearsal in dev.
+    // Arm the cleanup on the next macrotask so only real route/baseUrl exits
+    // send the best-effort "off" back to the previous device.
+    let cleanupArmed = false;
+    const armId = window.setTimeout(() => {
+      cleanupArmed = true;
+    }, 0);
+
+    return () => {
+      window.clearTimeout(armId);
+      if (!cleanupArmed) {
+        return;
+      }
+      postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
+        // Best-effort; do not block route teardown on cleanup failures.
+      });
+    };
+  }, [baseUrl]);
+
   // Live status stream (includes optional RAW fields in calibration mode).
   const [status, setStatus] = useState<FastStatusView | null>(null);
   const [statusStreamPaused, setStatusStreamPaused] = useState(false);
