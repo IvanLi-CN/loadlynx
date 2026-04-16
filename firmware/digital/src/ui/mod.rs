@@ -12,7 +12,8 @@ use embedded_graphics::pixelcolor::{
 use heapless::{String, Vec};
 use lcd_async::raw_framebuf::RawFrameBuf;
 use loadlynx_protocol::{
-    FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP, LoadMode,
+    CalKind, FAULT_MCU_OVER_TEMP, FAULT_OVERCURRENT, FAULT_OVERVOLTAGE, FAULT_SINK_OVER_TEMP,
+    LoadMode,
 };
 
 use crate::control::AdjustDigit;
@@ -28,6 +29,44 @@ pub enum AnalogState {
     CalMissing = 1,
     Faulted = 2,
     Ready = 3,
+}
+
+#[repr(u8)]
+#[derive(Copy, Clone, Eq, PartialEq, Debug)]
+pub enum CalibrationUiMode {
+    Off = 0,
+    Voltage = 1,
+    CurrentCh1 = 2,
+    CurrentCh2 = 3,
+}
+
+impl CalibrationUiMode {
+    pub fn from_cal_kind(kind: CalKind) -> Self {
+        match kind {
+            CalKind::Off => CalibrationUiMode::Off,
+            CalKind::Voltage => CalibrationUiMode::Voltage,
+            CalKind::CurrentCh1 => CalibrationUiMode::CurrentCh1,
+            CalKind::CurrentCh2 => CalibrationUiMode::CurrentCh2,
+        }
+    }
+
+    pub fn status_text(self) -> &'static str {
+        match self {
+            CalibrationUiMode::Off => "",
+            CalibrationUiMode::Voltage => "CAL V",
+            CalibrationUiMode::CurrentCh1 => "CAL C1",
+            CalibrationUiMode::CurrentCh2 => "CAL C2",
+        }
+    }
+
+    pub fn pill_top_text(self) -> Option<&'static str> {
+        match self {
+            CalibrationUiMode::Off => None,
+            CalibrationUiMode::Voltage => Some("V"),
+            CalibrationUiMode::CurrentCh1 => Some("C1"),
+            CalibrationUiMode::CurrentCh2 => Some("C2"),
+        }
+    }
 }
 
 impl AnalogState {
@@ -861,19 +900,31 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
     );
 
     // <M#><MODE> entry: show active/preview preset id + mode, with mode-specific colors.
-    let (mode_text, mode_color) = match data.active_mode {
-        LoadMode::Cc | LoadMode::Reserved(_) => ("CC", rgb(0xFF5252)),
-        LoadMode::Cv => ("CV", rgb(0xFFB347)),
-        LoadMode::Cp => ("CP", rgb(0xB27BFF)),
-    };
+    let (preset_text, mode_text, mode_color) =
+        if let Some(cal_top) = data.calibration_mode.pill_top_text() {
+            let mut preset_text = String::<3>::new();
+            let _ = preset_text.push_str(cal_top);
+            let mut mode_text = String::<3>::new();
+            let _ = mode_text.push_str("CAL");
+            (preset_text, mode_text, rgb(0x4CC9F0))
+        } else {
+            let (mode_text, mode_color) = match data.active_mode {
+                LoadMode::Cc | LoadMode::Reserved(_) => ("CC", rgb(0xFF5252)),
+                LoadMode::Cv => ("CV", rgb(0xFFB347)),
+                LoadMode::Cp => ("CP", rgb(0xB27BFF)),
+            };
 
-    let mut preset_text = String::<2>::new();
-    let _ = preset_text.push('M');
-    if (1..=9).contains(&data.active_preset_id) {
-        let _ = preset_text.push((b'0' + data.active_preset_id) as char);
-    } else {
-        let _ = preset_text.push('?');
-    }
+            let mut preset_text = String::<3>::new();
+            let _ = preset_text.push('M');
+            if (1..=9).contains(&data.active_preset_id) {
+                let _ = preset_text.push((b'0' + data.active_preset_id) as char);
+            } else {
+                let _ = preset_text.push('?');
+            }
+            let mut mode_buf = String::<3>::new();
+            let _ = mode_buf.push_str(mode_text);
+            (preset_text, mode_buf, mode_color)
+        };
 
     // Two-line preset label inside the left half: top = "M#", bottom = "CC"/"CV".
     let small_h = SMALL_FONT.height() as i32;
@@ -884,20 +935,27 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
     let label_right = CONTROL_MODE_PILL_RIGHT;
     let label_w = (label_right - label_left).max(1);
 
-    let preset_w = small_text_width(preset_text.as_str(), 0);
-    let mode_w = small_text_width(mode_text, 0);
+    let preset_w = small_text_width(preset_text.as_ref(), 0);
+    let mode_w = small_text_width(mode_text.as_ref(), 0);
     let preset_x = label_left + (label_w - preset_w).max(0) / 2;
     let mode_x = label_left + (label_w - mode_w).max(0) / 2;
 
     draw_small_text(
         canvas,
-        preset_text.as_str(),
+        preset_text.as_ref(),
         preset_x,
         label_y0,
         rgb(0xdfe7ff),
         0,
     );
-    draw_small_text(canvas, mode_text, mode_x, label_y0 + small_h, mode_color, 0);
+    draw_small_text(
+        canvas,
+        mode_text.as_ref(),
+        mode_x,
+        label_y0 + small_h,
+        mode_color,
+        0,
+    );
 
     // Target summary: big digits + small unit, right-aligned in the right half.
     let target = data.control_target_text.as_str();
@@ -1873,6 +1931,7 @@ pub struct UiSnapshot {
     pub wifi_status: WifiUiStatus,
     // Control overlay (active preset + mode + output + UV latch), driven by the
     // digital-side preset/control model.
+    pub calibration_mode: CalibrationUiMode,
     pub active_preset_id: u8,
     pub output_enabled: bool,
     pub active_mode: LoadMode,
@@ -1940,6 +1999,7 @@ impl UiSnapshot {
             fault_flags: 0,
             analog_state: AnalogState::Ready,
             wifi_status: WifiUiStatus::Disabled,
+            calibration_mode: CalibrationUiMode::Off,
             active_preset_id: 1,
             output_enabled: false,
             active_mode: LoadMode::Cc,
@@ -1973,6 +2033,7 @@ impl UiSnapshot {
 
     pub fn set_control_overlay(
         &mut self,
+        calibration_mode: CalibrationUiMode,
         active_preset_id: u8,
         output_enabled: bool,
         mode: LoadMode,
@@ -1983,6 +2044,7 @@ impl UiSnapshot {
         trip_alarm_abbrev: Option<&'static str>,
         blocked_enable_abbrev: Option<&'static str>,
     ) {
+        self.calibration_mode = calibration_mode;
         self.active_preset_id = active_preset_id;
         self.output_enabled = output_enabled;
         self.active_mode = match mode {
@@ -2068,6 +2130,18 @@ impl UiSnapshot {
             } else {
                 let _ = ctl.push_str("OFF");
             }
+        } else if self.calibration_mode != CalibrationUiMode::Off {
+            match self.analog_state {
+                AnalogState::Faulted => {
+                    let _ = ctl.push_str("FLT");
+                }
+                AnalogState::Offline => {
+                    let _ = ctl.push_str("OFF");
+                }
+                AnalogState::CalMissing | AnalogState::Ready => {
+                    let _ = ctl.push_str(self.calibration_mode.status_text());
+                }
+            }
         } else {
             // Normal status line avoids debug-y bitfields like "P1 CC OUT0 UV0 ...",
             // which are easy to misread on SmallFont (0/O) and exceed the visible width.
@@ -2138,5 +2212,54 @@ impl Rect {
             right,
             bottom,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn calibration_status_line_uses_channel_specific_copy_when_ready() {
+        let mut snapshot = UiSnapshot::demo();
+        snapshot.calibration_mode = CalibrationUiMode::CurrentCh1;
+        snapshot.analog_state = AnalogState::Ready;
+        snapshot.update_strings();
+
+        assert_eq!(snapshot.status_lines()[4].as_str(), "CAL C1");
+
+        snapshot.calibration_mode = CalibrationUiMode::CurrentCh2;
+        snapshot.update_strings();
+        assert_eq!(snapshot.status_lines()[4].as_str(), "CAL C2");
+    }
+
+    #[test]
+    fn calibration_status_line_keeps_fault_priority() {
+        let mut snapshot = UiSnapshot::demo();
+        snapshot.calibration_mode = CalibrationUiMode::CurrentCh1;
+        snapshot.fault_flags = FAULT_OVERCURRENT;
+        snapshot.update_strings();
+
+        assert_eq!(snapshot.status_lines()[4].as_str(), "OCF");
+    }
+
+    #[test]
+    fn calibration_ui_mode_maps_from_protocol_kind() {
+        assert_eq!(
+            CalibrationUiMode::from_cal_kind(CalKind::CurrentCh1),
+            CalibrationUiMode::CurrentCh1
+        );
+        assert_eq!(
+            CalibrationUiMode::from_cal_kind(CalKind::CurrentCh2),
+            CalibrationUiMode::CurrentCh2
+        );
+        assert_eq!(
+            CalibrationUiMode::from_cal_kind(CalKind::Voltage),
+            CalibrationUiMode::Voltage
+        );
+        assert_eq!(
+            CalibrationUiMode::from_cal_kind(CalKind::Off),
+            CalibrationUiMode::Off
+        );
     }
 }

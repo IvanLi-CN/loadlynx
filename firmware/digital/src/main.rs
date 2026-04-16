@@ -4524,7 +4524,8 @@ impl TelemetryModel {
                 mask.channel_currents = true;
             }
 
-            if prev.active_preset_id != current.active_preset_id
+            if prev.calibration_mode != current.calibration_mode
+                || prev.active_preset_id != current.active_preset_id
                 || prev.active_mode != current.active_mode
                 || prev.control_target_text != current.control_target_text
                 || prev.adjust_digit != current.adjust_digit
@@ -4984,6 +4985,7 @@ where
 async fn display_render_task(
     pipeline: &'static DisplayPipeline,
     telemetry: &'static TelemetryMutex,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
 ) {
     info!("Display render task starting");
@@ -5041,8 +5043,10 @@ async fn display_render_task(
         }
 
         let preview_id = PRESET_PREVIEW_ID.load(Ordering::Relaxed);
+        let cal_mode = { calibration.lock().await.cal_mode };
         let (
             overlay_preset_id,
+            calibration_mode,
             output_enabled,
             overlay_mode,
             active_target_milli,
@@ -5076,16 +5080,16 @@ async fn display_render_task(
                 LoadMode::Cp => LoadMode::Cp,
                 LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
             };
-            let active_preset = guard.active_preset();
-            let active_mode = match active_preset.mode {
+            let effective = guard.effective_output_command(cal_mode);
+            let active_mode = match effective.preset.mode {
                 LoadMode::Cv => LoadMode::Cv,
                 LoadMode::Cp => LoadMode::Cp,
                 LoadMode::Cc | LoadMode::Reserved(_) => LoadMode::Cc,
             };
             let (active_target_milli, active_target_unit) = match active_mode {
-                LoadMode::Cv => (active_preset.target_v_mv, 'V'),
-                LoadMode::Cp => (active_preset.target_p_mw as i32, 'W'),
-                LoadMode::Cc | LoadMode::Reserved(_) => (active_preset.target_i_ma, 'A'),
+                LoadMode::Cv => (effective.preset.target_v_mv, 'V'),
+                LoadMode::Cp => (effective.preset.target_p_mw as i32, 'W'),
+                LoadMode::Cc | LoadMode::Reserved(_) => (effective.preset.target_i_ma, 'A'),
             };
             let preview_panel = if preview_active {
                 use ui::preset_panel::{format_av_3dp, format_power_2dp};
@@ -5105,7 +5109,8 @@ async fn display_render_task(
             };
             (
                 overlay_preset_id,
-                guard.output_enabled,
+                ui::CalibrationUiMode::from_cal_kind(cal_mode),
+                effective.output_enabled,
                 overlay_mode,
                 active_target_milli,
                 active_target_unit,
@@ -5210,6 +5215,7 @@ async fn display_render_task(
                 );
             }
             guard.snapshot.set_control_overlay(
+                calibration_mode,
                 overlay_preset_id,
                 output_enabled,
                 overlay_mode,
@@ -6623,7 +6629,12 @@ async fn main(spawner: Spawner) {
         .expect("touch_spring_task spawn");
     info!("spawning display render task");
     spawner
-        .spawn(display_render_task(pipeline, telemetry, control))
+        .spawn(display_render_task(
+            pipeline,
+            telemetry,
+            calibration,
+            control,
+        ))
         .expect("display_render_task spawn");
     info!("spawning display present task");
     spawner

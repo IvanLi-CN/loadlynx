@@ -58,7 +58,7 @@
 
 | Pair | Payload | Font | Color | Placement |
 | --- | --- | --- | --- | --- |
-| Control row | 主界面 Preset 概览与入口：左侧两行 `M#` / `CC|CV`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更） | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；分别用于：显示 active preset（含编号与 mode）+ 显示 target 摘要；交互语义详见 `docs/plan/0005:on-device-preset-ui/PLAN.md`。 |
+| Control row | 主界面 Preset 概览与入口：默认显示左侧两行 `M#` / `CC|CV|CP`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更）；**当设备处于 calibration mode 时，左侧切换为 `C1/C2/V` / `CAL`，右侧显示当前 calibration target（若有）** | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；`CP` 紫 `#B27BFF`；`CAL` 蓝 `#4CC9F0`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；正常模式显示 active preset（含编号与 mode）+ target 摘要；calibration mode 显示 channel/kind + 当前 calibration target。交互语义详见 `docs/plan/0005:on-device-preset-ui/PLAN.md`。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
 | Extended-voltage toggle | 两行：`PD/<V>V`（`/` 代表换行）；短按切换“仅 Safe5V / 允许扩展电压” | SmallFont | 灰=`#555F75`（仅 Safe5V）；蓝=`#4CC9F0`（允许扩展电压）；红=`#FF5252`（允许扩展电压但最近一次非 Safe5V 请求失败） | 圆角矩形 `(198,118)-(277,145)`；顶部文案固定为 `PD`；第二行显示 `5V` 或已保存目标电压（当前设计稿示例为 `20V`） |
@@ -70,6 +70,7 @@
 - 正常就绪：`RDY`
 - 模拟板离线（从未建链）：`OFF`
 - 校准缺失：`CAL`
+- 若当前处于 calibration mode 且无更高优先级异常：显示 `CAL C1` / `CAL C2` / `CAL V`
 - 当显示“原因缩写”（`OFF/LNK/UVLO/OCP/OPP/OCF/OVP/OTP/FLT`）时，需要闪烁（文本双色切换），用于提示“异常/无法启用/强制关断”。
 - 最高级别故障（Critical）：
   - 链路持续故障：`LNK`（曾经建链后连续掉线；短暂掉线仅屏幕提示；持续掉线达到阈值后进入 Critical，默认：连续无有效帧 `≥3s`）
@@ -159,9 +160,10 @@
    - 左侧 `CURRENT` 仅显示合计电流主读数（数值 + 单位）；两路通道电流以 `CURRENT` 标签右侧镜像条形图表达（无文字标签，不显示单通道数值文本）。
 2. **Right status**
    - Voltage bars = `clamp(V_measured / V_range)` with default `V_range = 40 V`.
-   - **Control row** replaces the legacy “SET I” line:
-     - Shows the active preset `<M#><MODE>` and a target summary `DD.dddU` (unit follows the active mode).
-     - Target value is sourced from the digital preset model (not measured values).
+  - **Control row** replaces the legacy “SET I” line:
+     - Normal mode shows the active preset `<M#><MODE>` and a target summary `DD.dddU` (unit follows the active mode).
+     - Calibration mode switches the left pill to `C1/C2/V + CAL`; for current-channel calibration the right pill is sourced from the temporary calibration override rather than the persisted preset.
+     - Target value is always a digital-side command/target view (not measured values).
      - No per-digit adjustment highlight is shown on the main screen; editing occurs in the Preset Panel.
    - Runtime + energy update at 2 Hz, temperature at 5 Hz. Keep color semantics fixed for muscle memory.
 
@@ -199,6 +201,8 @@
 
 - `docs/assets/main-display/main-display-mock-cc.png` — pixel-level mock (CC active).
 - `docs/assets/main-display/main-display-mock-cv.png` — pixel-level mock (CV active).
+- `docs/assets/main-display/calibration/dashboard-calibration-current-ch1.png` — pixel-level mock（CH1 calibration active, 1.000 A target）。
+- `docs/assets/main-display/calibration/dashboard-calibration-current-ch2.png` — pixel-level mock（CH2 calibration active, 0.500 A target）。
 - `docs/assets/usb-pd-settings-panel/pd-settings-fixed.png` — USB‑PD Settings（Fixed）渲染 mock。
 - `docs/assets/usb-pd-settings-panel/pd-settings-pps.png` — USB‑PD Settings（PPS）渲染 mock。
 - `docs/assets/usb-pd-settings-panel/pd-settings-unavailable.png` — USB‑PD Settings（Unavailable）渲染 mock。
