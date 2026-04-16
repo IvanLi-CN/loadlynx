@@ -496,6 +496,23 @@ impl ControlState {
         self.set_live_output_enabled(effective_output_enabled);
     }
 
+    pub fn enable_output_for_mode(&mut self, cal_mode: CalKind) -> bool {
+        if calibration_mode_uses_cc_override(cal_mode) {
+            let target_i_ma = self
+                .calibration_cc_override
+                .map(|override_state| override_state.target_i_ma)
+                .unwrap_or(0);
+            if target_i_ma == 0 {
+                return false;
+            }
+            self.set_calibration_cc_override(target_i_ma, true);
+            return true;
+        }
+
+        self.set_normal_output_enabled(true);
+        true
+    }
+
     pub fn clear_calibration_cc_override(&mut self, restore_normal_output: bool) -> bool {
         let had_override = self.calibration_cc_override.take().is_some();
         if !had_override {
@@ -1250,5 +1267,32 @@ mod tests {
         assert!(!crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
 
         crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn enabling_output_in_current_calibration_reuses_override_target() {
+        let mut state = ControlState::new(default_presets(), PdConfig::default(), false);
+        crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
+        state.set_calibration_cc_override(1_500, false);
+
+        assert!(state.enable_output_for_mode(CalKind::CurrentCh1));
+        assert!(state.output_enabled);
+        assert!(crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
+
+        let current = state.effective_output_command(CalKind::CurrentCh1);
+        assert_eq!(current.preset.target_i_ma, 1_500);
+        assert!(current.output_enabled);
+
+        crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn enabling_output_in_current_calibration_without_target_is_blocked() {
+        let mut state = ControlState::new(default_presets(), PdConfig::default(), false);
+        crate::DESIRED_OUTPUT_ENABLED.store(false, Ordering::Relaxed);
+
+        assert!(!state.enable_output_for_mode(CalKind::CurrentCh2));
+        assert!(!state.output_enabled);
+        assert!(!crate::DESIRED_OUTPUT_ENABLED.load(Ordering::Relaxed));
     }
 }

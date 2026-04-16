@@ -758,7 +758,7 @@ function DeviceCalibrationPage({
   }, [baseUrl, rejectStatusWaiters, statusStreamPaused]);
 
   const statusFallbackQuery = useQuery<FastStatusView, HttpApiError>({
-    queryKey: ["device", deviceId, "status", "calibration-fallback"],
+    queryKey: ["device", deviceId, baseUrl, "status", "calibration-fallback"],
     queryFn: () => getStatus(baseUrl),
     enabled:
       Boolean(baseUrl) &&

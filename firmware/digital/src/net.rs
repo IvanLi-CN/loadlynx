@@ -4074,12 +4074,12 @@ async fn apply_calibration_mode(
     calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
 ) {
-    let mut prev_kind = kind;
-    {
+    let prev_kind = {
         let mut guard = calibration.lock().await;
-        prev_kind = guard.cal_mode;
+        let prev_kind = guard.cal_mode;
         guard.cal_mode = kind;
-    }
+        prev_kind
+    };
 
     let mode_changed = prev_kind != kind;
     let mut override_cleared = false;
