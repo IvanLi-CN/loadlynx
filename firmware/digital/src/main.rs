@@ -5767,6 +5767,7 @@ fn log_framebuffer_samples(label: &'static str, framebuffer: &[u8]) {
 #[embassy_executor::task]
 async fn uart_link_task(
     uart: &'static mut Uart<'static, Async>,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
@@ -5788,7 +5789,7 @@ async fn uart_link_task(
     loop {
         match AsyncRead::read(uart, &mut chunk).await {
             Ok(n) if n > 0 => {
-                feed_decoder(&chunk[..n], &mut decoder, control, telemetry).await;
+                feed_decoder(&chunk[..n], &mut decoder, calibration, control, telemetry).await;
             }
             Ok(_) => {
                 continue;
@@ -5809,6 +5810,7 @@ async fn uart_link_task(
 async fn uart_link_task_dma(
     mut uhci_rx: uhci::UhciRx<'static, Async>,
     mut dma_rx: DmaRxBuf,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
@@ -5847,7 +5849,7 @@ async fn uart_link_task_dma(
                 // When chunk_limit < dma buffer len, received bytes may wrap across descriptors.
                 // Always consume via the provided iterator to preserve ordering.
                 for chunk in buf_back.received_data() {
-                    feed_decoder(chunk, decoder, control, telemetry).await;
+                    feed_decoder(chunk, decoder, calibration, control, telemetry).await;
                 }
                 dma_rx = buf_back;
             }
@@ -5867,6 +5869,7 @@ async fn uart_link_task_dma(
 async fn feed_decoder(
     bytes: &[u8],
     decoder: &mut SlipDecoder<FAST_STATUS_SLIP_CAPACITY>,
+    calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
 ) {
@@ -6018,6 +6021,8 @@ async fn feed_decoder(
                                 if hdr.flags & FLAG_IS_ACK != 0 {
                                     let total =
                                         CAL_MODE_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+                                    net::apply_calibration_mode(mode.kind, calibration, control)
+                                        .await;
                                     info!(
                                         "cal_mode ACK received: seq={} kind={:?} (ack_total={})",
                                         hdr.seq, mode.kind, total
@@ -6716,13 +6721,19 @@ async fn main(spawner: Spawner) {
             let dma_rx = uhci_dma_buf_opt.take().expect("uhci dma buf missing");
             info!("spawning uart link task (UHCI DMA)");
             spawner
-                .spawn(uart_link_task_dma(uhci_rx, dma_rx, control, telemetry))
+                .spawn(uart_link_task_dma(
+                    uhci_rx,
+                    dma_rx,
+                    calibration,
+                    control,
+                    telemetry,
+                ))
                 .expect("uart_link_task_dma spawn");
         } else {
             let uart1 = uart1.expect("uart1 missing");
             info!("spawning uart link task (async no-DMA)");
             spawner
-                .spawn(uart_link_task(uart1, control, telemetry))
+                .spawn(uart_link_task(uart1, calibration, control, telemetry))
                 .expect("uart_link_task spawn");
         }
     } else {

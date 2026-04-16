@@ -115,6 +115,7 @@ const CALIBRATION_DRAFT_STORAGE_VERSION = 4;
 const CALIBRATION_CURRENT_OPTIONS_STORAGE_VERSION = 2;
 const CALIBRATION_STATUS_FALLBACK_REFETCH_MS = 500;
 const CALIBRATION_STATUS_STALE_TIMEOUT_MS = 2_500;
+const CALIBRATION_STATUS_STREAM_STARTUP_TIMEOUT_MS = 1_500;
 
 const calibrationStatusRetryDelay = () => 200 + Math.random() * 300;
 
@@ -622,6 +623,7 @@ function DeviceCalibrationPage({
       ? true
       : document.visibilityState === "visible",
   );
+  const previousCalibrationBaseUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (typeof document === "undefined") {
@@ -639,33 +641,26 @@ function DeviceCalibrationPage({
   }, []);
 
   useEffect(() => {
-    if (typeof window === "undefined" || isMockBaseUrl(baseUrl)) {
-      return undefined;
+    const previousBaseUrl = previousCalibrationBaseUrlRef.current;
+    previousCalibrationBaseUrlRef.current = baseUrl;
+    if (
+      !previousBaseUrl ||
+      previousBaseUrl === baseUrl ||
+      isMockBaseUrl(previousBaseUrl)
+    ) {
+      return;
     }
 
-    // React StrictMode tears effects down once during mount rehearsal in dev.
-    // Arm the cleanup on the next macrotask so only real route/baseUrl exits
-    // send the best-effort "off" back to the previous device.
-    let cleanupArmed = false;
-    const armId = window.setTimeout(() => {
-      cleanupArmed = true;
-    }, 0);
-
-    return () => {
-      window.clearTimeout(armId);
-      if (!cleanupArmed) {
-        return;
-      }
-      postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
-        // Best-effort; do not block route teardown on cleanup failures.
-      });
-    };
+    postCalibrationMode(previousBaseUrl, { kind: "off" }).catch(() => {
+      // Best-effort; do not block device switches on cleanup failures.
+    });
   }, [baseUrl]);
 
   // Live status stream (includes optional RAW fields in calibration mode).
   const [status, setStatus] = useState<FastStatusView | null>(null);
   const [statusStreamPaused, setStatusStreamPaused] = useState(false);
   const [statusStreamConnected, setStatusStreamConnected] = useState(false);
+  const [statusFallbackArmed, setStatusFallbackArmed] = useState(false);
   const statusRef = useRef<FastStatusView | null>(status);
   const lastStatusAtRef = useRef<number | null>(null);
   const statusWaitersRef = useRef<StatusWaiter[]>([]);
@@ -763,6 +758,7 @@ function DeviceCalibrationPage({
     lastStatusAtRef.current = null;
     publishStatusSnapshot(null);
     setStatusStreamConnected(false);
+    setStatusFallbackArmed(false);
     rejectStatusWaiters(new Error("Status stream reset"));
   }, [baseUrl, publishStatusSnapshot, rejectStatusWaiters]);
 
@@ -775,10 +771,12 @@ function DeviceCalibrationPage({
       baseUrl,
       (view) => {
         setStatusStreamConnected(true);
+        setStatusFallbackArmed(false);
         publishStatusSnapshot(view);
       },
       () => {
         setStatusStreamConnected(false);
+        setStatusFallbackArmed(true);
       },
     );
 
@@ -789,12 +787,29 @@ function DeviceCalibrationPage({
     };
   }, [baseUrl, publishStatusSnapshot, rejectStatusWaiters, statusStreamPaused]);
 
+  useEffect(() => {
+    if (statusStreamPaused || statusStreamConnected || statusFallbackArmed) {
+      return;
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      if (statusPauseDepthRef.current === 0 && !statusStreamConnected) {
+        setStatusFallbackArmed(true);
+      }
+    }, CALIBRATION_STATUS_STREAM_STARTUP_TIMEOUT_MS);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [statusFallbackArmed, statusStreamConnected, statusStreamPaused]);
+
   const statusFallbackQuery = useQuery<FastStatusView, HttpApiError>({
     queryKey: ["device", deviceId, baseUrl, "status", "calibration-fallback"],
     queryFn: () => getStatus(baseUrl),
     enabled:
       Boolean(baseUrl) &&
       isPageVisible &&
+      statusFallbackArmed &&
       !statusStreamPaused &&
       !statusStreamConnected,
     refetchInterval: isPageVisible

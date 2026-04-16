@@ -884,7 +884,6 @@ async fn handle_http_connection(
                         )
                         .await?;
                     } else {
-                        apply_calibration_mode(kind, calibration, control).await;
                         body.clear();
                         body.push_str(r#"{"ok":true}"#);
                         write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
@@ -4057,7 +4056,7 @@ fn parse_calibration_mode_request(
     }
 }
 
-async fn apply_calibration_mode(
+pub(crate) async fn apply_calibration_mode(
     kind: CalKind,
     calibration: &'static CalibrationMutex,
     control: &'static ControlMutex,

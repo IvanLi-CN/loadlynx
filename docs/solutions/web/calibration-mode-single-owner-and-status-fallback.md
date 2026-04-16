@@ -11,6 +11,7 @@
 - **设备模式写入必须单 owner。** 页签切换、按钮动作和初始化恢复都可以“提出目标 mode”，但真正调用 `postCalibrationMode(...)` 的地方必须唯一。
 - **storage hydrate 必须早于自动 side effect。** 如果页面 mount 时先跑默认值驱动的 side effect，再从 storage 恢复真实页签，就会把设备短暂切到错误模式。
 - **SSE 断流不等于页面离线。** 在嵌入式 HTTP 连接资源有限的设备上，短时断流或 worker 切换很常见；页面应该保留 last-good status，并自动回退到轻量 polling。
+- **fallback polling 不能在正常 SSE 启动期就并行打开。** 否则页面一挂载就会同时占用 SSE + 轮询请求，反而把嵌入式 HTTP worker 挤爆；应等到 stream 真实报错或启动超时后再启用 fallback。
 - **RAW / 调试字段必须按 mode 做消费门控。** 当前页签的设备 mode 未对齐时，宁可显示“syncing”占位，也不要误展示旧模式的 RAW/DAC 数据。
 - **动作链读取的 latest status 不能只依赖下一次 render。** 如果 `ensureMode()` 在暂停 SSE 时主动拉了一次 snapshot，就要同步更新共享 status ref；否则 `Capture` 这种紧跟在 mode sync 后的动作会读到旧的 `null`/过期 status。
 
