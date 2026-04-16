@@ -56,8 +56,8 @@ function seedCurrentCh2Draft(deviceId: string, baseUrl: string) {
 
 function findCalModeBadge(canvasElement: HTMLElement): HTMLElement | null {
   return (
-    Array.from(canvasElement.querySelectorAll(".badge")).find((element) =>
-      element.textContent?.includes("cal_mode:"),
+    Array.from(canvasElement.querySelectorAll<HTMLElement>(".badge")).find(
+      (element) => element.textContent?.includes("cal_mode:"),
     ) ?? null
   );
 }
@@ -66,7 +66,9 @@ function findCalibrationStat(
   canvasElement: HTMLElement,
   title: string,
 ): HTMLElement | null {
-  const matches = Array.from(canvasElement.querySelectorAll(".stat")).filter(
+  const matches = Array.from(
+    canvasElement.querySelectorAll<HTMLElement>(".stat"),
+  ).filter(
     (element) =>
       element.querySelector(".stat-title")?.textContent?.trim() === title,
   );
