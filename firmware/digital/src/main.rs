@@ -3900,27 +3900,52 @@ fn pd_button_display_target_mv(
     saved: control::PdConfig,
     allow_extended_voltage: bool,
     status: Option<&PdStatus>,
-) -> u32 {
-    match saved.mode {
-        // Dashboard line2 should prefer the persisted target, but legacy blobs may have a stale
-        // `target_mv` in Fixed mode (e.g. leftover PPS Vreq). If we can derive a fixed selection
-        // from `PD_STATUS`, prefer that value to avoid misleading UI output.
-        control::PdMode::Fixed => {
-            let persisted = saved.target_mv.clamp(
-                control::PdConfig::DEFAULT_TARGET_MV,
-                control::PdConfig::MAX_FIXED_TARGET_MV,
-            );
-            let derived = pd_fixed_target_mv(saved, status);
-            if allow_extended_voltage && derived != persisted {
-                derived
-            } else {
-                persisted
-            }
+) -> Option<u32> {
+    fn pdo_pos(pos: u8, idx: usize) -> u8 {
+        if pos != 0 {
+            pos
+        } else {
+            (idx + 1).min(u8::MAX as usize) as u8
         }
-        control::PdMode::Pps => saved.pps_target_mv.clamp(
+    }
+
+    if !allow_extended_voltage {
+        return Some(control::PdConfig::DEFAULT_TARGET_MV);
+    }
+
+    match saved.mode {
+        // Fixed mode only exposes the live source capability. If the saved fixed selection is not
+        // present in the current Source Caps, hide the target instead of leaking a stale 28V row.
+        control::PdMode::Fixed => {
+            let status = status?;
+            let object_pos = if saved.fixed_object_pos != 0 {
+                Some(saved.fixed_object_pos)
+            } else {
+                status
+                    .fixed_pdos
+                    .iter()
+                    .enumerate()
+                    .find(|(_idx, pdo)| {
+                        pdo.mv == saved.target_mv
+                            && pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV
+                    })
+                    .map(|(idx, pdo)| pdo_pos(pdo.pos, idx))
+            }?;
+
+            status
+                .fixed_pdos
+                .iter()
+                .enumerate()
+                .find(|(idx, pdo)| {
+                    pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV
+                        && pdo_pos(pdo.pos, *idx) == object_pos
+                })
+                .map(|(_idx, pdo)| pdo.mv)
+        }
+        control::PdMode::Pps => Some(saved.pps_target_mv.clamp(
             control::PdConfig::MIN_AUGMENTED_TARGET_MV,
             control::PdConfig::MAX_PPS_TARGET_MV,
-        ),
+        )),
     }
 }
 
@@ -3958,22 +3983,8 @@ fn build_pd_settings_vm(
         pps_pdos = s.pps_pdos.clone();
     }
 
-    // Keep the supported 28V EPR fixed rail selectable while detached, and also for attached
-    // sources that have already proven the EPR-capable bit in their SPR capabilities.
-    if control::can_advertise_synthetic_epr_fixed(status)
-        && !fixed_pdos.iter().any(|pdo| {
-            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
-        })
-    {
-        let _ = fixed_pdos.push(loadlynx_protocol::FixedPdo {
-            pos: control::EPR_FIXED_28V_OBJECT_POS,
-            mv: control::EPR_FIXED_28V_MV,
-            max_ma: control::UNKNOWN_PDO_MAX_MA,
-        });
-    }
-
     // Fixed selection: if not explicitly selected, fall back to target_mv matching for legacy blobs.
-    let fixed_object_pos = if draft.fixed_object_pos != 0 {
+    let resolved_fixed_object_pos = if draft.fixed_object_pos != 0 {
         draft.fixed_object_pos
     } else {
         fixed_pdos
@@ -3986,16 +3997,20 @@ fn build_pd_settings_vm(
 
     let pps_object_pos = draft.pps_object_pos;
 
-    let fixed_selected = if fixed_object_pos != 0 && fixed_object_pos <= control::MAX_PD_OBJECT_POS
+    let fixed_selected = if resolved_fixed_object_pos != 0
+        && resolved_fixed_object_pos <= control::MAX_PD_OBJECT_POS
     {
         fixed_pdos
             .iter()
             .enumerate()
-            .find(|(idx, pdo)| pdo_pos(pdo.pos, *idx) == fixed_object_pos)
+            .find(|(idx, pdo)| pdo_pos(pdo.pos, *idx) == resolved_fixed_object_pos)
             .map(|(_idx, pdo)| *pdo)
     } else {
         None
     };
+    let fixed_object_pos = fixed_selected
+        .map(|_| resolved_fixed_object_pos)
+        .unwrap_or(0);
     let pps_selected = if pps_object_pos != 0 && pps_object_pos <= control::MAX_PD_OBJECT_POS {
         pps_pdos
             .iter()
@@ -4009,12 +4024,12 @@ fn build_pd_settings_vm(
     let mut selection_missing = false;
     let apply_enabled = if !attached {
         match draft.mode {
-            control::PdMode::Fixed => {
-                draft.fixed_object_pos != 0
-                    && draft.fixed_object_pos <= control::MAX_PD_OBJECT_POS
-                    && draft.target_mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV
-                    && draft.i_req_ma >= 50
-            }
+            control::PdMode::Fixed => match fixed_selected {
+                Some(pdo) if pdo.mv <= control::MAX_SUPPORTED_FIXED_TARGET_MV => {
+                    draft.i_req_ma >= 50 && draft.i_req_ma <= pdo.max_ma
+                }
+                _ => false,
+            },
             control::PdMode::Pps => {
                 draft.pps_object_pos != 0
                     && draft.pps_object_pos <= control::MAX_PD_OBJECT_POS
@@ -4036,12 +4051,7 @@ fn build_pd_settings_vm(
                         draft.i_req_ma,
                     )
                 }
-                None => {
-                    if fixed_object_pos != 0 {
-                        selection_missing = true;
-                    }
-                    false
-                }
+                None => false,
                 Some(_) => {
                     selection_missing = true;
                     false
@@ -5224,12 +5234,9 @@ async fn display_render_task(
             let pd_contract_mv = pd_status.map(|status| status.contract_mv).unwrap_or(0);
             let pd_wants_non_safe5v = pd_config_allows_non_safe5v(pd_saved, pd_status);
             let pd_display_mode = pd_button_display_mode(pd_saved, allow_extended_voltage);
-            let pd_target_mv = Some(pd_button_display_target_mv(
-                pd_saved,
-                allow_extended_voltage,
-                pd_status,
-            ));
-            let pd_target_available = true;
+            let pd_target_mv =
+                pd_button_display_target_mv(pd_saved, allow_extended_voltage, pd_status);
+            let pd_target_available = pd_target_mv.is_some();
 
             guard.snapshot.pd_display_mode = pd_display_mode;
             guard.snapshot.pd_target_mv = pd_target_mv;
@@ -8863,5 +8870,149 @@ async fn send_soft_reset_handshake(
     } else {
         warn!("soft_reset ack not received after retries; proceed with caution");
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixed_cfg(object_pos: u8, target_mv: u32) -> control::PdConfig {
+        control::PdConfig {
+            mode: control::PdMode::Fixed,
+            fixed_object_pos: object_pos,
+            pps_object_pos: 0,
+            target_mv,
+            pps_target_mv: control::PdConfig::DEFAULT_TARGET_MV,
+            i_req_ma: 1_500,
+        }
+    }
+
+    fn status_with_fixed_pdos(
+        attached: bool,
+        epr_capable: bool,
+        pdos: &[loadlynx_protocol::FixedPdo],
+    ) -> PdStatus {
+        let mut status = PdStatus {
+            attached,
+            epr_capable,
+            ..PdStatus::default()
+        };
+        for pdo in pdos {
+            let _ = status.fixed_pdos.push(*pdo);
+        }
+        status
+    }
+
+    #[test]
+    fn pd_settings_vm_uses_only_live_fixed_pdos_when_status_is_missing() {
+        let vm = build_pd_settings_vm(
+            fixed_cfg(control::EPR_FIXED_28V_OBJECT_POS, control::EPR_FIXED_28V_MV),
+            control::PdSettingsFocus::Mode,
+            control::AdjustDigit::Tens,
+            None,
+        );
+
+        assert!(vm.fixed_pdos.is_empty());
+        assert_eq!(vm.fixed_object_pos, 0);
+        assert!(!vm.apply_enabled);
+        assert_eq!(vm.message, ui::pd_settings::PdSettingsMessage::None);
+    }
+
+    #[test]
+    fn pd_settings_vm_hides_missing_fixed_selection_for_detached_source() {
+        let status = status_with_fixed_pdos(
+            false,
+            true,
+            &[loadlynx_protocol::FixedPdo {
+                pos: 1,
+                mv: 5_000,
+                max_ma: 3_000,
+            }],
+        );
+
+        let vm = build_pd_settings_vm(
+            fixed_cfg(control::EPR_FIXED_28V_OBJECT_POS, control::EPR_FIXED_28V_MV),
+            control::PdSettingsFocus::Mode,
+            control::AdjustDigit::Tens,
+            Some(&status),
+        );
+
+        assert_eq!(vm.fixed_pdos.len(), 1);
+        assert!(
+            !vm.fixed_pdos
+                .iter()
+                .any(|pdo| pdo.mv == control::EPR_FIXED_28V_MV)
+        );
+        assert_eq!(vm.fixed_object_pos, 0);
+        assert!(!vm.apply_enabled);
+        assert_eq!(vm.message, ui::pd_settings::PdSettingsMessage::None);
+    }
+
+    #[test]
+    fn pd_settings_vm_hides_missing_fixed_selection_for_attached_epr_capable_source() {
+        let status = status_with_fixed_pdos(
+            true,
+            true,
+            &[
+                loadlynx_protocol::FixedPdo {
+                    pos: 1,
+                    mv: 5_000,
+                    max_ma: 3_000,
+                },
+                loadlynx_protocol::FixedPdo {
+                    pos: 5,
+                    mv: 20_000,
+                    max_ma: 1_500,
+                },
+            ],
+        );
+
+        let vm = build_pd_settings_vm(
+            fixed_cfg(control::EPR_FIXED_28V_OBJECT_POS, control::EPR_FIXED_28V_MV),
+            control::PdSettingsFocus::Mode,
+            control::AdjustDigit::Tens,
+            Some(&status),
+        );
+
+        assert_eq!(vm.fixed_pdos.len(), 2);
+        assert!(
+            !vm.fixed_pdos
+                .iter()
+                .any(|pdo| pdo.mv == control::EPR_FIXED_28V_MV)
+        );
+        assert_eq!(vm.fixed_object_pos, 0);
+        assert!(!vm.apply_enabled);
+        assert_eq!(vm.message, ui::pd_settings::PdSettingsMessage::None);
+    }
+
+    #[test]
+    fn pd_button_hides_missing_fixed_target_when_source_does_not_expose_it() {
+        let status = status_with_fixed_pdos(
+            true,
+            true,
+            &[loadlynx_protocol::FixedPdo {
+                pos: 5,
+                mv: 20_000,
+                max_ma: 1_500,
+            }],
+        );
+
+        assert_eq!(
+            pd_button_display_target_mv(
+                fixed_cfg(control::EPR_FIXED_28V_OBJECT_POS, control::EPR_FIXED_28V_MV),
+                true,
+                Some(&status),
+            ),
+            None
+        );
+        assert_eq!(
+            pd_button_display_target_mv(
+                fixed_cfg(control::EPR_FIXED_28V_OBJECT_POS, control::EPR_FIXED_28V_MV),
+                false,
+                Some(&status),
+            ),
+            Some(control::PdConfig::DEFAULT_TARGET_MV)
+        );
     }
 }

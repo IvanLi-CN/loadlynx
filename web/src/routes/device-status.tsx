@@ -8,6 +8,7 @@ import {
   getStatus,
   isHttpApiError,
 } from "../api/client.ts";
+import { findVisibleSavedFixedPdo } from "../api/pd-display.ts";
 import type { FastStatusView, Identity, PdView } from "../api/types.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
@@ -173,7 +174,16 @@ export function DeviceStatusRoute() {
 
       const saved =
         pd.saved.mode === "fixed"
-          ? `Mode: Fixed · PDO #${pd.saved.fixed_object_pos} · ${pd.saved.i_req_ma} mA`
+          ? (() => {
+              const visibleSavedFixed = findVisibleSavedFixedPdo(pd);
+              return [
+                "Mode: Fixed",
+                visibleSavedFixed ? `PDO #${visibleSavedFixed.pos}` : null,
+                `${pd.saved.i_req_ma} mA`,
+              ]
+                .filter(Boolean)
+                .join(" · ");
+            })()
           : `Mode: PPS · APDO #${pd.saved.pps_object_pos} · ${pd.saved.target_mv} mV · ${pd.saved.i_req_ma} mA`;
 
       const lastApply = pd.apply.last

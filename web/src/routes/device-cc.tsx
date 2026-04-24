@@ -16,6 +16,7 @@ import {
   updateControl,
   updatePreset,
 } from "../api/client.ts";
+import { findVisibleSavedFixedPdo } from "../api/pd-display.ts";
 import type {
   AnalogState,
   ControlView,
@@ -614,7 +615,16 @@ export function DeviceCcRoute() {
 
       const savedText =
         pd.saved.mode === "fixed"
-          ? `Saved: Fixed · PDO #${pd.saved.fixed_object_pos} · ${pd.saved.i_req_ma} mA`
+          ? (() => {
+              const visibleSavedFixed = findVisibleSavedFixedPdo(pd);
+              return [
+                "Saved: Fixed",
+                visibleSavedFixed ? `PDO #${visibleSavedFixed.pos}` : null,
+                `${pd.saved.i_req_ma} mA`,
+              ]
+                .filter(Boolean)
+                .join(" · ");
+            })()
           : `Saved: PPS · APDO #${pd.saved.pps_object_pos} · ${pd.saved.target_mv} mV · ${pd.saved.i_req_ma} mA`;
 
       return {
