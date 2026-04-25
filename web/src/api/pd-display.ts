@@ -20,5 +20,6 @@ export function findVisibleSavedFixedPdo(pd: PdView): PdFixedPdo | null {
   if (pd.saved.mode !== "fixed") return null;
   const byPos = findFixedPdo(pd, pd.saved.fixed_object_pos);
   if (byPos) return byPos;
+  if (pd.saved.fixed_object_pos !== 0) return null;
   return pd.fixed_pdos.find((entry) => entry.mv === pd.saved.target_mv) ?? null;
 }

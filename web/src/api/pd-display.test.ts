@@ -57,4 +57,21 @@ describe("api/pd-display", () => {
 
     expect(findVisibleSavedFixedPdo(pd)).toBeNull();
   });
+
+  it("does not remap non-legacy fixed selections by voltage alone", () => {
+    const pd: PdView = {
+      ...basePdView,
+      fixed_pdos: [
+        { pos: 1, mv: 5000, max_ma: 3000 },
+        { pos: 7, mv: 9000, max_ma: 3000 },
+      ],
+      saved: {
+        ...basePdView.saved,
+        fixed_object_pos: 2,
+        target_mv: 9000,
+      },
+    };
+
+    expect(findVisibleSavedFixedPdo(pd)).toBeNull();
+  });
 });
