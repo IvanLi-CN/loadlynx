@@ -64,9 +64,11 @@
     - `MSG_SET_POINT`（带 `FLAG_IS_ACK`）→ 调用 `handle_setpoint_ack`，驱动 SetPoint 重传状态机；
     - `MSG_SOFT_RESET`（带 `FLAG_IS_ACK`）→ 调用 `handle_soft_reset_frame`，确认软复位握手。
   - 协议/SLIP 错误通过限频日志计数：`UART RX error: ...`、`protocol decode error (...)` 等。
-- 链路健康：
+- 链路健康与冷启动恢复：
   - 每次成功处理 `HELLO`/`FAST_STATUS`/ACK 帧都会刷新 `LAST_GOOD_FRAME_MS`；
-  - `stats_task` 每秒检查一次该时间戳，若 >300 ms 未见有效帧则将 `LINK_UP=false` 并在日志中标记“link down”，SetPoint 发送任务会在 `LINK_UP=false` 时暂缓新的控制指令。
+  - `stats_task` 每秒检查一次该时间戳，若 >300 ms 未见有效帧则将 `LINK_UP=false` 并在日志中标记“link down”，控制发送任务会在 `LINK_UP=false` 时暂缓新的 output-on 指令；
+  - `setmode_tx_task` 额外覆盖 `LAST_GOOD_FRAME_MS==0` 的冷启动无帧场景：短暂 grace 后限频重发 SoftReset、全量 CalWrite、SetEnable(true)、LimitProfile，并强制下一次 SetMode snapshot；
+  - SoftReset ACK 以本次握手的 `seq` 与 ACK 计数 baseline 判定，避免旧 ACK 状态让新的恢复握手被误判为成功。
 
 ### STM32G431 侧（USART3 + 单任务主循环）
 
@@ -118,7 +120,8 @@
     - 总目标电流 ≥2 A 时，CH1/CH2 预期近似各承担一半电流（允许少量不平衡与采样误差）；
   - 底部 5 行状态文本：运行时间、两路散热片温度、MCU 温度以及故障概要（`FAULT OK` 或 `FAULT 0xXXXXXXXX`）。
 - Telemetry 模型在后台持续积分 `energy_wh`，当前 UI 尚未单独绘制该值，但已在 `UiSnapshot` 中保留字段，便于后续扩展或上位机导出。
-- UI 不直接控制任何安全逻辑，仅反映 `FastStatus` 内容；控制路径通过上文的 SetPoint/SoftReset/SetEnable 完成。
+- UI 不直接控制任何安全逻辑，仅反映 `FastStatus` 内容；控制路径通过上文的 SetMode/SoftReset/SetEnable 完成。
+- 生产固件的遥测模型初始值为 offline/unknown；只有 mock/test 场景使用 demo 快照，避免链路从未建立时 Dashboard 显示冻结的假电压/电流/功率。
 - 风扇 PWM / Tach 控制虽然在引脚与协议层预留了钩子，但当前固件尚未实现相应驱动与控制逻辑。
 
 ### 联调与期望日志

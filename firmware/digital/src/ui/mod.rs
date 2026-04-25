@@ -1976,6 +1976,61 @@ fn fault_flags_abbrev(flags: u32) -> &'static str {
 }
 
 impl UiSnapshot {
+    pub fn offline() -> Self {
+        let mut run_time = String::<16>::new();
+        let _ = run_time.push_str("00:00:00");
+        Self {
+            main_voltage: 0.0,
+            main_current: 0.0,
+            main_power: 0.0,
+            remote_voltage: 0.0,
+            local_voltage: 0.0,
+            ch1_current: 0.0,
+            ch2_current: 0.0,
+            control_target_milli: 0,
+            control_target_unit: 'A',
+            adjust_digit: AdjustDigit::DEFAULT,
+            run_time,
+            sink_core_temp: 0.0,
+            sink_exhaust_temp: 0.0,
+            mcu_temp: 0.0,
+            energy_wh: 0.0,
+            remote_active: false,
+            fault_flags: 0,
+            analog_state: AnalogState::Offline,
+            wifi_status: WifiUiStatus::Disabled,
+            calibration_mode: CalibrationUiMode::Off,
+            active_preset_id: 1,
+            output_enabled: false,
+            active_mode: LoadMode::Cc,
+            uv_latched: false,
+            link_up: false,
+            link_alarm_latched: false,
+            hello_seen: false,
+            trip_alarm_abbrev: None,
+            blocked_enable_abbrev: None,
+            blink_on: false,
+            pd_state: PdButtonState::Safe5vOnly,
+            pd_display_mode: PdButtonDisplayMode::Fixed,
+            pd_target_mv: Some(5_000),
+            pd_target_available: true,
+            preset_preview_active: false,
+            preset_preview_target_text: String::new(),
+            preset_preview_v_lim_text: String::new(),
+            preset_preview_i_lim_text: String::new(),
+            preset_preview_p_lim_text: String::new(),
+            main_voltage_text: String::new(),
+            main_current_text: String::new(),
+            main_power_text: String::new(),
+            remote_voltage_text: String::new(),
+            local_voltage_text: String::new(),
+            ch1_current_text: String::new(),
+            ch2_current_text: String::new(),
+            control_target_text: String::new(),
+            status_lines: Default::default(),
+        }
+    }
+
     pub fn demo() -> Self {
         let mut run_time = String::<16>::new();
         let _ = run_time.push_str("01:32:10");
