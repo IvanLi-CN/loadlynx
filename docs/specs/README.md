@@ -68,3 +68,4 @@
 | j979q | Release 失败 Telegram 告警接入 | 待实现 | `j979q-release-failure-telegram-alerts/SPEC.md` | 2026-04-12 | Add a repo-local notifier for the analog release and development release workflows with a manual Telegram smoke path |
 | t2f5j | USB-PD EPR 28V Sink Enablement | 部分完成（3/4） | `t2f5j-usb-pd-epr-28v-sink/SPEC.md` | 2026-04-25 | PR #72；实现与构建已完成；owner-facing fixed PDO 语义已收敛为 live-only；HIL 仍待 EPR 线材补验 |
 | wh4s9 | Calibration 页面模式同步与状态链路稳定化 | 已完成 | `wh4s9-calibration-mode-sync-stability/SPEC.md` | 2026-04-16 | 本地校准页稳定性修复、Storybook/E2E 回归与视觉证据已完成 |
+| fqmns | Dashboard Boot Link Recovery | 已完成 | `fqmns-boot-link-recovery/SPEC.md` | 2026-04-25 | 软件实现与构建验证完成；HIL 因当前 worktree 缺失 selector 阻断 |

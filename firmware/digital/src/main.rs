@@ -282,6 +282,10 @@ const SETPOINT_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
 const SETMODE_ACK_TIMEOUT_MS: u32 = 40;
 const SETMODE_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
 const SETMODE_TX_PERIOD_MS: u32 = 250;
+const BOOT_LINK_RECOVERY_GRACE_MS: u32 = 1_500;
+const LINK_DOWN_RECOVERY_GRACE_MS: u32 = 1_000;
+const LINK_RECOVERY_RETRY_MS: u32 = 3_000;
+const LINK_RECOVERY_POST_RESET_QUIET_MS: u32 = 300;
 
 // Fan PWM control (ESP32‑S3 本地，根据 G431 上报的 sink_core_temp + 功率驱动风扇占空比)。
 // 数值集中在此处，便于后续调参。
@@ -467,7 +471,8 @@ static PD_LAST_RESULT_CODE: AtomicU8 = AtomicU8::new(0);
 static PD_LAST_RESULT_MS: AtomicU32 = AtomicU32::new(0);
 static PD_UI_APPLY_MS: AtomicU32 = AtomicU32::new(0);
 static PD_EXTENDED_FAILURE_LATCH: AtomicBool = AtomicBool::new(false);
-static SOFT_RESET_ACKED: AtomicBool = AtomicBool::new(false);
+static SOFT_RESET_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
+static SOFT_RESET_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETPOINT_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
@@ -4457,7 +4462,7 @@ pub struct TelemetryModel {
 impl TelemetryModel {
     fn new() -> Self {
         Self {
-            snapshot: UiSnapshot::demo(),
+            snapshot: UiSnapshot::offline(),
             last_uptime_ms: None,
             last_rendered: None,
             last_status: None,
@@ -6138,7 +6143,8 @@ fn handle_pd_sink_request_ack(header: &FrameHeader) {
 
 fn handle_soft_reset_frame(header: &FrameHeader, reset: &SoftReset) {
     if header.flags & FLAG_IS_ACK != 0 {
-        SOFT_RESET_ACKED.store(true, Ordering::Relaxed);
+        SOFT_RESET_LAST_ACK_SEQ.store(header.seq, Ordering::Relaxed);
+        SOFT_RESET_ACK_TOTAL.fetch_add(1, Ordering::Relaxed);
         info!(
             "soft_reset ACK received: seq={} reason={:?} ts_ms={}",
             header.seq, reset.reason, reset.timestamp_ms
@@ -7744,6 +7750,8 @@ async fn setmode_tx_task(
     let mut calmissing_since_ms: Option<u32> = None;
     let mut last_calmissing_warn_ms: u32 = 0;
     let mut last_calmissing_handshake_ms: u32 = 0;
+    let task_start_ms = now_ms32();
+    let mut last_boot_link_recovery_ms: u32 = task_start_ms.wrapping_sub(LINK_RECOVERY_RETRY_MS);
 
     loop {
         yield_now().await;
@@ -7800,6 +7808,51 @@ async fn setmode_tx_task(
             }
         }
 
+        let now = now_ms32();
+
+        // Cold-boot recovery: CalMissing recovery only runs after LINK_UP=true,
+        // but the observed failure mode can get stuck before any valid frame is
+        // received. Retry the complete startup handshake at a low rate so a
+        // missed first HELLO/SoftReset window does not leave the dashboard on a
+        // forever-offline snapshot.
+        let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
+        let link_up_now = LINK_UP.load(Ordering::Relaxed);
+        let never_seen_frame = last_good == 0;
+        let no_frame_past_boot_grace =
+            never_seen_frame && now.wrapping_sub(task_start_ms) >= BOOT_LINK_RECOVERY_GRACE_MS;
+        let stale_link_down = !never_seen_frame
+            && !link_up_now
+            && now.wrapping_sub(last_good) >= LINK_DOWN_RECOVERY_GRACE_MS;
+        if (no_frame_past_boot_grace || stale_link_down)
+            && pending.is_none()
+            && pd_pending.is_none()
+            && now.wrapping_sub(last_boot_link_recovery_ms) >= LINK_RECOVERY_RETRY_MS
+        {
+            last_boot_link_recovery_ms = now;
+            let reason = if never_seen_frame {
+                "never-seen-frame"
+            } else {
+                "stale-link-down"
+            };
+            warn!(
+                "link recovery handshake starting (reason={}, last_good_frame_ms={}, hello_seen={}, link_up={})",
+                reason,
+                last_good,
+                HELLO_SEEN.load(Ordering::Relaxed),
+                link_up_now
+            );
+            run_link_recovery_handshake(
+                &mut uhci_tx,
+                &mut seq,
+                calibration,
+                &mut raw,
+                &mut slip,
+                reason,
+            )
+            .await;
+            force_send = true;
+        }
+
         // On link recovery, re-send the full calibration set and force a SetMode snapshot.
         let link_up_now = LINK_UP.load(Ordering::Relaxed);
         if link_up_now && !prev_link_up {
@@ -7818,8 +7871,6 @@ async fn setmode_tx_task(
         } else if !link_up_now && prev_link_up {
             prev_link_up = false;
         }
-
-        let now = now_ms32();
 
         // If the analog side resets while the digital stays up, we can end up in CalMissing
         // until we resend the calibration curves. Do a conservative retry loop (only when
@@ -8754,6 +8805,129 @@ async fn send_all_calibration_curves(
     send_calibration_curve(uhci_tx, seq, profile, CurveKind::VRemote, raw, slip, ctx).await;
 }
 
+async fn send_set_enable_true_frame(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) -> bool {
+    let enable_cmd = SetEnable { enable: true };
+    match encode_set_enable_frame(seq, &enable_cmd, raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "{}: SetEnable(true) frame sent seq={} len={} slip_len={}",
+                        ctx, seq, frame_len, slip_len
+                    );
+                    true
+                }
+                Ok(written) => {
+                    warn!(
+                        "{}: SetEnable(true) short write {} < {} (seq={})",
+                        ctx, written, slip_len, seq
+                    );
+                    false
+                }
+                Err(err) => {
+                    warn!(
+                        "{}: SetEnable(true) uart write error for seq={}: {:?}",
+                        ctx, seq, err
+                    );
+                    false
+                }
+            },
+            Err(err) => {
+                warn!("{}: SetEnable(true) slip_encode error: {:?}", ctx, err);
+                false
+            }
+        },
+        Err(err) => {
+            warn!("{}: SetEnable(true) encode error: {:?}", ctx, err);
+            false
+        }
+    }
+}
+
+async fn send_limit_profile_default_frame(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: u8,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) -> bool {
+    match encode_limit_profile_frame(seq, &LIMIT_PROFILE_DEFAULT, raw) {
+        Ok(frame_len) => match slip_encode(&raw[..frame_len], slip) {
+            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
+                Ok(written) if written == slip_len => {
+                    let _ = uhci_tx.uart_tx.flush_async().await;
+                    info!(
+                        "{}: LimitProfile v0 sent seq={} len={} slip_len={}",
+                        ctx, seq, frame_len, slip_len
+                    );
+                    true
+                }
+                Ok(written) => {
+                    warn!(
+                        "{}: LimitProfile v0 short write {} < {} (seq={})",
+                        ctx, written, slip_len, seq
+                    );
+                    false
+                }
+                Err(err) => {
+                    warn!(
+                        "{}: LimitProfile v0 uart write error for seq={}: {:?}",
+                        ctx, seq, err
+                    );
+                    false
+                }
+            },
+            Err(err) => {
+                warn!("{}: LimitProfile v0 slip_encode error: {:?}", ctx, err);
+                false
+            }
+        },
+        Err(err) => {
+            warn!("{}: LimitProfile v0 encode error: {:?}", ctx, err);
+            false
+        }
+    }
+}
+
+async fn run_link_recovery_handshake(
+    uhci_tx: &mut uhci::UhciTx<'static, Async>,
+    seq: &mut u8,
+    calibration: &'static CalibrationMutex,
+    raw: &mut [u8; 64],
+    slip: &mut [u8; 192],
+    ctx: &str,
+) {
+    let soft_reset_seq = *seq;
+    *seq = (*seq).wrapping_add(1);
+    let soft_reset_acked = send_soft_reset_handshake(uhci_tx, soft_reset_seq, raw, slip).await;
+    if !soft_reset_acked {
+        warn!(
+            "{}: soft_reset ack missing; continuing with CalWrite+SetEnable recovery",
+            ctx
+        );
+    }
+
+    cooperative_delay_ms(LINK_RECOVERY_POST_RESET_QUIET_MS).await;
+
+    let profile = { calibration.lock().await.profile.clone() };
+    send_all_calibration_curves(uhci_tx, seq, &profile, raw, slip, ctx).await;
+
+    let enable_seq = *seq;
+    *seq = (*seq).wrapping_add(1);
+    let _ = send_set_enable_true_frame(uhci_tx, enable_seq, raw, slip, ctx).await;
+
+    let limit_seq = *seq;
+    *seq = (*seq).wrapping_add(1);
+    let _ = send_limit_profile_default_frame(uhci_tx, limit_seq, raw, slip, ctx).await;
+}
+
 async fn send_soft_reset_one_shot(
     uhci_tx: &mut uhci::UhciTx<'static, Async>,
     seq: u8,
@@ -8807,9 +8981,7 @@ async fn send_soft_reset_handshake(
     raw: &mut [u8; 64],
     slip: &mut [u8; 192],
 ) -> bool {
-    if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
-        return true;
-    }
+    let ack_total_at_start = SOFT_RESET_ACK_TOTAL.load(Ordering::Relaxed);
 
     let reset = SoftReset {
         reason: SoftResetReason::FirmwareUpdate,
@@ -8817,7 +8989,7 @@ async fn send_soft_reset_handshake(
     };
 
     for attempt in 0..3 {
-        if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+        if soft_reset_ack_seen(seq, ack_total_at_start) {
             break;
         }
 
@@ -8858,19 +9030,30 @@ async fn send_soft_reset_handshake(
             }
         }
 
-        if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
+        if soft_reset_ack_seen(seq, ack_total_at_start) {
             break;
         }
         cooperative_delay_ms(150).await;
     }
 
-    if SOFT_RESET_ACKED.load(Ordering::Relaxed) {
-        info!("soft_reset ack received; continuing link init");
+    if soft_reset_ack_seen(seq, ack_total_at_start) {
+        info!(
+            "soft_reset ack received for current handshake seq={}; continuing link init",
+            seq
+        );
         true
     } else {
-        warn!("soft_reset ack not received after retries; proceed with caution");
+        warn!(
+            "soft_reset ack not received after retries for seq={}; proceed with caution",
+            seq
+        );
         false
     }
+}
+
+fn soft_reset_ack_seen(seq: u8, ack_total_at_start: u32) -> bool {
+    SOFT_RESET_ACK_TOTAL.load(Ordering::Relaxed) != ack_total_at_start
+        && SOFT_RESET_LAST_ACK_SEQ.load(Ordering::Relaxed) == seq
 }
 
 #[cfg(test)]
