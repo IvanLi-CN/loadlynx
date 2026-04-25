@@ -98,11 +98,13 @@ export function DevicePdRoute() {
   const pdDraftSeed = useMemo(() => {
     if (!pd) return null;
     return JSON.stringify({
+      deviceId,
+      baseUrl,
       saved: pd.saved,
       fixed_pdos: pd.fixed_pdos,
       pps_pdos: pd.pps_pdos,
     });
-  }, [pd]);
+  }, [baseUrl, deviceId, pd]);
 
   useEffect(() => {
     if (!pd || pdDraftSeed == null) return;

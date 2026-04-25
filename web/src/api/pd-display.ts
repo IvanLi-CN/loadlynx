@@ -18,5 +18,7 @@ export function findPpsPdo(
 
 export function findVisibleSavedFixedPdo(pd: PdView): PdFixedPdo | null {
   if (pd.saved.mode !== "fixed") return null;
-  return findFixedPdo(pd, pd.saved.fixed_object_pos);
+  const byPos = findFixedPdo(pd, pd.saved.fixed_object_pos);
+  if (byPos) return byPos;
+  return pd.fixed_pdos.find((entry) => entry.mv === pd.saved.target_mv) ?? null;
 }
