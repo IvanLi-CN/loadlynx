@@ -300,8 +300,8 @@ pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Optio
 }
 
 /// USB PD R3.2 v1.1 Tables 10.12 / 10.13 make 28V Fixed the baseline EPR fixed rail once the
-/// source advertises the SPR-side EPR-capable bit; before EPR entry the sink has to surface that
-/// row synthetically because the real EPR Fixed PDOs are not visible yet.
+/// source advertises the SPR-side EPR-capable bit. We keep this helper for request-path logic so
+/// a persisted 28V target can still be interpreted before the real EPR Fixed PDOs become visible.
 pub fn can_advertise_synthetic_epr_fixed(status: Option<&PdStatus>) -> bool {
     status.map(|s| !s.attached || s.epr_capable).unwrap_or(true)
 }

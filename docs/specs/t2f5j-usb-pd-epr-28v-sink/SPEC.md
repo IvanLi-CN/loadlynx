@@ -4,8 +4,8 @@
 
 - Status: 已完成（软件链路已验，28V 成功合同待补验）
 - Created: 2026-03-19
-- Last: 2026-03-21
-- Notes: PR #72；实现与构建已完成；模拟板启动已恢复；HIL 已观察到 Safe5V -> EnterEprMode；当前 100W 线材返回 `CableNotEprCapable`；主人接受按“软件链路已可用、28V 成功合同待 EPR 线材补验”收口
+- Last: 2026-04-25
+- Notes: PR #72；实现与构建已完成；模拟板启动已恢复；HIL 已观察到 Safe5V -> EnterEprMode；当前 100W 线材返回 `CableNotEprCapable`；主人接受按“软件链路已可用、28V 成功合同待 EPR 线材补验”收口；owner-facing fixed PDO 语义已收敛为 live-only
 
 ## 背景 / 问题陈述
 
@@ -58,13 +58,13 @@
 - 模拟板 attach 后仍先建立 Safe5V 合同；仅在目标 fixed PDO 位于 EPR 区间时才进入 EPR。
 - 28V fixed 必须通过标准 EPR fixed PDO 请求路径完成，而不是模拟成 PPS/AVS。
 - 数字侧保存的 fixed 目标电压不得再因 `>21_000` 被 EEPROM / UI / API 拒绝。
-- `GET /api/v1/pd` 与 on-device PD settings 都必须能看到 28V fixed PDO。
+- `GET /api/v1/pd` 与 owner-facing UI 只能展示 **当前 Source 真实上报** 的 fixed PDO；未真实上报时不得凭 `epr_capable` 或离线状态合成 28V fixed row。
 - `allow_extended_voltage=false` 时，设备仍必须停留在 Safe5V，不能因为保存值是 28V 就自动离开 Safe5V。
 - Source 不支持 EPR、线材不支持 EPR、或 EPR mode entry 失败时，必须进入现有可诊断失败态，而不是崩溃或静默改写保存配置。
 
 ### SHOULD
 
-- `fixed_pdos` 视图中同时保留 20V 以下的 SPR fixed 与 28V/36V/48V 的 EPR fixed，按 object position 原样暴露。
+- `fixed_pdos` 视图中同时保留当前 Source 真实上报的 SPR fixed 与 EPR fixed，按 object position 原样暴露；未真实上报的 28V 不得伪造成列表项。
 - AVS 能力以只读方式暴露给数字侧与 HTTP，作为后续能力基础。
 - 协议与 scratch buffer 预留到至少 16 PDO，避免后续再次因上限过小而返工。
 
@@ -79,14 +79,14 @@
 
 - Fixed 28V 选择：
   - 数字侧从 `PD_STATUS.fixed_pdos` 中读取所有 fixed PDO；
-  - 当 `object_pos >= 8` 且该 PDO 是 `28_000mV` 时，允许用户像选择普通 fixed PDO 一样保存它；
+  - 仅当 `object_pos >= 8` 且该 PDO 真实存在并且是 `28_000mV` 时，才允许用户像选择普通 fixed PDO 一样保存它；
   - 若 `allow_extended_voltage=true` 且当前 attach，数字侧下发 fixed 模式的 `PD_SINK_REQUEST`。
 - 模拟板 fixed 请求：
   - 若目标 fixed PDO 位于 SPR（通常 `pos <= 7`），保持原有 SPR fixed 流程；
   - 若目标 fixed PDO 位于 EPR（通常 `pos >= 8`），则先完成 EPR mode entry，再发出 `EprRequest` 请求对应 fixed PDO；
   - 若当前在 EPR 且目标切回 SPR fixed，则主动退出 EPR 并回到 SPR 能力协商。
 - 状态上报：
-  - `fixed_pdos` 上报全部 fixed PDO；
+  - `fixed_pdos` 上报当前 attach Source 的全部真实 fixed PDO；
   - `epr_avs_pdos` 上报全部 AVS APDO；
   - `epr_active=true` 表示当前协商状态机已处于 EPR 模式。
 
@@ -120,12 +120,12 @@
 
 - `PdConfig` 允许 fixed target 保存到 `48_000mV`。
 - `GET /api/v1/pd`
-  - `fixed_pdos` 可返回 28V/36V/48V fixed PDO；
+  - `fixed_pdos` 仅返回当前 Source 真实上报的 fixed PDO；28V/36V/48V 只有真实出现时才返回；
   - 新增 `epr_active`；
   - 新增 `epr_avs_pdos`。
 - `PUT /api/v1/pd`
   - 继续只接受 `fixed` / `pps`；
-  - fixed 模式允许 `object_pos` 指向 EPR fixed PDO。
+  - fixed 模式仅允许 `object_pos` 指向当前能力列表中真实存在的 fixed PDO。
 
 ## 验收标准（Acceptance Criteria）
 
@@ -137,13 +137,16 @@
   Then 设备退出 EPR 并稳定回到 SPR fixed 合同。
 - Given 保存的目标是 28V fixed
   When 重启后 `allow_extended_voltage=false`
-  Then UI 仍显示保存目标为 28V，但运行时有效策略保持 Safe5V。
+  Then 运行时有效策略保持 Safe5V，且 owner-facing UI 只显示当前 Source 的真实能力；若当前没有真实 28V PDO，则不显示 28V。
 - Given Source 不支持 EPR 或 EPR 进入失败
   When 用户请求 28V fixed
   Then 失败态可诊断，保存配置不被改写，设备不崩溃。
 - Given `GET /api/v1/pd`
   When 当前 Source 暴露 EPR fixed / AVS 能力
   Then 响应包含 28V fixed PDO 与只读 EPR 状态字段。
+- Given `GET /api/v1/pd` 或 owner-facing PD settings
+  When 当前 Source 未真实暴露 28V fixed PDO（包括 detached、status unavailable、仅有 `epr_capable=true` 但仍停留在 SPR Source Caps）
+  Then `fixed_pdos` 与 UI 都不得显示 synthetic 28V row。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
 
@@ -174,9 +177,13 @@
 - `docs/interfaces/network-http-api.md`
 - `docs/interfaces/main-display-ui.md`
 
-## Visual Evidence (PR)
+## Visual Evidence
 
-- 构建证据：`just a-build`、`just d-build`
+- Web Storybook（隐藏保存的 28V，不再伪造 `fixed_pdos` 行）：
+  ![Web PD settings without a real 28V fixed PDO](./assets/pd-settings-hidden-fixed-28.png)
+- Web Storybook（真实 28V fixed PDO 出现时正常展示）：
+  ![Web PD settings with a real 28V fixed PDO](./assets/pd-settings-real-fixed-28.png)
+- 构建证据：`just d-build`
 - HIL 证据：已观察到 `PD request: stage=followup enter-epr pdp=34W`
 - 当前 bench 结论：对端在 EPR mode entry 阶段返回 `CableNotEprCapable`，因此合同停留在 `5V`
 

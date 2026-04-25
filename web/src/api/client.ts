@@ -338,6 +338,12 @@ function createInitialPd(baseUrl: string): PdView | null {
     return null;
   }
 
+  const hasRealFixed28 =
+    normalized.includes("real-fixed28") || normalized.includes("real-fixed-28");
+  const hasHiddenSavedFixed28 =
+    normalized.includes("hidden-fixed28") ||
+    normalized.includes("hidden-fixed-28");
+
   const fixed_pdos = [
     { pos: 1, mv: 5_000, max_ma: 3_000 },
     { pos: 2, mv: 9_000, max_ma: 3_000 },
@@ -345,6 +351,9 @@ function createInitialPd(baseUrl: string): PdView | null {
     { pos: 4, mv: 15_000, max_ma: 3_000 },
     { pos: 5, mv: 20_000, max_ma: 1_500 },
   ];
+  if (hasRealFixed28) {
+    fixed_pdos.push({ pos: 8, mv: 28_000, max_ma: 5_000 });
+  }
 
   const pps_pdos = [
     { pos: 3, min_mv: 3_300, max_mv: 21_000, max_ma: 3_000 },
@@ -354,15 +363,16 @@ function createInitialPd(baseUrl: string): PdView | null {
   const detached =
     normalized.includes("detached") || normalized.includes("not-attached");
 
-  const allow_extended_voltage = normalized.includes("extended");
+  const allow_extended_voltage =
+    normalized.includes("extended") || hasRealFixed28 || hasHiddenSavedFixed28;
 
   const saved: PdView["saved"] = {
-    mode: "pps",
-    fixed_object_pos: 5,
+    mode: hasRealFixed28 || hasHiddenSavedFixed28 ? "fixed" : "pps",
+    fixed_object_pos: hasRealFixed28 || hasHiddenSavedFixed28 ? 8 : 5,
     pps_object_pos: 3,
-    target_mv: 9_000,
+    target_mv: hasRealFixed28 || hasHiddenSavedFixed28 ? 28_000 : 9_000,
     pps_target_mv: 9_000,
-    i_req_ma: 2_000,
+    i_req_ma: hasRealFixed28 ? 3_000 : 2_000,
   };
 
   const view: PdView = {
@@ -397,6 +407,11 @@ function createInitialPd(baseUrl: string): PdView | null {
       view.contract_mv = saved.target_mv;
       view.contract_ma = saved.i_req_ma;
     }
+  }
+
+  if (hasHiddenSavedFixed28) {
+    view.contract_mv = 5_000;
+    view.contract_ma = Math.min(saved.i_req_ma, fixed_pdos[0]?.max_ma ?? 3_000);
   }
 
   return view;

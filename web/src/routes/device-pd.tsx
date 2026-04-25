@@ -1,9 +1,14 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
 import { getIdentity, getPd, isHttpApiError, postPd } from "../api/client.ts";
-import type { Identity, PdFixedPdo, PdPpsPdo, PdView } from "../api/types.ts";
+import {
+  findFixedPdo,
+  findPpsPdo,
+  findVisibleSavedFixedPdo,
+} from "../api/pd-display.ts";
+import type { Identity, PdView } from "../api/types.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
 
@@ -26,16 +31,6 @@ function formatContract(pd: PdView | null | undefined): string {
   const v = formatMilliVolts(pd.contract_mv);
   const i = formatMilliAmps(pd.contract_ma);
   return `${v} @ ${i}`;
-}
-
-function findFixedPdo(pd: PdView, pos: number | null): PdFixedPdo | null {
-  if (pos == null) return null;
-  return pd.fixed_pdos.find((entry) => entry.pos === pos) ?? null;
-}
-
-function findPpsPdo(pd: PdView, pos: number | null): PdPpsPdo | null {
-  if (pos == null) return null;
-  return pd.pps_pdos.find((entry) => entry.pos === pos) ?? null;
 }
 
 export function DevicePdRoute() {
@@ -98,28 +93,32 @@ export function DevicePdRoute() {
   const [fixedIReqMa, setFixedIReqMa] = useState<number>(0);
   const [ppsIReqMa, setPpsIReqMa] = useState<number>(0);
   const [ppsTargetMv, setPpsTargetMv] = useState<number>(0);
+  const lastDraftSeedRef = useRef<string | null>(null);
+
+  const pdDraftSeed = useMemo(() => {
+    if (!pd) return null;
+    return JSON.stringify({
+      deviceId,
+      baseUrl,
+      saved: pd.saved,
+      fixed_pdos: pd.fixed_pdos,
+      pps_pdos: pd.pps_pdos,
+    });
+  }, [baseUrl, deviceId, pd]);
 
   useEffect(() => {
-    if (!pd) return;
+    if (!pd || pdDraftSeed == null) return;
+    if (lastDraftSeedRef.current === pdDraftSeed) return;
+    lastDraftSeedRef.current = pdDraftSeed;
+
     setTab(pd.saved.mode === "pps" ? "pps" : "fixed");
-
-    const fixedPos = pd.saved.fixed_object_pos;
-    const ppsPos = pd.saved.pps_object_pos;
-
-    const nextFixedPos = pd.fixed_pdos.some((entry) => entry.pos === fixedPos)
-      ? fixedPos
-      : (pd.fixed_pdos[0]?.pos ?? null);
-    const nextPpsPos = pd.pps_pdos.some((entry) => entry.pos === ppsPos)
-      ? ppsPos
-      : (pd.pps_pdos[0]?.pos ?? null);
-
-    setSelectedFixedPos(nextFixedPos);
-    setSelectedPpsPos(nextPpsPos);
+    setSelectedFixedPos(findVisibleSavedFixedPdo(pd)?.pos ?? null);
+    setSelectedPpsPos(findPpsPdo(pd, pd.saved.pps_object_pos)?.pos ?? null);
 
     setFixedIReqMa(pd.saved.i_req_ma);
     setPpsIReqMa(pd.saved.i_req_ma);
     setPpsTargetMv(pd.saved.pps_target_mv ?? pd.saved.target_mv);
-  }, [pd]);
+  }, [pd, pdDraftSeed]);
 
   const applyMutation = useMutation({
     mutationFn: async (payload: { tab: "fixed" | "pps" }) => {
@@ -198,12 +197,16 @@ export function DevicePdRoute() {
 
   const selectedFixed = pd ? findFixedPdo(pd, selectedFixedPos) : null;
   const selectedPps = pd ? findPpsPdo(pd, selectedPpsPos) : null;
+  const visibleSavedFixed = pd ? findVisibleSavedFixedPdo(pd) : null;
 
   const fixedValidation = useMemo(() => {
     if (!pd) return { ok: false, reason: "Loading..." } as const;
     if (!pd.attached) return { ok: false, reason: "PD not attached" } as const;
+    if (pd.fixed_pdos.length === 0) {
+      return { ok: false, reason: "No fixed PDOs." } as const;
+    }
     if (!selectedFixed) {
-      return { ok: false, reason: "Selected PDO not found" } as const;
+      return { ok: false, reason: "Select a Fixed PDO" } as const;
     }
     if (!Number.isFinite(fixedIReqMa)) {
       return { ok: false, reason: "Invalid Ireq" } as const;
@@ -534,7 +537,9 @@ export function DevicePdRoute() {
                       {pd?.saved.mode ?? "..."}
                     </span>
                     {pd?.saved.mode === "fixed" ? (
-                      <> · PDO #{pd.saved.fixed_object_pos}</>
+                      visibleSavedFixed ? (
+                        <> · PDO #{visibleSavedFixed.pos}</>
+                      ) : null
                     ) : (
                       <> · APDO #{pd?.saved.pps_object_pos}</>
                     )}

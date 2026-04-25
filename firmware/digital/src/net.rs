@@ -2409,22 +2409,6 @@ async fn render_pd_view_json(
         );
         fixed_count += 1;
     }
-    if control::can_advertise_synthetic_epr_fixed(Some(&status))
-        && !status.fixed_pdos.iter().any(|pdo| {
-            pdo.pos == control::EPR_FIXED_28V_OBJECT_POS || pdo.mv == control::EPR_FIXED_28V_MV
-        })
-    {
-        if fixed_count != 0 {
-            buf.push(',');
-        }
-        let _ = core::write!(
-            buf,
-            "{{\"pos\":{},\"mv\":{},\"max_ma\":{}}}",
-            control::EPR_FIXED_28V_OBJECT_POS,
-            control::EPR_FIXED_28V_MV,
-            control::UNKNOWN_PDO_MAX_MA
-        );
-    }
     buf.push(']');
 
     buf.push_str(",\"pps_pdos\":[");
@@ -2530,6 +2514,44 @@ struct PdUpdateRequest {
     target_mv: Option<u32>,
     i_req_ma: Option<u32>,
     allow_extended_voltage: Option<bool>,
+}
+
+fn find_live_fixed_pdo(
+    status: &loadlynx_protocol::PdStatus,
+    object_pos: u8,
+) -> Option<loadlynx_protocol::FixedPdo> {
+    status
+        .fixed_pdos
+        .iter()
+        .enumerate()
+        .find(|(idx, pdo)| {
+            let effective = if pdo.pos != 0 {
+                pdo.pos
+            } else {
+                (idx + 1) as u8
+            };
+            effective == object_pos
+        })
+        .map(|(_idx, pdo)| *pdo)
+}
+
+fn find_live_pps_pdo(
+    status: &loadlynx_protocol::PdStatus,
+    object_pos: u8,
+) -> Option<loadlynx_protocol::PpsPdo> {
+    status
+        .pps_pdos
+        .iter()
+        .enumerate()
+        .find(|(idx, pdo)| {
+            let effective = if pdo.pos != 0 {
+                pdo.pos
+            } else {
+                (idx + 1) as u8
+            };
+            effective == object_pos
+        })
+        .map(|(_idx, pdo)| *pdo)
 }
 
 fn parse_pd_update_json(body: &str) -> Result<PdUpdateRequest, &'static str> {
@@ -2641,9 +2663,9 @@ async fn handle_pd_update(
     }
 
     // Requests that update `saved` still require an active digital<->analog link plus live
-    // PD_STATUS so we can validate against the current partner when attached, or allow detached
-    // synthetic EPR selections to be persisted safely. Gate-only updates must be allowed offline
-    // so callers can lock the device back to Safe5V even if the analog board is disconnected.
+    // PD_STATUS so we can validate against the current partner. Gate-only updates must be allowed
+    // offline so callers can lock the device back to Safe5V even if the analog board is
+    // disconnected.
     if updates_saved_cfg {
         let link_up = LINK_UP.load(Ordering::Relaxed);
         if !link_up {
@@ -2771,43 +2793,11 @@ async fn handle_pd_update(
         let status = status
             .as_ref()
             .expect("status required when updating saved PD fields");
-        let find_fixed = |pos: u8| {
-            status
-                .fixed_pdos
-                .iter()
-                .enumerate()
-                .find(|(idx, pdo)| {
-                    let effective = if pdo.pos != 0 {
-                        pdo.pos
-                    } else {
-                        (idx + 1) as u8
-                    };
-                    effective == pos
-                })
-                .map(|(_idx, pdo)| *pdo)
-        };
-
-        let find_pps = |pos: u8| {
-            status
-                .pps_pdos
-                .iter()
-                .enumerate()
-                .find(|(idx, pdo)| {
-                    let effective = if pdo.pos != 0 {
-                        pdo.pos
-                    } else {
-                        (idx + 1) as u8
-                    };
-                    effective == pos
-                })
-                .map(|(_idx, pdo)| *pdo)
-        };
-
         cfg.mode = mode;
         cfg.i_req_ma = i_req_ma;
         match mode {
             control::PdMode::Fixed => {
-                if let Some(pdo) = find_fixed(object_pos) {
+                if let Some(pdo) = find_live_fixed_pdo(status, object_pos) {
                     if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
                         let details = format!(
                             r#"{{"object_pos":{},"target_mv":{},"max_supported_fixed_mv":{}}}"#,
@@ -2841,49 +2831,19 @@ async fn handle_pd_update(
                     cfg.fixed_object_pos = object_pos;
                     cfg.target_mv = pdo.mv;
                 } else {
-                    if control::can_advertise_synthetic_epr_fixed(Some(status))
-                        && let Some((target_mv, max_ma)) =
-                            control::supported_epr_fixed_selection(object_pos)
-                    {
-                        let effective_max_ma = control::effective_pdo_i_req_limit(
-                            Some(status),
-                            object_pos,
-                            target_mv,
-                            max_ma,
-                        );
-                        if effective_max_ma.is_some_and(|limit| i_req_ma > limit) {
-                            let details = format!(
-                                r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                                i_req_ma,
-                                effective_max_ma.unwrap_or(max_ma),
-                                object_pos
-                            );
-                            write_error_body(
-                                body_out,
-                                "LIMIT_VIOLATION",
-                                "i_req_ma exceeds PDO Imax",
-                                false,
-                                Some(&details),
-                            );
-                            return Err("422 Unprocessable Entity");
-                        }
-                        cfg.fixed_object_pos = object_pos;
-                        cfg.target_mv = target_mv;
-                    } else {
-                        let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
-                        write_error_body(
-                            body_out,
-                            "LIMIT_VIOLATION",
-                            "selected PDO not present in capabilities",
-                            false,
-                            Some(&details),
-                        );
-                        return Err("422 Unprocessable Entity");
-                    }
+                    let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
+                    write_error_body(
+                        body_out,
+                        "LIMIT_VIOLATION",
+                        "selected PDO not present in capabilities",
+                        false,
+                        Some(&details),
+                    );
+                    return Err("422 Unprocessable Entity");
                 }
             }
             control::PdMode::Pps => {
-                let Some(apdo) = find_pps(object_pos) else {
+                let Some(apdo) = find_live_pps_pdo(status, object_pos) else {
                     let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
                     write_error_body(
                         body_out,
@@ -3074,6 +3034,53 @@ async fn handle_pd_update(
             Ok(())
         }
         Err(err) => Err(err),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_fixed_lookup_requires_real_capability() {
+        let mut status = PdStatus {
+            attached: true,
+            epr_capable: true,
+            ..PdStatus::default()
+        };
+        let _ = status.fixed_pdos.push(loadlynx_protocol::FixedPdo {
+            pos: 1,
+            mv: 5_000,
+            max_ma: 3_000,
+        });
+
+        assert_eq!(
+            find_live_fixed_pdo(&status, control::EPR_FIXED_28V_OBJECT_POS),
+            None
+        );
+    }
+
+    #[test]
+    fn live_fixed_lookup_uses_index_when_protocol_pos_is_missing() {
+        let mut status = PdStatus {
+            attached: true,
+            ..PdStatus::default()
+        };
+        let _ = status.fixed_pdos.push(loadlynx_protocol::FixedPdo {
+            pos: 0,
+            mv: 5_000,
+            max_ma: 3_000,
+        });
+        let _ = status.fixed_pdos.push(loadlynx_protocol::FixedPdo {
+            pos: 0,
+            mv: 9_000,
+            max_ma: 3_000,
+        });
+
+        assert_eq!(
+            find_live_fixed_pdo(&status, 2).map(|pdo| pdo.mv),
+            Some(9_000)
+        );
     }
 }
 
