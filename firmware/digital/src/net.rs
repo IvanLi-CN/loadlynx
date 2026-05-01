@@ -1340,6 +1340,7 @@ async fn render_status_json_inner(
         AnalogState::CalMissing => "cal_missing",
         AnalogState::Faulted => "faulted",
         AnalogState::Ready => "ready",
+        AnalogState::MeasurementInvalid => "measurement_invalid",
     };
     write_json_string_escaped(buf, analog_state_str);
     buf.push_str("\",");
@@ -1918,7 +1919,7 @@ fn output_enable_allowed_for_restore(min_v_mv: i32) -> bool {
     let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
     match analog_state {
         AnalogState::Faulted | AnalogState::Offline => return false,
-        AnalogState::CalMissing | AnalogState::Ready => {}
+        AnalogState::CalMissing | AnalogState::MeasurementInvalid | AnalogState::Ready => {}
     }
 
     if min_v_mv > 0 && crate::LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
@@ -1988,6 +1989,7 @@ async fn ensure_output_enable_allowed(
             return Err("503 Service Unavailable");
         }
         AnalogState::Ready => {}
+        AnalogState::MeasurementInvalid => {}
     }
 
     // Pre-check UVLO inhibit (V_main <= min_v) and refuse enabling so we don't
@@ -2102,7 +2104,7 @@ async fn render_cc_view_json(
             write_error_body(buf, "LINK_DOWN", "analog board is offline", true, None);
             return Err("503 Service Unavailable");
         }
-        AnalogState::Ready => {}
+        AnalogState::MeasurementInvalid | AnalogState::Ready => {}
     }
 
     let status = {
@@ -2210,6 +2212,7 @@ async fn handle_cc_update(
             return Err("503 Service Unavailable");
         }
         AnalogState::Ready => {}
+        AnalogState::MeasurementInvalid => {}
     }
 
     let parsed = match parse_cc_update_json(body_in) {
@@ -2297,7 +2300,7 @@ async fn render_pd_view_json(
             write_error_body(buf, "LINK_DOWN", "analog board is offline", true, None);
             return Err("503 Service Unavailable");
         }
-        AnalogState::CalMissing | AnalogState::Ready => {}
+        AnalogState::MeasurementInvalid | AnalogState::CalMissing | AnalogState::Ready => {}
     }
 
     let (saved, allow_extended_voltage) = {
@@ -2689,7 +2692,7 @@ async fn handle_pd_update(
                 write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
                 return Err("503 Service Unavailable");
             }
-            AnalogState::CalMissing | AnalogState::Ready => {}
+            AnalogState::MeasurementInvalid | AnalogState::CalMissing | AnalogState::Ready => {}
         }
     }
 
@@ -3271,7 +3274,7 @@ fn ensure_calibration_api_available(body_out: &mut String) -> Result<(), &'stati
             write_error_body(body_out, "LINK_DOWN", "analog board is offline", true, None);
             Err("503 Service Unavailable")
         }
-        AnalogState::CalMissing | AnalogState::Ready => Ok(()),
+        AnalogState::CalMissing | AnalogState::MeasurementInvalid | AnalogState::Ready => Ok(()),
     }
 }
 

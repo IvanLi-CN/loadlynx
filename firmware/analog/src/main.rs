@@ -41,7 +41,7 @@ mod calibration;
 mod pd;
 use calibration::{
     CalCurve, CalibrationState, CurveKind, inverse_piecewise, mv_to_raw_100uv, piecewise_linear,
-    raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
+    preserve_nonzero_uncalibrated, raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
 };
 
 // STM32G431 VREFBUF 基址/寄存器地址（同 pd-sink-stm32g431cbu6-rs 工程）
@@ -951,6 +951,8 @@ fn raw_100uv_to_mv(raw_100uv: i16) -> u32 {
 // When determining whether a current calibration curve has already compensated
 // the current-sense chain's 0A offset, accept a small residual around 0A.
 const CURRENT_ZERO_CURVE_OK_MA: i32 = 20;
+const STATUS_VOLTAGE_NONZERO_MIN_MV: i32 = 100;
+const STATUS_CURRENT_NONZERO_MIN_MA: i32 = 20;
 
 macro_rules! adc_avg_from_first {
     ($adc:expr, $ch:expr, $first:expr, $n:expr) => {{
@@ -2874,7 +2876,32 @@ async fn main(_spawner: Spawner) -> ! {
 
             let (status_v_local_mv, status_v_remote_mv, status_i_ch1_ma, status_i_ch2_ma) =
                 if cal_kind == CalKind::Off {
-                    (v_local_mv, v_remote_mv, i_ch1_ma, i_ch2_ma)
+                    (
+                        preserve_nonzero_uncalibrated(
+                            v_local_mv,
+                            v_local_mv_uncal,
+                            raw_v_nr_100uv,
+                            STATUS_VOLTAGE_NONZERO_MIN_MV,
+                        ),
+                        preserve_nonzero_uncalibrated(
+                            v_remote_mv,
+                            v_remote_mv_uncal,
+                            raw_v_rmt_100uv,
+                            STATUS_VOLTAGE_NONZERO_MIN_MV,
+                        ),
+                        preserve_nonzero_uncalibrated(
+                            i_ch1_ma,
+                            i_ch1_ma_uncal,
+                            raw_cur1_eff_100uv,
+                            STATUS_CURRENT_NONZERO_MIN_MA,
+                        ),
+                        preserve_nonzero_uncalibrated(
+                            i_ch2_ma,
+                            i_ch2_ma_uncal,
+                            raw_cur2_eff_100uv,
+                            STATUS_CURRENT_NONZERO_MIN_MA,
+                        ),
+                    )
                 } else {
                     let v_nr_sns_mv_sm = raw_100uv_to_mv(raw_v_nr_100uv_sm);
                     let v_rmt_sns_mv_sm = raw_100uv_to_mv(raw_v_rmt_100uv_sm);
