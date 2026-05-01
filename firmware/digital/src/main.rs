@@ -284,8 +284,12 @@ const SETMODE_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
 const SETMODE_TX_PERIOD_MS: u32 = 250;
 const BOOT_LINK_RECOVERY_GRACE_MS: u32 = 1_500;
 const LINK_DOWN_RECOVERY_GRACE_MS: u32 = 1_000;
+const MEASUREMENT_ZERO_RECOVERY_GRACE_MS: u32 = 2_500;
 const LINK_RECOVERY_RETRY_MS: u32 = 3_000;
 const LINK_RECOVERY_POST_RESET_QUIET_MS: u32 = 300;
+const MEASUREMENT_SIGNAL_MIN_MV: i32 = 100;
+const MEASUREMENT_SIGNAL_MIN_MA: i32 = 20;
+const MEASUREMENT_SIGNAL_MIN_MW: u32 = 500;
 
 // Fan PWM control (ESP32‑S3 本地，根据 G431 上报的 sink_core_temp + 功率驱动风扇占空比)。
 // 数值集中在此处，便于后续调参。
@@ -498,6 +502,10 @@ static LAST_ENABLE_BLOCK_CODE: AtomicU8 = AtomicU8::new(0);
 pub(crate) static LINK_UP: AtomicBool = AtomicBool::new(false);
 pub(crate) static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
 pub(crate) static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_FAST_STATUS_MS: AtomicU32 = AtomicU32::new(0);
+static MEASUREMENT_EVER_TRUSTED: AtomicBool = AtomicBool::new(false);
+static MEASUREMENT_UNTRUSTED: AtomicBool = AtomicBool::new(false);
+static LAST_TRUSTED_MEASUREMENT_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_SETPOINT_GATE_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_FAULT_LOG_MS: AtomicU32 = AtomicU32::new(0);
 /// Last analog firmware version identifier observed from HELLO (0 means unknown).
@@ -4790,6 +4798,8 @@ async fn apply_fast_status(
     telemetry: &'static TelemetryMutex,
     status: &FastStatus,
 ) {
+    let now = now_ms32();
+    LAST_FAST_STATUS_MS.store(now, Ordering::Relaxed);
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fault_flags = status.fault_flags;
     LAST_FAULT_FLAGS.store(fault_flags, Ordering::Relaxed);
@@ -4825,6 +4835,15 @@ async fn apply_fast_status(
     };
     prompt_tone::set_warn_flags(warn_flags);
     let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
+    let measurement_has_signal = fast_status_has_measurement_signal(status);
+    if measurement_has_signal {
+        MEASUREMENT_EVER_TRUSTED.store(true, Ordering::Relaxed);
+        MEASUREMENT_UNTRUSTED.store(false, Ordering::Relaxed);
+        LAST_TRUSTED_MEASUREMENT_MS.store(now, Ordering::Relaxed);
+    } else if !MEASUREMENT_EVER_TRUSTED.load(Ordering::Relaxed) && (link_up || link_flag) {
+        MEASUREMENT_UNTRUSTED.store(true, Ordering::Relaxed);
+    }
+    let measurement_untrusted = MEASUREMENT_UNTRUSTED.load(Ordering::Relaxed);
 
     // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
     // 避免模拟侧未完全实现 LINK_GOOD 时 UI 误报 OFFLINE。
@@ -4835,6 +4854,8 @@ async fn apply_fast_status(
         AnalogState::Offline
     } else if fault_flags != 0 {
         AnalogState::Faulted
+    } else if measurement_untrusted {
+        AnalogState::MeasurementInvalid
     } else if enabled || !desired_output_enabled || uv_latched {
         AnalogState::Ready
     } else {
@@ -5937,6 +5958,10 @@ async fn feed_decoder(
                                 // identity endpoint) can expose a compact analog firmware
                                 // identifier without having to inspect UART traffic.
                                 ANALOG_FW_VERSION_RAW.store(hello.fw_version, Ordering::Relaxed);
+                                LAST_FAST_STATUS_MS.store(0, Ordering::Relaxed);
+                                MEASUREMENT_EVER_TRUSTED.store(false, Ordering::Relaxed);
+                                MEASUREMENT_UNTRUSTED.store(false, Ordering::Relaxed);
+                                LAST_TRUSTED_MEASUREMENT_MS.store(0, Ordering::Relaxed);
 
                                 let first = !HELLO_SEEN.swap(true, Ordering::Relaxed);
                                 if first {
@@ -6101,6 +6126,72 @@ fn record_uart_error() {
 fn record_link_activity() {
     let now = now_ms32();
     LAST_GOOD_FRAME_MS.store(now, Ordering::Relaxed);
+}
+
+fn fast_status_has_measurement_signal(status: &FastStatus) -> bool {
+    status.v_local_mv.abs() >= MEASUREMENT_SIGNAL_MIN_MV
+        || status.v_remote_mv.abs() >= MEASUREMENT_SIGNAL_MIN_MV
+        || status.i_local_ma.abs() >= MEASUREMENT_SIGNAL_MIN_MA
+        || status.i_remote_ma.abs() >= MEASUREMENT_SIGNAL_MIN_MA
+        || status.calc_p_mw >= MEASUREMENT_SIGNAL_MIN_MW
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkRecoveryReason {
+    NeverSeenFrame,
+    StaleLinkDown,
+    NoFastStatus,
+    ZeroMeasurement,
+}
+
+impl LinkRecoveryReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NeverSeenFrame => "never-seen-frame",
+            Self::StaleLinkDown => "stale-link-down",
+            Self::NoFastStatus => "no-fast-status",
+            Self::ZeroMeasurement => "zero-measurement",
+        }
+    }
+}
+
+fn link_recovery_reason(
+    now: u32,
+    task_start_ms: u32,
+    last_good_frame_ms: u32,
+    link_up: bool,
+    last_fast_status_ms: u32,
+    measurement_untrusted: bool,
+) -> Option<LinkRecoveryReason> {
+    let never_seen_frame = last_good_frame_ms == 0;
+    if never_seen_frame && now.wrapping_sub(task_start_ms) >= BOOT_LINK_RECOVERY_GRACE_MS {
+        return Some(LinkRecoveryReason::NeverSeenFrame);
+    }
+
+    if !never_seen_frame
+        && !link_up
+        && now.wrapping_sub(last_good_frame_ms) >= LINK_DOWN_RECOVERY_GRACE_MS
+    {
+        return Some(LinkRecoveryReason::StaleLinkDown);
+    }
+
+    if !never_seen_frame
+        && link_up
+        && last_fast_status_ms == 0
+        && now.wrapping_sub(task_start_ms) >= MEASUREMENT_ZERO_RECOVERY_GRACE_MS
+    {
+        return Some(LinkRecoveryReason::NoFastStatus);
+    }
+
+    if !never_seen_frame
+        && link_up
+        && measurement_untrusted
+        && now.wrapping_sub(task_start_ms) >= MEASUREMENT_ZERO_RECOVERY_GRACE_MS
+    {
+        return Some(LinkRecoveryReason::ZeroMeasurement);
+    }
+
+    None
 }
 
 fn handle_setpoint_ack(header: &FrameHeader) {
@@ -7449,7 +7540,7 @@ async fn setpoint_tx_task(
 
                     continue;
                 }
-                AnalogState::Offline | AnalogState::Ready => {
+                AnalogState::Offline | AnalogState::MeasurementInvalid | AnalogState::Ready => {
                     // Leaving CalMissing; reset stuck timer.
                     calmissing_since_ms = None;
                 }
@@ -7817,27 +7908,28 @@ async fn setmode_tx_task(
         // forever-offline snapshot.
         let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
         let link_up_now = LINK_UP.load(Ordering::Relaxed);
-        let never_seen_frame = last_good == 0;
-        let no_frame_past_boot_grace =
-            never_seen_frame && now.wrapping_sub(task_start_ms) >= BOOT_LINK_RECOVERY_GRACE_MS;
-        let stale_link_down = !never_seen_frame
-            && !link_up_now
-            && now.wrapping_sub(last_good) >= LINK_DOWN_RECOVERY_GRACE_MS;
-        if (no_frame_past_boot_grace || stale_link_down)
+        let last_fast_status = LAST_FAST_STATUS_MS.load(Ordering::Relaxed);
+        let recovery_reason = link_recovery_reason(
+            now,
+            task_start_ms,
+            last_good,
+            link_up_now,
+            last_fast_status,
+            MEASUREMENT_UNTRUSTED.load(Ordering::Relaxed),
+        );
+        if recovery_reason.is_some()
             && pending.is_none()
             && pd_pending.is_none()
             && now.wrapping_sub(last_boot_link_recovery_ms) >= LINK_RECOVERY_RETRY_MS
         {
             last_boot_link_recovery_ms = now;
-            let reason = if never_seen_frame {
-                "never-seen-frame"
-            } else {
-                "stale-link-down"
-            };
+            let reason = recovery_reason.unwrap().as_str();
             warn!(
-                "link recovery handshake starting (reason={}, last_good_frame_ms={}, hello_seen={}, link_up={})",
+                "link recovery handshake starting (reason={}, last_good_frame_ms={}, last_fast_status_ms={}, last_trusted_measurement_ms={}, hello_seen={}, link_up={})",
                 reason,
                 last_good,
+                last_fast_status,
+                LAST_TRUSTED_MEASUREMENT_MS.load(Ordering::Relaxed),
                 HELLO_SEEN.load(Ordering::Relaxed),
                 link_up_now
             );
@@ -8295,6 +8387,7 @@ async fn setmode_tx_task(
                         continue;
                     }
                     AnalogState::Ready => {}
+                    AnalogState::MeasurementInvalid => {}
                 }
             }
 
@@ -9196,6 +9289,52 @@ mod tests {
                 Some(&status),
             ),
             Some(control::PdConfig::DEFAULT_TARGET_MV)
+        );
+    }
+
+    #[test]
+    fn fast_status_measurement_signal_requires_nonzero_measurement() {
+        let zero = FastStatus::default();
+        assert!(!fast_status_has_measurement_signal(&zero));
+
+        let with_voltage = FastStatus {
+            v_local_mv: MEASUREMENT_SIGNAL_MIN_MV,
+            ..FastStatus::default()
+        };
+        assert!(fast_status_has_measurement_signal(&with_voltage));
+
+        let with_power = FastStatus {
+            calc_p_mw: MEASUREMENT_SIGNAL_MIN_MW,
+            ..FastStatus::default()
+        };
+        assert!(fast_status_has_measurement_signal(&with_power));
+    }
+
+    #[test]
+    fn link_recovery_covers_hello_without_fast_status() {
+        assert_eq!(
+            link_recovery_reason(MEASUREMENT_ZERO_RECOVERY_GRACE_MS, 0, 1, true, 0, false),
+            Some(LinkRecoveryReason::NoFastStatus)
+        );
+    }
+
+    #[test]
+    fn link_recovery_covers_zero_measurement_fast_status() {
+        assert_eq!(
+            link_recovery_reason(MEASUREMENT_ZERO_RECOVERY_GRACE_MS, 0, 1, true, 1, true),
+            Some(LinkRecoveryReason::ZeroMeasurement)
+        );
+    }
+
+    #[test]
+    fn link_recovery_keeps_existing_boot_and_stale_paths() {
+        assert_eq!(
+            link_recovery_reason(BOOT_LINK_RECOVERY_GRACE_MS, 0, 0, false, 0, false),
+            Some(LinkRecoveryReason::NeverSeenFrame)
+        );
+        assert_eq!(
+            link_recovery_reason(LINK_DOWN_RECOVERY_GRACE_MS + 1, 0, 1, false, 1, false),
+            Some(LinkRecoveryReason::StaleLinkDown)
         );
     }
 }

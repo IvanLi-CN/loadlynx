@@ -176,6 +176,19 @@ pub fn piecewise_linear(points: &[CalPoint], raw: i16) -> Result<i32, CalError> 
     Err(CalError::InvalidCurve)
 }
 
+pub fn preserve_nonzero_uncalibrated(
+    calibrated: i32,
+    uncalibrated: i32,
+    raw_100uv: i16,
+    min_uncalibrated_abs: i32,
+) -> i32 {
+    if calibrated == 0 && raw_100uv > 0 && uncalibrated.abs() >= min_uncalibrated_abs.max(0) {
+        uncalibrated
+    } else {
+        calibrated
+    }
+}
+
 fn interpolate_segment(a: CalPoint, b: CalPoint, raw: i32) -> Result<i32, CalError> {
     let raw_a = a.raw_100uv as i32;
     let raw_b = b.raw_100uv as i32;
@@ -637,6 +650,14 @@ mod tests {
         let points = [pt(1000, 1000), pt(2000, 2000)];
         assert_eq!(piecewise_linear(&points, 0).unwrap(), 0);
         assert_eq!(piecewise_linear(&points, 3000).unwrap(), 3000);
+    }
+
+    #[test]
+    fn preserve_nonzero_uncalibrated_keeps_nonzero_raw_from_becoming_zero() {
+        assert_eq!(preserve_nonzero_uncalibrated(0, 320, 250, 100), 320);
+        assert_eq!(preserve_nonzero_uncalibrated(0, 80, 250, 100), 0);
+        assert_eq!(preserve_nonzero_uncalibrated(12, 320, 250, 100), 12);
+        assert_eq!(preserve_nonzero_uncalibrated(0, 320, 0, 100), 0);
     }
 
     #[test]

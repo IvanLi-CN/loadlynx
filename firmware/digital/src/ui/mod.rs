@@ -29,6 +29,7 @@ pub enum AnalogState {
     CalMissing = 1,
     Faulted = 2,
     Ready = 3,
+    MeasurementInvalid = 4,
 }
 
 #[repr(u8)]
@@ -76,9 +77,29 @@ impl AnalogState {
             x if x == AnalogState::CalMissing as u8 => AnalogState::CalMissing,
             x if x == AnalogState::Faulted as u8 => AnalogState::Faulted,
             x if x == AnalogState::Ready as u8 => AnalogState::Ready,
+            x if x == AnalogState::MeasurementInvalid as u8 => AnalogState::MeasurementInvalid,
             _ => AnalogState::Offline,
         }
     }
+}
+
+fn unavailable_2dp() -> String<8> {
+    let mut s = String::<8>::new();
+    let _ = s.push_str("--.--");
+    s
+}
+
+fn unavailable_1dp_3i() -> String<8> {
+    let mut s = String::<8>::new();
+    let _ = s.push_str("---.-");
+    s
+}
+
+fn unavailable_pair(unit: char) -> String<6> {
+    let mut s = String::<6>::new();
+    let _ = s.push_str("--.--");
+    let _ = s.push(unit);
+    s
 }
 
 const LOGICAL_WIDTH: i32 = 320;
@@ -2124,19 +2145,40 @@ impl UiSnapshot {
 
     /// Recompute all preformatted strings from the current numeric snapshot.
     pub fn update_strings(&mut self) {
-        self.main_voltage_text = format_fixed_2dp(self.main_voltage);
-        self.main_current_text = format_fixed_2dp(self.main_current);
-        self.main_power_text = format_fixed_1dp_3i(self.main_power);
+        let measurement_unavailable = self.analog_state == AnalogState::MeasurementInvalid;
+        if measurement_unavailable {
+            self.main_voltage_text = unavailable_2dp();
+            self.main_current_text = unavailable_2dp();
+            self.main_power_text = unavailable_1dp_3i();
+        } else {
+            self.main_voltage_text = format_fixed_2dp(self.main_voltage);
+            self.main_current_text = format_fixed_2dp(self.main_current);
+            self.main_power_text = format_fixed_1dp_3i(self.main_power);
+        }
 
-        if self.remote_active {
+        if measurement_unavailable {
+            self.remote_voltage_text = unavailable_pair('V');
+        } else if self.remote_active {
             self.remote_voltage_text = format_pair_value(self.remote_voltage, 'V');
         } else {
             self.remote_voltage_text.clear();
             let _ = self.remote_voltage_text.push_str("--.--");
         }
-        self.local_voltage_text = format_pair_value(self.local_voltage, 'V');
-        self.ch1_current_text = format_pair_value(self.ch1_current, 'A');
-        self.ch2_current_text = format_pair_value(self.ch2_current, 'A');
+        self.local_voltage_text = if measurement_unavailable {
+            unavailable_pair('V')
+        } else {
+            format_pair_value(self.local_voltage, 'V')
+        };
+        self.ch1_current_text = if measurement_unavailable {
+            unavailable_pair('A')
+        } else {
+            format_pair_value(self.ch1_current, 'A')
+        };
+        self.ch2_current_text = if measurement_unavailable {
+            unavailable_pair('A')
+        } else {
+            format_pair_value(self.ch2_current, 'A')
+        };
         self.control_target_text =
             format_setpoint_milli(self.control_target_milli, self.control_target_unit);
 
@@ -2196,6 +2238,9 @@ impl UiSnapshot {
                 AnalogState::CalMissing | AnalogState::Ready => {
                     let _ = ctl.push_str(self.calibration_mode.status_text());
                 }
+                AnalogState::MeasurementInvalid => {
+                    let _ = ctl.push_str("MEAS");
+                }
             }
         } else {
             // Normal status line avoids debug-y bitfields like "P1 CC OUT0 UV0 ...",
@@ -2206,6 +2251,9 @@ impl UiSnapshot {
                 }
                 AnalogState::CalMissing => {
                     let _ = ctl.push_str("CAL");
+                }
+                AnalogState::MeasurementInvalid => {
+                    let _ = ctl.push_str("MEAS");
                 }
                 AnalogState::Ready => {
                     let _ = ctl.push_str("RDY");
@@ -2316,5 +2364,19 @@ mod tests {
             CalibrationUiMode::from_cal_kind(CalKind::Off),
             CalibrationUiMode::Off
         );
+    }
+
+    #[test]
+    fn measurement_invalid_uses_unavailable_readouts() {
+        let mut snapshot = UiSnapshot::demo();
+        snapshot.analog_state = AnalogState::MeasurementInvalid;
+        snapshot.update_strings();
+
+        assert_eq!(snapshot.main_voltage_text.as_str(), "--.--");
+        assert_eq!(snapshot.main_current_text.as_str(), "--.--");
+        assert_eq!(snapshot.main_power_text.as_str(), "---.-");
+        assert_eq!(snapshot.local_voltage_text.as_str(), "--.--V");
+        assert_eq!(snapshot.ch1_current_text.as_str(), "--.--A");
+        assert_eq!(snapshot.status_lines()[4].as_str(), "MEAS");
     }
 }
