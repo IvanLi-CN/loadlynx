@@ -11,6 +11,20 @@ default:
 fmt:
   cargo fmt --all || true
 
+# --- Local devd / CLI -------------------------------------------------------
+
+devd-build:
+  cargo build --manifest-path tools/loadlynx-devd/Cargo.toml --bins
+
+devd-test:
+  cargo test --manifest-path tools/loadlynx-devd/Cargo.toml
+
+devd-serve +args:
+  cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynx-devd -- serve {{args}}
+
+loadlynxctl +args:
+  cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynxctl -- {{args}}
+
 # --- Analog (STM32G431) ----------------------------------------------------
 
 # Build analog firmware (PROFILE/DEFMT_LOG passed via env)

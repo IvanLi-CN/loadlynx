@@ -105,6 +105,34 @@ interface DeviceCapabilities {
 }
 ```
 
+### 2.1.1 Identity firmware fields
+
+`GET /api/v1/identity` includes firmware and bridge metadata used by devd, Web and CLI artifact matching:
+
+```ts
+interface FirmwareIdentity {
+  target: "digital_esp32s3";
+  package_version: string;
+  build_id: string;       // same value as digital_fw_version
+  build_profile: string;  // release/debug/unknown
+  target_triple: string;
+  source_digest: string;
+  features: Array<"net_http" | "mdns_dns_sd" | "usb_cdc_jsonl" | string>;
+  protocol: "loadlynx.cdc.v1";
+  defmt: {
+    enabled: boolean;
+    encoding: string;
+  };
+}
+
+interface UsbBridgeIdentity {
+  transport: "usb_cdc_jsonl";
+  protocol: "loadlynx.cdc.v1";
+  lease_required: true;
+  framing: "lf_json";
+}
+```
+
 ### 2.2 模拟板状态枚举
 
 HTTP API 暴露的 `analog_state` 与数字板内部 `AnalogState` 枚举对应（`firmware/digital/src/ui/mod.rs`）：

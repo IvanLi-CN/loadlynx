@@ -1193,6 +1193,32 @@ async fn render_identity_json(
     write_json_string_escaped(buf, FW_VERSION);
     buf.push_str("\",");
 
+    // firmware contract used by devd artifact matching and USB/LAN record merge.
+    buf.push_str("\"firmware\":{");
+    buf.push_str("\"target\":\"digital_esp32s3\",");
+    buf.push_str("\"package_version\":\"");
+    write_json_string_escaped(buf, env!("CARGO_PKG_VERSION"));
+    buf.push_str("\",\"build_id\":\"");
+    write_json_string_escaped(buf, FW_VERSION);
+    buf.push_str("\",\"build_profile\":\"");
+    write_json_string_escaped(buf, option_env!("LOADLYNX_FW_PROFILE").unwrap_or("unknown"));
+    buf.push_str("\",\"target_triple\":\"");
+    write_json_string_escaped(buf, option_env!("LOADLYNX_FW_TARGET").unwrap_or("unknown"));
+    buf.push_str("\",\"source_digest\":\"");
+    write_json_string_escaped(
+        buf,
+        option_env!("LOADLYNX_FW_SRC_DIGEST").unwrap_or("src unknown"),
+    );
+    buf.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],");
+    buf.push_str("\"protocol\":\"loadlynx.cdc.v1\",");
+    buf.push_str("\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},");
+
+    buf.push_str("\"usb_bridge\":{");
+    buf.push_str("\"transport\":\"usb_cdc_jsonl\",");
+    buf.push_str("\"protocol\":\"loadlynx.cdc.v1\",");
+    buf.push_str("\"lease_required\":true,");
+    buf.push_str("\"framing\":\"lf_json\"},");
+
     // analog_fw_version: for now expose the compact HELLO fw_version as
     // 0xXXXXXXXX when available; otherwise "unknown".
     buf.push_str("\"analog_fw_version\":\"");

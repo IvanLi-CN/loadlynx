@@ -17,6 +17,15 @@ const MDNS_RESPONSE_TTL_SECS: u32 = 120;
 const ANNOUNCE_INTERVAL: Duration = Duration::from_secs(60);
 const RETRY_DELAY: Duration = Duration::from_secs(2);
 const HOSTNAME_PREFIX: &str = "loadlynx-";
+const LOADLYNX_SERVICE: &str = "_loadlynx._tcp.local";
+const HTTP_SERVICE: &str = "_http._tcp.local";
+const DNS_TYPE_A: u16 = 1;
+const DNS_TYPE_PTR: u16 = 12;
+const DNS_TYPE_TXT: u16 = 16;
+const DNS_TYPE_SRV: u16 = 33;
+const DNS_TYPE_ANY: u16 = 255;
+const DNS_CLASS_IN: u16 = 1;
+const DNS_CLASS_CACHE_FLUSH_IN: u16 = 0x8001;
 
 /// Configuration for the mDNS task.
 #[derive(Clone)]
@@ -114,20 +123,19 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
         }
 
         info!(
-            "mdns: announcing HTTP service via .local hostname (hostname={}, ip={}, port={})",
+            "mdns: announcing LoadLynx DNS-SD service (hostname={}, ip={}, port={})",
             cfg.hostname_fqdn.as_str(),
             ip,
             cfg.port
         );
 
         // Send an initial unsolicited announcement.
-        send_a_response(
+        send_service_response(
             &mut socket,
             &mut resp_buf,
-            cfg.hostname.as_str(),
+            &cfg,
             ip,
             IpEndpoint::new(IpAddress::Ipv4(MDNS_MULTICAST_V4), MDNS_PORT),
-            false,
         )
         .await;
 
@@ -165,6 +173,23 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
                                         true,
                                     )
                                     .await;
+                                } else if service_name_matches(&query.name) {
+                                    let dest = if query.unicast_response {
+                                        meta.endpoint
+                                    } else {
+                                        IpEndpoint::new(
+                                            IpAddress::Ipv4(MDNS_MULTICAST_V4),
+                                            MDNS_PORT,
+                                        )
+                                    };
+                                    send_service_response(
+                                        &mut socket,
+                                        &mut resp_buf,
+                                        &cfg,
+                                        ip,
+                                        dest,
+                                    )
+                                    .await;
                                 }
                             }
                         }
@@ -177,13 +202,12 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
                 }
                 Either::Second(_) => {
                     // Periodic unsolicited announcement.
-                    send_a_response(
+                    send_service_response(
                         &mut socket,
                         &mut resp_buf,
-                        cfg.hostname.as_str(),
+                        &cfg,
                         ip,
                         IpEndpoint::new(IpAddress::Ipv4(MDNS_MULTICAST_V4), MDNS_PORT),
-                        false,
                     )
                     .await;
                     announce_timer = Timer::after(ANNOUNCE_INTERVAL);
@@ -196,6 +220,30 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
         }
 
         Timer::after(RETRY_DELAY).await;
+    }
+}
+
+async fn send_service_response(
+    socket: &mut UdpSocket<'_>,
+    buf: &mut [u8],
+    cfg: &MdnsConfig,
+    ip: Ipv4Address,
+    dest: IpEndpoint,
+) {
+    let len = build_service_response(buf, cfg, ip).unwrap_or_else(|| {
+        warn!("mdns: failed to encode DNS-SD response (buffer too small)");
+        0
+    });
+    if len == 0 {
+        return;
+    }
+
+    if let Err(err) = socket.send_to(&buf[..len], dest).await {
+        match err {
+            SendError::NoRoute => warn!("mdns: send_to no route"),
+            SendError::SocketNotBound => warn!("mdns: socket not bound"),
+            SendError::PacketTooLarge => warn!("mdns: packet too large"),
+        }
     }
 }
 
@@ -300,10 +348,10 @@ fn build_response_inner(
 
     // Type A
     buf[offset] = 0;
-    buf[offset + 1] = 1;
-    // Class IN with cache‑flush bit set
-    buf[offset + 2] = 0x80;
-    buf[offset + 3] = 0x01;
+    buf[offset + 1] = DNS_TYPE_A as u8;
+    // Class IN with cache-flush bit set
+    buf[offset + 2] = (DNS_CLASS_CACHE_FLUSH_IN >> 8) as u8;
+    buf[offset + 3] = DNS_CLASS_CACHE_FLUSH_IN as u8;
     // TTL
     buf[offset + 4] = (MDNS_RESPONSE_TTL_SECS >> 24) as u8;
     buf[offset + 5] = (MDNS_RESPONSE_TTL_SECS >> 16) as u8;
@@ -320,6 +368,197 @@ fn build_response_inner(
     }
     buf[offset + 10..end].copy_from_slice(&octets);
     Some(end)
+}
+
+fn build_service_response(buf: &mut [u8], cfg: &MdnsConfig, ip: Ipv4Address) -> Option<usize> {
+    if buf.len() < 12 {
+        return None;
+    }
+
+    buf[0] = 0;
+    buf[1] = 0;
+    buf[2] = 0x84;
+    buf[3] = 0x00;
+    buf[4] = 0;
+    buf[5] = 0; // QDCOUNT
+    buf[6] = 0;
+    buf[7] = 5; // ANCOUNT: PTR + PTR + SRV + TXT + A
+    buf[8] = 0;
+    buf[9] = 0;
+    buf[10] = 0;
+    buf[11] = 0;
+
+    let mut offset = 12;
+    let loadlynx_instance = service_instance_name(cfg.hostname.as_str(), LOADLYNX_SERVICE);
+    let http_instance = service_instance_name(cfg.hostname.as_str(), HTTP_SERVICE);
+
+    offset = write_name_rr(
+        buf,
+        offset,
+        LOADLYNX_SERVICE,
+        DNS_TYPE_PTR,
+        DNS_CLASS_IN,
+        loadlynx_instance.as_str(),
+    )?;
+    offset = write_name_rr(
+        buf,
+        offset,
+        HTTP_SERVICE,
+        DNS_TYPE_PTR,
+        DNS_CLASS_IN,
+        http_instance.as_str(),
+    )?;
+    offset = write_srv_rr(
+        buf,
+        offset,
+        loadlynx_instance.as_str(),
+        cfg.port,
+        cfg.hostname_fqdn.as_str(),
+    )?;
+    offset = write_txt_rr(
+        buf,
+        offset,
+        loadlynx_instance.as_str(),
+        cfg.hostname.as_str(),
+    )?;
+    offset = write_a_rr(buf, offset, cfg.hostname_fqdn.as_str(), ip)?;
+    Some(offset)
+}
+
+fn service_instance_name(hostname: &str, service_name: &str) -> String<96> {
+    let mut out = String::<96>::new();
+    let _ = out.push_str("LoadLynx ");
+    let _ = out.push_str(hostname);
+    let _ = out.push('.');
+    let _ = out.push_str(service_name);
+    out
+}
+
+fn write_name_rr(
+    buf: &mut [u8],
+    offset: usize,
+    owner: &str,
+    rr_type: u16,
+    rr_class: u16,
+    target: &str,
+) -> Option<usize> {
+    let (mut offset, rdlen_pos, rdata_start) = begin_rr(buf, offset, owner, rr_type, rr_class)?;
+    offset = encode_dns_name(buf, offset, target)?;
+    finish_rr(buf, rdlen_pos, rdata_start, offset)
+}
+
+fn write_srv_rr(
+    buf: &mut [u8],
+    offset: usize,
+    owner: &str,
+    port: u16,
+    target: &str,
+) -> Option<usize> {
+    let (mut offset, rdlen_pos, rdata_start) =
+        begin_rr(buf, offset, owner, DNS_TYPE_SRV, DNS_CLASS_CACHE_FLUSH_IN)?;
+    if offset + 6 > buf.len() {
+        return None;
+    }
+    buf[offset] = 0;
+    buf[offset + 1] = 0; // priority
+    buf[offset + 2] = 0;
+    buf[offset + 3] = 0; // weight
+    buf[offset + 4] = (port >> 8) as u8;
+    buf[offset + 5] = port as u8;
+    offset += 6;
+    offset = encode_dns_name(buf, offset, target)?;
+    finish_rr(buf, rdlen_pos, rdata_start, offset)
+}
+
+fn write_txt_rr(buf: &mut [u8], offset: usize, owner: &str, hostname: &str) -> Option<usize> {
+    let (mut offset, rdlen_pos, rdata_start) =
+        begin_rr(buf, offset, owner, DNS_TYPE_TXT, DNS_CLASS_CACHE_FLUSH_IN)?;
+    for item in [
+        "product=loadlynx",
+        "api=v1",
+        "cap=net_http,usb_cdc_jsonl",
+        hostname,
+    ] {
+        let txt = if item == hostname { "device_id=" } else { item };
+        let suffix = if item == hostname { hostname } else { "" };
+        let len = txt.len() + suffix.len();
+        if len > 255 || offset + 1 + len > buf.len() {
+            return None;
+        }
+        buf[offset] = len as u8;
+        offset += 1;
+        buf[offset..offset + txt.len()].copy_from_slice(txt.as_bytes());
+        offset += txt.len();
+        if !suffix.is_empty() {
+            buf[offset..offset + suffix.len()].copy_from_slice(suffix.as_bytes());
+            offset += suffix.len();
+        }
+    }
+    finish_rr(buf, rdlen_pos, rdata_start, offset)
+}
+
+fn write_a_rr(buf: &mut [u8], offset: usize, owner: &str, ip: Ipv4Address) -> Option<usize> {
+    let (mut offset, rdlen_pos, rdata_start) =
+        begin_rr(buf, offset, owner, DNS_TYPE_A, DNS_CLASS_CACHE_FLUSH_IN)?;
+    let octets = ip.octets();
+    if offset + 4 > buf.len() {
+        return None;
+    }
+    buf[offset..offset + 4].copy_from_slice(&octets);
+    offset += 4;
+    finish_rr(buf, rdlen_pos, rdata_start, offset)
+}
+
+fn begin_rr(
+    buf: &mut [u8],
+    mut offset: usize,
+    owner: &str,
+    rr_type: u16,
+    rr_class: u16,
+) -> Option<(usize, usize, usize)> {
+    offset = encode_dns_name(buf, offset, owner)?;
+    if offset + 10 > buf.len() {
+        return None;
+    }
+    buf[offset] = (rr_type >> 8) as u8;
+    buf[offset + 1] = rr_type as u8;
+    buf[offset + 2] = (rr_class >> 8) as u8;
+    buf[offset + 3] = rr_class as u8;
+    buf[offset + 4] = (MDNS_RESPONSE_TTL_SECS >> 24) as u8;
+    buf[offset + 5] = (MDNS_RESPONSE_TTL_SECS >> 16) as u8;
+    buf[offset + 6] = (MDNS_RESPONSE_TTL_SECS >> 8) as u8;
+    buf[offset + 7] = MDNS_RESPONSE_TTL_SECS as u8;
+    let rdlen_pos = offset + 8;
+    offset += 10;
+    Some((offset, rdlen_pos, offset))
+}
+
+fn finish_rr(buf: &mut [u8], rdlen_pos: usize, rdata_start: usize, offset: usize) -> Option<usize> {
+    let rdlen = offset.checked_sub(rdata_start)?;
+    if rdlen > u16::MAX as usize || rdlen_pos + 1 >= buf.len() {
+        return None;
+    }
+    buf[rdlen_pos] = (rdlen >> 8) as u8;
+    buf[rdlen_pos + 1] = rdlen as u8;
+    Some(offset)
+}
+
+fn encode_dns_name(buf: &mut [u8], mut offset: usize, name: &str) -> Option<usize> {
+    for label in name.trim_end_matches('.').split('.') {
+        let len = label.as_bytes().len();
+        if len == 0 || len > 63 || offset + 1 + len > buf.len() {
+            return None;
+        }
+        buf[offset] = len as u8;
+        offset += 1;
+        buf[offset..offset + len].copy_from_slice(label.as_bytes());
+        offset += len;
+    }
+    if offset >= buf.len() {
+        return None;
+    }
+    buf[offset] = 0;
+    Some(offset + 1)
 }
 
 fn encode_name(buf: &mut [u8], mut offset: usize, hostname: &str) -> Option<usize> {
@@ -382,10 +621,13 @@ fn parse_query(packet: &[u8]) -> Option<Query<'_>> {
     let unicast = (qclass_raw & 0x8000) != 0;
     let qclass = qclass_raw & 0x7FFF;
 
-    if !(qtype == 1 || qtype == 255) {
+    if !matches!(
+        qtype,
+        DNS_TYPE_A | DNS_TYPE_PTR | DNS_TYPE_TXT | DNS_TYPE_SRV | DNS_TYPE_ANY
+    ) {
         return None;
     }
-    if qclass != 1 {
+    if qclass != DNS_CLASS_IN {
         return None;
     }
 
@@ -448,6 +690,10 @@ fn name_matches(candidate: &str, target: &str) -> bool {
     false
 }
 
+fn service_name_matches(candidate: &str) -> bool {
+    name_matches(candidate, LOADLYNX_SERVICE) || name_matches(candidate, HTTP_SERVICE)
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -491,5 +737,23 @@ mod tests {
         let next = decode_name(&buf, 12, &mut name).unwrap();
         assert_eq!(name.as_str(), "loadlynx-aabbcc.local");
         assert!(next < len);
+    }
+
+    #[test]
+    fn dns_sd_response_advertises_loadlynx_service() {
+        let ip = Ipv4Address::new(192, 168, 1, 42);
+        let cfg = MdnsConfig {
+            hostname: hostname_from_short_id("aabbcc"),
+            hostname_fqdn: fqdn_from_hostname("loadlynx-aabbcc"),
+            port: 80,
+        };
+        let mut buf = [0u8; 512];
+        let len = build_service_response(&mut buf, &cfg, ip).unwrap();
+
+        assert_eq!(buf[7], 5);
+        let packet = core::str::from_utf8(&buf[..len]).unwrap_or("");
+        assert!(packet.contains("_loadlynx"));
+        assert!(packet.contains("product=loadlynx"));
+        assert!(packet.contains("device_id=loadlynx-aabbcc"));
     }
 }

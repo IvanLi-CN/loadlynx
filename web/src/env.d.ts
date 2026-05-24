@@ -14,6 +14,7 @@ interface ImportMetaEnv {
   readonly VITE_APP_GIT_SHA?: string;
   readonly VITE_APP_GIT_TAG?: string;
   readonly VITE_GITHUB_REPO?: string;
+  readonly VITE_LOADLYNX_DEVD_URL?: string;
 }
 
 // biome-ignore lint/correctness/noUnusedVariables: Used by Vite/TypeScript global typings.

@@ -52,6 +52,11 @@ fn main() {
 
     // Make the version string available to firmware code.
     println!("cargo:rustc-env=LOADLYNX_FW_VERSION={}", version_string);
+    println!("cargo:rustc-env=LOADLYNX_FW_PROFILE={}", profile);
+    println!("cargo:rustc-env=LOADLYNX_FW_SRC_DIGEST={}", src_hash);
+    if let Ok(target) = env::var("TARGET") {
+        println!("cargo:rustc-env=LOADLYNX_FW_TARGET={}", target);
+    }
 
     // Also emit a copy into repo_root/tmp for host-side scripts.
     if let Some(repo_root) = repo_root_from_manifest() {

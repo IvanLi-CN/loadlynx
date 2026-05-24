@@ -4,6 +4,8 @@ LoadLynx 的硬件在环（HIL）工作流使用外部 `mcu-agentd`（默认 sib
 
 根目录 `Justfile` 提供 `just agentd-init` 安装/升级（默认 `../mcu-agentd`，可用 `MCU_AGENTD_PATH` 覆盖）；安装后 `just agentd ...` 直接调用 `mcu-agentd`。若二进制未安装，则回退到 `cargo run --manifest-path $MCU_AGENTD_MANIFEST ...`。
 
+`loadlynx-devd` 是 Web/CLI 面向 owner 的本地控制面；`mcu-agentd` 仍是底层 flash/reset/monitor 后端。devd 可以读取当前 selector cache 来生成目标证据，但不得写入 `.esp32-port`、`.stm32-port` 或暴露 selector mutation 操作。
+
 ## 1) 配置与落盘目录
 
 - 配置文件：仓根 `mcu-agentd.toml`（提交到仓库，定义 MCU 目标、后端、芯片、ELF 路径等）。
@@ -25,7 +27,16 @@ LoadLynx 的硬件在环（HIL）工作流使用外部 `mcu-agentd`（默认 sib
 - selector：`just agentd selector set|get|list ...`（也可用 `just agentd-set-port ...` / `just agentd-get-port ...`）
 - 操作：`just agentd flash|reset|monitor|logs ...`
 
-## 4) 参考（外部仓库文档）
+## 4) devd/CLI 入口
+
+- devd 构建：`just devd-build`
+- devd 测试：`just devd-test`
+- devd 启动：`just devd-serve --bind 127.0.0.1:30180 --allow-dev-cors`
+- CLI：`just loadlynxctl -- devices` 或 `just loadlynxctl -- flash digital --device <id> --artifact <artifact_id> --dry-run`
+
+真实 flash/reset 前仍必须打印目标证据，并继续遵守 selector guardrails。
+
+## 5) 参考（外部仓库文档）
 
 - 使用指南：`../mcu-agentd/docs/usage/mcu-agentd.md`
 - 配置规范：`../mcu-agentd/docs/design/config.md`

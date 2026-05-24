@@ -8,6 +8,7 @@
   - `interfaces/uart-link.md`
   - `interfaces/network-control.md`
   - `interfaces/network-http-api.md`
+  - `interfaces/usb-cdc-jsonl-bridge.md`
   - `interfaces/pinmaps/esp32-s3.md`
 
 - 器件与选型（Components）
@@ -28,6 +29,9 @@
   - ESP32-S3 启动流程：`dev-notes/software.md`
   - 硬件设计约定与易混点：`dev-notes/hardware-quirks.md`
   - MCU Agent 服务设计：`dev-notes/mcu-agentd.md`
+  - LoadLynx devd 本地设备控制面规格：`specs/e3rv6-loadlynx-devd-control-plane/SPEC.md`
+  - 本地设备控制面复用方案：`solutions/devices/local-device-control-plane.md`
+  - 固件 catalog schema：`../schemas/firmware-catalog.schema.json`
   - 用户手动校准功能：`dev-notes/user-calibration.md`
   - 蜂鸣器提示音管理器：`plan/0007:prompt-tone-manager/PLAN.md`
 

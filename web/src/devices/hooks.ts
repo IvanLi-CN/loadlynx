@@ -82,6 +82,8 @@ export function useAddDeviceMutation() {
 export interface AddRealDeviceInput {
   name: string;
   baseUrl: string;
+  connectionMarks?: StoredDevice["connectionMarks"];
+  devd?: StoredDevice["devd"];
 }
 
 export function useAddRealDeviceMutation() {
@@ -96,6 +98,8 @@ export function useAddRealDeviceMutation() {
         id: `device-${String(index).padStart(3, "0")}`,
         name: input.name,
         baseUrl: input.baseUrl,
+        connectionMarks: input.connectionMarks,
+        devd: input.devd,
       };
       const next = [...current, nextDevice];
       store.setDevices(next);
