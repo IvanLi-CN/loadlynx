@@ -127,6 +127,8 @@ export function DevicesRoute() {
                   <span className="label-text">Device name</span>
                 </div>
                 <input
+                  id="device-name"
+                  name="device_name"
                   type="text"
                   value={newDeviceName}
                   onChange={(event) => setNewDeviceName(event.target.value)}
@@ -139,6 +141,8 @@ export function DevicesRoute() {
                   <span className="label-text">Base URL</span>
                 </div>
                 <input
+                  id="device-base-url"
+                  name="device_base_url"
                   type="text"
                   value={newDeviceBaseUrl}
                   onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
@@ -244,6 +248,8 @@ export function DevicesRoute() {
                   <span className="label-text">devd candidate</span>
                 </div>
                 <select
+                  id="devd-candidate"
+                  name="devd_candidate"
                   className="select select-bordered select-sm w-full"
                   value={selectedDevdDeviceId}
                   onChange={(event) =>
@@ -408,6 +414,8 @@ export function DevicesRoute() {
                   <span className="label-text">Seed IP (Example Device)</span>
                 </div>
                 <input
+                  id="lan-scan-seed-ip"
+                  name="lan_scan_seed_ip"
                   type="text"
                   value={seedIp}
                   onChange={(e) => setSeedIp(e.target.value)}

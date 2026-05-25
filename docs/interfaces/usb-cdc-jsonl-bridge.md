@@ -72,3 +72,9 @@ Supported `op` values are `get_identity`, `get_status`, `set_log_level`, `set_ou
 ## Ownership
 
 The browser never writes directly to this channel. Web operations acquire a devd per-device lease first; CLI operations use an exclusive devd session or direct LAN API where available.
+
+`loadlynx-devd` owns the USB CDC session for Web control-plane verification. This path does not use `mcu-agentd` or `mcu-agentd selector` state; its CLI default digital USB port memory reuses `.esp32-port`.
+
+When validating against hardware, set the default ESP32-S3 digital USB CDC port through the CLI, such as `loadlynx usb-port set digital /dev/cu.usbmodemXXXX`, when the owner has identified the intended device. CLI/devd operations then use that project-local memory as the hardware target, reading only the port path line if `.esp32-port` also contains selector metadata such as `mac=...`. A passing hardware validation must include protocol-level evidence from that port: a decoded `hello`, a successful `get_identity`, a successful `get_status`, or equivalent JSONL request/response frames.
+
+Serial-open-only checks, candidate discovery, Web lease creation, mock identity/status data, and firmware dry-run target evidence are diagnostic signals only. They are not sufficient proof that the Web/devd USB CDC control plane works on the real device.

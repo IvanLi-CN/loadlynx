@@ -22,8 +22,8 @@ devd-test:
 devd-serve +args:
   cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynx-devd -- serve {{args}}
 
-loadlynxctl +args:
-  cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynxctl -- {{args}}
+loadlynx +args:
+  cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynx -- {{args}}
 
 # --- Analog (STM32G431) ----------------------------------------------------
 

@@ -1,10 +1,14 @@
 use clap::{Parser, Subcommand, ValueEnum};
-use loadlynx_devd::{DEFAULT_DEVD_URL, TargetKind};
+use dialoguer::{Confirm, Select, theme::ColorfulTheme};
+use loadlynx_devd::{
+    DEFAULT_DEVD_URL, TargetKind, list_digital_usb_port_candidates, write_default_digital_usb_port,
+};
 use reqwest::Client;
 use serde_json::{Value, json};
+use std::{env, io, path::PathBuf};
 
 #[derive(Debug, Parser)]
-#[command(name = "loadlynxctl")]
+#[command(name = "loadlynx")]
 #[command(about = "LoadLynx LAN/USB/devd control CLI")]
 struct Cli {
     #[arg(long, default_value = DEFAULT_DEVD_URL)]
@@ -61,6 +65,10 @@ enum Command {
         #[command(subcommand)]
         command: OutputCommand,
     },
+    UsbPort {
+        #[command(subcommand)]
+        command: UsbPortCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -71,6 +79,19 @@ enum OutputCommand {
         #[arg(long)]
         enable: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum UsbPortCommand {
+    Set {
+        #[arg(value_name = "TARGET_OR_PORT", num_args = 0..=2)]
+        args: Vec<String>,
+    },
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum UsbPortTarget {
+    Digital,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -94,6 +115,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::new();
     let payload =
         match cli.command {
+            Command::UsbPort {
+                command: UsbPortCommand::Set { args },
+            } => {
+                let (target, port) = resolve_usb_port_set_args(args)?;
+                let repo_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                match target {
+                    UsbPortTarget::Digital => {
+                        write_default_digital_usb_port(&repo_root, &port)?;
+                        json!({"ok": true, "mcu": "digital", "default_usb_port": port})
+                    }
+                }
+            }
             Command::Discover { mdns, lan_scan } => {
                 let scan = client
                     .post(format!("{}/api/v1/devices/scan", cli.devd))
@@ -202,4 +235,105 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("{}", serde_json::to_string_pretty(&payload)?);
     }
     Ok(())
+}
+
+fn resolve_usb_port_set_args(
+    args: Vec<String>,
+) -> Result<(UsbPortTarget, String), Box<dyn std::error::Error + Send + Sync>> {
+    match args.as_slice() {
+        [] => Ok((
+            UsbPortTarget::Digital,
+            choose_digital_usb_port_interactive()?,
+        )),
+        [single] if single == "digital" => Ok((
+            UsbPortTarget::Digital,
+            choose_digital_usb_port_interactive()?,
+        )),
+        [single] => Ok((UsbPortTarget::Digital, single.clone())),
+        [target, port] if target == "digital" => Ok((UsbPortTarget::Digital, port.clone())),
+        [target, _] => Err(format!("unsupported USB port target: {target}").into()),
+        _ => Err("usb-port set accepts at most TARGET and PORT".into()),
+    }
+}
+
+fn choose_digital_usb_port_interactive() -> io::Result<String> {
+    let candidates = list_digital_usb_port_candidates();
+    if candidates.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "No serial ports found. Connect the ESP32-S3 digital USB CDC device and retry.",
+        ));
+    }
+
+    if candidates.len() == 1 {
+        let candidate = &candidates[0];
+        let confirmed = Confirm::with_theme(&ColorfulTheme::default())
+            .with_prompt(format!("Use serial port {}?", candidate.display_name))
+            .default(true)
+            .interact()
+            .map_err(io::Error::other)?;
+        if confirmed {
+            return Ok(candidate.port_path.clone());
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "USB port selection cancelled",
+        ));
+    }
+
+    let items = candidates
+        .iter()
+        .map(|candidate| {
+            if candidate.recognized {
+                format!("{} (recognized dev board)", candidate.display_name)
+            } else {
+                candidate.display_name.clone()
+            }
+        })
+        .collect::<Vec<_>>();
+    let selected = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Select ESP32-S3 digital USB CDC serial port")
+        .items(&items)
+        .default(0)
+        .interact_opt()
+        .map_err(io::Error::other)?
+        .ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Interrupted, "USB port selection cancelled")
+        })?;
+
+    Ok(candidates[selected].port_path.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usb_port_set_args_accept_port_only() {
+        let (target, port) =
+            resolve_usb_port_set_args(vec!["/dev/cu.usbmodem212101".to_string()]).unwrap();
+        assert!(matches!(target, UsbPortTarget::Digital));
+        assert_eq!(port, "/dev/cu.usbmodem212101");
+    }
+
+    #[test]
+    fn usb_port_set_args_accept_digital_and_port() {
+        let (target, port) = resolve_usb_port_set_args(vec![
+            "digital".to_string(),
+            "/dev/cu.usbmodem212101".to_string(),
+        ])
+        .unwrap();
+        assert!(matches!(target, UsbPortTarget::Digital));
+        assert_eq!(port, "/dev/cu.usbmodem212101");
+    }
+
+    #[test]
+    fn usb_port_set_args_reject_unknown_target() {
+        let err = resolve_usb_port_set_args(vec![
+            "analog".to_string(),
+            "/dev/cu.usbmodem212101".to_string(),
+        ])
+        .unwrap_err();
+        assert!(err.to_string().contains("unsupported USB port target"));
+    }
 }

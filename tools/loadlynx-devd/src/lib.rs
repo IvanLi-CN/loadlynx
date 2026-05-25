@@ -11,23 +11,34 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
-    env, fs,
+    env, fs, io,
     net::SocketAddr,
-    path::{Path as FsPath, PathBuf},
+    path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 use tokio::{process::Command, sync::broadcast};
-use tower_http::{cors::CorsLayer, services::ServeDir};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    services::ServeDir,
+};
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:30180";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30180";
+pub const DEFAULT_DIGITAL_USB_PORT_FILE: &str = ".esp32-port";
+const DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE: &str = ".esp32-port";
+const ESPFLASH_ENV: &str = "LOADLYNX_ESPFLASH";
+const DEFAULT_ESPFLASH: &str = "espflash";
 pub const WEB_LEASE_HEARTBEAT_INTERVAL_MS: u64 = 2_000;
 pub const WEB_LEASE_TTL_MS: u64 = 8_000;
 const EVENT_LIMIT: usize = 1_000;
 const LOG_LIMIT: usize = 500;
 const TRACE_LIMIT: usize = 2_000;
+const SERIAL_PROBE_BAUD: u32 = 115_200;
+const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
+const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 1_500;
+const SERIAL_PROBE_MAX_BYTES: usize = 512;
 
 #[derive(Debug, Clone)]
 pub struct DevdConfig {
@@ -98,6 +109,13 @@ pub struct TargetCandidate {
     pub probe_selector: Option<String>,
     pub lan_base_url: Option<String>,
     pub selector_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigitalUsbPortCandidate {
+    pub port_path: String,
+    pub display_name: String,
+    pub recognized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -346,10 +364,9 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
     if allow_dev_cors {
         router = router.layer(
             CorsLayer::new()
-                .allow_origin([
-                    HeaderValue::from_static("http://localhost:5173"),
-                    HeaderValue::from_static("http://127.0.0.1:5173"),
-                ])
+                .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
+                    is_loopback_dev_origin(origin)
+                }))
                 .allow_methods([Method::GET, Method::POST, Method::DELETE])
                 .allow_headers(tower_http::cors::Any),
         );
@@ -359,6 +376,23 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
         router = router.fallback_service(ServeDir::new(web_root));
     }
     router
+}
+
+fn is_loopback_dev_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some(rest) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    ["localhost:", "127.0.0.1:", "[::1]:"]
+        .iter()
+        .filter_map(|prefix| rest.strip_prefix(prefix))
+        .any(valid_port)
+}
+
+fn valid_port(port: &str) -> bool {
+    port.parse::<u16>().is_ok()
 }
 
 async fn health() -> Json<Value> {
@@ -377,8 +411,8 @@ async fn list_devices(State(state): State<AppState>) -> Json<Value> {
 async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
     cleanup_expired_leases(&state);
     let mut discovered = Vec::new();
-    discovered.extend(scan_serial_targets());
-    discovered.extend(scan_cached_selector_targets(&state.repo_root));
+    let default_usb_port = read_default_digital_usb_port(&state.repo_root);
+    discovered.extend(scan_serial_targets(default_usb_port.as_deref()));
 
     let mut guard = state.inner.lock().expect("state lock");
     for candidate in discovered {
@@ -650,9 +684,18 @@ async fn flash_device(
             .devices
             .get(&id)
             .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
-        ensure_agentd_uses_selected_target(device, &target)?;
+        ensure_real_operation_uses_cached_target(device, &target)?;
     }
-    run_agentd(target.clone(), "flash").await?;
+    match target {
+        TargetKind::DigitalEsp32s3 => run_espflash_digital(&state, &id, &artifact).await?,
+        TargetKind::AnalogStm32g431 => run_agentd(target.clone(), "flash").await?,
+        TargetKind::LanHttp | TargetKind::Mock => {
+            return Err(HttpError::bad_request(
+                "target_unsupported",
+                "target cannot be flashed",
+            ));
+        }
+    }
     emit(
         &state,
         Some(id),
@@ -690,7 +733,7 @@ async fn reset_device(
             .devices
             .get(&id)
             .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
-        ensure_agentd_uses_selected_target(device, &target)?;
+        ensure_real_operation_uses_cached_target(device, &target)?;
     }
     run_agentd(target.clone(), "reset").await?;
     emit(
@@ -786,6 +829,7 @@ async fn create_lease(
             .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
     }
     let _ = connect_device(State(state.clone()), Path(input.device_id.clone()), None).await?;
+    probe_device_serial_session(&state, &input.device_id);
 
     let lease_id = next_id();
     let identity_device_id = {
@@ -1175,7 +1219,7 @@ fn target_evidence_locked(
     }))
 }
 
-fn ensure_agentd_uses_selected_target(
+fn ensure_real_operation_uses_cached_target(
     device: &DeviceRecord,
     target: &TargetKind,
 ) -> Result<(), HttpError> {
@@ -1191,7 +1235,7 @@ fn ensure_agentd_uses_selected_target(
         ));
     };
     let expected_source = match target {
-        TargetKind::DigitalEsp32s3 => ".esp32-port",
+        TargetKind::DigitalEsp32s3 => DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE,
         TargetKind::AnalogStm32g431 => ".stm32-port",
         TargetKind::LanHttp | TargetKind::Mock => unreachable!(),
     };
@@ -1204,6 +1248,165 @@ fn ensure_agentd_uses_selected_target(
         ));
     }
     Ok(())
+}
+
+#[derive(Debug)]
+struct EspflashOperation {
+    command: &'static str,
+    file_path: String,
+    flash_address: Option<u64>,
+}
+
+fn selected_espflash_operation(
+    artifact: &FirmwareArtifact,
+) -> Result<EspflashOperation, HttpError> {
+    if let Some(file) = artifact.files.iter().find(|file| file.kind == "elf") {
+        return Ok(EspflashOperation {
+            command: "flash",
+            file_path: file.path.clone(),
+            flash_address: None,
+        });
+    }
+    if let Some(file) = artifact.files.iter().find(|file| file.kind == "image") {
+        let Some(flash_address) = file.flash_address else {
+            return Err(HttpError::bad_request(
+                "artifact_flash_address_missing",
+                "image artifacts require flash_address for espflash write-bin",
+            ));
+        };
+        return Ok(EspflashOperation {
+            command: "write-bin",
+            file_path: file.path.clone(),
+            flash_address: Some(flash_address),
+        });
+    }
+    Err(HttpError::bad_request(
+        "artifact_flash_file_missing",
+        "digital flash requires an artifact file with kind=elf or kind=image",
+    ))
+}
+
+async fn run_espflash_digital(
+    state: &AppState,
+    device_id: &str,
+    artifact: &FirmwareArtifact,
+) -> Result<(), HttpError> {
+    let (port_path, operation) = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        let target = device.digital_target.as_ref().ok_or_else(|| {
+            HttpError::conflict("target_unavailable", "digital target is not available")
+        })?;
+        let port_path = target.port_path.clone().ok_or_else(|| {
+            HttpError::conflict(
+                "target_port_missing",
+                "digital flash requires an approved ESP32-S3 USB port path",
+            )
+        })?;
+        let operation = selected_espflash_operation(artifact)?;
+        (port_path, operation)
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(
+                device,
+                "info",
+                "flash",
+                &format!("starting espflash for {}", artifact.artifact_id),
+            );
+            push_trace(
+                device,
+                "tx",
+                json!({
+                    "type": "flash",
+                    "tool": "espflash",
+                    "chip": "esp32s3",
+                    "port": port_path,
+                    "artifact_id": artifact.artifact_id,
+                    "command": operation.command,
+                    "file": operation.file_path,
+                    "flash_address": operation.flash_address,
+                }),
+            );
+        }
+    }
+
+    let espflash = env::var(ESPFLASH_ENV).unwrap_or_else(|_| DEFAULT_ESPFLASH.to_string());
+    let mut command = Command::new(&espflash);
+    command
+        .arg(operation.command)
+        .arg("--chip")
+        .arg("esp32s3")
+        .arg("--port")
+        .arg(&port_path)
+        .arg("--non-interactive");
+    if let Some(flash_address) = operation.flash_address {
+        command.arg(format!("0x{flash_address:x}"));
+    }
+    let output = command
+        .arg(&operation.file_path)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("espflash_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "flash_result",
+                    "tool": espflash,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "flash",
+                if output.status.success() {
+                    "espflash completed"
+                } else {
+                    "espflash failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "espflash_failed",
+            format!(
+                "espflash {} exited with {}",
+                operation.command, output.status
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn tail_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
 }
 
 async fn run_agentd(target: TargetKind, action: &str) -> Result<(), HttpError> {
@@ -1323,64 +1526,358 @@ fn identity_features_match(firmware: Option<&Value>, artifact_features: &[String
     identity == artifact
 }
 
-fn scan_serial_targets() -> Vec<TargetCandidate> {
+fn scan_serial_targets(default_usb_port: Option<&str>) -> Vec<TargetCandidate> {
     let mut out = Vec::new();
-    let Ok(ports) = serialport::available_ports() else {
-        return out;
-    };
-    for port in ports {
-        if is_native_usb_serial_candidate(&port) {
-            out.push(TargetCandidate {
-                kind: TargetKind::DigitalEsp32s3,
-                display_name: format!("ESP32-S3 USB CDC ({})", port.port_name),
-                port_path: Some(port.port_name),
-                probe_selector: None,
-                lan_base_url: None,
-                selector_source: Some("serialport scan".to_string()),
-            });
-        }
-    }
-    out
-}
-
-fn scan_cached_selector_targets(repo_root: &FsPath) -> Vec<TargetCandidate> {
-    let mut out = Vec::new();
-    let esp32 = repo_root.join(".esp32-port");
-    if let Some(port) = read_selector_cache(&esp32) {
+    if let Some(port_path) = default_usb_port {
         out.push(TargetCandidate {
             kind: TargetKind::DigitalEsp32s3,
-            display_name: format!("ESP32-S3 cached selector ({port})"),
-            port_path: Some(port),
+            display_name: format!("ESP32-S3 USB CDC ({port_path})"),
+            port_path: Some(port_path.to_string()),
             probe_selector: None,
             lan_base_url: None,
-            selector_source: Some(".esp32-port".to_string()),
+            selector_source: Some(DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE.to_string()),
         });
+        return out;
     }
-    let stm32 = repo_root.join(".stm32-port");
-    if let Some(selector) = read_selector_cache(&stm32) {
+
+    for port in list_digital_usb_port_candidates() {
         out.push(TargetCandidate {
-            kind: TargetKind::AnalogStm32g431,
-            display_name: format!("STM32G431 cached probe ({selector})"),
-            port_path: None,
-            probe_selector: Some(selector),
+            kind: TargetKind::DigitalEsp32s3,
+            display_name: format!("ESP32-S3 USB CDC ({})", port.display_name),
+            port_path: Some(port.port_path),
+            probe_selector: None,
             lan_base_url: None,
-            selector_source: Some(".stm32-port".to_string()),
+            selector_source: Some("serialport scan".to_string()),
         });
     }
     out
 }
 
-fn read_selector_cache(path: &FsPath) -> Option<String> {
-    let value = fs::read_to_string(path).ok()?.trim().to_string();
-    (!value.is_empty()).then_some(value)
+fn probe_device_serial_session(state: &AppState, device_id: &str) {
+    let port_path = {
+        let guard = state.inner.lock().expect("state lock");
+        guard
+            .devices
+            .get(device_id)
+            .and_then(|device| device.digital_target.as_ref())
+            .and_then(|target| target.port_path.clone())
+    };
+    let Some(port_path) = port_path else {
+        return;
+    };
+    if port_path.starts_with("mock://") {
+        return;
+    }
+    if let Some(default_usb_port) = read_default_digital_usb_port(&state.repo_root).as_deref() {
+        if port_path != default_usb_port {
+            return;
+        }
+    }
+    if !is_default_or_scanned_usb_source(&state, device_id) {
+        return;
+    }
+
+    let result = probe_serial_protocol(&port_path);
+    let mut guard = state.inner.lock().expect("state lock");
+    let Some(device) = guard.devices.get_mut(device_id) else {
+        return;
+    };
+    match result {
+        Ok(probe) if probe.frames.is_empty() && probe.non_protocol_bytes == 0 => {
+            push_log(
+                device,
+                "info",
+                "serial",
+                &format!("serial probe opened {port_path}; no bytes before timeout"),
+            );
+            push_trace(
+                device,
+                "rx",
+                json!({"type": "serial_probe", "port_path": port_path, "status": "timeout", "bytes": 0}),
+            );
+        }
+        Ok(probe) => {
+            push_log(
+                device,
+                "info",
+                "serial",
+                &format!(
+                    "serial protocol probe opened {port_path}; decoded {} JSONL protocol frames ({} non-protocol bytes)",
+                    probe.frames.len(),
+                    probe.non_protocol_bytes
+                ),
+            );
+            if probe.non_protocol_bytes != 0 {
+                push_trace(
+                    device,
+                    "rx",
+                    json!({
+                        "type": "serial_probe",
+                        "port_path": port_path,
+                        "status": "non_protocol_bytes",
+                        "bytes": probe.non_protocol_bytes,
+                        "text": probe.non_protocol_text
+                    }),
+                );
+            }
+            for event in probe.frames {
+                push_trace(device, event.direction, event.frame);
+            }
+        }
+        Err(error) => {
+            push_log(
+                device,
+                "warn",
+                "serial",
+                &format!("serial probe failed for {port_path}: {error}"),
+            );
+            push_trace(
+                device,
+                "rx",
+                json!({"type": "serial_probe", "port_path": port_path, "status": "error", "error": error.to_string()}),
+            );
+        }
+    }
 }
 
-fn is_native_usb_serial_candidate(port: &serialport::SerialPortInfo) -> bool {
-    let name = port.port_name.to_lowercase();
-    matches!(port.port_type, serialport::SerialPortType::UsbPort(_))
-        || name.contains("usbmodem")
-        || name.contains("usbserial")
-        || name.contains("wchusbserial")
+struct SerialProtocolFrame {
+    direction: &'static str,
+    frame: Value,
+}
+
+struct SerialProtocolProbe {
+    frames: Vec<SerialProtocolFrame>,
+    non_protocol_bytes: usize,
+    non_protocol_text: String,
+}
+
+fn read_serial_jsonl_until(
+    port: &mut dyn serialport::SerialPort,
+    deadline: Instant,
+    line_buf: &mut Vec<u8>,
+    frames: &mut Vec<SerialProtocolFrame>,
+    non_protocol_bytes: &mut usize,
+    non_protocol_text: &mut String,
+    wanted_request_id: Option<&str>,
+) -> io::Result<bool> {
+    let mut buf = [0_u8; 128];
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        match port.read(&mut buf) {
+            Ok(0) => return Ok(false),
+            Ok(n) => {
+                for &byte in &buf[..n] {
+                    match byte {
+                        b'\n' => {
+                            let line = String::from_utf8_lossy(line_buf).trim().to_string();
+                            line_buf.clear();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            match serde_json::from_str::<Value>(&line) {
+                                Ok(frame) => {
+                                    let matched = wanted_request_id.is_some_and(|id| {
+                                        frame
+                                            .get("request_id")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|frame_id| frame_id == id)
+                                    });
+                                    frames.push(SerialProtocolFrame {
+                                        direction: "rx",
+                                        frame,
+                                    });
+                                    if matched {
+                                        return Ok(true);
+                                    }
+                                }
+                                Err(_) => {
+                                    *non_protocol_bytes += line.len();
+                                    if non_protocol_text.len() < SERIAL_PROBE_MAX_BYTES {
+                                        non_protocol_text.push_str(&line);
+                                        non_protocol_text.push('\n');
+                                    }
+                                }
+                            }
+                        }
+                        b'\r' => {}
+                        byte => {
+                            if line_buf.len() < SERIAL_PROBE_MAX_BYTES {
+                                line_buf.push(byte);
+                            } else {
+                                *non_protocol_bytes += line_buf.len();
+                                line_buf.clear();
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => return Ok(false),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn write_serial_request(
+    port: &mut dyn serialport::SerialPort,
+    frames: &mut Vec<SerialProtocolFrame>,
+    request_id: &str,
+    op: &str,
+    extra: Option<Value>,
+) -> io::Result<()> {
+    let mut frame = json!({
+        "type": "request",
+        "request_id": request_id,
+        "op": op,
+    });
+    if let Some(extra) = extra {
+        if let (Some(frame), Some(extra)) = (frame.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                frame.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let mut line = serde_json::to_vec(&frame)?;
+    line.push(b'\n');
+    port.write_all(&line)?;
+    port.flush()?;
+    frames.push(SerialProtocolFrame {
+        direction: "tx",
+        frame,
+    });
+    Ok(())
+}
+
+fn is_default_or_scanned_usb_source(state: &AppState, device_id: &str) -> bool {
+    let guard = state.inner.lock().expect("state lock");
+    guard
+        .devices
+        .get(device_id)
+        .and_then(|device| device.digital_target.as_ref())
+        .and_then(|target| target.selector_source.as_deref())
+        .is_some_and(|source| {
+            source == DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE || source == "serialport scan"
+        })
+}
+
+fn probe_serial_protocol(port_path: &str) -> io::Result<SerialProtocolProbe> {
+    let mut port = serialport::new(port_path, SERIAL_PROBE_BAUD)
+        .timeout(Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS))
+        .open()?;
+    let mut frames = Vec::new();
+    let mut line_buf = Vec::new();
+    let mut non_protocol_bytes = 0usize;
+    let mut non_protocol_text = String::new();
+
+    let warmup_deadline = Instant::now() + Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS);
+    let _ = read_serial_jsonl_until(
+        port.as_mut(),
+        warmup_deadline,
+        &mut line_buf,
+        &mut frames,
+        &mut non_protocol_bytes,
+        &mut non_protocol_text,
+        None,
+    )?;
+
+    for (request_id, op) in [
+        ("devd-get-identity", "get_identity"),
+        ("devd-get-status", "get_status"),
+        ("devd-output-disable", "set_output_enabled"),
+    ] {
+        let extra = (op == "set_output_enabled").then(|| json!({"enable": false}));
+        write_serial_request(port.as_mut(), &mut frames, request_id, op, extra)?;
+        let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
+        let _ = read_serial_jsonl_until(
+            port.as_mut(),
+            deadline,
+            &mut line_buf,
+            &mut frames,
+            &mut non_protocol_bytes,
+            &mut non_protocol_text,
+            Some(request_id),
+        )?;
+    }
+
+    Ok(SerialProtocolProbe {
+        frames,
+        non_protocol_bytes,
+        non_protocol_text,
+    })
+}
+pub fn default_digital_usb_port_path(repo_root: &std::path::Path) -> PathBuf {
+    repo_root.join(DEFAULT_DIGITAL_USB_PORT_FILE)
+}
+
+pub fn read_default_digital_usb_port(repo_root: &std::path::Path) -> Option<String> {
+    fs::read_to_string(default_digital_usb_port_path(repo_root))
+        .ok()?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.contains('='))
+        .map(ToOwned::to_owned)
+}
+
+pub fn write_default_digital_usb_port(
+    repo_root: &std::path::Path,
+    port_path: &str,
+) -> io::Result<()> {
+    let port_path = port_path.trim();
+    if port_path.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "USB port path must not be empty",
+        ));
+    }
+    fs::write(
+        default_digital_usb_port_path(repo_root),
+        format!("{port_path}\n"),
+    )
+}
+
+pub fn list_digital_usb_port_candidates() -> Vec<DigitalUsbPortCandidate> {
+    let Ok(ports) = serialport::available_ports() else {
+        return Vec::new();
+    };
+    ports
+        .into_iter()
+        .filter(is_espflash_default_port_candidate)
+        .map(|port| DigitalUsbPortCandidate {
+            port_path: port.port_name.clone(),
+            display_name: espflash_port_display_name(&port),
+            recognized: is_espflash_known_port(&port),
+        })
+        .collect()
+}
+
+fn is_espflash_default_port_candidate(port: &serialport::SerialPortInfo) -> bool {
+    #[cfg(target_os = "macos")]
+    if port.port_name.starts_with("/dev/tty.") {
+        return false;
+    }
+
+    matches!(&port.port_type, serialport::SerialPortType::UsbPort(_))
+}
+
+fn is_espflash_known_port(port: &serialport::SerialPortInfo) -> bool {
+    let serialport::SerialPortType::UsbPort(info) = &port.port_type else {
+        return false;
+    };
+    matches!(
+        (info.vid, info.pid),
+        (0x10c4, 0xea60) | (0x1a86, 0x7523) | (0x303a, 0x1001)
+    )
+}
+
+fn espflash_port_display_name(port: &serialport::SerialPortInfo) -> String {
+    match &port.port_type {
+        serialport::SerialPortType::UsbPort(info) => match &info.product {
+            Some(product) => format!("{} - {product}", port.port_name),
+            None => port.port_name.clone(),
+        },
+        _ => port.port_name.clone(),
+    }
 }
 
 fn stable_candidate_id(candidate: &TargetCandidate) -> String {
@@ -1609,7 +2106,6 @@ impl IntoResponse for HttpError {
 mod tests {
     use super::*;
     use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
-    use std::io::Write;
 
     fn test_artifact(artifact_id: &str, target: TargetKind) -> FirmwareArtifact {
         FirmwareArtifact {
@@ -1649,13 +2145,19 @@ mod tests {
     }
 
     #[test]
-    fn native_usb_serial_candidate_filters_expected_names() {
-        assert!(is_native_usb_serial_candidate(&SerialPortInfo {
+    fn espflash_port_helpers_match_default_candidates() {
+        assert!(is_espflash_default_port_candidate(&SerialPortInfo {
             port_name: "/dev/cu.usbmodem101".into(),
-            port_type: SerialPortType::Unknown,
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid: 0x303a,
+                pid: 0x1001,
+                serial_number: Some("abc".into()),
+                manufacturer: None,
+                product: Some("USB JTAG/serial debug unit".into()),
+            }),
         }));
-        assert!(is_native_usb_serial_candidate(&SerialPortInfo {
-            port_name: "COM7".into(),
+        assert!(is_espflash_known_port(&SerialPortInfo {
+            port_name: "/dev/cu.usbmodem101".into(),
             port_type: SerialPortType::UsbPort(UsbPortInfo {
                 vid: 0x303a,
                 pid: 0x1001,
@@ -1664,10 +2166,56 @@ mod tests {
                 product: None,
             }),
         }));
-        assert!(!is_native_usb_serial_candidate(&SerialPortInfo {
-            port_name: "/dev/ttys001".into(),
+        assert!(!is_espflash_default_port_candidate(&SerialPortInfo {
+            port_name: "/dev/tty.usbmodem101".into(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid: 0x303a,
+                pid: 0x1001,
+                serial_number: Some("abc".into()),
+                manufacturer: None,
+                product: None,
+            }),
+        }));
+        assert!(!is_espflash_default_port_candidate(&SerialPortInfo {
+            port_name: "/dev/cu.usbmodem101".into(),
             port_type: SerialPortType::Unknown,
         }));
+        assert!(
+            espflash_port_display_name(&SerialPortInfo {
+                port_name: "/dev/cu.usbmodem101".into(),
+                port_type: SerialPortType::UsbPort(UsbPortInfo {
+                    vid: 0x303a,
+                    pid: 0x1001,
+                    serial_number: Some("abc".into()),
+                    manufacturer: None,
+                    product: Some("USB JTAG/serial debug unit".into()),
+                }),
+            })
+            .contains("USB JTAG/serial debug unit")
+        );
+        assert!(!is_espflash_known_port(&SerialPortInfo {
+            port_name: "/dev/cu.usbmodem101".into(),
+            port_type: SerialPortType::Unknown,
+        }));
+    }
+
+    #[test]
+    fn loopback_dev_origin_allows_only_local_http_ports() {
+        assert!(is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://localhost:47821"
+        )));
+        assert!(is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://127.0.0.1:47821"
+        )));
+        assert!(is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://[::1]:47821"
+        )));
+        assert!(!is_loopback_dev_origin(&HeaderValue::from_static(
+            "https://127.0.0.1:47821"
+        )));
+        assert!(!is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://example.com:47821"
+        )));
     }
 
     #[test]
@@ -1694,6 +2242,53 @@ mod tests {
             flash_address: None,
         }];
         assert!(verify_artifact_files(&artifact).is_err());
+    }
+
+    #[test]
+    fn espflash_operation_prefers_elf_flash() {
+        let mut artifact = test_artifact("a", TargetKind::DigitalEsp32s3);
+        artifact.files = vec![
+            ArtifactFile {
+                kind: "image".into(),
+                path: "firmware.bin".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: Some(0x10000),
+            },
+            ArtifactFile {
+                kind: "elf".into(),
+                path: "digital".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: None,
+            },
+        ];
+
+        let op = selected_espflash_operation(&artifact).unwrap();
+        assert_eq!(op.command, "flash");
+        assert_eq!(op.file_path, "digital");
+        assert_eq!(op.flash_address, None);
+    }
+
+    #[test]
+    fn espflash_image_operation_requires_flash_address() {
+        let mut artifact = test_artifact("a", TargetKind::DigitalEsp32s3);
+        artifact.files = vec![ArtifactFile {
+            kind: "image".into(),
+            path: "firmware.bin".into(),
+            sha256: "unused".into(),
+            size: 1,
+            flash_address: None,
+        }];
+
+        let err = selected_espflash_operation(&artifact).unwrap_err();
+        assert_eq!(err.0.code, "artifact_flash_address_missing");
+
+        artifact.files[0].flash_address = Some(0x10000);
+        let op = selected_espflash_operation(&artifact).unwrap();
+        assert_eq!(op.command, "write-bin");
+        assert_eq!(op.file_path, "firmware.bin");
+        assert_eq!(op.flash_address, Some(0x10000));
     }
 
     #[test]
@@ -1835,12 +2430,42 @@ mod tests {
     }
 
     #[test]
-    fn reads_selector_cache_without_writing_it() {
+    fn default_digital_usb_port_creates_single_digital_candidate() {
+        let candidates = scan_serial_targets(Some("/dev/cu.usbmodem212101"));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].port_path.as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
+        assert_eq!(candidates[0].kind, TargetKind::DigitalEsp32s3);
+        assert_eq!(
+            candidates[0].selector_source.as_deref(),
+            Some(DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE)
+        );
+    }
+
+    #[test]
+    fn default_digital_usb_port_memory_round_trips() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join(".stm32-port");
-        let mut file = fs::File::create(&path).unwrap();
-        writeln!(file, "0483:3748:ABC").unwrap();
-        assert_eq!(read_selector_cache(&path).unwrap(), "0483:3748:ABC");
+        write_default_digital_usb_port(dir.path(), " /dev/cu.usbmodem212101 ").unwrap();
+        assert_eq!(
+            read_default_digital_usb_port(dir.path()).as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
+    }
+
+    #[test]
+    fn default_digital_usb_port_reads_mcu_agentd_selector_record() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            default_digital_usb_port_path(dir.path()),
+            "/dev/cu.usbmodem212101\nmac=b8:f8:62:d6:86:38\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_default_digital_usb_port(dir.path()).as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
     }
 
     #[tokio::test]
@@ -1951,12 +2576,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_agentd_requires_cached_selector_source() {
+    async fn real_operation_requires_cached_selector_source() {
         let state = AppState::new(PathBuf::from("."));
         let guard = state.inner.lock().expect("state lock");
         let device = guard.devices.get("mock-loadlynx-devd").unwrap();
-        let err =
-            ensure_agentd_uses_selected_target(device, &TargetKind::DigitalEsp32s3).unwrap_err();
+        let err = ensure_real_operation_uses_cached_target(device, &TargetKind::DigitalEsp32s3)
+            .unwrap_err();
         assert_eq!(err.0.code, "target_selector_not_cached");
     }
 }

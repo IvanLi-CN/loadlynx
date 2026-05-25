@@ -6,6 +6,7 @@
 #[cfg(feature = "net_http")]
 extern crate alloc;
 
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use core::{convert::Infallible, ptr, slice};
 use defmt::*;
@@ -19,7 +20,7 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
-use embedded_io_async::Read as AsyncRead;
+use embedded_io_async::{Read as AsyncRead, Write as AsyncWrite};
 use esp_hal::gpio::OutputSignal as GpioOutputSignal;
 use esp_hal::gpio::interconnect::OutputSignal as OutputSignalPin;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
@@ -29,6 +30,7 @@ use esp_hal::time::Instant as HalInstant;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::uhci::{self, RxConfig as UhciRxConfig, TxConfig as UhciTxConfig, Uhci};
 use esp_hal::uart::{Config as UartConfig, DataBits, Parity, RxConfig, StopBits, Uart};
+use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 use esp_hal::{
     self as hal, Async,
     delay::Delay,
@@ -654,6 +656,340 @@ fn recent_enable_block_abbrev(now_ms: u32) -> Option<&'static str> {
     } else {
         LAST_ENABLE_BLOCK_CODE.store(ENABLE_BLOCK_NONE, Ordering::Relaxed);
         None
+    }
+}
+
+fn write_json_string_escaped(buf: &mut heapless::String<2048>, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '"' => buf.push_str("\\\"").ok(),
+            '\\' => buf.push_str("\\\\").ok(),
+            '\n' => buf.push_str("\\n").ok(),
+            '\r' => buf.push_str("\\r").ok(),
+            '\t' => buf.push_str("\\t").ok(),
+            c if c < ' ' => buf.push('?').ok(),
+            c => buf.push(c).ok(),
+        };
+    }
+}
+
+fn json_string_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let idx = line.find(key)?;
+    let colon = line[idx..].find(':')?;
+    let mut rest = line[idx + colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let mut escaped = false;
+    for (idx, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(&rest[..idx]);
+        }
+    }
+    None
+}
+
+fn json_bool_value(line: &str, key: &str) -> Option<bool> {
+    let idx = line.find(key)?;
+    let colon = line[idx..].find(':')?;
+    let rest = line[idx + colon + 1..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+async fn usb_cdc_write_line(
+    tx: &mut UsbSerialJtagTx<'static, Async>,
+    line: &heapless::String<2048>,
+) {
+    let _ = tx.write_all(line.as_bytes()).await;
+    let _ = tx.write_all(b"\n").await;
+    let _ = tx.flush().await;
+}
+
+fn write_usb_error_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    code: &str,
+    message: &str,
+) {
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":false,\"error\":{\"code\":\"").ok();
+    write_json_string_escaped(out, code);
+    out.push_str("\",\"message\":\"").ok();
+    write_json_string_escaped(out, message);
+    out.push_str("\"}}").ok();
+}
+
+async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_id: Option<&str>) {
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{\"device_id\":\"digital-esp32s3\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"protocol\":\"loadlynx.cdc.v1\",\"firmware_version\":\"").ok();
+    write_json_string_escaped(out, FW_VERSION);
+    out.push_str("\",\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"set_output_enabled\"]}}").ok();
+}
+
+async fn write_usb_status_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    let cal_mode = { calibration.lock().await.cal_mode };
+    let (active_preset_id, output_enabled, mode, target_i_ma, target_v_mv, target_p_mw, min_v_mv) = {
+        let guard = control.lock().await;
+        let effective = guard.effective_output_command(cal_mode);
+        (
+            guard.active_preset_id,
+            effective.output_enabled,
+            effective.preset.mode,
+            effective.preset.target_i_ma,
+            effective.preset.target_v_mv,
+            effective.preset.target_p_mw,
+            effective.preset.min_v_mv,
+        )
+    };
+    let (fast_status, analog_state) = {
+        let guard = telemetry.lock().await;
+        (
+            guard.last_status.unwrap_or(FastStatus::default()),
+            AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed)),
+        )
+    };
+    let mode_str = match mode {
+        LoadMode::Cc => "cc",
+        LoadMode::Cv => "cv",
+        LoadMode::Cp => "cp",
+        LoadMode::Reserved(_) => "cc",
+    };
+    let analog_state_str = match analog_state {
+        AnalogState::Offline => "offline",
+        AnalogState::CalMissing => "cal_missing",
+        AnalogState::Faulted => "faulted",
+        AnalogState::Ready => "ready",
+        AnalogState::MeasurementInvalid => "measurement_invalid",
+    };
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{").ok();
+    let _ = core::write!(
+        out,
+        "\"uptime_ms\":{},\"link_up\":{},\"hello_seen\":{},\"analog_state\":\"{}\",\"control\":{{\"active_preset_id\":{},\"output_enabled\":{},\"mode\":\"{}\",\"target_i_ma\":{},\"target_v_mv\":{},\"target_p_mw\":{},\"min_v_mv\":{}}},\"status\":{{\"state_flags\":{},\"fault_flags\":{},\"enable\":{},\"i_local_ma\":{},\"i_remote_ma\":{},\"v_local_mv\":{},\"v_remote_mv\":{},\"calc_p_mw\":{}}}}}",
+        now_ms32(),
+        if LINK_UP.load(Ordering::Relaxed) {
+            "true"
+        } else {
+            "false"
+        },
+        if HELLO_SEEN.load(Ordering::Relaxed) {
+            "true"
+        } else {
+            "false"
+        },
+        analog_state_str,
+        active_preset_id,
+        if output_enabled { "true" } else { "false" },
+        mode_str,
+        target_i_ma,
+        target_v_mv,
+        target_p_mw,
+        min_v_mv,
+        fast_status.state_flags,
+        fast_status.fault_flags,
+        if fast_status.enable { "true" } else { "false" },
+        fast_status.i_local_ma,
+        fast_status.i_remote_ma,
+        fast_status.v_local_mv,
+        fast_status.v_remote_mv,
+        fast_status.calc_p_mw,
+    );
+}
+
+async fn write_usb_set_output_enabled_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    line: &str,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+) {
+    let Some(enable) =
+        json_bool_value(line, "\"enable\"").or_else(|| json_bool_value(line, "\"output_enabled\""))
+    else {
+        write_usb_error_response(out, request_id, "BAD_REQUEST", "missing enable boolean");
+        return;
+    };
+
+    let cal_mode = { calibration.lock().await.cal_mode };
+    let mut guard = control.lock().await;
+    let preset = guard.effective_output_command(cal_mode).preset;
+    let setpoint_zero = match preset.mode {
+        LoadMode::Cp => preset.target_p_mw == 0,
+        LoadMode::Cv => preset.target_v_mv == 0,
+        LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+    };
+
+    let mut changed = false;
+    let mut ok = true;
+    let mut reason: Option<&'static str> = None;
+    if enable {
+        if setpoint_zero {
+            ok = false;
+            reason = Some("SETPOINT_ZERO");
+        } else if let Some(block) = current_load_enable_block_abbrev(preset.min_v_mv) {
+            ok = false;
+            reason = Some(block);
+            record_enable_block(block);
+        } else if guard.enable_output_for_mode(cal_mode) {
+            changed = true;
+        } else {
+            ok = false;
+            reason = Some("SETPOINT_ZERO");
+        }
+    } else if guard.output_enabled {
+        guard.disable_output_for_mode(cal_mode);
+        changed = true;
+    }
+    let output_enabled = guard.output_enabled;
+    drop(guard);
+    if changed {
+        bump_control_rev();
+    }
+
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    if ok {
+        let _ = core::write!(
+            out,
+            ",\"ok\":true,\"data\":{{\"output_enabled\":{},\"changed\":{}}}",
+            if output_enabled { "true" } else { "false" },
+            if changed { "true" } else { "false" }
+        );
+    } else {
+        out.push_str(",\"ok\":false,\"error\":{\"code\":\"ENABLE_BLOCKED\",\"message\":\"")
+            .ok();
+        write_json_string_escaped(out, reason.unwrap_or("blocked"));
+        out.push_str("\"}}").ok();
+    }
+}
+
+async fn handle_usb_jsonl_request(
+    line: &str,
+    out: &mut heapless::String<2048>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    let request_id = json_string_value(line, "\"request_id\"");
+    let Some(op) = json_string_value(line, "\"op\"") else {
+        write_usb_error_response(out, request_id, "BAD_REQUEST", "missing op");
+        return;
+    };
+
+    match op {
+        "get_identity" => write_usb_identity_response(out, request_id).await,
+        "get_status" => {
+            write_usb_status_response(out, request_id, control, calibration, telemetry).await
+        }
+        "set_output_enabled" => {
+            write_usb_set_output_enabled_response(out, request_id, line, control, calibration).await
+        }
+        _ => write_usb_error_response(out, request_id, "UNKNOWN_OP", "unsupported op"),
+    }
+}
+
+#[embassy_executor::task]
+async fn usb_cdc_jsonl_task(
+    mut rx: UsbSerialJtagRx<'static, Async>,
+    mut tx: UsbSerialJtagTx<'static, Async>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    info!("USB CDC JSONL task starting (protocol=loadlynx.cdc.v1)");
+    let mut out = heapless::String::<2048>::new();
+    out.push_str("{\"type\":\"hello\",\"protocol\":\"loadlynx.cdc.v1\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"firmware_version\":\"").ok();
+    write_json_string_escaped(&mut out, FW_VERSION);
+    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"set_output_enabled\"]}")
+        .ok();
+    usb_cdc_write_line(&mut tx, &out).await;
+
+    let mut read_buf = [0_u8; 64];
+    let mut line_buf = [0_u8; 512];
+    let mut line_len = 0usize;
+
+    loop {
+        let n = match rx.read(&mut read_buf).await {
+            Ok(0) => {
+                yield_now().await;
+                continue;
+            }
+            Ok(n) => n,
+            Err(_) => {
+                cooperative_delay_ms(20).await;
+                continue;
+            }
+        };
+
+        for &byte in &read_buf[..n] {
+            match byte {
+                b'\n' => {
+                    let line = core::str::from_utf8(&line_buf[..line_len]).unwrap_or("");
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        handle_usb_jsonl_request(line, &mut out, control, calibration, telemetry)
+                            .await;
+                        usb_cdc_write_line(&mut tx, &out).await;
+                    }
+                    line_len = 0;
+                }
+                b'\r' => {}
+                byte if line_len < line_buf.len() => {
+                    line_buf[line_len] = byte;
+                    line_len += 1;
+                }
+                _ => {
+                    line_len = 0;
+                    write_usb_error_response(
+                        &mut out,
+                        None,
+                        "LINE_TOO_LONG",
+                        "request line too long",
+                    );
+                    usb_cdc_write_line(&mut tx, &out).await;
+                }
+            }
+        }
     }
 }
 
@@ -6620,6 +6956,8 @@ async fn main(spawner: Spawner) {
         initial_pd,
         initial_allow_extended_voltage,
     )));
+    let usb_serial = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
+    let (usb_rx, usb_tx) = usb_serial.split();
     CONTROL_REV.store(1, Ordering::Relaxed);
     LAST_USER_ACTIVITY_MS.store(now_ms32(), Ordering::Relaxed);
     SCREEN_POWER_STATE.store(SCREEN_POWER_STATE_ACTIVE, Ordering::Relaxed);
@@ -6761,6 +7099,16 @@ async fn main(spawner: Spawner) {
     spawner.spawn(ticker()).expect("ticker spawn");
     info!("spawning diag task");
     spawner.spawn(diag_task()).expect("diag_task spawn");
+    info!("spawning USB CDC JSONL task");
+    spawner
+        .spawn(usb_cdc_jsonl_task(
+            usb_rx,
+            usb_tx,
+            control,
+            calibration,
+            telemetry,
+        ))
+        .expect("usb_cdc_jsonl_task spawn");
 
     #[cfg(not(feature = "mock_setpoint"))]
     {

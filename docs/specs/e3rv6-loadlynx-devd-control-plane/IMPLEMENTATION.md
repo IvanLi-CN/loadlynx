@@ -2,7 +2,7 @@
 
 ## Current State
 
-The first implementation is complete and ready for PR review. It adds a local `loadlynx-devd` daemon, `loadlynxctl` CLI, Web devd/Firmware routes, firmware catalog tooling, digital identity/DNS-SD contract updates and mock-first Storybook coverage.
+The first implementation is complete and ready for PR review. It adds a local `loadlynx-devd` daemon, `loadlynx` CLI, Web devd/Firmware routes, firmware catalog tooling, digital identity/DNS-SD contract updates and mock-first Storybook coverage.
 
 ## Design Inputs
 
@@ -15,13 +15,13 @@ The first implementation is complete and ready for PR review. It adds a local `l
 ## Implementation Notes
 
 - Do not copy `mains-aegis-devd` without adapting the device model. LoadLynx needs separate digital and analog targets under one logical device.
-- Treat `mcu-agentd` as a backend/fallback integration point. Do not change cached selectors from devd or CLI unless the owner explicitly approves the exact selector command.
+- Treat `mcu-agentd` as a backend/fallback integration point for non-devd firmware workflows and analog/probe operations. Devd/Web ESP32-S3 digital firmware flashing uses devd's lease-gated direct `espflash` path with the approved `.esp32-port` target.
 - Keep Web USB lease TTL short enough to recover from tab crashes while tolerating brief SSE/heartbeat jitter.
 - Keep LAN discovery read-oriented until a separate LAN write-control safety design is accepted.
-- `tools/loadlynx-devd/` exposes `loadlynx-devd serve` and `loadlynxctl` from one Rust package.
-- devd scans native USB serial candidates, cached `.esp32-port`/`.stm32-port` selectors, LAN/mock candidates, but never writes selector cache files.
+- `tools/loadlynx-devd/` exposes `loadlynx-devd serve` and `loadlynx` from one Rust package.
+- devd scans native USB serial candidates, the cached digital `.esp32-port` USB path, LAN/mock candidates, but never writes selector cache files. When `.esp32-port` uses the mcu-agentd selector-record format, devd reads only the path line and ignores metadata lines such as `mac=...`.
 - Compatibility endpoints require an explicit `device_id`/`lease_id` when there is no unique active lease.
-- Firmware flash/reset paths default to dry-run and include target evidence; real operations call `just agentd flash|reset <digital|analog>`.
+- Firmware flash/reset paths default to dry-run and include target evidence. Real ESP32-S3 digital flash calls direct `espflash` through devd after artifact hash verification and a valid Web lease: ELF artifacts use `espflash flash`, and raw image artifacts require `flash_address` before using `espflash write-bin`. Analog flash/reset and reset-only paths continue to use existing backend guardrails.
 - Web Storybook coverage uses canvas stories for Devices devd lease creation and Firmware dry-run/session states.
 
 ## Verification Plan

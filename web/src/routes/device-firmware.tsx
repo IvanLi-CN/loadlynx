@@ -53,6 +53,8 @@ export function DeviceFirmwareRoute() {
                 <span className="label-text">Target board</span>
               </div>
               <select
+                id="firmware-target"
+                name="firmware_target"
                 className="select select-bordered"
                 value={target}
                 onChange={(event) =>
@@ -69,6 +71,8 @@ export function DeviceFirmwareRoute() {
                 <span className="label-text">Artifact ID</span>
               </div>
               <input
+                id="firmware-artifact-id"
+                name="firmware_artifact_id"
                 className="input input-bordered"
                 value={artifactId}
                 onChange={(event) => setArtifactId(event.target.value)}
@@ -81,6 +85,8 @@ export function DeviceFirmwareRoute() {
                 <span className="label-text">Catalog manifest</span>
               </div>
               <input
+                id="firmware-manifest-path"
+                name="firmware_manifest_path"
                 className="input input-bordered"
                 value={manifestPath}
                 onChange={(event) => setManifestPath(event.target.value)}
@@ -91,6 +97,8 @@ export function DeviceFirmwareRoute() {
 
           <label className="label cursor-pointer justify-start gap-3">
             <input
+              id="firmware-dry-run"
+              name="firmware_dry_run"
               type="checkbox"
               className="checkbox checkbox-sm"
               checked={dryRun}

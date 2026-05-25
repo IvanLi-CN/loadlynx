@@ -34,7 +34,7 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 ### In Scope
 
 - `tools/loadlynx-devd/` Rust daemon。
-- `tools/loadlynxctl/` 或同一 binary 的 CLI 子命令。
+- `tools/loadlynx-devd/` 内的 `loadlynx` CLI 子命令。
 - Web 管理端新增 Firmware、Connect/Discovery、USB session、Logs/Monitor 能力。
 - `schemas/firmware-catalog.schema.json` 与 artifact generator。
 - ESP32-S3 固件 identity、USB CDC JSONL bridge、mDNS/DNS-SD 发布与 HTTP API 小幅扩展。
@@ -135,7 +135,7 @@ Artifact catalog entries must represent both boards:
 
 Flash behavior:
 
-- `target=digital_esp32s3`: use `espflash` or `mcu-agentd` backend, exact serial target required.
+- `target=digital_esp32s3`: devd/Web firmware flows use devd's lease-gated direct `espflash` backend with the approved `.esp32-port` serial target; `mcu-agentd` is not the owner-facing devd digital flash path. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
 - `target=analog_stm32g431`: use probe-rs or `mcu-agentd` backend, exact probe selector required.
 - `dry_run=true` must validate target resolution, artifact presence and hashes without touching hardware.
 - Real flash must refuse if the requested target does not match the selected device/board identity.
@@ -145,15 +145,15 @@ Flash behavior:
 
 CLI commands should map 1:1 to devd/LAN operations:
 
-- `loadlynxctl discover --mdns --lan-scan --json`
-- `loadlynxctl devices --devd http://127.0.0.1:<port>`
-- `loadlynxctl status --url http://loadlynx-xxxxxx.local`
-- `loadlynxctl status --device <id>`
-- `loadlynxctl flash digital --device <id> --artifact <artifact_id> [--dry-run]`
-- `loadlynxctl flash analog --device <id> --artifact <artifact_id> [--dry-run]`
-- `loadlynxctl reset digital|analog --device <id>`
-- `loadlynxctl monitor digital|analog --device <id> --tail 200`
-- `loadlynxctl output set --url <base_url> --enable false`
+- `loadlynx discover --mdns --lan-scan --json`
+- `loadlynx devices --devd http://127.0.0.1:<port>`
+- `loadlynx status --url http://loadlynx-xxxxxx.local`
+- `loadlynx status --device <id>`
+- `loadlynx flash digital --device <id> --artifact <artifact_id> [--dry-run]`
+- `loadlynx flash analog --device <id> --artifact <artifact_id> [--dry-run]`
+- `loadlynx reset digital|analog --device <id>`
+- `loadlynx monitor digital|analog --device <id> --tail 200`
+- `loadlynx output set --url <base_url> --enable false`
 
 CLI must print target evidence before hardware-changing operations: device id, transport, port/probe, artifact id, SHA-256 and dry-run/real mode.
 
@@ -205,8 +205,8 @@ CLI must print target evidence before hardware-changing operations: device id, t
 
 ## 实现前置条件
 
-- `loadlynx-devd` and `loadlynxctl` ship as separate binaries from one Rust package.
-- devd uses `mcu-agentd`/`just agentd ...` as the first backend for flash/reset while preserving selector mutation guardrails.
+- `loadlynx-devd` and `loadlynx` ship as separate binaries from one Rust package.
+- devd uses direct `espflash` for real ESP32-S3 digital firmware flashing after Web lease, artifact hash verification and `.esp32-port` target evidence. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`. Analog/probe operations may use `mcu-agentd` while preserving selector mutation guardrails.
 - ESP32-S3 USB CDC JSONL bridge protocol is defined in `docs/interfaces/usb-cdc-jsonl-bridge.md`.
 - Firmware catalog schema and generator are available under `schemas/` and `tools/firmware-catalog/`.
 - Analog identity is represented through artifact/probe provenance in the first version, with direct analog runtime identity left as a follow-up.
@@ -217,7 +217,7 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - CLI tests cover JSON output and dry-run target evidence.
 - Web typecheck, Storybook, and route-level mock tests pass.
 - Firmware builds for digital and analog remain green.
-- HIL verification uses existing `mcu-agentd` guardrails and never changes selector caches without explicit owner approval.
+- HIL verification uses devd's approved `.esp32-port` evidence for Web/devd digital flashing and existing `mcu-agentd` guardrails for non-devd or analog/probe operations. It never changes selector caches without explicit owner approval.
 
 ## 文档更新
 

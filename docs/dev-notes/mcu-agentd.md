@@ -4,7 +4,7 @@ LoadLynx 的硬件在环（HIL）工作流使用外部 `mcu-agentd`（默认 sib
 
 根目录 `Justfile` 提供 `just agentd-init` 安装/升级（默认 `../mcu-agentd`，可用 `MCU_AGENTD_PATH` 覆盖）；安装后 `just agentd ...` 直接调用 `mcu-agentd`。若二进制未安装，则回退到 `cargo run --manifest-path $MCU_AGENTD_MANIFEST ...`。
 
-`loadlynx-devd` 是 Web/CLI 面向 owner 的本地控制面；`mcu-agentd` 仍是底层 flash/reset/monitor 后端。devd 可以读取当前 selector cache 来生成目标证据，但不得写入 `.esp32-port`、`.stm32-port` 或暴露 selector mutation 操作。
+`loadlynx-devd` 是 Web/CLI 面向 owner 的本地控制面。对 devd/Web ESP32-S3 digital firmware flash，devd 持有 Web lease 后使用批准的 `.esp32-port` 目标直接调用 `espflash`；`mcu-agentd` 仍用于非 devd 固件工作流以及 analog/probe flash/reset/monitor。devd 可以读取当前 selector cache 来生成目标证据，但不得写入 `.esp32-port`、`.stm32-port` 或暴露 selector mutation 操作。
 
 ## 1) 配置与落盘目录
 
@@ -32,7 +32,7 @@ LoadLynx 的硬件在环（HIL）工作流使用外部 `mcu-agentd`（默认 sib
 - devd 构建：`just devd-build`
 - devd 测试：`just devd-test`
 - devd 启动：`just devd-serve --bind 127.0.0.1:30180 --allow-dev-cors`
-- CLI：`just loadlynxctl -- devices` 或 `just loadlynxctl -- flash digital --device <id> --artifact <artifact_id> --dry-run`
+- CLI：`just loadlynx devices` 或 `just loadlynx flash digital --device <id> --artifact <artifact_id> --dry-run`
 
 真实 flash/reset 前仍必须打印目标证据，并继续遵守 selector guardrails。
 

@@ -379,6 +379,8 @@ export function ConsoleLayout() {
             </div>
             <div className="join">
               <select
+                id="current-device-selector"
+                name="current_device"
                 disabled
                 className="select select-bordered select-sm w-full join-item text-xs"
               >
@@ -509,6 +511,8 @@ export function ConsoleLayout() {
                   </div>
                   <div className="join w-full">
                     <select
+                      id="drawer-device-selector"
+                      name="drawer_device"
                       className="select select-bordered select-sm w-full join-item text-xs"
                       value={deviceId ?? ""}
                       onChange={(event) => {
