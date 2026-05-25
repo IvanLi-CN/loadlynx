@@ -1661,7 +1661,7 @@ async fn main(_spawner: Spawner) -> ! {
     let mut slip_frame = [0u8; 384];
 
     // 上电后发送一次 HELLO，携带最小协议/固件信息，供数字侧建立链路状态。
-    send_hello_frame(&uart_tx_shared, &mut raw_frame, &mut slip_frame, "sent").await;
+    send_hello_frame(uart_tx_shared, &mut raw_frame, &mut slip_frame, "sent").await;
     comm_iwdg_refresh();
 
     let mut last_link_fault = false;
@@ -1856,7 +1856,7 @@ async fn main(_spawner: Spawner) -> ! {
 
         if link_fault {
             if last_rx == 0 && now_ms < COMM_BOOT_PROBE_WINDOW_MS && next_boot_hello_ms <= now_ms {
-                send_hello_frame(&uart_tx_shared, &mut raw_frame, &mut slip_frame, "retry").await;
+                send_hello_frame(uart_tx_shared, &mut raw_frame, &mut slip_frame, "retry").await;
                 next_boot_hello_ms = now_ms.saturating_add(COMM_BOOT_HELLO_RETRY_MS);
             }
 
