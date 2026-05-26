@@ -1676,8 +1676,20 @@ fn read_serial_jsonl_until(
                             if line.is_empty() {
                                 continue;
                             }
-                            match serde_json::from_str::<Value>(&line) {
-                                Ok(frame) => {
+                            let parsed_frames = extract_serial_json_frames(&line);
+                            if parsed_frames.is_empty() {
+                                *non_protocol_bytes += line.len();
+                                if non_protocol_text.len() < SERIAL_PROBE_MAX_BYTES {
+                                    non_protocol_text.push_str(&line);
+                                    non_protocol_text.push('\n');
+                                }
+                            } else {
+                                for ExtractedSerialFrame {
+                                    frame,
+                                    non_protocol_bytes: skipped,
+                                } in parsed_frames
+                                {
+                                    *non_protocol_bytes += skipped;
                                     let matched = wanted_request_id.is_some_and(|id| {
                                         frame
                                             .get("request_id")
@@ -1690,13 +1702,6 @@ fn read_serial_jsonl_until(
                                     });
                                     if matched {
                                         return Ok(true);
-                                    }
-                                }
-                                Err(_) => {
-                                    *non_protocol_bytes += line.len();
-                                    if non_protocol_text.len() < SERIAL_PROBE_MAX_BYTES {
-                                        non_protocol_text.push_str(&line);
-                                        non_protocol_text.push('\n');
                                     }
                                 }
                             }
@@ -1717,6 +1722,53 @@ fn read_serial_jsonl_until(
             Err(error) => return Err(error),
         }
     }
+}
+
+struct ExtractedSerialFrame {
+    frame: Value,
+    non_protocol_bytes: usize,
+}
+
+fn extract_serial_json_frames(line: &str) -> Vec<ExtractedSerialFrame> {
+    if let Ok(frame) = serde_json::from_str::<Value>(line) {
+        return vec![ExtractedSerialFrame {
+            frame,
+            non_protocol_bytes: 0,
+        }];
+    }
+
+    let mut frames = Vec::new();
+    let mut search_offset = 0;
+    while let Some(start_rel) = line[search_offset..].find('{') {
+        let start = search_offset + start_rel;
+        let mut end_search = start + 1;
+        let mut matched = None;
+        while let Some(end_rel) = line[end_search..].find('}') {
+            let end = end_search + end_rel + 1;
+            if let Ok(frame) = serde_json::from_str::<Value>(&line[start..end]) {
+                matched = Some((end, frame));
+            }
+            end_search = end;
+        }
+
+        match matched {
+            Some((end, frame)) => {
+                frames.push(ExtractedSerialFrame {
+                    frame,
+                    non_protocol_bytes: start.saturating_sub(search_offset),
+                });
+                search_offset = end;
+            }
+            None => {
+                search_offset = start + 1;
+            }
+        }
+    }
+
+    if let Some(last) = frames.last_mut() {
+        last.non_protocol_bytes += line.len().saturating_sub(search_offset);
+    }
+    frames
 }
 
 fn write_serial_request(
@@ -2466,6 +2518,48 @@ mod tests {
             read_default_digital_usb_port(dir.path()).as_deref(),
             Some("/dev/cu.usbmodem212101")
         );
+    }
+
+    #[test]
+    fn serial_json_extractor_recovers_frame_after_log_noise() {
+        let frames = extract_serial_json_frames(
+            "\u{fffd}\0binary log {\"type\":\"response\",\"request_id\":\"devd-get-identity\",\"ok\":true}\n",
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].frame.get("request_id").and_then(Value::as_str),
+            Some("devd-get-identity")
+        );
+        assert!(frames[0].non_protocol_bytes > 0);
+    }
+
+    #[test]
+    fn serial_json_extractor_keeps_clean_frame_clean() {
+        let frames = extract_serial_json_frames(
+            "{\"type\":\"response\",\"request_id\":\"devd-output-disable\",\"ok\":true}",
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].frame.get("request_id").and_then(Value::as_str),
+            Some("devd-output-disable")
+        );
+        assert_eq!(frames[0].non_protocol_bytes, 0);
+    }
+
+    #[test]
+    fn serial_json_extractor_prefers_outer_response_frame() {
+        let frames = extract_serial_json_frames(
+            "noise {\"type\":\"response\",\"request_id\":\"devd-get-status\",\"ok\":true,\"data\":{\"status\":{\"enable\":false}}}",
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].frame.get("request_id").and_then(Value::as_str),
+            Some("devd-get-status")
+        );
+        assert!(frames[0].frame.get("data").is_some());
     }
 
     #[tokio::test]
