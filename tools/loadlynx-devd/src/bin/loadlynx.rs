@@ -3,7 +3,7 @@ use dialoguer::{Confirm, Select, theme::ColorfulTheme};
 use loadlynx_devd::{
     DEFAULT_DEVD_URL, TargetKind, list_digital_usb_port_candidates, write_default_digital_usb_port,
 };
-use reqwest::Client;
+use reqwest::{Client, Url};
 use serde_json::{Value, json};
 use std::{env, io, path::PathBuf};
 
@@ -109,6 +109,31 @@ impl BoardTarget {
     }
 }
 
+fn api_url(base: &str, path: &str) -> Result<Url, Box<dyn std::error::Error + Send + Sync>> {
+    let base_url = Url::parse(base)?;
+    let inherited_query = base_url
+        .query_pairs()
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect::<Vec<_>>();
+    let mut url = base_url;
+    let (path, query) = path.split_once('?').unwrap_or((path, ""));
+    url.set_path(path);
+    url.set_query((!query.is_empty()).then_some(query));
+    let existing_keys = url
+        .query_pairs()
+        .map(|(key, _)| key.into_owned())
+        .collect::<Vec<_>>();
+    if !inherited_query.is_empty() {
+        url.query_pairs_mut().extend_pairs(
+            inherited_query
+                .iter()
+                .filter(|(key, _)| !existing_keys.contains(key))
+                .map(|(key, value)| (&**key, &**value)),
+        );
+    }
+    Ok(url)
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
@@ -129,7 +154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             Command::Discover { mdns, lan_scan } => {
                 let scan = client
-                    .post(format!("{}/api/v1/devices/scan", cli.devd))
+                    .post(api_url(&cli.devd, "/api/v1/devices/scan")?)
                     .send()
                     .await?
                     .error_for_status()?
@@ -139,7 +164,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
             Command::Devices => {
                 client
-                    .get(format!("{}/api/v1/devices", cli.devd))
+                    .get(api_url(&cli.devd, "/api/v1/devices")?)
                     .send()
                     .await?
                     .error_for_status()?
@@ -149,7 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Command::Status { url, device } => {
                 if let Some(url) = url {
                     client
-                        .get(format!("{}/api/v1/status", url.trim_end_matches('/')))
+                        .get(api_url(&url, "/api/v1/status")?)
                         .send()
                         .await?
                         .error_for_status()?
@@ -157,7 +182,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .await?
                 } else if let Some(device) = device {
                     client
-                        .get(format!("{}/api/v1/devices/{device}/status", cli.devd))
+                        .get(api_url(&cli.devd, &format!("/api/v1/devices/{device}/status"))?)
                         .send()
                         .await?
                         .error_for_status()?
@@ -174,7 +199,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             lease_id,
             dry_run,
         } => client
-            .post(format!("{}/api/v1/devices/{device}/flash", cli.devd))
+            .post(api_url(&cli.devd, &format!("/api/v1/devices/{device}/flash"))?)
             .json(
                 &json!({"target": target.kind(), "artifact_id": artifact, "lease_id": lease_id, "dry_run": dry_run}),
             )
@@ -190,7 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             dry_run,
         } => {
             client
-                .post(format!("{}/api/v1/devices/{device}/reset", cli.devd))
+                .post(api_url(&cli.devd, &format!("/api/v1/devices/{device}/reset"))?)
                 .json(&json!({"target": target.kind(), "lease_id": lease_id, "dry_run": dry_run}))
                 .send()
                     .await?
@@ -204,11 +229,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 tail,
             } => {
                 client
-                    .get(format!(
-                        "{}/api/v1/devices/{device}/session?logs_limit={tail}&trace_limit={}",
-                        cli.devd,
-                        tail * 2
-                    ))
+                    .get(api_url(
+                        &cli.devd,
+                        &format!(
+                            "/api/v1/devices/{device}/session?logs_limit={tail}&trace_limit={}",
+                            tail * 2
+                        ),
+                    )?)
                     .send()
                     .await?
                     .error_for_status()?
@@ -218,7 +245,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Command::Output { command } => match command {
                 OutputCommand::Set { url, enable } => {
                     client
-                        .post(format!("{}/api/v1/cc", url.trim_end_matches('/')))
+                        .post(api_url(&url, "/api/v1/cc")?)
                         .json(&json!({"enable": enable}))
                         .send()
                         .await?
