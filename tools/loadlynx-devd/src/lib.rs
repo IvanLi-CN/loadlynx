@@ -38,7 +38,7 @@ const TRACE_LIMIT: usize = 2_000;
 const SERIAL_PROBE_BAUD: u32 = 115_200;
 const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 1_500;
-const SERIAL_PROBE_MAX_BYTES: usize = 512;
+const SERIAL_PROBE_MAX_BYTES: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct DevdConfig {
@@ -127,6 +127,7 @@ pub struct DeviceRecord {
     pub analog_target: Option<TargetCandidate>,
     pub lan_endpoint: Option<String>,
     pub identity: Option<Value>,
+    pub usb_pd_cache: Option<Value>,
     pub selected_artifact_id: Option<String>,
     pub log_decode: LogDecodeState,
     pub logs: VecDeque<SessionLog>,
@@ -303,6 +304,15 @@ struct CcRequest {
     enable: bool,
 }
 
+#[derive(Debug, Deserialize)]
+struct PdRequest {
+    mode: Option<String>,
+    object_pos: Option<u8>,
+    target_mv: Option<u32>,
+    i_req_ma: Option<u32>,
+    allow_extended_voltage: Option<bool>,
+}
+
 pub async fn serve(config: DevdConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
@@ -365,6 +375,7 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
         .route("/api/v1/status", get(compat_status))
         .route("/api/v1/network", get(compat_network))
         .route("/api/v1/cc", post(compat_cc))
+        .route("/api/v1/pd", get(compat_pd_get).post(compat_pd_post))
         .with_state(state);
 
     if allow_dev_cors {
@@ -434,6 +445,7 @@ async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
                 analog_target: None,
                 lan_endpoint: candidate.lan_base_url.clone(),
                 identity: None,
+                usb_pd_cache: None,
                 selected_artifact_id: None,
                 log_decode: LogDecodeState::default(),
                 logs: VecDeque::new(),
@@ -1039,6 +1051,176 @@ async fn compat_cc(
         "request_id": request_id,
         "response": response
     })))
+}
+
+fn select_serial_port_for_compat(
+    state: &DevdState,
+    query: &CompatQuery,
+    operation: &str,
+) -> Result<(String, String), HttpError> {
+    let device =
+        select_compat_device(state, query.lease_id.as_deref(), query.device_id.as_deref())?;
+    ensure_active_lease_for_device(state, &device.id, query.lease_id.as_deref())?;
+    let port_path = device
+        .digital_target
+        .as_ref()
+        .and_then(|target| target.port_path.clone())
+        .ok_or_else(|| {
+            HttpError::conflict(
+                "target_port_missing",
+                format!("USB {operation} requires a selected digital USB port"),
+            )
+        })?;
+    Ok((device.id.clone(), port_path))
+}
+
+fn pd_response_data(response: Value) -> Result<Value, HttpError> {
+    if response.get("ok").and_then(Value::as_bool) == Some(true) {
+        return response.get("data").cloned().ok_or_else(|| {
+            HttpError::retryable(
+                "serial_response_invalid",
+                "USB PD response did not include data",
+            )
+        });
+    }
+
+    let code = response
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("serial_request_failed");
+    let message = response
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("USB PD request failed");
+    Err(HttpError::conflict(code, message))
+}
+
+fn cached_pd_view(state: &AppState, device_id: &str) -> Option<Value> {
+    state
+        .inner
+        .lock()
+        .expect("state lock")
+        .devices
+        .get(device_id)
+        .and_then(|device| device.usb_pd_cache.clone())
+}
+
+async fn compat_pd_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "PD control")?
+    };
+
+    let request_id = "devd-get-pd";
+    let probe = serial_jsonl_request(&port_path, request_id, "get_pd", None)
+        .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+    let response = probe
+        .frames
+        .iter()
+        .rev()
+        .find(|event| {
+            event.direction == "rx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id)
+        })
+        .map(|event| event.frame.clone());
+    record_serial_protocol_probe(
+        &state,
+        &device_id,
+        &port_path,
+        "USB PD GET completed",
+        probe,
+    );
+    if let Some(response) = response {
+        return Ok(Json(pd_response_data(response)?));
+    }
+    if let Some(cached) = cached_pd_view(&state, &device_id) {
+        return Ok(Json(cached));
+    }
+    Err(HttpError::retryable(
+        "serial_response_missing",
+        "USB PD GET did not return a protocol response",
+    ))
+}
+
+async fn compat_pd_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let input: PdRequest = serde_json::from_str(&body)
+        .map_err(|error| HttpError::bad_request("invalid_request", error.to_string()))?;
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "PD control")?
+    };
+
+    let mut extra = serde_json::Map::new();
+    if let Some(mode) = input.mode {
+        extra.insert("mode".to_string(), Value::String(mode));
+    }
+    if let Some(object_pos) = input.object_pos {
+        extra.insert("object_pos".to_string(), json!(object_pos));
+    }
+    if let Some(target_mv) = input.target_mv {
+        extra.insert("target_mv".to_string(), json!(target_mv));
+    }
+    if let Some(i_req_ma) = input.i_req_ma {
+        extra.insert("i_req_ma".to_string(), json!(i_req_ma));
+    }
+    if let Some(allow_extended_voltage) = input.allow_extended_voltage {
+        extra.insert(
+            "allow_extended_voltage".to_string(),
+            json!(allow_extended_voltage),
+        );
+    }
+
+    let request_id = "devd-set-pd-policy";
+    let probe = serial_jsonl_request(
+        &port_path,
+        request_id,
+        "set_pd_policy",
+        Some(Value::Object(extra)),
+    )
+    .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+    let response = probe
+        .frames
+        .iter()
+        .rev()
+        .find(|event| {
+            event.direction == "rx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id)
+        })
+        .map(|event| event.frame.clone());
+    record_serial_protocol_probe(
+        &state,
+        &device_id,
+        &port_path,
+        "USB PD POST completed",
+        probe,
+    );
+    if let Some(response) = response {
+        return Ok(Json(pd_response_data(response)?));
+    }
+    if let Some(cached) = cached_pd_view(&state, &device_id) {
+        return Ok(Json(cached));
+    }
+    Err(HttpError::retryable(
+        "serial_response_missing",
+        "USB PD POST did not return a protocol response",
+    ))
 }
 
 async fn compat_events(
@@ -1771,6 +1953,17 @@ fn record_serial_protocol_probe(
                 );
             }
             for event in probe.frames {
+                if event.direction == "rx"
+                    && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
+                    && event
+                        .frame
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id == "devd-get-pd" || id == "devd-set-pd-policy")
+                    && let Some(data) = event.frame.get("data").cloned()
+                {
+                    device.usb_pd_cache = Some(data);
+                }
                 push_trace(device, event.direction, event.frame);
             }
         }
@@ -1969,14 +2162,17 @@ fn probe_serial_protocol(port_path: &str) -> io::Result<SerialProtocolProbe> {
         &mut non_protocol_text,
         None,
     )?;
+    line_buf.clear();
 
     for (request_id, op) in [
         ("devd-get-identity", "get_identity"),
         ("devd-get-status", "get_status"),
+        ("devd-get-pd", "get_pd"),
         ("devd-output-disable", "set_output_enabled"),
     ] {
         let extra = (op == "set_output_enabled").then(|| json!({"enable": false}));
         write_serial_request(port.as_mut(), &mut frames, request_id, op, extra)?;
+        line_buf.clear();
         let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
         let _ = read_serial_jsonl_until(
             port.as_mut(),
@@ -2020,8 +2216,10 @@ fn serial_jsonl_request(
         &mut non_protocol_text,
         None,
     )?;
+    line_buf.clear();
 
     write_serial_request(port.as_mut(), &mut frames, request_id, op, extra)?;
+    line_buf.clear();
     let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
     let _ = read_serial_jsonl_until(
         port.as_mut(),
@@ -2181,6 +2379,7 @@ fn seed_mock_device(state: &AppState) {
             "mock-loadlynx-devd",
             "Mock LoadLynx devd device",
         )),
+        usb_pd_cache: None,
         selected_artifact_id: None,
         log_decode: LogDecodeState::default(),
         logs: VecDeque::new(),
@@ -2662,6 +2861,7 @@ mod tests {
             identity: Some(
                 json!({"firmware": {"build_id": "b", "build_profile": "release", "features": ["net_http"]}}),
             ),
+            usb_pd_cache: None,
             selected_artifact_id: None,
             log_decode: LogDecodeState::default(),
             logs: VecDeque::new(),

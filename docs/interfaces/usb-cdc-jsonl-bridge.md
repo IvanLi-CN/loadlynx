@@ -24,13 +24,13 @@ LoadLynx digital firmware and `loadlynx-devd` use LF-delimited JSON frames on th
       "features": ["net_http", "mdns_dns_sd", "usb_cdc_jsonl"]
     }
   },
-  "capabilities": ["get_identity", "get_status", "wifi_config"]
+  "capabilities": ["get_identity", "get_status", "get_pd", "set_pd_policy"]
 }
 ```
 
 ### `request`
 
-Supported `op` values are `get_identity`, `get_status`, `set_log_level`, `set_output_enable`, `set_setpoint`, `set_pd_policy`, `set_calibration_mode` and `wifi_config`.
+Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, and `set_output_enabled`.
 
 ```json
 {

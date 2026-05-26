@@ -21,6 +21,7 @@ The first implementation is complete and ready for PR review. It adds a local `l
 - `tools/loadlynx-devd/` exposes `loadlynx-devd serve` and `loadlynx` from one Rust package.
 - devd scans native USB serial candidates, the cached digital `.esp32-port` USB path, LAN/mock candidates, but never writes selector cache files. When `.esp32-port` uses the mcu-agentd selector-record format, devd reads only the path line and ignores metadata lines such as `mac=...`.
 - Compatibility endpoints require an explicit `device_id`/`lease_id` when there is no unique active lease.
+- The devd USB compatibility surface includes PD sink reads and writes. Digital firmware exposes `get_pd` and `set_pd_policy`; devd maps them to `/api/v1/pd` and caches the last complete PD view from protocol frames so intermittent USB log noise cannot make Web lose a valid real-device PD snapshot.
 - Firmware flash/reset paths default to dry-run and include target evidence. Real ESP32-S3 digital flash calls direct `espflash` through devd after artifact hash verification and a valid Web lease: ELF artifacts use `espflash flash`, and raw image artifacts require `flash_address` before using `espflash write-bin`. Analog flash/reset and reset-only paths continue to use existing backend guardrails.
 - Web Storybook coverage uses canvas stories for Devices devd lease creation and Firmware dry-run/session states.
 
@@ -40,5 +41,7 @@ The first implementation is complete and ready for PR review. It adds a local `l
 - `bun run test:storybook:ci`
 - `PROFILE=release just d-build`
 - `PROFILE=release just a-build`
+- Real ESP32-S3 digital flash through devd direct `espflash` on `/dev/cu.usbmodem212101`; post-flash USB CDC `get_identity` matched the local digital firmware version.
+- Real USB PD sink verification through devd `/api/v1/pd`: read attached 9V/500mA contract and PDO/APDO capabilities, applied fixed 5V/500mA, observed contract transition to 5V, restored fixed 9V/500mA, and observed contract return to 9V while load output stayed disabled.
 
 `cargo +esp test --manifest-path firmware/digital/Cargo.toml mdns --no-run` is not a valid host-side unit path for this ESP target in the current toolchain; it fails inside xtensa test dependencies before reaching LoadLynx code. The firmware build path above is the accepted validation for the digital crate.

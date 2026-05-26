@@ -1469,15 +1469,6 @@ export async function getPd(baseUrl: string): Promise<PdView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetPd(baseUrl);
   }
-  if (isDevdCompatBaseUrl(baseUrl)) {
-    throw new HttpApiError({
-      status: 404,
-      code: "UNSUPPORTED_OPERATION",
-      message: "USB-PD API is not available through the devd USB bridge",
-      retryable: false,
-      details: null,
-    });
-  }
   return httpJsonQueued<PdView>(baseUrl, "/api/v1/pd");
 }
 

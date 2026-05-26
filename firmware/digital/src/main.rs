@@ -707,6 +707,54 @@ fn json_bool_value(line: &str, key: &str) -> Option<bool> {
     }
 }
 
+fn json_u32_value(line: &str, key: &str) -> Option<u32> {
+    let idx = line.find(key)?;
+    let colon = line[idx..].find(':')?;
+    let rest = line[idx + colon + 1..].trim_start();
+    let mut end = 0usize;
+    for ch in rest.chars() {
+        if ch.is_ascii_digit() {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    rest[..end].parse().ok()
+}
+
+fn usb_pd_mode_value(line: &str) -> Option<control::PdMode> {
+    match json_string_value(line, "\"mode\"")? {
+        "fixed" => Some(control::PdMode::Fixed),
+        "pps" => Some(control::PdMode::Pps),
+        _ => None,
+    }
+}
+
+fn pd_object_pos(pos: u8, idx: usize) -> u8 {
+    if pos != 0 { pos } else { (idx + 1) as u8 }
+}
+
+fn usb_find_fixed_pdo(status: &PdStatus, object_pos: u8) -> Option<loadlynx_protocol::FixedPdo> {
+    status
+        .fixed_pdos
+        .iter()
+        .enumerate()
+        .find(|(idx, pdo)| pd_object_pos(pdo.pos, *idx) == object_pos)
+        .map(|(_idx, pdo)| *pdo)
+}
+
+fn usb_find_pps_pdo(status: &PdStatus, object_pos: u8) -> Option<loadlynx_protocol::PpsPdo> {
+    status
+        .pps_pdos
+        .iter()
+        .enumerate()
+        .find(|(idx, pdo)| pd_object_pos(pdo.pos, *idx) == object_pos)
+        .map(|(_idx, pdo)| *pdo)
+}
+
 async fn usb_cdc_write_line(
     tx: &mut UsbSerialJtagTx<'static, Async>,
     line: &heapless::String<2048>,
@@ -746,7 +794,7 @@ async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_i
     }
     out.push_str(",\"ok\":true,\"data\":{\"device_id\":\"digital-esp32s3\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"protocol\":\"loadlynx.cdc.v1\",\"firmware_version\":\"").ok();
     write_json_string_escaped(out, FW_VERSION);
-    out.push_str("\",\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"set_output_enabled\"]}}").ok();
+    out.push_str("\",\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}}").ok();
 }
 
 async fn write_usb_status_response(
@@ -831,6 +879,272 @@ async fn write_usb_status_response(
     );
 }
 
+async fn write_usb_pd_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    if !LINK_UP.load(Ordering::Relaxed) {
+        write_usb_error_response(out, request_id, "LINK_DOWN", "UART link is down");
+        return;
+    }
+
+    let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+    if matches!(analog_state, AnalogState::Faulted | AnalogState::Offline) {
+        write_usb_error_response(out, request_id, "LINK_DOWN", "analog board is not online");
+        return;
+    }
+
+    let (saved, allow_extended_voltage) = {
+        let guard = control.lock().await;
+        (guard.pd_saved, guard.allow_extended_voltage)
+    };
+    let status = { telemetry.lock().await.last_pd_status.clone() };
+    let ack_pending = PD_REQ_ACK_PENDING.load(Ordering::Relaxed);
+    let last_code = PD_LAST_RESULT_CODE.load(Ordering::Relaxed);
+    let last_ms = PD_LAST_RESULT_MS.load(Ordering::Relaxed);
+
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{").ok();
+
+    if let Some(status) = status {
+        out.push_str("\"attached\":").ok();
+        out.push_str(if status.attached { "true" } else { "false" })
+            .ok();
+        if status.attached {
+            let _ = core::write!(
+                out,
+                ",\"contract_mv\":{},\"contract_ma\":{}",
+                status.contract_mv,
+                status.contract_ma
+            );
+        } else {
+            out.push_str(",\"contract_mv\":null,\"contract_ma\":null")
+                .ok();
+        }
+
+        out.push_str(",\"fixed_pdos\":[").ok();
+        for (idx, pdo) in status.fixed_pdos.iter().enumerate() {
+            if idx != 0 {
+                out.push(',').ok();
+            }
+            let _ = core::write!(
+                out,
+                "{{\"pos\":{},\"mv\":{},\"max_ma\":{}}}",
+                pd_object_pos(pdo.pos, idx),
+                pdo.mv,
+                pdo.max_ma
+            );
+        }
+        out.push_str("],\"pps_pdos\":[").ok();
+        for (idx, pdo) in status.pps_pdos.iter().enumerate() {
+            if idx != 0 {
+                out.push(',').ok();
+            }
+            let _ = core::write!(
+                out,
+                "{{\"pos\":{},\"min_mv\":{},\"max_mv\":{},\"max_ma\":{}}}",
+                pd_object_pos(pdo.pos, idx),
+                pdo.min_mv,
+                pdo.max_mv,
+                pdo.max_ma
+            );
+        }
+        out.push(']').ok();
+    } else {
+        out.push_str(
+            "\"attached\":false,\"contract_mv\":null,\"contract_ma\":null,\"fixed_pdos\":[],\"pps_pdos\":[]",
+        )
+        .ok();
+    }
+
+    out.push_str(",\"epr_active\":false,\"epr_avs_pdos\":[],\"allow_extended_voltage\":")
+        .ok();
+    out.push_str(if allow_extended_voltage {
+        "true"
+    } else {
+        "false"
+    })
+    .ok();
+    out.push_str(",\"saved\":{\"mode\":\"").ok();
+    out.push_str(match saved.mode {
+        control::PdMode::Fixed => "fixed",
+        control::PdMode::Pps => "pps",
+    })
+    .ok();
+    let _ = core::write!(
+        out,
+        "\",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"pps_target_mv\":{},\"i_req_ma\":{}}},\"apply\":{{\"pending\":{}",
+        saved.fixed_object_pos,
+        saved.pps_object_pos,
+        saved.target_mv,
+        saved.pps_target_mv,
+        saved.i_req_ma,
+        if ack_pending { "true" } else { "false" }
+    );
+    if last_code != 0 {
+        out.push_str(",\"last\":{\"code\":\"").ok();
+        out.push_str(match last_code {
+            1 => "ok",
+            2 => "nack",
+            3 => "timeout",
+            4 => "persist_fail",
+            _ => "failed",
+        })
+        .ok();
+        let _ = core::write!(out, "\",\"at_ms\":{}}}", last_ms);
+    }
+    out.push_str("}}}").ok();
+}
+
+async fn write_usb_set_pd_policy_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    line: &str,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+) {
+    let mode = match usb_pd_mode_value(line) {
+        Some(mode) => mode,
+        None => {
+            write_usb_error_response(
+                out,
+                request_id,
+                "INVALID_REQUEST",
+                "mode must be fixed or pps",
+            );
+            return;
+        }
+    };
+    let Some(object_pos) = json_u32_value(line, "\"object_pos\"").map(|v| v.min(255) as u8) else {
+        write_usb_error_response(out, request_id, "INVALID_REQUEST", "missing object_pos");
+        return;
+    };
+    let Some(i_req_ma) = json_u32_value(line, "\"i_req_ma\"") else {
+        write_usb_error_response(out, request_id, "INVALID_REQUEST", "missing i_req_ma");
+        return;
+    };
+    if object_pos == 0 || object_pos > control::MAX_PD_OBJECT_POS || i_req_ma < 50 {
+        write_usb_error_response(
+            out,
+            request_id,
+            "LIMIT_VIOLATION",
+            "PD request is out of range",
+        );
+        return;
+    }
+    if !LINK_UP.load(Ordering::Relaxed) {
+        write_usb_error_response(out, request_id, "LINK_DOWN", "UART link is down");
+        return;
+    }
+
+    let status = match telemetry.lock().await.last_pd_status.clone() {
+        Some(status) if status.attached => status,
+        _ => {
+            write_usb_error_response(out, request_id, "NOT_ATTACHED", "PD status unavailable");
+            return;
+        }
+    };
+
+    let mut ctrl = control.lock().await;
+    let mut cfg = ctrl.pd_saved;
+    cfg.mode = mode;
+    cfg.i_req_ma = i_req_ma;
+    match mode {
+        control::PdMode::Fixed => {
+            let Some(pdo) = usb_find_fixed_pdo(&status, object_pos) else {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected PDO not present",
+                );
+                return;
+            };
+            if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV || i_req_ma > pdo.max_ma {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected PDO exceeds limits",
+                );
+                return;
+            }
+            cfg.fixed_object_pos = object_pos;
+            cfg.target_mv = pdo.mv;
+        }
+        control::PdMode::Pps => {
+            let Some(apdo) = usb_find_pps_pdo(&status, object_pos) else {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected APDO not present",
+                );
+                return;
+            };
+            let Some(target_mv) = json_u32_value(line, "\"target_mv\"") else {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "INVALID_REQUEST",
+                    "missing target_mv for PPS",
+                );
+                return;
+            };
+            if target_mv < apdo.min_mv || target_mv > apdo.max_mv || i_req_ma > apdo.max_ma {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected APDO exceeds limits",
+                );
+                return;
+            }
+            cfg.pps_object_pos = object_pos;
+            cfg.target_mv = target_mv;
+            cfg.pps_target_mv = target_mv;
+        }
+    }
+
+    let allow_extended_voltage =
+        json_bool_value(line, "\"allow_extended_voltage\"").unwrap_or(ctrl.allow_extended_voltage);
+    let changed = cfg != ctrl.pd_saved || allow_extended_voltage != ctrl.allow_extended_voltage;
+    if changed {
+        let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
+        if eeprom.lock().await.write_pd_blob(&blob).await.is_err() {
+            PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed);
+            PD_LAST_RESULT_MS.store(now_ms32(), Ordering::Relaxed);
+            write_usb_error_response(out, request_id, "UNAVAILABLE", "EEPROM write failed");
+            return;
+        }
+        ctrl.pd_saved = cfg;
+        ctrl.allow_extended_voltage = allow_extended_voltage;
+        if ctrl.ui_view == control::UiView::PdSettings {
+            ctrl.pd_draft = cfg;
+        }
+        bump_control_rev();
+    }
+    drop(ctrl);
+
+    if !allow_extended_voltage {
+        clear_pd_extended_voltage_failure();
+    }
+    let now = now_ms32();
+    start_pd_extended_voltage_retry_window(now);
+    PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
+    PD_FORCE_SEND.store(true, Ordering::Release);
+    write_usb_pd_response(out, request_id, control, telemetry).await;
+}
+
 async fn write_usb_set_output_enabled_response(
     out: &mut heapless::String<2048>,
     request_id: Option<&str>,
@@ -909,6 +1223,7 @@ async fn handle_usb_jsonl_request(
     control: &'static ControlMutex,
     calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
 ) {
     let request_id = json_string_value(line, "\"request_id\"");
     let Some(op) = json_string_value(line, "\"op\"") else {
@@ -920,6 +1235,11 @@ async fn handle_usb_jsonl_request(
         "get_identity" => write_usb_identity_response(out, request_id).await,
         "get_status" => {
             write_usb_status_response(out, request_id, control, calibration, telemetry).await
+        }
+        "get_pd" => write_usb_pd_response(out, request_id, control, telemetry).await,
+        "set_pd_policy" => {
+            write_usb_set_pd_policy_response(out, request_id, line, control, telemetry, eeprom)
+                .await
         }
         "set_output_enabled" => {
             write_usb_set_output_enabled_response(out, request_id, line, control, calibration).await
@@ -935,12 +1255,13 @@ async fn usb_cdc_jsonl_task(
     control: &'static ControlMutex,
     calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
 ) {
     info!("USB CDC JSONL task starting (protocol=loadlynx.cdc.v1)");
     let mut out = heapless::String::<2048>::new();
     out.push_str("{\"type\":\"hello\",\"protocol\":\"loadlynx.cdc.v1\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"firmware_version\":\"").ok();
     write_json_string_escaped(&mut out, FW_VERSION);
-    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"set_output_enabled\"]}")
+    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}")
         .ok();
     usb_cdc_write_line(&mut tx, &out).await;
 
@@ -967,8 +1288,15 @@ async fn usb_cdc_jsonl_task(
                     let line = core::str::from_utf8(&line_buf[..line_len]).unwrap_or("");
                     let line = line.trim();
                     if !line.is_empty() {
-                        handle_usb_jsonl_request(line, &mut out, control, calibration, telemetry)
-                            .await;
+                        handle_usb_jsonl_request(
+                            line,
+                            &mut out,
+                            control,
+                            calibration,
+                            telemetry,
+                            eeprom,
+                        )
+                        .await;
                         usb_cdc_write_line(&mut tx, &out).await;
                     }
                     line_len = 0;
@@ -7107,6 +7435,7 @@ async fn main(spawner: Spawner) {
             control,
             calibration,
             telemetry,
+            eeprom,
         ))
         .expect("usb_cdc_jsonl_task spawn");
 
