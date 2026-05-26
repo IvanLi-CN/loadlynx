@@ -3,7 +3,10 @@ import { Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { ENABLE_MOCK_DEVTOOLS, isHttpApiError } from "../api/client.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
-import { DEFAULT_DEVD_BASE_URL } from "../devd/client.ts";
+import {
+  buildDevdCompatBaseUrl,
+  DEFAULT_DEVD_BASE_URL,
+} from "../devd/client.ts";
 import { useCreateDevdLease, useDevdScan } from "../devd/hooks.ts";
 import type { DevdDevice } from "../devd/types.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
@@ -280,18 +283,18 @@ export function DevicesRoute() {
                       if (candidate.lan_endpoint) {
                         connectionMarks.push("lan");
                       }
-                      const baseUrl =
-                        candidate.lan_endpoint ?? `mock://devd-${candidate.id}`;
+                      const devd = {
+                        baseUrl: DEFAULT_DEVD_BASE_URL,
+                        deviceId: candidate.id,
+                        leaseId: lease.lease_id,
+                      };
+                      const baseUrl = buildDevdCompatBaseUrl(devd);
                       addRealDeviceMutation.mutate(
                         {
                           name: candidate.display_name,
                           baseUrl,
                           connectionMarks,
-                          devd: {
-                            baseUrl: DEFAULT_DEVD_BASE_URL,
-                            deviceId: candidate.id,
-                            leaseId: lease.lease_id,
-                          },
+                          devd,
                         },
                         {
                           onSuccess: () => {

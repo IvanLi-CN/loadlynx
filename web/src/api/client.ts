@@ -49,6 +49,31 @@ export function isMockBaseUrl(baseUrl: string): boolean {
   return normalized.startsWith("mock://");
 }
 
+function makeApiUrl(baseUrl: string, path: string): URL {
+  const base = new URL(baseUrl);
+  const url = new URL(path, base);
+  base.searchParams.forEach((value, key) => {
+    if (!url.searchParams.has(key)) {
+      url.searchParams.append(key, value);
+    }
+  });
+  return url;
+}
+
+function isDevdCompatBaseUrl(baseUrl: string): boolean {
+  if (!baseUrl || isMockBaseUrl(baseUrl)) {
+    return false;
+  }
+  try {
+    const url = new URL(baseUrl);
+    return Boolean(
+      url.searchParams.get("device_id") && url.searchParams.get("lease_id"),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isStorybookRuntime(): boolean {
   return globalThis.__LOADLYNX_STORYBOOK__ === true;
 }
@@ -149,7 +174,7 @@ async function httpJson<T>(
     );
   }
 
-  const url = new URL(path, baseUrl);
+  const url = makeApiUrl(baseUrl, path);
 
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> | undefined),
@@ -725,6 +750,32 @@ function mockMakeControlView(state: MockDeviceState): ControlView {
   };
 }
 
+function makeDevdControlView(outputEnabled = false): ControlView {
+  const preset = createInitialPresets()[0];
+  if (!preset) {
+    throw new Error("default preset missing");
+  }
+  return {
+    active_preset_id: 1,
+    output_enabled: outputEnabled,
+    uv_latched: false,
+    preset: structuredClone(preset),
+  };
+}
+
+function getDevdResponseOutputEnabled(
+  payload: unknown,
+  fallback: boolean,
+): boolean {
+  const response = (payload as { response?: unknown } | null)?.response as
+    | { data?: unknown }
+    | undefined;
+  const data = response?.data as { output_enabled?: unknown } | undefined;
+  return typeof data?.output_enabled === "boolean"
+    ? data.output_enabled
+    : fallback;
+}
+
 function mockRequireControlReady(state: MockDeviceState): void {
   if (!state.status.link_up) {
     throw new HttpApiError({
@@ -1139,6 +1190,18 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetStatus(baseUrl);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    const payload = await httpJsonQueued<{
+      connection?: string;
+      log_decode?: { status?: string };
+    }>(baseUrl, "/api/v1/status");
+    const view = createInitialStatus(baseUrl);
+    const connected = payload.connection === "connected";
+    view.link_up = connected;
+    view.hello_seen = connected;
+    view.analog_state = connected ? "ready" : "offline";
+    return view;
+  }
   interface FastStatusHttpResponse {
     status: FastStatusJson;
     link_up: boolean;
@@ -1190,13 +1253,17 @@ export function subscribeStatusStream(
     };
   }
 
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    return () => undefined;
+  }
+
   if (isStorybookRuntime()) {
     throw new Error(
       `[LoadLynx] Real device status streaming is disabled in Storybook. Use a mock:// baseUrl instead (attempted baseUrl="${baseUrl}").`,
     );
   }
 
-  const url = new URL("/api/v1/status", baseUrl);
+  const url = makeApiUrl(baseUrl, "/api/v1/status");
   let closed = false;
 
   const isFastStatusView = (val: unknown): val is FastStatusView => {
@@ -1402,6 +1469,15 @@ export async function getPd(baseUrl: string): Promise<PdView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetPd(baseUrl);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    throw new HttpApiError({
+      status: 404,
+      code: "UNSUPPORTED_OPERATION",
+      message: "USB-PD API is not available through the devd USB bridge",
+      retryable: false,
+      details: null,
+    });
+  }
   return httpJsonQueued<PdView>(baseUrl, "/api/v1/pd");
 }
 
@@ -1454,6 +1530,9 @@ export async function getPresets(baseUrl: string): Promise<Preset[]> {
     const payload = await mockGetPresets(baseUrl);
     return payload.presets;
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    return structuredClone(createInitialPresets());
+  }
   const payload = await httpJsonQueued<{ presets: Preset[] }>(
     baseUrl,
     "/api/v1/presets",
@@ -1467,6 +1546,15 @@ export async function updatePreset(
 ): Promise<Preset> {
   if (isMockBaseUrl(baseUrl)) {
     return mockUpdatePreset(baseUrl, payload);
+  }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    throw new HttpApiError({
+      status: 409,
+      code: "UNSUPPORTED_OPERATION",
+      message: "Preset writes are not available through the devd USB bridge",
+      retryable: false,
+      details: null,
+    });
   }
 
   const body = JSON.stringify(payload);
@@ -1488,6 +1576,10 @@ export async function applyPreset(
   if (isMockBaseUrl(baseUrl)) {
     return mockApplyPreset(baseUrl, preset_id);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    void preset_id;
+    return makeDevdControlView(false);
+  }
 
   const body = JSON.stringify({ preset_id });
 
@@ -1504,6 +1596,9 @@ export async function getControl(baseUrl: string): Promise<ControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetControl(baseUrl);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    return makeDevdControlView(false);
+  }
   return httpJsonQueued<ControlView>(baseUrl, "/api/v1/control");
 }
 
@@ -1513,6 +1608,18 @@ export async function updateControl(
 ): Promise<ControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockUpdateControl(baseUrl, payload);
+  }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    const response = await httpJsonQueued<unknown>(baseUrl, "/api/v1/cc", {
+      method: "POST",
+      body: JSON.stringify({ enable: payload.output_enabled }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+    return makeDevdControlView(
+      getDevdResponseOutputEnabled(response, payload.output_enabled),
+    );
   }
 
   const body = JSON.stringify(payload);
@@ -1691,6 +1798,18 @@ export async function postCalibrationMode(
 ): Promise<void> {
   if (isMockBaseUrl(baseUrl)) {
     return mockPostCalibrationMode(baseUrl, payload);
+  }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    if (payload.kind === "off") {
+      return;
+    }
+    throw new HttpApiError({
+      status: 409,
+      code: "UNSUPPORTED_OPERATION",
+      message: "Calibration mode is not available through the devd USB bridge",
+      retryable: false,
+      details: null,
+    });
   }
   const body = JSON.stringify(payload);
   return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/mode", {

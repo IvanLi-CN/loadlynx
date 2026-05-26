@@ -15,6 +15,23 @@ function isStorybookRuntime(): boolean {
   return globalThis.__LOADLYNX_STORYBOOK__ === true;
 }
 
+export function buildDevdCompatBaseUrl(input: {
+  baseUrl?: string;
+  deviceId: string;
+  leaseId?: string;
+}): string {
+  if (isStorybookRuntime()) {
+    return `mock://devd-${input.deviceId}`;
+  }
+
+  const url = new URL(input.baseUrl ?? DEFAULT_DEVD_BASE_URL);
+  url.searchParams.set("device_id", input.deviceId);
+  if (input.leaseId) {
+    url.searchParams.set("lease_id", input.leaseId);
+  }
+  return url.toString();
+}
+
 const MOCK_DEVD_DEVICES: DevdDevice[] = [
   {
     id: "mock-loadlynx-devd",
