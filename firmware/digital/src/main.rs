@@ -1221,7 +1221,7 @@ async fn write_usb_set_output_enabled_response(
     if ok {
         let _ = core::write!(
             out,
-            ",\"ok\":true,\"data\":{{\"output_enabled\":{},\"changed\":{}}}",
+            ",\"ok\":true,\"data\":{{\"output_enabled\":{},\"changed\":{}}}}}",
             if output_enabled { "true" } else { "false" },
             if changed { "true" } else { "false" }
         );
@@ -5520,7 +5520,7 @@ async fn apply_fast_status(
         MEASUREMENT_EVER_TRUSTED.store(true, Ordering::Relaxed);
         MEASUREMENT_UNTRUSTED.store(false, Ordering::Relaxed);
         LAST_TRUSTED_MEASUREMENT_MS.store(now, Ordering::Relaxed);
-    } else if !MEASUREMENT_EVER_TRUSTED.load(Ordering::Relaxed) && (link_up || link_flag) {
+    } else if !MEASUREMENT_EVER_TRUSTED.load(Ordering::Relaxed) {
         MEASUREMENT_UNTRUSTED.store(true, Ordering::Relaxed);
     }
     let measurement_untrusted = MEASUREMENT_UNTRUSTED.load(Ordering::Relaxed);
@@ -10012,10 +10012,18 @@ mod tests {
     }
 
     #[test]
-    fn link_recovery_covers_zero_measurement_fast_status() {
+    fn link_recovery_covers_never_trusted_zero_measurement_fast_status() {
         assert_eq!(
             link_recovery_reason(MEASUREMENT_ZERO_RECOVERY_GRACE_MS, 0, 1, true, 1, true),
             Some(LinkRecoveryReason::ZeroMeasurement)
+        );
+    }
+
+    #[test]
+    fn link_recovery_ignores_trusted_zero_measurement_fast_status() {
+        assert_eq!(
+            link_recovery_reason(MEASUREMENT_ZERO_RECOVERY_GRACE_MS, 0, 1, true, 1, false),
+            None
         );
     }
 

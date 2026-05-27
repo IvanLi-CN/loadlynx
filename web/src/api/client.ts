@@ -514,6 +514,90 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
   };
 }
 
+function normalizeDevdIdentity(
+  baseUrl: string,
+  payload: Partial<Identity> & { firmware_version?: unknown },
+): Identity {
+  const url = new URL(baseUrl);
+  const deviceId =
+    payload.device_id ?? url.searchParams.get("device_id") ?? "devd-usb";
+  const hostname =
+    payload.hostname ?? payload.network?.hostname ?? "loadlynx-devd-usb";
+  return {
+    device_id: deviceId,
+    digital_fw_version:
+      payload.digital_fw_version ??
+      (typeof payload.firmware_version === "string"
+        ? payload.firmware_version
+        : "unknown"),
+    analog_fw_version: payload.analog_fw_version ?? "unknown",
+    protocol_version: payload.protocol_version ?? 1,
+    uptime_ms: payload.uptime_ms ?? 0,
+    network: {
+      ip: payload.network?.ip ?? url.hostname,
+      mac: payload.network?.mac ?? "unknown",
+      hostname,
+    },
+    hostname,
+    short_id: payload.short_id ?? deviceId,
+    capabilities: {
+      cc_supported: payload.capabilities?.cc_supported ?? true,
+      cv_supported: payload.capabilities?.cv_supported ?? true,
+      cp_supported: payload.capabilities?.cp_supported ?? true,
+      presets_supported: payload.capabilities?.presets_supported ?? false,
+      preset_count: payload.capabilities?.preset_count,
+      api_version: payload.capabilities?.api_version ?? "devd-usb",
+    },
+  };
+}
+
+function normalizeDevdStatus(payload: {
+  status: Partial<FastStatusJson>;
+  link_up?: boolean;
+  hello_seen?: boolean;
+  analog_state?: FastStatusView["analog_state"];
+  fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
+  control?: { mode?: string; output_enabled?: boolean; target_p_mw?: number };
+}): FastStatusView {
+  const raw: FastStatusJson = {
+    uptime_ms: payload.status.uptime_ms ?? 0,
+    mode:
+      payload.status.mode ??
+      (payload.control?.mode === "cc"
+        ? 1
+        : payload.control?.mode === "cv"
+          ? 2
+          : 3),
+    state_flags: payload.status.state_flags ?? 0,
+    enable: payload.status.enable ?? payload.control?.output_enabled ?? false,
+    target_value:
+      payload.status.target_value ?? payload.control?.target_p_mw ?? 0,
+    i_local_ma: payload.status.i_local_ma ?? 0,
+    i_remote_ma: payload.status.i_remote_ma ?? 0,
+    v_local_mv: payload.status.v_local_mv ?? 0,
+    v_remote_mv: payload.status.v_remote_mv ?? 0,
+    calc_p_mw: payload.status.calc_p_mw ?? 0,
+    dac_headroom_mv: payload.status.dac_headroom_mv ?? 0,
+    loop_error: payload.status.loop_error ?? 0,
+    sink_core_temp_mc: payload.status.sink_core_temp_mc ?? 0,
+    sink_exhaust_temp_mc: payload.status.sink_exhaust_temp_mc ?? 0,
+    mcu_temp_mc: payload.status.mcu_temp_mc ?? 0,
+    fault_flags: payload.status.fault_flags ?? 0,
+    cal_kind: payload.status.cal_kind,
+    raw_v_nr_100uv: payload.status.raw_v_nr_100uv,
+    raw_v_rmt_100uv: payload.status.raw_v_rmt_100uv,
+    raw_cur_100uv: payload.status.raw_cur_100uv,
+    raw_dac_code: payload.status.raw_dac_code,
+  };
+  return {
+    raw,
+    link_up: payload.link_up ?? true,
+    hello_seen: payload.hello_seen ?? true,
+    analog_state: payload.analog_state ?? "ready",
+    fault_flags_decoded: payload.fault_flags_decoded ?? [],
+  };
+}
+
 function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
   const existing = mockDevices.get(baseUrl);
   if (existing) {
@@ -1183,6 +1267,23 @@ export async function getIdentity(baseUrl: string): Promise<Identity> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetIdentity(baseUrl);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    try {
+      const payload = await httpJsonQueued<
+        Partial<Identity> & { firmware_version?: unknown }
+      >(baseUrl, "/api/v1/identity");
+      return normalizeDevdIdentity(baseUrl, payload);
+    } catch {
+      const status = await httpJsonQueued<{ status: Partial<FastStatusJson> }>(
+        baseUrl,
+        "/api/v1/status",
+      );
+      return normalizeDevdIdentity(baseUrl, {
+        device_id: new URL(baseUrl).searchParams.get("device_id") ?? undefined,
+        uptime_ms: status.status.uptime_ms,
+      });
+    }
+  }
   return httpJsonQueued<Identity>(baseUrl, "/api/v1/identity");
 }
 
@@ -1192,19 +1293,18 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
     const payload = await httpJsonQueued<{
-      status: FastStatusJson;
+      status: Partial<FastStatusJson>;
       link_up?: boolean;
       hello_seen?: boolean;
       analog_state?: FastStatusView["analog_state"];
       fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
+      control?: {
+        mode?: string;
+        output_enabled?: boolean;
+        target_p_mw?: number;
+      };
     }>(baseUrl, "/api/v1/status");
-    return {
-      raw: payload.status,
-      link_up: payload.link_up ?? true,
-      hello_seen: payload.hello_seen ?? true,
-      analog_state: payload.analog_state ?? "ready",
-      fault_flags_decoded: payload.fault_flags_decoded ?? [],
-    };
+    return normalizeDevdStatus(payload);
   }
   interface FastStatusHttpResponse {
     status: FastStatusJson;
@@ -1573,7 +1673,13 @@ export async function applyPreset(
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
     void preset_id;
-    return makeDevdControlView(false);
+    throw new HttpApiError({
+      status: 409,
+      code: "UNSUPPORTED_OPERATION",
+      message: "Preset applies are not available through the devd USB bridge",
+      retryable: false,
+      details: null,
+    });
   }
 
   const body = JSON.stringify({ preset_id });

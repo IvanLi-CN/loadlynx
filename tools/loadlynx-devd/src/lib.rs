@@ -32,6 +32,11 @@ const DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE: &str = ".esp32-port";
 const DEFAULT_ANALOG_PROBE_SELECTOR_SOURCE: &str = ".stm32-port";
 const ESPFLASH_ENV: &str = "LOADLYNX_ESPFLASH";
 const DEFAULT_ESPFLASH: &str = "espflash";
+const PROBE_RS_ENV: &str = "LOADLYNX_PROBE_RS";
+const DEFAULT_PROBE_RS: &str = "probe-rs";
+const ANALOG_PROBE_CHIP: &str = "STM32G431CB";
+const ANALOG_PROBE_PROTOCOL: &str = "swd";
+const ANALOG_PROBE_SPEED_KHZ: u32 = 4_000;
 pub const WEB_LEASE_HEARTBEAT_INTERVAL_MS: u64 = 2_000;
 pub const WEB_LEASE_TTL_MS: u64 = 8_000;
 const EVENT_LIMIT: usize = 1_000;
@@ -722,7 +727,7 @@ async fn flash_device(
     }
     match target {
         TargetKind::DigitalEsp32s3 => run_espflash_digital(&state, &id, &artifact).await?,
-        TargetKind::AnalogStm32g431 => run_agentd(target.clone(), "flash").await?,
+        TargetKind::AnalogStm32g431 => run_probe_rs_analog(&state, &id, &artifact).await?,
         TargetKind::LanHttp | TargetKind::Mock => {
             return Err(HttpError::bad_request(
                 "target_unsupported",
@@ -958,15 +963,60 @@ async fn compat_identity(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    let guard = state.inner.lock().expect("state lock");
-    let device = select_compat_device(
-        &guard,
-        query.lease_id.as_deref(),
-        query.device_id.as_deref(),
-    )?;
-    Ok(Json(device.identity.clone().unwrap_or_else(|| {
-        mock_identity(&device.id, &device.display_name)
-    })))
+    cleanup_expired_leases(&state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "identity")?
+    };
+
+    let identity = request_usb_identity(&state, &device_id, &port_path)?;
+    if let Some(device) = state
+        .inner
+        .lock()
+        .expect("state lock")
+        .devices
+        .get_mut(&device_id)
+    {
+        device.identity = Some(identity.clone());
+    }
+    Ok(Json(identity))
+}
+
+fn request_usb_identity(
+    state: &AppState,
+    device_id: &str,
+    port_path: &str,
+) -> Result<Value, HttpError> {
+    let request_id = "devd-get-identity";
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let probe = serial_jsonl_request(port_path, request_id, "get_identity", None)
+            .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+        let response = serial_response_for_request(&probe, request_id)
+            .or_else(|| infer_serial_response_from_text(&probe, request_id));
+
+        record_serial_protocol_probe(
+            state,
+            device_id,
+            port_path,
+            if attempt == 0 {
+                "USB identity request completed"
+            } else {
+                "USB identity retry completed"
+            },
+            probe,
+        );
+        match identity_data_from_serial_response(response) {
+            Ok(identity) => return Ok(identity),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB identity did not return a protocol response",
+        )
+    }))
 }
 
 async fn compat_status(
@@ -991,15 +1041,41 @@ async fn compat_status(
         "USB status request completed",
         probe,
     );
-    let status = status_from_serial_response(response)?;
-    Ok(Json(json!({
-        "device_id": device_id,
-        "status": status,
-        "link_up": true,
-        "hello_seen": true,
-        "analog_state": "ready",
-        "fault_flags_decoded": [],
-    })))
+    let data = status_data_from_serial_response(response)?;
+    let status = data.get("status").cloned().ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_invalid",
+            "USB status response did not include status",
+        )
+    })?;
+    let link_up = data.get("link_up").and_then(Value::as_bool).unwrap_or(true);
+    let hello_seen = data
+        .get("hello_seen")
+        .and_then(Value::as_bool)
+        .unwrap_or(link_up);
+    let analog_state = data
+        .get("analog_state")
+        .and_then(Value::as_str)
+        .unwrap_or(if link_up { "ready" } else { "offline" })
+        .to_string();
+    let mut output = data;
+    if let Some(object) = output.as_object_mut() {
+        object.insert("device_id".to_string(), json!(device_id));
+        object.insert("status".to_string(), status);
+        object
+            .entry("link_up".to_string())
+            .or_insert_with(|| json!(link_up));
+        object
+            .entry("hello_seen".to_string())
+            .or_insert_with(|| json!(hello_seen));
+        object
+            .entry("analog_state".to_string())
+            .or_insert_with(|| json!(analog_state));
+        object
+            .entry("fault_flags_decoded".to_string())
+            .or_insert_with(|| json!([]));
+    }
+    Ok(Json(output))
 }
 
 async fn compat_network(
@@ -1089,6 +1165,7 @@ async fn compat_cc(
             "USB CC control did not return a protocol response",
         )
     })?;
+    let _ = serial_response_data(response.clone(), "USB CC control")?;
     Ok(Json(json!({
         "ok": true,
         "request_id": request_id,
@@ -1121,22 +1198,53 @@ fn pd_response_data(response: Value) -> Result<Value, HttpError> {
     serial_response_data(response, "USB PD")
 }
 
-fn status_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
+fn pd_post_response_data(response: Option<Value>) -> Result<Value, HttpError> {
+    response.map(pd_response_data).unwrap_or_else(|| {
+        Err(HttpError::retryable(
+            "serial_response_missing",
+            "USB PD POST did not return a protocol response",
+        ))
+    })
+}
+
+fn identity_data_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
+    let response = response.ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB identity did not return a protocol response",
+        )
+    })?;
+    let data = serial_response_data(response, "USB identity")?;
+    if data.get("device_id").is_none() {
+        return Err(HttpError::retryable(
+            "serial_response_invalid",
+            "USB identity response did not include device_id",
+        ));
+    }
+    Ok(data)
+}
+
+fn status_data_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
     let response = response.ok_or_else(|| {
         HttpError::retryable(
             "serial_response_missing",
             "USB status did not return a protocol response",
         )
     })?;
-    serial_response_data(response, "USB status")?
-        .get("status")
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return serial_response_data(response, "USB status");
+    }
+    let data = response
+        .get("data")
         .cloned()
-        .ok_or_else(|| {
-            HttpError::retryable(
-                "serial_response_invalid",
-                "USB status response did not include status",
-            )
-        })
+        .unwrap_or_else(|| response.clone());
+    if data.get("status").is_none() {
+        return Err(HttpError::retryable(
+            "serial_response_invalid",
+            "USB status response did not include status",
+        ));
+    }
+    Ok(data)
 }
 
 fn serial_response_data(response: Value, operation: &str) -> Result<Value, HttpError> {
@@ -1276,16 +1384,7 @@ async fn compat_pd_post(
         "USB PD POST completed",
         probe,
     );
-    if let Some(response) = response {
-        return Ok(Json(pd_response_data(response)?));
-    }
-    if let Some(cached) = cached_pd_view(&state, &device_id) {
-        return Ok(Json(cached));
-    }
-    Err(HttpError::retryable(
-        "serial_response_missing",
-        "USB PD POST did not return a protocol response",
-    ))
+    Ok(Json(pd_post_response_data(response)?))
 }
 
 async fn compat_events(
@@ -1648,6 +1747,52 @@ fn selected_espflash_operation(
     ))
 }
 
+fn selected_analog_elf_file(artifact: &FirmwareArtifact) -> Result<String, HttpError> {
+    artifact
+        .files
+        .iter()
+        .find(|file| file.kind == "elf")
+        .map(|file| file.path.clone())
+        .ok_or_else(|| {
+            HttpError::bad_request(
+                "artifact_flash_file_missing",
+                "analog flash requires an artifact file with kind=elf",
+            )
+        })
+}
+
+fn canonicalize_probe_rs_selector(selector: &str) -> String {
+    let trimmed = selector.trim();
+    let mut parts = trimmed.splitn(3, ':');
+    let Some(vid) = parts.next() else {
+        return trimmed.to_string();
+    };
+    let Some(pid_or_legacy) = parts.next() else {
+        return trimmed.to_string();
+    };
+    let Some(serial) = parts.next() else {
+        return trimmed.to_string();
+    };
+    let Some((pid, index)) = pid_or_legacy.split_once('-') else {
+        return trimmed.to_string();
+    };
+
+    if is_hex4(vid)
+        && is_hex4(pid)
+        && !index.is_empty()
+        && !serial.is_empty()
+        && index.chars().all(|c| c.is_ascii_digit())
+    {
+        format!("{vid}:{pid}:{serial}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_hex4(value: &str) -> bool {
+    value.len() == 4 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 async fn run_espflash_digital(
     state: &AppState,
     device_id: &str,
@@ -1849,6 +1994,118 @@ async fn run_espflash_reset_digital(state: &AppState, device_id: &str) -> Result
         return Err(HttpError::retryable(
             "espflash_failed",
             format!("espflash reset exited with {}", output.status),
+        ));
+    }
+    Ok(())
+}
+
+async fn run_probe_rs_analog(
+    state: &AppState,
+    device_id: &str,
+    artifact: &FirmwareArtifact,
+) -> Result<(), HttpError> {
+    let (probe_selector, elf_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        let target = device.analog_target.as_ref().ok_or_else(|| {
+            HttpError::conflict("target_unavailable", "analog target is not available")
+        })?;
+        let probe_selector = target.probe_selector.clone().ok_or_else(|| {
+            HttpError::conflict(
+                "target_probe_missing",
+                "analog flash requires an approved STM32 probe selector",
+            )
+        })?;
+        let elf_path = selected_analog_elf_file(artifact)?;
+        (canonicalize_probe_rs_selector(&probe_selector), elf_path)
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(
+                device,
+                "info",
+                "flash",
+                &format!("starting probe-rs for {}", artifact.artifact_id),
+            );
+            push_trace(
+                device,
+                "tx",
+                json!({
+                    "type": "flash",
+                    "tool": "probe-rs",
+                    "chip": ANALOG_PROBE_CHIP,
+                    "probe": probe_selector,
+                    "artifact_id": artifact.artifact_id,
+                    "command": "download",
+                    "file": elf_path,
+                }),
+            );
+        }
+    }
+
+    let probe_rs = env::var(PROBE_RS_ENV).unwrap_or_else(|_| DEFAULT_PROBE_RS.to_string());
+    let output = Command::new(&probe_rs)
+        .arg("download")
+        .arg(&elf_path)
+        .arg("--chip")
+        .arg(ANALOG_PROBE_CHIP)
+        .arg("--probe")
+        .arg(&probe_selector)
+        .arg("--non-interactive")
+        .arg("--protocol")
+        .arg(ANALOG_PROBE_PROTOCOL)
+        .arg("--speed")
+        .arg(ANALOG_PROBE_SPEED_KHZ.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("probe_rs_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "flash_result",
+                    "tool": probe_rs,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "flash",
+                if output.status.success() {
+                    "probe-rs completed"
+                } else {
+                    "probe-rs failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "probe_rs_failed",
+            format!("probe-rs download exited with {}", output.status),
         ));
     }
     Ok(())
@@ -2219,7 +2476,7 @@ fn read_serial_jsonl_until(
                     }
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::TimedOut => return Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
             Err(error) => return Err(error),
         }
     }
@@ -2339,10 +2596,8 @@ fn probe_serial_protocol(port_path: &str) -> io::Result<SerialProtocolProbe> {
         ("devd-get-identity", "get_identity"),
         ("devd-get-status", "get_status"),
         ("devd-get-pd", "get_pd"),
-        ("devd-output-disable", "set_output_enabled"),
     ] {
-        let extra = (op == "set_output_enabled").then(|| json!({"enable": false}));
-        write_serial_request(port.as_mut(), &mut frames, request_id, op, extra)?;
+        write_serial_request(port.as_mut(), &mut frames, request_id, op, None)?;
         line_buf.clear();
         let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
         let _ = read_serial_jsonl_until(
@@ -2427,7 +2682,10 @@ fn serial_response_for_request(probe: &SerialProtocolProbe, request_id: &str) ->
 
 fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
     let text = &probe.non_protocol_text;
-    if text.contains(request_id) && text.contains("\"ok\":true") {
+    if request_id.starts_with("devd-output-")
+        && text.contains(request_id)
+        && text.contains("\"ok\":true")
+    {
         return Some(json!({
             "type": "response",
             "request_id": request_id,
@@ -2962,6 +3220,45 @@ mod tests {
     }
 
     #[test]
+    fn analog_flash_uses_selected_elf_file_only() {
+        let mut artifact = test_artifact("analog", TargetKind::AnalogStm32g431);
+        artifact.files = vec![
+            ArtifactFile {
+                kind: "image".into(),
+                path: "analog.bin".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: Some(0x08000000),
+            },
+            ArtifactFile {
+                kind: "elf".into(),
+                path: "analog.elf".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: None,
+            },
+        ];
+
+        assert_eq!(selected_analog_elf_file(&artifact).unwrap(), "analog.elf");
+
+        artifact.files.retain(|file| file.kind != "elf");
+        let err = selected_analog_elf_file(&artifact).unwrap_err();
+        assert_eq!(err.0.code, "artifact_flash_file_missing");
+    }
+
+    #[test]
+    fn probe_rs_selector_canonicalizes_legacy_index() {
+        assert_eq!(
+            canonicalize_probe_rs_selector("0483:3748-2:SERIAL"),
+            "0483:3748:SERIAL"
+        );
+        assert_eq!(
+            canonicalize_probe_rs_selector("0483:3748:SERIAL"),
+            "0483:3748:SERIAL"
+        );
+    }
+
+    #[test]
     fn manifest_reader_accepts_single_artifact() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("artifact.json");
@@ -3264,7 +3561,7 @@ mod tests {
 
     #[test]
     fn status_response_extractor_requires_real_status_payload() {
-        let status = status_from_serial_response(Some(json!({
+        let data = status_data_from_serial_response(Some(json!({
             "type": "response",
             "request_id": "devd-get-status",
             "ok": true,
@@ -3279,10 +3576,32 @@ mod tests {
         })))
         .unwrap();
 
-        assert_eq!(status["enable"], true);
-        assert_eq!(status["v_local_mv"], 5010);
+        assert_eq!(data["status"]["enable"], true);
+        assert_eq!(data["status"]["v_local_mv"], 5010);
 
-        let err = status_from_serial_response(Some(json!({
+        let legacy = status_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-status",
+            "ok": true,
+            "status": {
+                "enable": false,
+                "v_local_mv": 9049,
+                "i_local_ma": 9,
+                "fault_flags": 0
+            },
+            "control": {
+                "mode": "cp",
+                "output_enabled": false
+            },
+            "dat_state": "ready"
+        })))
+        .unwrap();
+
+        assert_eq!(legacy["status"]["enable"], false);
+        assert_eq!(legacy["control"]["mode"], "cp");
+        assert_eq!(legacy["dat_state"], "ready");
+
+        let err = status_data_from_serial_response(Some(json!({
             "type": "response",
             "request_id": "devd-get-status",
             "ok": true,
@@ -3290,6 +3609,61 @@ mod tests {
         })))
         .unwrap_err();
         assert_eq!(err.0.code, "serial_response_invalid");
+    }
+
+    #[test]
+    fn identity_response_extractor_requires_real_identity_payload() {
+        let identity = identity_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-identity",
+            "ok": true,
+            "data": {
+                "device_id": "digital-esp32s3",
+                "target": "digital",
+                "mcu": "esp32s3",
+                "protocol": "loadlynx.cdc.v1"
+            }
+        })))
+        .unwrap();
+
+        assert_eq!(identity["device_id"], "digital-esp32s3");
+        assert_eq!(identity["target"], "digital");
+
+        let err = identity_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-identity",
+            "ok": true,
+            "data": {}
+        })))
+        .unwrap_err();
+        assert_eq!(err.0.code, "serial_response_invalid");
+    }
+
+    #[test]
+    fn serial_response_data_rejects_protocol_errors() {
+        let err = serial_response_data(
+            json!({
+                "type": "error",
+                "request_id": "devd-output-enable",
+                "ok": false,
+                "error": {
+                    "code": "LINK_DOWN",
+                    "message": "UART link is down"
+                }
+            }),
+            "USB CC control",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.1, StatusCode::CONFLICT);
+        assert_eq!(err.0.code, "LINK_DOWN");
+        assert_eq!(err.0.message, "UART link is down");
+    }
+
+    #[test]
+    fn pd_post_requires_fresh_protocol_response() {
+        let err = pd_post_response_data(None).unwrap_err();
+        assert_eq!(err.0.code, "serial_response_missing");
     }
 
     #[test]

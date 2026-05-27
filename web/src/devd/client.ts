@@ -74,6 +74,18 @@ const MOCK_DEVD_DEVICES: DevdDevice[] = [
   },
 ];
 
+export class DevdApiError extends Error {
+  readonly status: number;
+  readonly code?: string;
+
+  constructor(input: { status: number; code?: string; message: string }) {
+    super(input.message);
+    this.name = "DevdApiError";
+    this.status = input.status;
+    this.code = input.code;
+  }
+}
+
 async function devdJson<T>(
   baseUrl: string,
   path: string,
@@ -95,7 +107,11 @@ async function devdJson<T>(
   if (!response.ok) {
     const envelope = data as { error?: { message?: string; code?: string } };
     const message = envelope.error?.message ?? `devd HTTP ${response.status}`;
-    throw new Error(message);
+    throw new DevdApiError({
+      status: response.status,
+      code: envelope.error?.code,
+      message,
+    });
   }
   return data as T;
 }

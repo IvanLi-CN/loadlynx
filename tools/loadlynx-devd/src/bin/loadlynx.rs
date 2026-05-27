@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use dialoguer::{Confirm, Select, theme::ColorfulTheme};
 use loadlynx_devd::{
     DEFAULT_DEVD_URL, TargetKind, list_digital_usb_port_candidates, write_default_digital_usb_port,
@@ -42,7 +42,7 @@ enum Command {
         artifact: Option<String>,
         #[arg(long)]
         lease_id: Option<String>,
-        #[arg(long, default_value_t = true)]
+        #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
     },
     Reset {
@@ -51,13 +51,15 @@ enum Command {
         device: String,
         #[arg(long)]
         lease_id: Option<String>,
-        #[arg(long, default_value_t = true)]
+        #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
     },
     Monitor {
         target: BoardTarget,
         #[arg(long)]
         device: String,
+        #[arg(long)]
+        lease_id: Option<String>,
         #[arg(long, default_value_t = 200)]
         tail: usize,
     },
@@ -226,16 +228,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             Command::Monitor {
                 target: _,
                 device,
+                lease_id,
                 tail,
             } => {
+                let mut url = api_url(
+                    &cli.devd,
+                    &format!(
+                        "/api/v1/devices/{device}/session?logs_limit={tail}&trace_limit={}",
+                        tail * 2
+                    ),
+                )?;
+                if let Some(lease_id) = lease_id {
+                    url.query_pairs_mut().append_pair("lease_id", &lease_id);
+                }
                 client
-                    .get(api_url(
-                        &cli.devd,
-                        &format!(
-                            "/api/v1/devices/{device}/session?logs_limit={tail}&trace_limit={}",
-                            tail * 2
-                        ),
-                    )?)
+                    .get(url)
                     .send()
                     .await?
                     .error_for_status()?
@@ -362,5 +369,74 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.to_string().contains("unsupported USB port target"));
+    }
+
+    #[test]
+    fn flash_defaults_to_dry_run_and_accepts_no_dry_run() {
+        let cli =
+            Cli::try_parse_from(["loadlynx", "flash", "--device", "digital-1", "digital"]).unwrap();
+        match cli.command {
+            Command::Flash { dry_run, .. } => assert!(dry_run),
+            _ => panic!("expected flash command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "flash",
+            "--device",
+            "digital-1",
+            "--no-dry-run",
+            "digital",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Flash { dry_run, .. } => assert!(!dry_run),
+            _ => panic!("expected flash command"),
+        }
+    }
+
+    #[test]
+    fn reset_defaults_to_dry_run_and_accepts_no_dry_run() {
+        let cli =
+            Cli::try_parse_from(["loadlynx", "reset", "--device", "digital-1", "digital"]).unwrap();
+        match cli.command {
+            Command::Reset { dry_run, .. } => assert!(dry_run),
+            _ => panic!("expected reset command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "reset",
+            "--device",
+            "digital-1",
+            "--no-dry-run",
+            "digital",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Reset { dry_run, .. } => assert!(!dry_run),
+            _ => panic!("expected reset command"),
+        }
+    }
+
+    #[test]
+    fn monitor_accepts_lease_id() {
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "monitor",
+            "--device",
+            "digital-1",
+            "--lease-id",
+            "lease-1",
+            "digital",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Monitor { lease_id, tail, .. } => {
+                assert_eq!(lease_id.as_deref(), Some("lease-1"));
+                assert_eq!(tail, 200);
+            }
+            _ => panic!("expected monitor command"),
+        }
     }
 }

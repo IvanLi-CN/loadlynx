@@ -1,9 +1,12 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import type { StoredDevice } from "../devices/device-store.ts";
+import { useDeviceStore } from "../devices/store-context.tsx";
 import {
+  buildDevdCompatBaseUrl,
   createDevdLease,
   DEFAULT_DEVD_BASE_URL,
+  DevdApiError,
   flashDevdDevice,
   getDevdSession,
   heartbeatDevdLease,
@@ -25,14 +28,22 @@ export function useCreateDevdLease(baseUrl: string = DEFAULT_DEVD_BASE_URL) {
 }
 
 export function useDevdLeaseHeartbeats(devices: StoredDevice[] | undefined) {
+  const store = useDeviceStore();
+  const queryClient = useQueryClient();
+
   useEffect(() => {
     const leases = (devices ?? [])
-      .map((device) => device.devd)
+      .map((device) => ({ storedDeviceId: device.id, devd: device.devd }))
       .filter(
         (
-          devd,
-        ): devd is { baseUrl: string; deviceId: string; leaseId: string } =>
-          Boolean(devd?.baseUrl && devd.deviceId && devd.leaseId),
+          item,
+        ): item is {
+          storedDeviceId: string;
+          devd: { baseUrl: string; deviceId: string; leaseId: string };
+        } =>
+          Boolean(
+            item.devd?.baseUrl && item.devd.deviceId && item.devd.leaseId,
+          ),
       );
     if (leases.length === 0) {
       return;
@@ -40,9 +51,46 @@ export function useDevdLeaseHeartbeats(devices: StoredDevice[] | undefined) {
 
     let cancelled = false;
     const heartbeat = () => {
-      for (const lease of leases) {
-        heartbeatDevdLease(lease.leaseId, lease.baseUrl).catch(() => {
-          // Best-effort heartbeat; session views surface expired leases explicitly.
+      for (const { storedDeviceId, devd } of leases) {
+        heartbeatDevdLease(devd.leaseId, devd.baseUrl).catch((error) => {
+          if (
+            cancelled ||
+            !(error instanceof DevdApiError) ||
+            error.code !== "web_session_expired"
+          ) {
+            return;
+          }
+
+          createDevdLease(devd.deviceId, devd.baseUrl)
+            .then((lease) => {
+              if (cancelled) {
+                return;
+              }
+              const current = store.getDevices();
+              const next = current.map((device) => {
+                if (
+                  device.id !== storedDeviceId ||
+                  device.devd?.leaseId !== devd.leaseId
+                ) {
+                  return device;
+                }
+
+                const nextDevd = {
+                  ...device.devd,
+                  leaseId: lease.lease_id,
+                };
+                return {
+                  ...device,
+                  baseUrl: buildDevdCompatBaseUrl(nextDevd),
+                  devd: nextDevd,
+                };
+              });
+              store.setDevices(next);
+              queryClient.setQueryData<StoredDevice[]>(["devices"], next);
+            })
+            .catch(() => {
+              // Best-effort renewal; the device row remains visible for manual reconnect.
+            });
         });
       }
     };
@@ -57,7 +105,7 @@ export function useDevdLeaseHeartbeats(devices: StoredDevice[] | undefined) {
       cancelled = true;
       window.clearInterval(interval);
     };
-  }, [devices]);
+  }, [devices, queryClient, store]);
 }
 
 export function useDevdSession(
