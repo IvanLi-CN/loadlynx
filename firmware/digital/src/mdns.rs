@@ -173,7 +173,7 @@ pub async fn run_mdns(stack: Stack<'static>, cfg: MdnsConfig) -> ! {
                                         true,
                                     )
                                     .await;
-                                } else if service_name_matches(&query.name) {
+                                } else if service_query_matches(&query.name, &cfg) {
                                     let dest = if query.unicast_response {
                                         meta.endpoint
                                     } else {
@@ -702,6 +702,16 @@ fn service_name_matches(candidate: &str) -> bool {
     name_matches(candidate, LOADLYNX_SERVICE) || name_matches(candidate, HTTP_SERVICE)
 }
 
+fn service_query_matches(candidate: &str, cfg: &MdnsConfig) -> bool {
+    if service_name_matches(candidate) {
+        return true;
+    }
+    let loadlynx_instance = service_instance_name(cfg.hostname.as_str(), LOADLYNX_SERVICE);
+    let http_instance = service_instance_name(cfg.hostname.as_str(), HTTP_SERVICE);
+    name_matches(candidate, loadlynx_instance.as_str())
+        || name_matches(candidate, http_instance.as_str())
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -764,5 +774,25 @@ mod tests {
         assert!(packet.contains("_http"));
         assert!(packet.contains("product=loadlynx"));
         assert!(packet.contains("device_id=loadlynx-aabbcc"));
+    }
+
+    #[test]
+    fn dns_sd_query_match_accepts_service_instances() {
+        let cfg = MdnsConfig {
+            hostname: hostname_from_short_id("aabbcc"),
+            hostname_fqdn: fqdn_from_hostname("loadlynx-aabbcc"),
+            port: 80,
+        };
+
+        assert!(service_query_matches("_http._tcp.local", &cfg));
+        assert!(service_query_matches(
+            "LoadLynx loadlynx-aabbcc._http._tcp.local",
+            &cfg
+        ));
+        assert!(service_query_matches(
+            "LoadLynx loadlynx-aabbcc._loadlynx._tcp.local.",
+            &cfg
+        ));
+        assert!(!service_query_matches("_ssh._tcp.local", &cfg));
     }
 }
