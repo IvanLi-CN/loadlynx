@@ -1192,15 +1192,19 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
     const payload = await httpJsonQueued<{
-      connection?: string;
-      log_decode?: { status?: string };
+      status: FastStatusJson;
+      link_up?: boolean;
+      hello_seen?: boolean;
+      analog_state?: FastStatusView["analog_state"];
+      fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
     }>(baseUrl, "/api/v1/status");
-    const view = createInitialStatus(baseUrl);
-    const connected = payload.connection === "connected";
-    view.link_up = connected;
-    view.hello_seen = connected;
-    view.analog_state = connected ? "ready" : "offline";
-    return view;
+    return {
+      raw: payload.status,
+      link_up: payload.link_up ?? true,
+      hello_seen: payload.hello_seen ?? true,
+      analog_state: payload.analog_state ?? "ready",
+      fault_flags_decoded: payload.fault_flags_decoded ?? [],
+    };
   }
   interface FastStatusHttpResponse {
     status: FastStatusJson;

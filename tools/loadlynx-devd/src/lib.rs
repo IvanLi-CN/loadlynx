@@ -27,7 +27,9 @@ use tower_http::{
 pub const DEFAULT_BIND: &str = "127.0.0.1:30180";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30180";
 pub const DEFAULT_DIGITAL_USB_PORT_FILE: &str = ".esp32-port";
+pub const DEFAULT_ANALOG_PROBE_FILE: &str = ".stm32-port";
 const DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE: &str = ".esp32-port";
+const DEFAULT_ANALOG_PROBE_SELECTOR_SOURCE: &str = ".stm32-port";
 const ESPFLASH_ENV: &str = "LOADLYNX_ESPFLASH";
 const DEFAULT_ESPFLASH: &str = "espflash";
 pub const WEB_LEASE_HEARTBEAT_INTERVAL_MS: u64 = 2_000;
@@ -429,7 +431,14 @@ async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
     cleanup_expired_leases(&state);
     let mut discovered = Vec::new();
     let default_usb_port = read_default_digital_usb_port(&state.repo_root);
+    let default_analog_probe = read_default_analog_probe_selector(&state.repo_root);
+    let analog_candidate = default_analog_probe
+        .as_deref()
+        .map(default_analog_probe_candidate);
     discovered.extend(scan_serial_targets(default_usb_port.as_deref()));
+    if let Some(candidate) = analog_candidate.clone() {
+        discovered.push(candidate);
+    }
 
     let mut guard = state.inner.lock().expect("state lock");
     for candidate in discovered {
@@ -452,7 +461,14 @@ async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
                 trace: VecDeque::new(),
             });
         match candidate.kind {
-            TargetKind::DigitalEsp32s3 => entry.digital_target = Some(candidate),
+            TargetKind::DigitalEsp32s3 => {
+                entry.digital_target = Some(candidate);
+                if entry.analog_target.is_none()
+                    && let Some(analog_candidate) = analog_candidate.clone()
+                {
+                    entry.analog_target = Some(analog_candidate);
+                }
+            }
             TargetKind::AnalogStm32g431 => entry.analog_target = Some(candidate),
             TargetKind::LanHttp => entry.lan_endpoint = candidate.lan_base_url.clone(),
             TargetKind::Mock => {}
@@ -753,7 +769,16 @@ async fn reset_device(
             .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
         ensure_real_operation_uses_cached_target(device, &target)?;
     }
-    run_agentd(target.clone(), "reset").await?;
+    match target {
+        TargetKind::DigitalEsp32s3 => run_espflash_reset_digital(&state, &id).await?,
+        TargetKind::AnalogStm32g431 => run_agentd(target.clone(), "reset").await?,
+        TargetKind::LanHttp | TargetKind::Mock => {
+            return Err(HttpError::bad_request(
+                "target_unsupported",
+                "target cannot be reset",
+            ));
+        }
+    }
     emit(
         &state,
         Some(id),
@@ -948,15 +973,33 @@ async fn compat_status(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    let guard = state.inner.lock().expect("state lock");
-    let device = select_compat_device(
-        &guard,
-        query.lease_id.as_deref(),
-        query.device_id.as_deref(),
-    )?;
-    Ok(Json(
-        json!({"device_id": device.id, "connection": device.connection, "log_decode": device.log_decode}),
-    ))
+    cleanup_expired_leases(&state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "status")?
+    };
+
+    let request_id = "devd-get-status";
+    let probe = serial_jsonl_request(&port_path, request_id, "get_status", None)
+        .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+    let response = serial_response_for_request(&probe, request_id)
+        .or_else(|| infer_serial_response_from_text(&probe, request_id));
+    record_serial_protocol_probe(
+        &state,
+        &device_id,
+        &port_path,
+        "USB status request completed",
+        probe,
+    );
+    let status = status_from_serial_response(response)?;
+    Ok(Json(json!({
+        "device_id": device_id,
+        "status": status,
+        "link_up": true,
+        "hello_seen": true,
+        "analog_state": "ready",
+        "fault_flags_decoded": [],
+    })))
 }
 
 async fn compat_network(
@@ -1075,11 +1118,33 @@ fn select_serial_port_for_compat(
 }
 
 fn pd_response_data(response: Value) -> Result<Value, HttpError> {
+    serial_response_data(response, "USB PD")
+}
+
+fn status_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
+    let response = response.ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB status did not return a protocol response",
+        )
+    })?;
+    serial_response_data(response, "USB status")?
+        .get("status")
+        .cloned()
+        .ok_or_else(|| {
+            HttpError::retryable(
+                "serial_response_invalid",
+                "USB status response did not include status",
+            )
+        })
+}
+
+fn serial_response_data(response: Value, operation: &str) -> Result<Value, HttpError> {
     if response.get("ok").and_then(Value::as_bool) == Some(true) {
         return response.get("data").cloned().ok_or_else(|| {
             HttpError::retryable(
                 "serial_response_invalid",
-                "USB PD response did not include data",
+                format!("{operation} response did not include data"),
             )
         });
     }
@@ -1091,7 +1156,7 @@ fn pd_response_data(response: Value) -> Result<Value, HttpError> {
     let message = response
         .pointer("/error/message")
         .and_then(Value::as_str)
-        .unwrap_or("USB PD request failed");
+        .unwrap_or("USB request failed");
     Err(HttpError::conflict(code, message))
 }
 
@@ -1700,6 +1765,95 @@ async fn run_espflash_digital(
     Ok(())
 }
 
+async fn run_espflash_reset_digital(state: &AppState, device_id: &str) -> Result<(), HttpError> {
+    let port_path = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        device
+            .digital_target
+            .as_ref()
+            .and_then(|target| target.port_path.clone())
+            .ok_or_else(|| {
+                HttpError::conflict(
+                    "target_port_missing",
+                    "digital reset requires an approved ESP32-S3 USB port path",
+                )
+            })?
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(device, "info", "reset", "starting espflash reset");
+            push_trace(
+                device,
+                "tx",
+                json!({"type": "reset", "tool": "espflash", "chip": "esp32s3", "port": port_path}),
+            );
+        }
+    }
+
+    let espflash = env::var(ESPFLASH_ENV).unwrap_or_else(|_| DEFAULT_ESPFLASH.to_string());
+    let output = Command::new(&espflash)
+        .arg("reset")
+        .arg("--chip")
+        .arg("esp32s3")
+        .arg("--port")
+        .arg(&port_path)
+        .arg("--non-interactive")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("espflash_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "reset_result",
+                    "tool": espflash,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "reset",
+                if output.status.success() {
+                    "espflash reset completed"
+                } else {
+                    "espflash reset failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "espflash_failed",
+            format!("espflash reset exited with {}", output.status),
+        ));
+    }
+    Ok(())
+}
+
 fn tail_text(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
     chars.reverse();
@@ -2255,6 +2409,22 @@ fn serial_jsonl_request(
     })
 }
 
+fn serial_response_for_request(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
+    probe
+        .frames
+        .iter()
+        .rev()
+        .find(|event| {
+            event.direction == "rx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id)
+        })
+        .map(|event| event.frame.clone())
+}
+
 fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
     let text = &probe.non_protocol_text;
     if text.contains(request_id) && text.contains("\"ok\":true") {
@@ -2285,8 +2455,21 @@ pub fn default_digital_usb_port_path(repo_root: &std::path::Path) -> PathBuf {
     repo_root.join(DEFAULT_DIGITAL_USB_PORT_FILE)
 }
 
+pub fn default_analog_probe_path(repo_root: &std::path::Path) -> PathBuf {
+    repo_root.join(DEFAULT_ANALOG_PROBE_FILE)
+}
+
 pub fn read_default_digital_usb_port(repo_root: &std::path::Path) -> Option<String> {
     fs::read_to_string(default_digital_usb_port_path(repo_root))
+        .ok()?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.contains('='))
+        .map(ToOwned::to_owned)
+}
+
+pub fn read_default_analog_probe_selector(repo_root: &std::path::Path) -> Option<String> {
+    fs::read_to_string(default_analog_probe_path(repo_root))
         .ok()?
         .lines()
         .map(str::trim)
@@ -2352,6 +2535,17 @@ fn espflash_port_display_name(port: &serialport::SerialPortInfo) -> String {
             None => port.port_name.clone(),
         },
         _ => port.port_name.clone(),
+    }
+}
+
+fn default_analog_probe_candidate(selector: &str) -> TargetCandidate {
+    TargetCandidate {
+        kind: TargetKind::AnalogStm32g431,
+        display_name: format!("STM32G431 probe ({selector})"),
+        port_path: None,
+        probe_selector: Some(selector.to_string()),
+        lan_base_url: None,
+        selector_source: Some(DEFAULT_ANALOG_PROBE_SELECTOR_SOURCE.to_string()),
     }
 }
 
@@ -2946,6 +3140,69 @@ mod tests {
     }
 
     #[test]
+    fn default_analog_probe_selector_reads_plain_selector_record() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            default_analog_probe_path(dir.path()),
+            "0483:3748:ABCDEF\nserial=ignored\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_default_analog_probe_selector(dir.path()).as_deref(),
+            Some("0483:3748:ABCDEF")
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_attaches_default_analog_probe_to_default_digital_device() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            default_digital_usb_port_path(dir.path()),
+            "/dev/cu.usbmodem212101\n",
+        )
+        .unwrap();
+        fs::write(default_analog_probe_path(dir.path()), "0483:3748:ABCDEF\n").unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+
+        let _ = scan_devices(State(state.clone())).await.unwrap();
+
+        let guard = state.inner.lock().expect("state lock");
+        let digital = guard
+            .devices
+            .values()
+            .find(|device| {
+                device
+                    .digital_target
+                    .as_ref()
+                    .and_then(|target| target.selector_source.as_deref())
+                    == Some(DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE)
+            })
+            .expect("digital device");
+        assert_eq!(
+            digital
+                .digital_target
+                .as_ref()
+                .and_then(|target| target.port_path.as_deref()),
+            Some("/dev/cu.usbmodem212101")
+        );
+        assert_eq!(
+            digital
+                .analog_target
+                .as_ref()
+                .and_then(|target| target.probe_selector.as_deref()),
+            Some("0483:3748:ABCDEF")
+        );
+        assert_eq!(
+            digital
+                .analog_target
+                .as_ref()
+                .and_then(|target| target.selector_source.as_deref()),
+            Some(DEFAULT_ANALOG_PROBE_SELECTOR_SOURCE)
+        );
+    }
+
+    #[test]
     fn serial_json_extractor_recovers_frame_after_log_noise() {
         let frames = extract_serial_json_frames(
             "\u{fffd}\0binary log {\"type\":\"response\",\"request_id\":\"devd-get-identity\",\"ok\":true}\n",
@@ -3003,6 +3260,36 @@ mod tests {
             response.get("recovered_from_text").and_then(Value::as_bool),
             Some(true)
         );
+    }
+
+    #[test]
+    fn status_response_extractor_requires_real_status_payload() {
+        let status = status_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-status",
+            "ok": true,
+            "data": {
+                "status": {
+                    "enable": true,
+                    "v_local_mv": 5010,
+                    "i_local_ma": 120,
+                    "fault_flags": 0
+                }
+            }
+        })))
+        .unwrap();
+
+        assert_eq!(status["enable"], true);
+        assert_eq!(status["v_local_mv"], 5010);
+
+        let err = status_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-status",
+            "ok": true,
+            "data": {}
+        })))
+        .unwrap_err();
+        assert_eq!(err.0.code, "serial_response_invalid");
     }
 
     #[test]
