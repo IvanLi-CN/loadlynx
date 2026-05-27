@@ -49,6 +49,31 @@ export function isMockBaseUrl(baseUrl: string): boolean {
   return normalized.startsWith("mock://");
 }
 
+function makeApiUrl(baseUrl: string, path: string): URL {
+  const base = new URL(baseUrl);
+  const url = new URL(path, base);
+  base.searchParams.forEach((value, key) => {
+    if (!url.searchParams.has(key)) {
+      url.searchParams.append(key, value);
+    }
+  });
+  return url;
+}
+
+function isDevdCompatBaseUrl(baseUrl: string): boolean {
+  if (!baseUrl || isMockBaseUrl(baseUrl)) {
+    return false;
+  }
+  try {
+    const url = new URL(baseUrl);
+    return Boolean(
+      url.searchParams.get("device_id") && url.searchParams.get("lease_id"),
+    );
+  } catch {
+    return false;
+  }
+}
+
 function isStorybookRuntime(): boolean {
   return globalThis.__LOADLYNX_STORYBOOK__ === true;
 }
@@ -149,7 +174,7 @@ async function httpJson<T>(
     );
   }
 
-  const url = new URL(path, baseUrl);
+  const url = makeApiUrl(baseUrl, path);
 
   const headers: Record<string, string> = {
     ...(init?.headers as Record<string, string> | undefined),
@@ -489,6 +514,90 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
   };
 }
 
+function normalizeDevdIdentity(
+  baseUrl: string,
+  payload: Partial<Identity> & { firmware_version?: unknown },
+): Identity {
+  const url = new URL(baseUrl);
+  const deviceId =
+    payload.device_id ?? url.searchParams.get("device_id") ?? "devd-usb";
+  const hostname =
+    payload.hostname ?? payload.network?.hostname ?? "loadlynx-devd-usb";
+  return {
+    device_id: deviceId,
+    digital_fw_version:
+      payload.digital_fw_version ??
+      (typeof payload.firmware_version === "string"
+        ? payload.firmware_version
+        : "unknown"),
+    analog_fw_version: payload.analog_fw_version ?? "unknown",
+    protocol_version: payload.protocol_version ?? 1,
+    uptime_ms: payload.uptime_ms ?? 0,
+    network: {
+      ip: payload.network?.ip ?? url.hostname,
+      mac: payload.network?.mac ?? "unknown",
+      hostname,
+    },
+    hostname,
+    short_id: payload.short_id ?? deviceId,
+    capabilities: {
+      cc_supported: payload.capabilities?.cc_supported ?? true,
+      cv_supported: payload.capabilities?.cv_supported ?? true,
+      cp_supported: payload.capabilities?.cp_supported ?? true,
+      presets_supported: payload.capabilities?.presets_supported ?? false,
+      preset_count: payload.capabilities?.preset_count,
+      api_version: payload.capabilities?.api_version ?? "devd-usb",
+    },
+  };
+}
+
+function normalizeDevdStatus(payload: {
+  status: Partial<FastStatusJson>;
+  link_up?: boolean;
+  hello_seen?: boolean;
+  analog_state?: FastStatusView["analog_state"];
+  fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
+  control?: { mode?: string; output_enabled?: boolean; target_p_mw?: number };
+}): FastStatusView {
+  const raw: FastStatusJson = {
+    uptime_ms: payload.status.uptime_ms ?? 0,
+    mode:
+      payload.status.mode ??
+      (payload.control?.mode === "cc"
+        ? 1
+        : payload.control?.mode === "cv"
+          ? 2
+          : 3),
+    state_flags: payload.status.state_flags ?? 0,
+    enable: payload.status.enable ?? payload.control?.output_enabled ?? false,
+    target_value:
+      payload.status.target_value ?? payload.control?.target_p_mw ?? 0,
+    i_local_ma: payload.status.i_local_ma ?? 0,
+    i_remote_ma: payload.status.i_remote_ma ?? 0,
+    v_local_mv: payload.status.v_local_mv ?? 0,
+    v_remote_mv: payload.status.v_remote_mv ?? 0,
+    calc_p_mw: payload.status.calc_p_mw ?? 0,
+    dac_headroom_mv: payload.status.dac_headroom_mv ?? 0,
+    loop_error: payload.status.loop_error ?? 0,
+    sink_core_temp_mc: payload.status.sink_core_temp_mc ?? 0,
+    sink_exhaust_temp_mc: payload.status.sink_exhaust_temp_mc ?? 0,
+    mcu_temp_mc: payload.status.mcu_temp_mc ?? 0,
+    fault_flags: payload.status.fault_flags ?? 0,
+    cal_kind: payload.status.cal_kind,
+    raw_v_nr_100uv: payload.status.raw_v_nr_100uv,
+    raw_v_rmt_100uv: payload.status.raw_v_rmt_100uv,
+    raw_cur_100uv: payload.status.raw_cur_100uv,
+    raw_dac_code: payload.status.raw_dac_code,
+  };
+  return {
+    raw,
+    link_up: payload.link_up ?? true,
+    hello_seen: payload.hello_seen ?? true,
+    analog_state: payload.analog_state ?? "ready",
+    fault_flags_decoded: payload.fault_flags_decoded ?? [],
+  };
+}
+
 function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
   const existing = mockDevices.get(baseUrl);
   if (existing) {
@@ -723,6 +832,32 @@ function mockMakeControlView(state: MockDeviceState): ControlView {
     uv_latched: state.uv_latched,
     preset: structuredClone(mockGetActivePreset(state)),
   };
+}
+
+function makeDevdControlView(outputEnabled = false): ControlView {
+  const preset = createInitialPresets()[0];
+  if (!preset) {
+    throw new Error("default preset missing");
+  }
+  return {
+    active_preset_id: 1,
+    output_enabled: outputEnabled,
+    uv_latched: false,
+    preset: structuredClone(preset),
+  };
+}
+
+function getDevdResponseOutputEnabled(
+  payload: unknown,
+  fallback: boolean,
+): boolean {
+  const response = (payload as { response?: unknown } | null)?.response as
+    | { data?: unknown }
+    | undefined;
+  const data = response?.data as { output_enabled?: unknown } | undefined;
+  return typeof data?.output_enabled === "boolean"
+    ? data.output_enabled
+    : fallback;
 }
 
 function mockRequireControlReady(state: MockDeviceState): void {
@@ -1132,12 +1267,44 @@ export async function getIdentity(baseUrl: string): Promise<Identity> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetIdentity(baseUrl);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    try {
+      const payload = await httpJsonQueued<
+        Partial<Identity> & { firmware_version?: unknown }
+      >(baseUrl, "/api/v1/identity");
+      return normalizeDevdIdentity(baseUrl, payload);
+    } catch {
+      const status = await httpJsonQueued<{ status: Partial<FastStatusJson> }>(
+        baseUrl,
+        "/api/v1/status",
+      );
+      return normalizeDevdIdentity(baseUrl, {
+        device_id: new URL(baseUrl).searchParams.get("device_id") ?? undefined,
+        uptime_ms: status.status.uptime_ms,
+      });
+    }
+  }
   return httpJsonQueued<Identity>(baseUrl, "/api/v1/identity");
 }
 
 export async function getStatus(baseUrl: string): Promise<FastStatusView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetStatus(baseUrl);
+  }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    const payload = await httpJsonQueued<{
+      status: Partial<FastStatusJson>;
+      link_up?: boolean;
+      hello_seen?: boolean;
+      analog_state?: FastStatusView["analog_state"];
+      fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
+      control?: {
+        mode?: string;
+        output_enabled?: boolean;
+        target_p_mw?: number;
+      };
+    }>(baseUrl, "/api/v1/status");
+    return normalizeDevdStatus(payload);
   }
   interface FastStatusHttpResponse {
     status: FastStatusJson;
@@ -1190,13 +1357,17 @@ export function subscribeStatusStream(
     };
   }
 
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    return () => undefined;
+  }
+
   if (isStorybookRuntime()) {
     throw new Error(
       `[LoadLynx] Real device status streaming is disabled in Storybook. Use a mock:// baseUrl instead (attempted baseUrl="${baseUrl}").`,
     );
   }
 
-  const url = new URL("/api/v1/status", baseUrl);
+  const url = makeApiUrl(baseUrl, "/api/v1/status");
   let closed = false;
 
   const isFastStatusView = (val: unknown): val is FastStatusView => {
@@ -1454,6 +1625,9 @@ export async function getPresets(baseUrl: string): Promise<Preset[]> {
     const payload = await mockGetPresets(baseUrl);
     return payload.presets;
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    return structuredClone(createInitialPresets());
+  }
   const payload = await httpJsonQueued<{ presets: Preset[] }>(
     baseUrl,
     "/api/v1/presets",
@@ -1467,6 +1641,15 @@ export async function updatePreset(
 ): Promise<Preset> {
   if (isMockBaseUrl(baseUrl)) {
     return mockUpdatePreset(baseUrl, payload);
+  }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    throw new HttpApiError({
+      status: 409,
+      code: "UNSUPPORTED_OPERATION",
+      message: "Preset writes are not available through the devd USB bridge",
+      retryable: false,
+      details: null,
+    });
   }
 
   const body = JSON.stringify(payload);
@@ -1488,6 +1671,16 @@ export async function applyPreset(
   if (isMockBaseUrl(baseUrl)) {
     return mockApplyPreset(baseUrl, preset_id);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    void preset_id;
+    throw new HttpApiError({
+      status: 409,
+      code: "UNSUPPORTED_OPERATION",
+      message: "Preset applies are not available through the devd USB bridge",
+      retryable: false,
+      details: null,
+    });
+  }
 
   const body = JSON.stringify({ preset_id });
 
@@ -1504,6 +1697,9 @@ export async function getControl(baseUrl: string): Promise<ControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetControl(baseUrl);
   }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    return makeDevdControlView(false);
+  }
   return httpJsonQueued<ControlView>(baseUrl, "/api/v1/control");
 }
 
@@ -1513,6 +1709,18 @@ export async function updateControl(
 ): Promise<ControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockUpdateControl(baseUrl, payload);
+  }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    const response = await httpJsonQueued<unknown>(baseUrl, "/api/v1/cc", {
+      method: "POST",
+      body: JSON.stringify({ enable: payload.output_enabled }),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    });
+    return makeDevdControlView(
+      getDevdResponseOutputEnabled(response, payload.output_enabled),
+    );
   }
 
   const body = JSON.stringify(payload);
@@ -1691,6 +1899,18 @@ export async function postCalibrationMode(
 ): Promise<void> {
   if (isMockBaseUrl(baseUrl)) {
     return mockPostCalibrationMode(baseUrl, payload);
+  }
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    if (payload.kind === "off") {
+      return;
+    }
+    throw new HttpApiError({
+      status: 409,
+      code: "UNSUPPORTED_OPERATION",
+      message: "Calibration mode is not available through the devd USB bridge",
+      retryable: false,
+      details: null,
+    });
   }
   const body = JSON.stringify(payload);
   return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/mode", {

@@ -18,9 +18,16 @@ import {
   NAV_ICON_STATUS,
 } from "../components/icons/nav-icons.ts";
 import { AppVersionLink } from "../components/layout/app-version-link.tsx";
+import { useDevdLeaseHeartbeats } from "../devd/hooks.ts";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
-type DeviceTab = "cc" | "status" | "pd" | "settings" | "calibration";
+type DeviceTab =
+  | "cc"
+  | "status"
+  | "pd"
+  | "settings"
+  | "calibration"
+  | "firmware";
 
 function isDeviceTab(value: string): value is DeviceTab {
   return (
@@ -28,7 +35,8 @@ function isDeviceTab(value: string): value is DeviceTab {
     value === "status" ||
     value === "pd" ||
     value === "settings" ||
-    value === "calibration"
+    value === "calibration" ||
+    value === "firmware"
   );
 }
 
@@ -48,6 +56,7 @@ export function ConsoleLayout() {
   });
 
   const { data: devices } = useDevicesQuery();
+  useDevdLeaseHeartbeats(devices);
   const currentDevice =
     deviceId && devices
       ? devices.find((device) => device.id === deviceId)
@@ -133,6 +142,12 @@ export function ConsoleLayout() {
       case "calibration":
         navigate({
           to: "/$deviceId/calibration",
+          params: { deviceId: nextDeviceId },
+        });
+        return;
+      case "firmware":
+        navigate({
+          to: "/$deviceId/firmware",
           params: { deviceId: nextDeviceId },
         });
         return;
@@ -249,6 +264,20 @@ export function ConsoleLayout() {
             </li>
             <li>
               <Link
+                to="/$deviceId/firmware"
+                params={{ deviceId }}
+                activeProps={{ className: `${linkClassName} active` }}
+                className={linkClassName}
+                aria-label="Firmware"
+                title="Firmware"
+                onClick={isDrawer ? closeDrawer : undefined}
+              >
+                <AppIcon icon={NAV_ICON_SETTINGS} size={navIconSize} />
+                <span className={labelVisibilityClass}>Firmware</span>
+              </Link>
+            </li>
+            <li>
+              <Link
                 to="/$deviceId/calibration"
                 params={{ deviceId }}
                 activeProps={{ className: `${linkClassName} active` }}
@@ -300,6 +329,16 @@ export function ConsoleLayout() {
                 disabled
                 className={disabledButtonClassName}
               >
+                <AppIcon icon={NAV_ICON_SETTINGS} size={navIconSize} />
+                <span className={labelVisibilityClass}>Firmware</span>
+              </button>
+            </li>
+            <li>
+              <button
+                type="button"
+                disabled
+                className={disabledButtonClassName}
+              >
                 <AppIcon icon={NAV_ICON_CALIBRATION} size={navIconSize} />
                 <span className={labelVisibilityClass}>Calibration</span>
               </button>
@@ -340,6 +379,8 @@ export function ConsoleLayout() {
             </div>
             <div className="join">
               <select
+                id="current-device-selector"
+                name="current_device"
                 disabled
                 className="select select-bordered select-sm w-full join-item text-xs"
               >
@@ -470,6 +511,8 @@ export function ConsoleLayout() {
                   </div>
                   <div className="join w-full">
                     <select
+                      id="drawer-device-selector"
+                      name="drawer_device"
                       className="select select-bordered select-sm w-full join-item text-xs"
                       value={deviceId ?? ""}
                       onChange={(event) => {

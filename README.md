@@ -30,7 +30,7 @@
 - probe-rs（由 `mcu-agentd` 作为 STM32 后端调用）
 - ESP32‑S3 Xtensa 工具链（`espup`）与 `espflash`（由 `mcu-agentd` 作为 ESP32 后端调用）
 
-推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；**烧录/复位/监视一律通过 `mcu-agentd`**（见下文 `MCU Agent`）。
+推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；固件烧录/复位/监视通过 `mcu-agentd`（见下文 `MCU Agent`）。Web 控制台与 `loadlynx-devd` 的 USB CDC 验证不使用 `mcu-agentd` selector。
 
 ### G431（analog）
 
@@ -94,6 +94,28 @@ just agentd selector set analog 0483:3748:SERIAL   # 例：ST-Link VID:PID:SER
 just agentd-get-port digital
 just agentd-get-port analog
 ```
+
+### Web + devd USB CDC 控制面
+
+`loadlynx-devd` 是 Web 控制台访问 ESP32-S3 USB CDC JSONL 的本地守护。验证 Web/devd 控制面时通过 `just loadlynx usb-port set digital <path>` 复用 `.esp32-port` 作为默认端口记忆，不要切换 `mcu-agentd selector`。devd/Web 的 ESP32-S3 digital firmware flash 也走 devd：持有 Web lease、校验 artifact hash，并对批准的 `.esp32-port` 端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。不要退回 `just agentd flash digital`。如果 `.esp32-port` 包含 `mac=...` 等 selector metadata，CLI/devd 只使用端口路径行。
+
+常用本地入口：
+
+```sh
+# 设置 CLI/devd 默认 ESP32-S3 digital USB CDC 设备
+just loadlynx usb-port set digital /dev/cu.usbmodemXXXX
+
+# 人工交互选择端口（方向键选择，候选项按 espflash 默认串口枚举规则）
+just loadlynx usb-port set digital
+
+# 启动 devd
+just devd-serve --bind 127.0.0.1:30180 --allow-dev-cors
+
+# 启动 Web，并显式指向 devd
+(cd web && VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:30180 bun run dev)
+```
+
+真机验证应证明 devd 对指定串口完成 USB CDC JSONL 通信，例如收到 `hello` 或成功执行 `get_identity` / `get_status`。仅证明串口能打开、出现候选设备、创建 Web lease，或只完成 firmware dry-run，不足以说明 Web/devd 真机链路可用。
 
 ## 目录结构
 

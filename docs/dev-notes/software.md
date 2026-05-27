@@ -68,6 +68,7 @@
   - 每次成功处理 `HELLO`/`FAST_STATUS`/ACK 帧都会刷新 `LAST_GOOD_FRAME_MS`；
   - `stats_task` 每秒检查一次该时间戳，若 >300 ms 未见有效帧则将 `LINK_UP=false` 并在日志中标记“link down”，控制发送任务会在 `LINK_UP=false` 时暂缓新的 output-on 指令；
   - `setmode_tx_task` 额外覆盖 `LAST_GOOD_FRAME_MS==0` 的冷启动无帧场景：短暂 grace 后限频重发 SoftReset、全量 CalWrite、SetEnable(true)、LimitProfile，并强制下一次 SetMode snapshot；
+  - 冷启动后若已经收到帧但没有 `FastStatus`，或 `FastStatus` 电压、电流、功率持续全零，数字侧先显示 `MEAS` 与 unavailable 数值，并以 `no-fast-status` / `zero-measurement` 原因限频重发同一套恢复握手；
   - SoftReset ACK 以本次握手的 `seq` 与 ACK 计数 baseline 判定，避免旧 ACK 状态让新的恢复握手被误判为成功。
 
 ### STM32G431 侧（USART3 + 单任务主循环）
@@ -83,6 +84,7 @@
     - 通过 VrefInt 计算当前 `vref_mv`；
     - 采样本地/远端电压、两路电流、5 V 轨、电源温度、两路 NTC 与 MCU 内部温度；
     - 根据传感器换算得到 `v_local_mv`/`v_remote_mv`、`i_local_ma`/`i_remote_ma`（分别对应功率通道 CH1/CH2）、`calc_p_mw`（基于 `i_total_ma = i_local_ma + i_remote_ma`）、三路温度与 `dac_headroom_mv`；
+    - FastStatus 上报侧会保留非零 raw 对应的未校准读数，避免低端校准/初始化把实际非零测量坍缩成精确 0；保护与闭环控制仍使用原即时计算值；
     - 做远端 sense 判定：电压在 0.5–55 V 且 ADC 原码远离饱和，3 帧进入 / 2 帧退出，驱动 `STATE_FLAG_REMOTE_ACTIVE`；
     - 基于 `LAST_RX_GOOD_MS` 与 300 ms 超时时间计算链路是否健康，超时则认为 link fault：LED1 以约 2 Hz 闪烁，并在 FastStatus 的 `state_flags` 中清除 `STATE_FLAG_LINK_GOOD`；
     - 结合 `ENABLE_REQUESTED`、`CAL_READY` 与 `FAULT_FLAGS` 计算 `effective_enable_with_fault`，据此决定目标电流与 DAC 输出；
@@ -122,6 +124,7 @@
 - Telemetry 模型在后台持续积分 `energy_wh`，当前 UI 尚未单独绘制该值，但已在 `UiSnapshot` 中保留字段，便于后续扩展或上位机导出。
 - UI 不直接控制任何安全逻辑，仅反映 `FastStatus` 内容；控制路径通过上文的 SetMode/SoftReset/SetEnable 完成。
 - 生产固件的遥测模型初始值为 offline/unknown；只有 mock/test 场景使用 demo 快照，避免链路从未建立时 Dashboard 显示冻结的假电压/电流/功率。
+- 当链路已有帧但测量尚未可信时，UI 状态行为 `MEAS`，主电压/电流/功率显示 unavailable，而不是把全零 FastStatus 当作真实读数。
 - 风扇 PWM / Tach 控制虽然在引脚与协议层预留了钩子，但当前固件尚未实现相应驱动与控制逻辑。
 
 ### 联调与期望日志

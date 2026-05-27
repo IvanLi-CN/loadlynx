@@ -1,0 +1,3862 @@
+use axum::{
+    Json, Router,
+    extract::{Path, Query, State},
+    http::{HeaderValue, Method, StatusCode},
+    response::{IntoResponse, Response, sse::Event, sse::Sse},
+    routing::{delete, get, post},
+};
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{HashMap, VecDeque},
+    env, fs, io,
+    net::SocketAddr,
+    path::PathBuf,
+    process::Stdio,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
+};
+use tokio::{process::Command, sync::broadcast};
+use tower_http::{
+    cors::{AllowOrigin, CorsLayer},
+    services::ServeDir,
+};
+
+pub const DEFAULT_BIND: &str = "127.0.0.1:30180";
+pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30180";
+pub const DEFAULT_DIGITAL_USB_PORT_FILE: &str = ".esp32-port";
+pub const DEFAULT_ANALOG_PROBE_FILE: &str = ".stm32-port";
+const DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE: &str = ".esp32-port";
+const DEFAULT_ANALOG_PROBE_SELECTOR_SOURCE: &str = ".stm32-port";
+const ESPFLASH_ENV: &str = "LOADLYNX_ESPFLASH";
+const DEFAULT_ESPFLASH: &str = "espflash";
+const PROBE_RS_ENV: &str = "LOADLYNX_PROBE_RS";
+const DEFAULT_PROBE_RS: &str = "probe-rs";
+const ANALOG_PROBE_CHIP: &str = "STM32G431CB";
+const ANALOG_PROBE_PROTOCOL: &str = "swd";
+const ANALOG_PROBE_SPEED_KHZ: u32 = 4_000;
+pub const WEB_LEASE_HEARTBEAT_INTERVAL_MS: u64 = 2_000;
+pub const WEB_LEASE_TTL_MS: u64 = 8_000;
+const EVENT_LIMIT: usize = 1_000;
+const LOG_LIMIT: usize = 500;
+const TRACE_LIMIT: usize = 2_000;
+const SERIAL_PROBE_BAUD: u32 = 115_200;
+const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
+const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 1_500;
+const SERIAL_PROBE_MAX_BYTES: usize = 4096;
+
+#[derive(Debug, Clone)]
+pub struct DevdConfig {
+    pub bind: SocketAddr,
+    pub web_root: Option<PathBuf>,
+    pub allow_dev_cors: bool,
+    pub repo_root: PathBuf,
+}
+
+impl DevdConfig {
+    pub fn new(bind: SocketAddr, web_root: Option<PathBuf>, allow_dev_cors: bool) -> Self {
+        Self {
+            bind,
+            web_root,
+            allow_dev_cors,
+            repo_root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct AppState {
+    inner: Arc<Mutex<DevdState>>,
+    events: broadcast::Sender<DevdEvent>,
+    repo_root: PathBuf,
+}
+
+#[derive(Debug, Default)]
+struct DevdState {
+    devices: HashMap<String, DeviceRecord>,
+    artifacts: HashMap<String, FirmwareArtifact>,
+    leases: HashMap<String, WebLease>,
+    events: VecDeque<DevdEvent>,
+}
+
+#[derive(Debug, Clone)]
+struct WebLease {
+    lease_id: String,
+    device_id: String,
+    identity_device_id: Option<String>,
+    expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TargetKind {
+    DigitalEsp32s3,
+    AnalogStm32g431,
+    LanHttp,
+    Mock,
+}
+
+impl TargetKind {
+    fn board_name(&self) -> Option<&'static str> {
+        match self {
+            Self::DigitalEsp32s3 => Some("digital"),
+            Self::AnalogStm32g431 => Some("analog"),
+            Self::LanHttp | Self::Mock => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TargetCandidate {
+    pub kind: TargetKind,
+    pub display_name: String,
+    pub port_path: Option<String>,
+    pub probe_selector: Option<String>,
+    pub lan_base_url: Option<String>,
+    pub selector_source: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DigitalUsbPortCandidate {
+    pub port_path: String,
+    pub display_name: String,
+    pub recognized: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceRecord {
+    pub id: String,
+    pub display_name: String,
+    pub connection: ConnectionState,
+    pub digital_target: Option<TargetCandidate>,
+    pub analog_target: Option<TargetCandidate>,
+    pub lan_endpoint: Option<String>,
+    pub identity: Option<Value>,
+    pub usb_pd_cache: Option<Value>,
+    pub selected_artifact_id: Option<String>,
+    pub log_decode: LogDecodeState,
+    pub logs: VecDeque<SessionLog>,
+    pub trace: VecDeque<SessionTrace>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConnectionState {
+    Disconnected,
+    Connected,
+    Busy,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogDecodeState {
+    pub status: String,
+    pub reason: Option<String>,
+    pub artifact_id: Option<String>,
+}
+
+impl Default for LogDecodeState {
+    fn default() -> Self {
+        Self {
+            status: "unverified".to_string(),
+            reason: Some("no artifact selected".to_string()),
+            artifact_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirmwareCatalog {
+    pub schema_version: String,
+    pub artifacts: Vec<FirmwareArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum FirmwareManifest {
+    Catalog(FirmwareCatalog),
+    Artifact(FirmwareArtifact),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirmwareArtifact {
+    pub artifact_id: String,
+    pub name: String,
+    pub target: TargetKind,
+    pub package_version: String,
+    pub git_sha: String,
+    pub build_id: String,
+    pub build_profile: String,
+    pub features: Vec<String>,
+    pub protocol: String,
+    pub defmt: DefmtMetadata,
+    pub files: Vec<ArtifactFile>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DefmtMetadata {
+    pub enabled: bool,
+    pub encoding: String,
+    pub elf_sha256: Option<String>,
+    pub table_sha256: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ArtifactFile {
+    pub kind: String,
+    pub path: String,
+    pub sha256: String,
+    pub size: u64,
+    pub flash_address: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DevdEvent {
+    pub id: String,
+    pub timestamp: String,
+    pub device_id: Option<String>,
+    pub kind: String,
+    pub message: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionLog {
+    pub id: String,
+    pub timestamp: String,
+    pub level: String,
+    pub target: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionTrace {
+    pub id: String,
+    pub timestamp: String,
+    pub direction: String,
+    pub summary: String,
+    pub payload: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiErrorEnvelope {
+    pub error: ApiError,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ApiError {
+    pub code: String,
+    pub message: String,
+    pub retryable: bool,
+    pub details: Option<Value>,
+}
+
+#[derive(Debug)]
+pub struct HttpError(ApiError, StatusCode);
+
+#[derive(Debug, Deserialize)]
+struct BindRequest {
+    alias: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConnectRequest {
+    identity: Option<Value>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ArtifactSelectRequest {
+    manifest_path: Option<String>,
+    artifact_id: Option<String>,
+    artifact: Option<FirmwareArtifact>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FlashRequest {
+    target: Option<TargetKind>,
+    artifact_id: Option<String>,
+    dry_run: Option<bool>,
+    lease_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResetRequest {
+    target: Option<TargetKind>,
+    dry_run: Option<bool>,
+    lease_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LeaseRequest {
+    device_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct SessionQuery {
+    lease_id: Option<String>,
+    logs_limit: Option<usize>,
+    trace_limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompatQuery {
+    device_id: Option<String>,
+    lease_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CcRequest {
+    enable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct PdRequest {
+    mode: Option<String>,
+    object_pos: Option<u8>,
+    target_mv: Option<u32>,
+    i_req_ma: Option<u32>,
+    allow_extended_voltage: Option<bool>,
+}
+
+pub async fn serve(config: DevdConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()
+        .ok();
+
+    let state = AppState::new(config.repo_root.clone());
+    let router = router(state, config.web_root, config.allow_dev_cors);
+    let listener = tokio::net::TcpListener::bind(config.bind).await?;
+    tracing::info!("loadlynx-devd listening on http://{}", config.bind);
+    axum::serve(listener, router).await?;
+    Ok(())
+}
+
+impl AppState {
+    pub fn new(repo_root: PathBuf) -> Self {
+        let (events, _) = broadcast::channel(EVENT_LIMIT);
+        let state = Self {
+            inner: Arc::new(Mutex::new(DevdState::default())),
+            events,
+            repo_root,
+        };
+        seed_mock_device(&state);
+        spawn_lease_reaper(state.clone());
+        state
+    }
+}
+
+fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> Router {
+    let mut router = Router::new()
+        .route("/health", get(health))
+        .route("/api/v1/ping", get(health))
+        .route("/api/v1/devices", get(list_devices))
+        .route("/api/v1/devices/scan", post(scan_devices))
+        .route("/api/v1/devices/{id}/bind", post(bind_device))
+        .route("/api/v1/devices/{id}/connect", post(connect_device))
+        .route("/api/v1/devices/{id}/disconnect", post(disconnect_device))
+        .route("/api/v1/devices/{id}/binding", delete(unbind_device))
+        .route("/api/v1/devices/{id}/identity", get(device_identity))
+        .route("/api/v1/devices/{id}/status", get(device_status))
+        .route("/api/v1/devices/{id}/network", get(device_network))
+        .route("/api/v1/devices/{id}/session", get(device_session))
+        .route("/api/v1/devices/{id}/events", get(device_events))
+        .route(
+            "/api/v1/devices/{id}/artifact",
+            get(device_artifact).post(select_artifact),
+        )
+        .route("/api/v1/devices/{id}/flash", post(flash_device))
+        .route("/api/v1/devices/{id}/reset", post(reset_device))
+        .route("/api/v1/devices/{id}/monitor/start", post(monitor_start))
+        .route("/api/v1/devices/{id}/monitor/stop", post(monitor_stop))
+        .route("/api/v1/serial/lease", post(create_lease))
+        .route(
+            "/api/v1/serial/lease/{lease_id}",
+            post(heartbeat_lease).delete(release_lease),
+        )
+        .route("/api/v1/serial/session", get(compat_session))
+        .route("/api/v1/serial/events", get(compat_events))
+        .route("/api/v1/identity", get(compat_identity))
+        .route("/api/v1/status", get(compat_status))
+        .route("/api/v1/network", get(compat_network))
+        .route("/api/v1/cc", post(compat_cc))
+        .route("/api/v1/pd", get(compat_pd_get).post(compat_pd_post))
+        .with_state(state);
+
+    if allow_dev_cors {
+        router = router.layer(
+            CorsLayer::new()
+                .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
+                    is_loopback_dev_origin(origin)
+                }))
+                .allow_methods([Method::GET, Method::POST, Method::DELETE])
+                .allow_headers(tower_http::cors::Any),
+        );
+    }
+
+    if let Some(web_root) = web_root {
+        router = router.fallback_service(ServeDir::new(web_root));
+    }
+    router
+}
+
+fn is_loopback_dev_origin(origin: &HeaderValue) -> bool {
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
+    let Some(rest) = origin.strip_prefix("http://") else {
+        return false;
+    };
+    ["localhost:", "127.0.0.1:", "[::1]:"]
+        .iter()
+        .filter_map(|prefix| rest.strip_prefix(prefix))
+        .any(valid_port)
+}
+
+fn valid_port(port: &str) -> bool {
+    port.parse::<u16>().is_ok()
+}
+
+async fn health() -> Json<Value> {
+    Json(json!({"ok": true, "service": "loadlynx-devd"}))
+}
+
+async fn list_devices(State(state): State<AppState>) -> Json<Value> {
+    cleanup_expired_leases(&state);
+    let guard = state.inner.lock().expect("state lock");
+    Json(json!({
+        "devices": guard.devices.values().cloned().collect::<Vec<_>>(),
+        "leases": guard.leases.values().map(lease_json).collect::<Vec<_>>()
+    }))
+}
+
+async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let mut discovered = Vec::new();
+    let default_usb_port = read_default_digital_usb_port(&state.repo_root);
+    let default_analog_probe = read_default_analog_probe_selector(&state.repo_root);
+    let analog_candidate = default_analog_probe
+        .as_deref()
+        .map(default_analog_probe_candidate);
+    discovered.extend(scan_serial_targets(default_usb_port.as_deref()));
+    if let Some(candidate) = analog_candidate.clone() {
+        discovered.push(candidate);
+    }
+
+    let mut guard = state.inner.lock().expect("state lock");
+    for candidate in discovered {
+        let id = stable_candidate_id(&candidate);
+        let entry = guard
+            .devices
+            .entry(id.clone())
+            .or_insert_with(|| DeviceRecord {
+                id,
+                display_name: candidate.display_name.clone(),
+                connection: ConnectionState::Disconnected,
+                digital_target: None,
+                analog_target: None,
+                lan_endpoint: candidate.lan_base_url.clone(),
+                identity: None,
+                usb_pd_cache: None,
+                selected_artifact_id: None,
+                log_decode: LogDecodeState::default(),
+                logs: VecDeque::new(),
+                trace: VecDeque::new(),
+            });
+        match candidate.kind {
+            TargetKind::DigitalEsp32s3 => {
+                entry.digital_target = Some(candidate);
+                if entry.analog_target.is_none()
+                    && let Some(analog_candidate) = analog_candidate.clone()
+                {
+                    entry.analog_target = Some(analog_candidate);
+                }
+            }
+            TargetKind::AnalogStm32g431 => entry.analog_target = Some(candidate),
+            TargetKind::LanHttp => entry.lan_endpoint = candidate.lan_base_url.clone(),
+            TargetKind::Mock => {}
+        }
+    }
+    let devices = guard.devices.values().cloned().collect::<Vec<_>>();
+    drop(guard);
+    emit(
+        &state,
+        None,
+        "scan",
+        "device scan completed",
+        json!({"count": devices.len()}),
+    );
+    Ok(Json(json!({"devices": devices})))
+}
+
+async fn bind_device(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<BindRequest>,
+) -> Result<Json<Value>, HttpError> {
+    let mut guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get_mut(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    if let Some(alias) = input.alias {
+        device.display_name = alias;
+    }
+    Ok(Json(json!({"device": device.clone()})))
+}
+
+async fn unbind_device(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let mut guard = state.inner.lock().expect("state lock");
+    let removed = guard.devices.remove(&id).is_some();
+    Ok(Json(json!({"ok": true, "removed": removed})))
+}
+
+async fn connect_device(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<ConnectRequest>>,
+) -> Result<Json<Value>, HttpError> {
+    let mut guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get_mut(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    device.connection = ConnectionState::Connected;
+    if let Some(Json(input)) = body {
+        if input.identity.is_some() {
+            device.identity = input.identity;
+        }
+    }
+    if device.identity.is_none() {
+        device.identity = Some(mock_identity(&device.id, &device.display_name));
+    }
+    push_log(device, "info", "devd", "device connected");
+    let device = device.clone();
+    drop(guard);
+    emit(&state, Some(id), "connect", "device connected", json!({}));
+    Ok(Json(json!({"device": device})))
+}
+
+async fn disconnect_device(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    disconnect_device_inner(&state, &id)?;
+    Ok(Json(json!({"ok": true})))
+}
+
+fn disconnect_device_inner(state: &AppState, id: &str) -> Result<(), HttpError> {
+    let mut guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get_mut(id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    device.connection = ConnectionState::Disconnected;
+    push_log(device, "info", "devd", "device disconnected");
+    drop(guard);
+    emit(
+        state,
+        Some(id.to_string()),
+        "disconnect",
+        "device disconnected",
+        json!({}),
+    );
+    Ok(())
+}
+
+async fn device_identity(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    let identity = device
+        .identity
+        .clone()
+        .unwrap_or_else(|| mock_identity(&device.id, &device.display_name));
+    Ok(Json(identity))
+}
+
+async fn device_status(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    Ok(Json(json!({
+        "device_id": id,
+        "connection": device.connection,
+        "targets": {
+            "digital": device.digital_target,
+            "analog": device.analog_target,
+            "lan": device.lan_endpoint
+        },
+        "log_decode": device.log_decode
+    })))
+}
+
+async fn device_network(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    Ok(Json(json!({
+        "lan_endpoint": device.lan_endpoint,
+        "mdns": device.identity.as_ref().and_then(|i| i.get("hostname")).cloned()
+    })))
+}
+
+async fn select_artifact(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<ArtifactSelectRequest>,
+) -> Result<Json<Value>, HttpError> {
+    let requested_artifact_id = input.artifact_id;
+    let mut loaded_artifact_ids = Vec::new();
+    if let Some(artifact) = input.artifact {
+        loaded_artifact_ids.push(artifact.artifact_id.clone());
+        state
+            .inner
+            .lock()
+            .expect("state lock")
+            .artifacts
+            .insert(artifact.artifact_id.clone(), artifact);
+    } else if let Some(path) = input.manifest_path {
+        let artifacts = read_manifest(&path)?;
+        let mut guard = state.inner.lock().expect("state lock");
+        for artifact in artifacts {
+            loaded_artifact_ids.push(artifact.artifact_id.clone());
+            guard
+                .artifacts
+                .insert(artifact.artifact_id.clone(), artifact);
+        }
+    }
+    let artifact_id = match (requested_artifact_id, loaded_artifact_ids.as_slice()) {
+        (Some(artifact_id), _) => artifact_id,
+        (None, [artifact_id]) => artifact_id.clone(),
+        (None, []) => {
+            return Err(HttpError::bad_request(
+                "artifact_missing",
+                "artifact_id, artifact or manifest_path required",
+            ));
+        }
+        (None, _) => {
+            return Err(HttpError::bad_request(
+                "artifact_id_required",
+                "manifest_path loaded multiple artifacts; artifact_id is required",
+            ));
+        }
+    };
+    let mut guard = state.inner.lock().expect("state lock");
+    let selected = guard
+        .artifacts
+        .get(&artifact_id)
+        .cloned()
+        .ok_or_else(|| HttpError::not_found("artifact_not_found", "artifact is not loaded"))?;
+    let device = guard
+        .devices
+        .get_mut(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    device.selected_artifact_id = Some(artifact_id.clone());
+    apply_artifact_match(device, Some(&selected));
+    let log_decode = device.log_decode.clone();
+    Ok(Json(
+        json!({"artifact": selected, "log_decode": log_decode}),
+    ))
+}
+
+async fn device_artifact(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    let artifact = device
+        .selected_artifact_id
+        .as_ref()
+        .and_then(|id| guard.artifacts.get(id));
+    Ok(Json(
+        json!({"artifact": artifact, "log_decode": device.log_decode}),
+    ))
+}
+
+async fn flash_device(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(input): Json<FlashRequest>,
+) -> Result<Json<Value>, HttpError> {
+    let (artifact, target, dry_run, evidence) = resolve_operation(
+        &state,
+        &id,
+        input.target,
+        input.artifact_id,
+        input.dry_run.unwrap_or(true),
+    )?;
+    verify_artifact_files(&artifact)?;
+    if dry_run {
+        return Ok(Json(
+            json!({"ok": true, "dry_run": true, "action": "flash", "target_evidence": evidence}),
+        ));
+    }
+    {
+        let guard = state.inner.lock().expect("state lock");
+        ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
+        let device = guard
+            .devices
+            .get(&id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        ensure_real_operation_uses_cached_target(device, &target)?;
+    }
+    match target {
+        TargetKind::DigitalEsp32s3 => run_espflash_digital(&state, &id, &artifact).await?,
+        TargetKind::AnalogStm32g431 => run_probe_rs_analog(&state, &id, &artifact).await?,
+        TargetKind::LanHttp | TargetKind::Mock => {
+            return Err(HttpError::bad_request(
+                "target_unsupported",
+                "target cannot be flashed",
+            ));
+        }
+    }
+    emit(
+        &state,
+        Some(id),
+        "flash",
+        "firmware flash completed",
+        json!({"artifact_id": artifact.artifact_id, "target": target}),
+    );
+    Ok(Json(
+        json!({"ok": true, "dry_run": false, "action": "flash", "target_evidence": evidence}),
+    ))
+}
+
+async fn reset_device(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Option<Json<ResetRequest>>,
+) -> Result<Json<Value>, HttpError> {
+    let input = body.map(|Json(v)| v).unwrap_or(ResetRequest {
+        target: None,
+        dry_run: Some(true),
+        lease_id: None,
+    });
+    let target = input.target.unwrap_or(TargetKind::DigitalEsp32s3);
+    let dry_run = input.dry_run.unwrap_or(true);
+    let evidence = target_evidence(&state, &id, target.clone(), None)?;
+    if dry_run {
+        return Ok(Json(
+            json!({"ok": true, "dry_run": true, "action": "reset", "target_evidence": evidence}),
+        ));
+    }
+    {
+        let guard = state.inner.lock().expect("state lock");
+        ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
+        let device = guard
+            .devices
+            .get(&id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        ensure_real_operation_uses_cached_target(device, &target)?;
+    }
+    match target {
+        TargetKind::DigitalEsp32s3 => run_espflash_reset_digital(&state, &id).await?,
+        TargetKind::AnalogStm32g431 => run_agentd(target.clone(), "reset").await?,
+        TargetKind::LanHttp | TargetKind::Mock => {
+            return Err(HttpError::bad_request(
+                "target_unsupported",
+                "target cannot be reset",
+            ));
+        }
+    }
+    emit(
+        &state,
+        Some(id),
+        "reset",
+        "device reset completed",
+        json!({"target": target}),
+    );
+    Ok(Json(
+        json!({"ok": true, "dry_run": false, "action": "reset", "target_evidence": evidence}),
+    ))
+}
+
+async fn monitor_start(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let mut guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get_mut(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    device.connection = ConnectionState::Connected;
+    push_log(
+        device,
+        "info",
+        "monitor",
+        "monitor started (bounded devd session)",
+    );
+    push_trace(
+        device,
+        "rx",
+        json!({"type": "log", "level": "info", "message": "monitor started"}),
+    );
+    Ok(Json(json!({"ok": true, "monitor": "started"})))
+}
+
+async fn monitor_stop(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let mut guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get_mut(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    push_log(device, "info", "monitor", "monitor stopped");
+    Ok(Json(json!({"ok": true, "monitor": "stopped"})))
+}
+
+async fn device_session(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    ensure_lease_for_target(&guard, Some(&id), query.lease_id.as_deref())?;
+    let device = guard
+        .devices
+        .get(&id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    Ok(Json(session_json(
+        device,
+        query.logs_limit,
+        query.trace_limit,
+    )))
+}
+
+async fn create_lease(
+    State(state): State<AppState>,
+    Json(input): Json<LeaseRequest>,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    {
+        let guard = state.inner.lock().expect("state lock");
+        if let Some(existing) = guard
+            .leases
+            .values()
+            .find(|lease| lease.device_id == input.device_id && lease.expires_at > Instant::now())
+        {
+            return Err(HttpError::conflict(
+                "device_lease_conflict",
+                format!(
+                    "device already has an active Web lease: {}",
+                    existing.lease_id
+                ),
+            ));
+        }
+        guard
+            .devices
+            .get(&input.device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    }
+    let _ = connect_device(State(state.clone()), Path(input.device_id.clone()), None).await?;
+    probe_device_serial_session(&state, &input.device_id);
+
+    let lease_id = next_id();
+    let identity_device_id = {
+        let guard = state.inner.lock().expect("state lock");
+        guard
+            .devices
+            .get(&input.device_id)
+            .and_then(|d| d.identity.as_ref())
+            .and_then(|i| i.get("device_id"))
+            .and_then(Value::as_str)
+            .map(str::to_string)
+    };
+    let lease = WebLease {
+        lease_id: lease_id.clone(),
+        device_id: input.device_id.clone(),
+        identity_device_id,
+        expires_at: Instant::now() + Duration::from_millis(WEB_LEASE_TTL_MS),
+    };
+    state
+        .inner
+        .lock()
+        .expect("state lock")
+        .leases
+        .insert(lease_id.clone(), lease.clone());
+    emit(
+        &state,
+        Some(input.device_id),
+        "web_lease",
+        "Web USB lease created",
+        json!({"lease_id": lease_id}),
+    );
+    Ok(Json(json!({
+        "lease_id": lease_id,
+        "device_id": lease.device_id,
+        "identity_device_id": lease.identity_device_id,
+        "heartbeat_interval_ms": WEB_LEASE_HEARTBEAT_INTERVAL_MS,
+        "lease_ttl_ms": WEB_LEASE_TTL_MS
+    })))
+}
+
+async fn heartbeat_lease(
+    State(state): State<AppState>,
+    Path(lease_id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let mut guard = state.inner.lock().expect("state lock");
+    let lease = guard
+        .leases
+        .get_mut(&lease_id)
+        .ok_or_else(|| HttpError::bad_request("web_session_expired", "Web USB lease is expired"))?;
+    lease.expires_at = Instant::now() + Duration::from_millis(WEB_LEASE_TTL_MS);
+    Ok(Json(json!({
+        "lease_id": lease.lease_id,
+        "device_id": lease.device_id,
+        "identity_device_id": lease.identity_device_id,
+        "heartbeat_interval_ms": WEB_LEASE_HEARTBEAT_INTERVAL_MS,
+        "lease_ttl_ms": WEB_LEASE_TTL_MS
+    })))
+}
+
+async fn release_lease(
+    State(state): State<AppState>,
+    Path(lease_id): Path<String>,
+) -> Result<Json<Value>, HttpError> {
+    let released = release_lease_inner(&state, &lease_id, "released");
+    Ok(Json(json!({"ok": true, "released": released})))
+}
+
+async fn compat_session(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = select_compat_device(&guard, query.lease_id.as_deref(), None)?;
+    Ok(Json(session_json(
+        device,
+        query.logs_limit,
+        query.trace_limit,
+    )))
+}
+
+async fn compat_identity(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "identity")?
+    };
+
+    let identity = request_usb_identity(&state, &device_id, &port_path)?;
+    if let Some(device) = state
+        .inner
+        .lock()
+        .expect("state lock")
+        .devices
+        .get_mut(&device_id)
+    {
+        device.identity = Some(identity.clone());
+    }
+    Ok(Json(identity))
+}
+
+fn request_usb_identity(
+    state: &AppState,
+    device_id: &str,
+    port_path: &str,
+) -> Result<Value, HttpError> {
+    let request_id = "devd-get-identity";
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let probe = serial_jsonl_request(port_path, request_id, "get_identity", None)
+            .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+        let response = serial_response_for_request(&probe, request_id)
+            .or_else(|| infer_serial_response_from_text(&probe, request_id));
+
+        record_serial_protocol_probe(
+            state,
+            device_id,
+            port_path,
+            if attempt == 0 {
+                "USB identity request completed"
+            } else {
+                "USB identity retry completed"
+            },
+            probe,
+        );
+        match identity_data_from_serial_response(response) {
+            Ok(identity) => return Ok(identity),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB identity did not return a protocol response",
+        )
+    }))
+}
+
+async fn compat_status(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "status")?
+    };
+
+    let request_id = "devd-get-status";
+    let probe = serial_jsonl_request(&port_path, request_id, "get_status", None)
+        .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+    let response = serial_response_for_request(&probe, request_id)
+        .or_else(|| infer_serial_response_from_text(&probe, request_id));
+    record_serial_protocol_probe(
+        &state,
+        &device_id,
+        &port_path,
+        "USB status request completed",
+        probe,
+    );
+    let data = status_data_from_serial_response(response)?;
+    let status = data.get("status").cloned().ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_invalid",
+            "USB status response did not include status",
+        )
+    })?;
+    let link_up = data.get("link_up").and_then(Value::as_bool).unwrap_or(true);
+    let hello_seen = data
+        .get("hello_seen")
+        .and_then(Value::as_bool)
+        .unwrap_or(link_up);
+    let analog_state = data
+        .get("analog_state")
+        .and_then(Value::as_str)
+        .unwrap_or(if link_up { "ready" } else { "offline" })
+        .to_string();
+    let mut output = data;
+    if let Some(object) = output.as_object_mut() {
+        object.insert("device_id".to_string(), json!(device_id));
+        object.insert("status".to_string(), status);
+        object
+            .entry("link_up".to_string())
+            .or_insert_with(|| json!(link_up));
+        object
+            .entry("hello_seen".to_string())
+            .or_insert_with(|| json!(hello_seen));
+        object
+            .entry("analog_state".to_string())
+            .or_insert_with(|| json!(analog_state));
+        object
+            .entry("fault_flags_decoded".to_string())
+            .or_insert_with(|| json!([]));
+    }
+    Ok(Json(output))
+}
+
+async fn compat_network(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = select_compat_device(
+        &guard,
+        query.lease_id.as_deref(),
+        query.device_id.as_deref(),
+    )?;
+    Ok(Json(json!({"lan_endpoint": device.lan_endpoint})))
+}
+
+async fn compat_cc(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    Json(input): Json<CcRequest>,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = select_compat_device(
+            &guard,
+            query.lease_id.as_deref(),
+            query.device_id.as_deref(),
+        )?;
+        ensure_active_lease_for_device(&guard, &device.id, query.lease_id.as_deref())?;
+        let port_path = device
+            .digital_target
+            .as_ref()
+            .and_then(|target| target.port_path.clone())
+            .ok_or_else(|| {
+                HttpError::conflict(
+                    "target_port_missing",
+                    "USB CC control requires a selected digital USB port",
+                )
+            })?;
+        (device.id.clone(), port_path)
+    };
+
+    let request_id = if input.enable {
+        "devd-output-enable"
+    } else {
+        "devd-output-disable"
+    };
+    let probe = serial_jsonl_request(
+        &port_path,
+        request_id,
+        "set_output_enabled",
+        Some(json!({"enable": input.enable})),
+    )
+    .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+    let response = probe
+        .frames
+        .iter()
+        .rev()
+        .find(|event| {
+            event.direction == "rx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id)
+        })
+        .or_else(|| {
+            probe
+                .frames
+                .iter()
+                .rev()
+                .find(|event| event.direction == "rx")
+        })
+        .map(|event| event.frame.clone())
+        .or_else(|| infer_serial_response_from_text(&probe, request_id));
+
+    record_serial_protocol_probe(
+        &state,
+        &device_id,
+        &port_path,
+        "USB CC control request completed",
+        probe,
+    );
+    let response = response.ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB CC control did not return a protocol response",
+        )
+    })?;
+    let _ = serial_response_data(response.clone(), "USB CC control")?;
+    Ok(Json(json!({
+        "ok": true,
+        "request_id": request_id,
+        "response": response
+    })))
+}
+
+fn select_serial_port_for_compat(
+    state: &DevdState,
+    query: &CompatQuery,
+    operation: &str,
+) -> Result<(String, String), HttpError> {
+    let device =
+        select_compat_device(state, query.lease_id.as_deref(), query.device_id.as_deref())?;
+    ensure_active_lease_for_device(state, &device.id, query.lease_id.as_deref())?;
+    let port_path = device
+        .digital_target
+        .as_ref()
+        .and_then(|target| target.port_path.clone())
+        .ok_or_else(|| {
+            HttpError::conflict(
+                "target_port_missing",
+                format!("USB {operation} requires a selected digital USB port"),
+            )
+        })?;
+    Ok((device.id.clone(), port_path))
+}
+
+fn pd_response_data(response: Value) -> Result<Value, HttpError> {
+    serial_response_data(response, "USB PD")
+}
+
+fn pd_post_response_data(response: Option<Value>) -> Result<Value, HttpError> {
+    response.map(pd_response_data).unwrap_or_else(|| {
+        Err(HttpError::retryable(
+            "serial_response_missing",
+            "USB PD POST did not return a protocol response",
+        ))
+    })
+}
+
+fn identity_data_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
+    let response = response.ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB identity did not return a protocol response",
+        )
+    })?;
+    let data = serial_response_data(response, "USB identity")?;
+    if data.get("device_id").is_none() {
+        return Err(HttpError::retryable(
+            "serial_response_invalid",
+            "USB identity response did not include device_id",
+        ));
+    }
+    Ok(data)
+}
+
+fn status_data_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
+    let response = response.ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB status did not return a protocol response",
+        )
+    })?;
+    if response.get("ok").and_then(Value::as_bool) != Some(true) {
+        return serial_response_data(response, "USB status");
+    }
+    let data = response
+        .get("data")
+        .cloned()
+        .unwrap_or_else(|| response.clone());
+    if data.get("status").is_none() {
+        return Err(HttpError::retryable(
+            "serial_response_invalid",
+            "USB status response did not include status",
+        ));
+    }
+    Ok(data)
+}
+
+fn serial_response_data(response: Value, operation: &str) -> Result<Value, HttpError> {
+    if response.get("ok").and_then(Value::as_bool) == Some(true) {
+        return response.get("data").cloned().ok_or_else(|| {
+            HttpError::retryable(
+                "serial_response_invalid",
+                format!("{operation} response did not include data"),
+            )
+        });
+    }
+
+    let code = response
+        .pointer("/error/code")
+        .and_then(Value::as_str)
+        .unwrap_or("serial_request_failed");
+    let message = response
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .unwrap_or("USB request failed");
+    Err(HttpError::conflict(code, message))
+}
+
+fn cached_pd_view(state: &AppState, device_id: &str) -> Option<Value> {
+    state
+        .inner
+        .lock()
+        .expect("state lock")
+        .devices
+        .get(device_id)
+        .and_then(|device| device.usb_pd_cache.clone())
+}
+
+async fn compat_pd_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "PD control")?
+    };
+
+    let request_id = "devd-get-pd";
+    let probe = serial_jsonl_request(&port_path, request_id, "get_pd", None)
+        .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+    let response = probe
+        .frames
+        .iter()
+        .rev()
+        .find(|event| {
+            event.direction == "rx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id)
+        })
+        .map(|event| event.frame.clone());
+    record_serial_protocol_probe(
+        &state,
+        &device_id,
+        &port_path,
+        "USB PD GET completed",
+        probe,
+    );
+    if let Some(response) = response {
+        return Ok(Json(pd_response_data(response)?));
+    }
+    if let Some(cached) = cached_pd_view(&state, &device_id) {
+        return Ok(Json(cached));
+    }
+    Err(HttpError::retryable(
+        "serial_response_missing",
+        "USB PD GET did not return a protocol response",
+    ))
+}
+
+async fn compat_pd_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    cleanup_expired_leases(&state);
+    let input: PdRequest = serde_json::from_str(&body)
+        .map_err(|error| HttpError::bad_request("invalid_request", error.to_string()))?;
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, &query, "PD control")?
+    };
+
+    let mut extra = serde_json::Map::new();
+    if let Some(mode) = input.mode {
+        extra.insert("mode".to_string(), Value::String(mode));
+    }
+    if let Some(object_pos) = input.object_pos {
+        extra.insert("object_pos".to_string(), json!(object_pos));
+    }
+    if let Some(target_mv) = input.target_mv {
+        extra.insert("target_mv".to_string(), json!(target_mv));
+    }
+    if let Some(i_req_ma) = input.i_req_ma {
+        extra.insert("i_req_ma".to_string(), json!(i_req_ma));
+    }
+    if let Some(allow_extended_voltage) = input.allow_extended_voltage {
+        extra.insert(
+            "allow_extended_voltage".to_string(),
+            json!(allow_extended_voltage),
+        );
+    }
+
+    let request_id = "devd-set-pd-policy";
+    let probe = serial_jsonl_request(
+        &port_path,
+        request_id,
+        "set_pd_policy",
+        Some(Value::Object(extra)),
+    )
+    .map_err(|error| HttpError::retryable("serial_request_failed", error.to_string()))?;
+    let response = probe
+        .frames
+        .iter()
+        .rev()
+        .find(|event| {
+            event.direction == "rx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id)
+        })
+        .map(|event| event.frame.clone());
+    record_serial_protocol_probe(
+        &state,
+        &device_id,
+        &port_path,
+        "USB PD POST completed",
+        probe,
+    );
+    Ok(Json(pd_post_response_data(response)?))
+}
+
+async fn compat_events(
+    State(state): State<AppState>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    events_stream(state, None)
+}
+
+async fn device_events(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    events_stream(state, Some(id))
+}
+
+fn events_stream(
+    state: AppState,
+    device_id: Option<String>,
+) -> Sse<impl futures_core::Stream<Item = Result<Event, std::convert::Infallible>>> {
+    let mut rx = state.events.subscribe();
+    let stream = async_stream::stream! {
+        loop {
+            match rx.recv().await {
+                Ok(event) => {
+                    if device_id.as_ref().is_none_or(|id| event.device_id.as_ref() == Some(id)) {
+                        let data = serde_json::to_string(&event).unwrap_or_else(|_| "{}".to_string());
+                        yield Ok(Event::default().event(event.kind).data(data));
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    };
+    Sse::new(stream)
+}
+
+fn select_compat_device<'a>(
+    state: &'a DevdState,
+    lease_id: Option<&str>,
+    device_id: Option<&str>,
+) -> Result<&'a DeviceRecord, HttpError> {
+    if let Some(device_id) = device_id {
+        return state
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"));
+    }
+    if let Some(lease_id) = lease_id {
+        let lease = active_lease_by_id(state, lease_id)?;
+        return state
+            .devices
+            .get(&lease.device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "leased device is not known"));
+    }
+    let active = state
+        .leases
+        .values()
+        .filter(|lease| lease.expires_at > Instant::now())
+        .collect::<Vec<_>>();
+    match active.as_slice() {
+        [lease] => state
+            .devices
+            .get(&lease.device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "leased device is not known")),
+        [] => Err(HttpError::bad_request(
+            "web_session_required",
+            "Web USB lease or explicit device_id is required",
+        )),
+        _ => Err(HttpError::bad_request(
+            "device_selection_required",
+            "multiple Web USB leases are active; specify lease_id or device_id",
+        )),
+    }
+}
+
+fn ensure_lease_for_target(
+    state: &DevdState,
+    target_device_id: Option<&str>,
+    lease_id: Option<&str>,
+) -> Result<(), HttpError> {
+    let Some(lease_id) = lease_id else {
+        return Err(HttpError::bad_request(
+            "web_session_required",
+            "Web USB lease is required for devd USB session access",
+        ));
+    };
+    let lease = active_lease_by_id(state, lease_id)?;
+    if let Some(target) = target_device_id {
+        if lease.device_id != target {
+            return Err(HttpError::conflict(
+                "device_lease_mismatch",
+                "Web USB lease does not match requested device",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_active_lease_for_device(
+    state: &DevdState,
+    device_id: &str,
+    lease_id: Option<&str>,
+) -> Result<(), HttpError> {
+    if let Some(lease_id) = lease_id {
+        ensure_lease_for_target(state, Some(device_id), Some(lease_id))?;
+        return Ok(());
+    }
+
+    let active = state
+        .leases
+        .values()
+        .filter(|lease| lease.device_id == device_id && lease.expires_at > Instant::now())
+        .collect::<Vec<_>>();
+    match active.as_slice() {
+        [_] => Ok(()),
+        [] => Err(HttpError::bad_request(
+            "web_session_required",
+            "Web USB lease is required for devd USB session access",
+        )),
+        _ => Err(HttpError::bad_request(
+            "device_selection_required",
+            "multiple Web USB leases are active; specify lease_id",
+        )),
+    }
+}
+
+fn active_lease_by_id<'a>(state: &'a DevdState, lease_id: &str) -> Result<&'a WebLease, HttpError> {
+    state
+        .leases
+        .get(lease_id)
+        .filter(|lease| lease.expires_at > Instant::now())
+        .ok_or_else(|| HttpError::bad_request("web_session_expired", "Web USB lease is expired"))
+}
+
+fn release_lease_inner(state: &AppState, lease_id: &str, reason: &str) -> bool {
+    let lease = state
+        .inner
+        .lock()
+        .expect("state lock")
+        .leases
+        .remove(lease_id);
+    let Some(lease) = lease else {
+        return false;
+    };
+    let should_disconnect = {
+        let guard = state.inner.lock().expect("state lock");
+        !guard
+            .leases
+            .values()
+            .any(|item| item.device_id == lease.device_id && item.expires_at > Instant::now())
+    };
+    if should_disconnect {
+        let _ = disconnect_device_inner(state, &lease.device_id);
+    }
+    emit(
+        state,
+        Some(lease.device_id),
+        "web_lease",
+        &format!("Web USB lease {reason}"),
+        json!({"lease_id": lease_id}),
+    );
+    true
+}
+
+fn spawn_lease_reaper(state: AppState) {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_millis(1_000));
+        loop {
+            interval.tick().await;
+            cleanup_expired_leases(&state);
+        }
+    });
+}
+
+fn cleanup_expired_leases(state: &AppState) {
+    let expired = {
+        let guard = state.inner.lock().expect("state lock");
+        guard
+            .leases
+            .iter()
+            .filter_map(|(id, lease)| (lease.expires_at <= Instant::now()).then(|| id.clone()))
+            .collect::<Vec<_>>()
+    };
+    for id in expired {
+        release_lease_inner(state, &id, "expired");
+    }
+}
+
+fn session_json(
+    device: &DeviceRecord,
+    logs_limit: Option<usize>,
+    trace_limit: Option<usize>,
+) -> Value {
+    json!({
+        "connected": device.connection == ConnectionState::Connected,
+        "log_decode": device.log_decode,
+        "logs": tail(&device.logs, logs_limit.unwrap_or(200).min(LOG_LIMIT)),
+        "trace": tail(&device.trace, trace_limit.unwrap_or(600).min(TRACE_LIMIT)),
+    })
+}
+
+fn lease_json(lease: &WebLease) -> Value {
+    json!({
+        "lease_id": lease.lease_id,
+        "device_id": lease.device_id,
+        "identity_device_id": lease.identity_device_id,
+        "lease_ttl_ms": WEB_LEASE_TTL_MS,
+        "heartbeat_interval_ms": WEB_LEASE_HEARTBEAT_INTERVAL_MS
+    })
+}
+
+fn resolve_operation(
+    state: &AppState,
+    device_id: &str,
+    target: Option<TargetKind>,
+    artifact_id: Option<String>,
+    dry_run: bool,
+) -> Result<(FirmwareArtifact, TargetKind, bool, Value), HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get(device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    let artifact_id = artifact_id
+        .or_else(|| device.selected_artifact_id.clone())
+        .ok_or_else(|| {
+            HttpError::bad_request("artifact_missing", "select an artifact before flashing")
+        })?;
+    let artifact = guard
+        .artifacts
+        .get(&artifact_id)
+        .cloned()
+        .ok_or_else(|| HttpError::not_found("artifact_not_found", "artifact is not loaded"))?;
+    let target = target.unwrap_or_else(|| artifact.target.clone());
+    if target != artifact.target {
+        return Err(HttpError::conflict(
+            "artifact_target_mismatch",
+            "selected artifact target does not match requested operation target",
+        ));
+    }
+    let evidence = target_evidence_locked(device, target.clone(), Some(&artifact))?;
+    Ok((artifact, target, dry_run, evidence))
+}
+
+fn target_evidence(
+    state: &AppState,
+    device_id: &str,
+    target: TargetKind,
+    artifact: Option<&FirmwareArtifact>,
+) -> Result<Value, HttpError> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard
+        .devices
+        .get(device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    target_evidence_locked(device, target, artifact)
+}
+
+fn target_evidence_locked(
+    device: &DeviceRecord,
+    target: TargetKind,
+    artifact: Option<&FirmwareArtifact>,
+) -> Result<Value, HttpError> {
+    let candidate = match target {
+        TargetKind::DigitalEsp32s3 => device.digital_target.as_ref(),
+        TargetKind::AnalogStm32g431 => device.analog_target.as_ref(),
+        TargetKind::LanHttp => None,
+        TargetKind::Mock => Some(&TargetCandidate {
+            kind: TargetKind::Mock,
+            display_name: device.display_name.clone(),
+            port_path: None,
+            probe_selector: None,
+            lan_base_url: None,
+            selector_source: None,
+        }),
+    };
+    let Some(candidate) = candidate else {
+        return Err(HttpError::conflict(
+            "target_unavailable",
+            "requested target is not available on this device",
+        ));
+    };
+    Ok(json!({
+        "device_id": device.id,
+        "target": target,
+        "display_name": candidate.display_name,
+        "port_path": candidate.port_path,
+        "probe_selector": candidate.probe_selector,
+        "selector_source": candidate.selector_source,
+        "artifact_id": artifact.map(|a| a.artifact_id.as_str()),
+        "artifact_build_id": artifact.map(|a| a.build_id.as_str()),
+    }))
+}
+
+fn ensure_real_operation_uses_cached_target(
+    device: &DeviceRecord,
+    target: &TargetKind,
+) -> Result<(), HttpError> {
+    let candidate = match target {
+        TargetKind::DigitalEsp32s3 => device.digital_target.as_ref(),
+        TargetKind::AnalogStm32g431 => device.analog_target.as_ref(),
+        TargetKind::LanHttp | TargetKind::Mock => None,
+    };
+    let Some(candidate) = candidate else {
+        return Err(HttpError::conflict(
+            "target_unavailable",
+            "requested target is not available on this device",
+        ));
+    };
+    let expected_source = match target {
+        TargetKind::DigitalEsp32s3 => DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE,
+        TargetKind::AnalogStm32g431 => ".stm32-port",
+        TargetKind::LanHttp | TargetKind::Mock => unreachable!(),
+    };
+    if candidate.selector_source.as_deref() != Some(expected_source) {
+        return Err(HttpError::conflict(
+            "target_selector_not_cached",
+            format!(
+                "real {target:?} operation requires the selected target to come from {expected_source}; run dry-run or ask the owner to approve an explicit selector update"
+            ),
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct EspflashOperation {
+    command: &'static str,
+    file_path: String,
+    flash_address: Option<u64>,
+}
+
+fn selected_espflash_operation(
+    artifact: &FirmwareArtifact,
+) -> Result<EspflashOperation, HttpError> {
+    if let Some(file) = artifact.files.iter().find(|file| file.kind == "elf") {
+        return Ok(EspflashOperation {
+            command: "flash",
+            file_path: file.path.clone(),
+            flash_address: None,
+        });
+    }
+    if let Some(file) = artifact.files.iter().find(|file| file.kind == "image") {
+        let Some(flash_address) = file.flash_address else {
+            return Err(HttpError::bad_request(
+                "artifact_flash_address_missing",
+                "image artifacts require flash_address for espflash write-bin",
+            ));
+        };
+        return Ok(EspflashOperation {
+            command: "write-bin",
+            file_path: file.path.clone(),
+            flash_address: Some(flash_address),
+        });
+    }
+    Err(HttpError::bad_request(
+        "artifact_flash_file_missing",
+        "digital flash requires an artifact file with kind=elf or kind=image",
+    ))
+}
+
+fn selected_analog_elf_file(artifact: &FirmwareArtifact) -> Result<String, HttpError> {
+    artifact
+        .files
+        .iter()
+        .find(|file| file.kind == "elf")
+        .map(|file| file.path.clone())
+        .ok_or_else(|| {
+            HttpError::bad_request(
+                "artifact_flash_file_missing",
+                "analog flash requires an artifact file with kind=elf",
+            )
+        })
+}
+
+fn canonicalize_probe_rs_selector(selector: &str) -> String {
+    let trimmed = selector.trim();
+    let mut parts = trimmed.splitn(3, ':');
+    let Some(vid) = parts.next() else {
+        return trimmed.to_string();
+    };
+    let Some(pid_or_legacy) = parts.next() else {
+        return trimmed.to_string();
+    };
+    let Some(serial) = parts.next() else {
+        return trimmed.to_string();
+    };
+    let Some((pid, index)) = pid_or_legacy.split_once('-') else {
+        return trimmed.to_string();
+    };
+
+    if is_hex4(vid)
+        && is_hex4(pid)
+        && !index.is_empty()
+        && !serial.is_empty()
+        && index.chars().all(|c| c.is_ascii_digit())
+    {
+        format!("{vid}:{pid}:{serial}")
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn is_hex4(value: &str) -> bool {
+    value.len() == 4 && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+async fn run_espflash_digital(
+    state: &AppState,
+    device_id: &str,
+    artifact: &FirmwareArtifact,
+) -> Result<(), HttpError> {
+    let (port_path, operation) = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        let target = device.digital_target.as_ref().ok_or_else(|| {
+            HttpError::conflict("target_unavailable", "digital target is not available")
+        })?;
+        let port_path = target.port_path.clone().ok_or_else(|| {
+            HttpError::conflict(
+                "target_port_missing",
+                "digital flash requires an approved ESP32-S3 USB port path",
+            )
+        })?;
+        let operation = selected_espflash_operation(artifact)?;
+        (port_path, operation)
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(
+                device,
+                "info",
+                "flash",
+                &format!("starting espflash for {}", artifact.artifact_id),
+            );
+            push_trace(
+                device,
+                "tx",
+                json!({
+                    "type": "flash",
+                    "tool": "espflash",
+                    "chip": "esp32s3",
+                    "port": port_path,
+                    "artifact_id": artifact.artifact_id,
+                    "command": operation.command,
+                    "file": operation.file_path,
+                    "flash_address": operation.flash_address,
+                }),
+            );
+        }
+    }
+
+    let espflash = env::var(ESPFLASH_ENV).unwrap_or_else(|_| DEFAULT_ESPFLASH.to_string());
+    let mut command = Command::new(&espflash);
+    command
+        .arg(operation.command)
+        .arg("--chip")
+        .arg("esp32s3")
+        .arg("--port")
+        .arg(&port_path)
+        .arg("--non-interactive");
+    if let Some(flash_address) = operation.flash_address {
+        command.arg(format!("0x{flash_address:x}"));
+    }
+    let output = command
+        .arg(&operation.file_path)
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("espflash_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "flash_result",
+                    "tool": espflash,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "flash",
+                if output.status.success() {
+                    "espflash completed"
+                } else {
+                    "espflash failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "espflash_failed",
+            format!(
+                "espflash {} exited with {}",
+                operation.command, output.status
+            ),
+        ));
+    }
+    Ok(())
+}
+
+async fn run_espflash_reset_digital(state: &AppState, device_id: &str) -> Result<(), HttpError> {
+    let port_path = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        device
+            .digital_target
+            .as_ref()
+            .and_then(|target| target.port_path.clone())
+            .ok_or_else(|| {
+                HttpError::conflict(
+                    "target_port_missing",
+                    "digital reset requires an approved ESP32-S3 USB port path",
+                )
+            })?
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(device, "info", "reset", "starting espflash reset");
+            push_trace(
+                device,
+                "tx",
+                json!({"type": "reset", "tool": "espflash", "chip": "esp32s3", "port": port_path}),
+            );
+        }
+    }
+
+    let espflash = env::var(ESPFLASH_ENV).unwrap_or_else(|_| DEFAULT_ESPFLASH.to_string());
+    let output = Command::new(&espflash)
+        .arg("reset")
+        .arg("--chip")
+        .arg("esp32s3")
+        .arg("--port")
+        .arg(&port_path)
+        .arg("--non-interactive")
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("espflash_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "reset_result",
+                    "tool": espflash,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "reset",
+                if output.status.success() {
+                    "espflash reset completed"
+                } else {
+                    "espflash reset failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "espflash_failed",
+            format!("espflash reset exited with {}", output.status),
+        ));
+    }
+    Ok(())
+}
+
+async fn run_probe_rs_analog(
+    state: &AppState,
+    device_id: &str,
+    artifact: &FirmwareArtifact,
+) -> Result<(), HttpError> {
+    let (probe_selector, elf_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        let target = device.analog_target.as_ref().ok_or_else(|| {
+            HttpError::conflict("target_unavailable", "analog target is not available")
+        })?;
+        let probe_selector = target.probe_selector.clone().ok_or_else(|| {
+            HttpError::conflict(
+                "target_probe_missing",
+                "analog flash requires an approved STM32 probe selector",
+            )
+        })?;
+        let elf_path = selected_analog_elf_file(artifact)?;
+        (canonicalize_probe_rs_selector(&probe_selector), elf_path)
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(
+                device,
+                "info",
+                "flash",
+                &format!("starting probe-rs for {}", artifact.artifact_id),
+            );
+            push_trace(
+                device,
+                "tx",
+                json!({
+                    "type": "flash",
+                    "tool": "probe-rs",
+                    "chip": ANALOG_PROBE_CHIP,
+                    "probe": probe_selector,
+                    "artifact_id": artifact.artifact_id,
+                    "command": "download",
+                    "file": elf_path,
+                }),
+            );
+        }
+    }
+
+    let probe_rs = env::var(PROBE_RS_ENV).unwrap_or_else(|_| DEFAULT_PROBE_RS.to_string());
+    let output = Command::new(&probe_rs)
+        .arg("download")
+        .arg(&elf_path)
+        .arg("--chip")
+        .arg(ANALOG_PROBE_CHIP)
+        .arg("--probe")
+        .arg(&probe_selector)
+        .arg("--non-interactive")
+        .arg("--protocol")
+        .arg(ANALOG_PROBE_PROTOCOL)
+        .arg("--speed")
+        .arg(ANALOG_PROBE_SPEED_KHZ.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("probe_rs_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "flash_result",
+                    "tool": probe_rs,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "flash",
+                if output.status.success() {
+                    "probe-rs completed"
+                } else {
+                    "probe-rs failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "probe_rs_failed",
+            format!("probe-rs download exited with {}", output.status),
+        ));
+    }
+    Ok(())
+}
+
+fn tail_text(text: &str, max_chars: usize) -> String {
+    let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
+    chars.reverse();
+    chars.into_iter().collect()
+}
+
+async fn run_agentd(target: TargetKind, action: &str) -> Result<(), HttpError> {
+    let Some(board) = target.board_name() else {
+        return Err(HttpError::bad_request(
+            "target_unsupported",
+            "target cannot be handled by mcu-agentd",
+        ));
+    };
+    let status = Command::new("just")
+        .arg("agentd")
+        .arg(action)
+        .arg(board)
+        .stdin(Stdio::null())
+        .status()
+        .await
+        .map_err(|error| HttpError::retryable("agentd_launch_failed", error.to_string()))?;
+    if !status.success() {
+        return Err(HttpError::retryable(
+            "agentd_failed",
+            format!("mcu-agentd {action} {board} exited with {status}"),
+        ));
+    }
+    Ok(())
+}
+
+fn read_manifest(path: &str) -> Result<Vec<FirmwareArtifact>, HttpError> {
+    let text = fs::read_to_string(path).map_err(|error| {
+        HttpError::retryable("artifact_read_failed", format!("{path}: {error}"))
+    })?;
+    let manifest: FirmwareManifest = serde_json::from_str(&text)
+        .map_err(|error| HttpError::bad_request("artifact_parse_failed", error.to_string()))?;
+    match manifest {
+        FirmwareManifest::Artifact(artifact) => Ok(vec![artifact]),
+        FirmwareManifest::Catalog(catalog) => {
+            if catalog.schema_version != "1" {
+                return Err(HttpError::bad_request(
+                    "artifact_catalog_version_unsupported",
+                    format!(
+                        "unsupported firmware catalog schema_version {}",
+                        catalog.schema_version
+                    ),
+                ));
+            }
+            if catalog.artifacts.is_empty() {
+                return Err(HttpError::bad_request(
+                    "artifact_catalog_empty",
+                    "firmware catalog contains no artifacts",
+                ));
+            }
+            Ok(catalog.artifacts)
+        }
+    }
+}
+
+pub fn verify_artifact_files(artifact: &FirmwareArtifact) -> Result<(), HttpError> {
+    for file in &artifact.files {
+        let bytes = fs::read(&file.path).map_err(|error| {
+            HttpError::retryable("artifact_read_failed", format!("{}: {error}", file.path))
+        })?;
+        let actual = format!("{:x}", Sha256::digest(&bytes));
+        if actual != file.sha256 {
+            return Err(HttpError::conflict(
+                "artifact_sha256_mismatch",
+                format!("{} expected {} got {}", file.path, file.sha256, actual),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn apply_artifact_match(device: &mut DeviceRecord, artifact: Option<&FirmwareArtifact>) {
+    let Some(artifact) = artifact else {
+        device.log_decode = LogDecodeState::default();
+        return;
+    };
+    let firmware = device.identity.as_ref().and_then(|v| v.get("firmware"));
+    let matched = firmware
+        .and_then(|f| f.get("build_id"))
+        .and_then(Value::as_str)
+        == Some(artifact.build_id.as_str())
+        && firmware
+            .and_then(|f| f.get("build_profile"))
+            .and_then(Value::as_str)
+            == Some(artifact.build_profile.as_str())
+        && identity_features_match(firmware, &artifact.features);
+    device.log_decode = if matched {
+        LogDecodeState {
+            status: "verified".to_string(),
+            reason: None,
+            artifact_id: Some(artifact.artifact_id.clone()),
+        }
+    } else {
+        LogDecodeState {
+            status: "unverified".to_string(),
+            reason: Some("device firmware identity does not match selected artifact".to_string()),
+            artifact_id: Some(artifact.artifact_id.clone()),
+        }
+    };
+}
+
+fn identity_features_match(firmware: Option<&Value>, artifact_features: &[String]) -> bool {
+    let Some(features) = firmware
+        .and_then(|f| f.get("features"))
+        .and_then(Value::as_array)
+    else {
+        return artifact_features.is_empty();
+    };
+    let mut identity = features
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let mut artifact = artifact_features.to_vec();
+    identity.sort();
+    artifact.sort();
+    identity == artifact
+}
+
+fn scan_serial_targets(default_usb_port: Option<&str>) -> Vec<TargetCandidate> {
+    let mut out = Vec::new();
+    if let Some(port_path) = default_usb_port {
+        out.push(TargetCandidate {
+            kind: TargetKind::DigitalEsp32s3,
+            display_name: format!("ESP32-S3 USB CDC ({port_path})"),
+            port_path: Some(port_path.to_string()),
+            probe_selector: None,
+            lan_base_url: None,
+            selector_source: Some(DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE.to_string()),
+        });
+        return out;
+    }
+
+    for port in list_digital_usb_port_candidates() {
+        out.push(TargetCandidate {
+            kind: TargetKind::DigitalEsp32s3,
+            display_name: format!("ESP32-S3 USB CDC ({})", port.display_name),
+            port_path: Some(port.port_path),
+            probe_selector: None,
+            lan_base_url: None,
+            selector_source: Some("serialport scan".to_string()),
+        });
+    }
+    out
+}
+
+fn probe_device_serial_session(state: &AppState, device_id: &str) {
+    let port_path = {
+        let guard = state.inner.lock().expect("state lock");
+        guard
+            .devices
+            .get(device_id)
+            .and_then(|device| device.digital_target.as_ref())
+            .and_then(|target| target.port_path.clone())
+    };
+    let Some(port_path) = port_path else {
+        return;
+    };
+    if port_path.starts_with("mock://") {
+        return;
+    }
+    if let Some(default_usb_port) = read_default_digital_usb_port(&state.repo_root).as_deref() {
+        if port_path != default_usb_port {
+            return;
+        }
+    }
+    if !is_default_or_scanned_usb_source(&state, device_id) {
+        return;
+    }
+
+    let result = probe_serial_protocol(&port_path);
+    match result {
+        Ok(probe) => record_serial_protocol_probe(
+            state,
+            device_id,
+            &port_path,
+            "serial protocol probe completed",
+            probe,
+        ),
+        Err(error) => {
+            let mut guard = state.inner.lock().expect("state lock");
+            let Some(device) = guard.devices.get_mut(device_id) else {
+                return;
+            };
+            push_log(
+                device,
+                "warn",
+                "serial",
+                &format!("serial probe failed for {port_path}: {error}"),
+            );
+            push_trace(
+                device,
+                "rx",
+                json!({"type": "serial_probe", "port_path": port_path, "status": "error", "error": error.to_string()}),
+            );
+        }
+    }
+}
+
+fn record_serial_protocol_probe(
+    state: &AppState,
+    device_id: &str,
+    port_path: &str,
+    success_message: &str,
+    probe: SerialProtocolProbe,
+) {
+    let mut guard = state.inner.lock().expect("state lock");
+    let selected_artifact = guard
+        .devices
+        .get(device_id)
+        .and_then(|device| device.selected_artifact_id.as_ref())
+        .and_then(|id| guard.artifacts.get(id))
+        .cloned();
+    let Some(device) = guard.devices.get_mut(device_id) else {
+        return;
+    };
+    match probe {
+        probe if probe.frames.is_empty() && probe.non_protocol_bytes == 0 => {
+            push_log(
+                device,
+                "info",
+                "serial",
+                &format!("serial probe opened {port_path}; no bytes before timeout"),
+            );
+            push_trace(
+                device,
+                "rx",
+                json!({"type": "serial_probe", "port_path": port_path, "status": "timeout", "bytes": 0}),
+            );
+        }
+        probe => {
+            push_log(
+                device,
+                "info",
+                "serial",
+                &format!(
+                    "{success_message}; opened {port_path}; decoded {} JSONL protocol frames ({} non-protocol bytes)",
+                    probe.frames.len(),
+                    probe.non_protocol_bytes
+                ),
+            );
+            if probe.non_protocol_bytes != 0 {
+                push_trace(
+                    device,
+                    "rx",
+                    json!({
+                        "type": "serial_probe",
+                        "port_path": port_path,
+                        "status": "non_protocol_bytes",
+                        "bytes": probe.non_protocol_bytes,
+                        "text": sanitize_trace_text(&probe.non_protocol_text)
+                    }),
+                );
+            }
+            for event in probe.frames {
+                if event.direction == "rx"
+                    && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
+                    && event
+                        .frame
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id == "devd-get-identity")
+                    && let Some(data) = event.frame.get("data").cloned()
+                {
+                    device.identity = Some(data);
+                    apply_artifact_match(device, selected_artifact.as_ref());
+                } else if event.direction == "rx"
+                    && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
+                    && event
+                        .frame
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id == "devd-get-pd" || id == "devd-set-pd-policy")
+                    && let Some(data) = event.frame.get("data").cloned()
+                {
+                    device.usb_pd_cache = Some(data);
+                }
+                push_trace(device, event.direction, event.frame);
+            }
+        }
+    }
+}
+
+struct SerialProtocolFrame {
+    direction: &'static str,
+    frame: Value,
+}
+
+struct SerialProtocolProbe {
+    frames: Vec<SerialProtocolFrame>,
+    non_protocol_bytes: usize,
+    non_protocol_text: String,
+}
+
+fn read_serial_jsonl_until(
+    port: &mut dyn serialport::SerialPort,
+    deadline: Instant,
+    line_buf: &mut Vec<u8>,
+    frames: &mut Vec<SerialProtocolFrame>,
+    non_protocol_bytes: &mut usize,
+    non_protocol_text: &mut String,
+    wanted_request_id: Option<&str>,
+) -> io::Result<bool> {
+    let mut buf = [0_u8; 128];
+    loop {
+        if Instant::now() >= deadline {
+            return Ok(false);
+        }
+        match port.read(&mut buf) {
+            Ok(0) => return Ok(false),
+            Ok(n) => {
+                for &byte in &buf[..n] {
+                    match byte {
+                        b'\n' => {
+                            let line = String::from_utf8_lossy(line_buf).trim().to_string();
+                            line_buf.clear();
+                            if line.is_empty() {
+                                continue;
+                            }
+                            let parsed_frames = extract_serial_json_frames(&line);
+                            if parsed_frames.is_empty() {
+                                *non_protocol_bytes += line.len();
+                                if non_protocol_text.len() < SERIAL_PROBE_MAX_BYTES {
+                                    non_protocol_text.push_str(&line);
+                                    non_protocol_text.push('\n');
+                                }
+                            } else {
+                                for ExtractedSerialFrame {
+                                    frame,
+                                    non_protocol_bytes: skipped,
+                                } in parsed_frames
+                                {
+                                    *non_protocol_bytes += skipped;
+                                    let matched = wanted_request_id.is_some_and(|id| {
+                                        frame
+                                            .get("request_id")
+                                            .and_then(Value::as_str)
+                                            .is_some_and(|frame_id| frame_id == id)
+                                    });
+                                    frames.push(SerialProtocolFrame {
+                                        direction: "rx",
+                                        frame,
+                                    });
+                                    if matched {
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                        }
+                        b'\r' => {}
+                        byte => {
+                            if line_buf.len() < SERIAL_PROBE_MAX_BYTES {
+                                line_buf.push(byte);
+                            } else {
+                                *non_protocol_bytes += line_buf.len();
+                                line_buf.clear();
+                            }
+                        }
+                    }
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+struct ExtractedSerialFrame {
+    frame: Value,
+    non_protocol_bytes: usize,
+}
+
+fn extract_serial_json_frames(line: &str) -> Vec<ExtractedSerialFrame> {
+    if let Ok(frame) = serde_json::from_str::<Value>(line) {
+        return vec![ExtractedSerialFrame {
+            frame,
+            non_protocol_bytes: 0,
+        }];
+    }
+
+    let mut frames = Vec::new();
+    let mut search_offset = 0;
+    while let Some(start_rel) = line[search_offset..].find('{') {
+        let start = search_offset + start_rel;
+        let mut end_search = start + 1;
+        let mut matched = None;
+        while let Some(end_rel) = line[end_search..].find('}') {
+            let end = end_search + end_rel + 1;
+            if let Ok(frame) = serde_json::from_str::<Value>(&line[start..end]) {
+                matched = Some((end, frame));
+            }
+            end_search = end;
+        }
+
+        match matched {
+            Some((end, frame)) => {
+                frames.push(ExtractedSerialFrame {
+                    frame,
+                    non_protocol_bytes: start.saturating_sub(search_offset),
+                });
+                search_offset = end;
+            }
+            None => {
+                search_offset = start + 1;
+            }
+        }
+    }
+
+    if let Some(last) = frames.last_mut() {
+        last.non_protocol_bytes += line.len().saturating_sub(search_offset);
+    }
+    frames
+}
+
+fn write_serial_request(
+    port: &mut dyn serialport::SerialPort,
+    frames: &mut Vec<SerialProtocolFrame>,
+    request_id: &str,
+    op: &str,
+    extra: Option<Value>,
+) -> io::Result<()> {
+    let mut frame = json!({
+        "type": "request",
+        "request_id": request_id,
+        "op": op,
+    });
+    if let Some(extra) = extra {
+        if let (Some(frame), Some(extra)) = (frame.as_object_mut(), extra.as_object()) {
+            for (key, value) in extra {
+                frame.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    let mut line = serde_json::to_vec(&frame)?;
+    line.push(b'\n');
+    port.write_all(&line)?;
+    port.flush()?;
+    frames.push(SerialProtocolFrame {
+        direction: "tx",
+        frame,
+    });
+    Ok(())
+}
+
+fn is_default_or_scanned_usb_source(state: &AppState, device_id: &str) -> bool {
+    let guard = state.inner.lock().expect("state lock");
+    guard
+        .devices
+        .get(device_id)
+        .and_then(|device| device.digital_target.as_ref())
+        .and_then(|target| target.selector_source.as_deref())
+        .is_some_and(|source| {
+            source == DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE || source == "serialport scan"
+        })
+}
+
+fn probe_serial_protocol(port_path: &str) -> io::Result<SerialProtocolProbe> {
+    let mut port = serialport::new(port_path, SERIAL_PROBE_BAUD)
+        .timeout(Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS))
+        .open()?;
+    let mut frames = Vec::new();
+    let mut line_buf = Vec::new();
+    let mut non_protocol_bytes = 0usize;
+    let mut non_protocol_text = String::new();
+
+    let warmup_deadline = Instant::now() + Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS);
+    let _ = read_serial_jsonl_until(
+        port.as_mut(),
+        warmup_deadline,
+        &mut line_buf,
+        &mut frames,
+        &mut non_protocol_bytes,
+        &mut non_protocol_text,
+        None,
+    )?;
+    line_buf.clear();
+
+    for (request_id, op) in [
+        ("devd-get-identity", "get_identity"),
+        ("devd-get-status", "get_status"),
+        ("devd-get-pd", "get_pd"),
+    ] {
+        write_serial_request(port.as_mut(), &mut frames, request_id, op, None)?;
+        line_buf.clear();
+        let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
+        let _ = read_serial_jsonl_until(
+            port.as_mut(),
+            deadline,
+            &mut line_buf,
+            &mut frames,
+            &mut non_protocol_bytes,
+            &mut non_protocol_text,
+            Some(request_id),
+        )?;
+    }
+
+    Ok(SerialProtocolProbe {
+        frames,
+        non_protocol_bytes,
+        non_protocol_text,
+    })
+}
+
+fn serial_jsonl_request(
+    port_path: &str,
+    request_id: &str,
+    op: &str,
+    extra: Option<Value>,
+) -> io::Result<SerialProtocolProbe> {
+    let mut port = serialport::new(port_path, SERIAL_PROBE_BAUD)
+        .timeout(Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS))
+        .open()?;
+    let mut frames = Vec::new();
+    let mut line_buf = Vec::new();
+    let mut non_protocol_bytes = 0usize;
+    let mut non_protocol_text = String::new();
+
+    let warmup_deadline = Instant::now() + Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS);
+    let _ = read_serial_jsonl_until(
+        port.as_mut(),
+        warmup_deadline,
+        &mut line_buf,
+        &mut frames,
+        &mut non_protocol_bytes,
+        &mut non_protocol_text,
+        None,
+    )?;
+    line_buf.clear();
+
+    write_serial_request(port.as_mut(), &mut frames, request_id, op, extra)?;
+    line_buf.clear();
+    let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
+    let _ = read_serial_jsonl_until(
+        port.as_mut(),
+        deadline,
+        &mut line_buf,
+        &mut frames,
+        &mut non_protocol_bytes,
+        &mut non_protocol_text,
+        Some(request_id),
+    )?;
+
+    Ok(SerialProtocolProbe {
+        frames,
+        non_protocol_bytes,
+        non_protocol_text,
+    })
+}
+
+fn serial_response_for_request(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
+    probe
+        .frames
+        .iter()
+        .rev()
+        .find(|event| {
+            event.direction == "rx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id)
+        })
+        .map(|event| event.frame.clone())
+}
+
+fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
+    let text = &probe.non_protocol_text;
+    if request_id.starts_with("devd-output-")
+        && text.contains(request_id)
+        && text.contains("\"ok\":true")
+    {
+        return Some(json!({
+            "type": "response",
+            "request_id": request_id,
+            "ok": true,
+            "recovered_from_text": true
+        }));
+    }
+    None
+}
+
+fn sanitize_trace_text(text: &str) -> String {
+    let mut out = String::new();
+    for ch in text.chars() {
+        if ch.is_control() {
+            use std::fmt::Write as _;
+            let _ = write!(out, "\\x{:02x}", ch as u32);
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+pub fn default_digital_usb_port_path(repo_root: &std::path::Path) -> PathBuf {
+    repo_root.join(DEFAULT_DIGITAL_USB_PORT_FILE)
+}
+
+pub fn default_analog_probe_path(repo_root: &std::path::Path) -> PathBuf {
+    repo_root.join(DEFAULT_ANALOG_PROBE_FILE)
+}
+
+pub fn read_default_digital_usb_port(repo_root: &std::path::Path) -> Option<String> {
+    fs::read_to_string(default_digital_usb_port_path(repo_root))
+        .ok()?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.contains('='))
+        .map(ToOwned::to_owned)
+}
+
+pub fn read_default_analog_probe_selector(repo_root: &std::path::Path) -> Option<String> {
+    fs::read_to_string(default_analog_probe_path(repo_root))
+        .ok()?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.contains('='))
+        .map(ToOwned::to_owned)
+}
+
+pub fn write_default_digital_usb_port(
+    repo_root: &std::path::Path,
+    port_path: &str,
+) -> io::Result<()> {
+    let port_path = port_path.trim();
+    if port_path.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "USB port path must not be empty",
+        ));
+    }
+    fs::write(
+        default_digital_usb_port_path(repo_root),
+        format!("{port_path}\n"),
+    )
+}
+
+pub fn list_digital_usb_port_candidates() -> Vec<DigitalUsbPortCandidate> {
+    let Ok(ports) = serialport::available_ports() else {
+        return Vec::new();
+    };
+    ports
+        .into_iter()
+        .filter(is_espflash_default_port_candidate)
+        .map(|port| DigitalUsbPortCandidate {
+            port_path: port.port_name.clone(),
+            display_name: espflash_port_display_name(&port),
+            recognized: is_espflash_known_port(&port),
+        })
+        .collect()
+}
+
+fn is_espflash_default_port_candidate(port: &serialport::SerialPortInfo) -> bool {
+    #[cfg(target_os = "macos")]
+    if port.port_name.starts_with("/dev/tty.") {
+        return false;
+    }
+
+    matches!(&port.port_type, serialport::SerialPortType::UsbPort(_))
+}
+
+fn is_espflash_known_port(port: &serialport::SerialPortInfo) -> bool {
+    let serialport::SerialPortType::UsbPort(info) = &port.port_type else {
+        return false;
+    };
+    matches!(
+        (info.vid, info.pid),
+        (0x10c4, 0xea60) | (0x1a86, 0x7523) | (0x303a, 0x1001)
+    )
+}
+
+fn espflash_port_display_name(port: &serialport::SerialPortInfo) -> String {
+    match &port.port_type {
+        serialport::SerialPortType::UsbPort(info) => match &info.product {
+            Some(product) => format!("{} - {product}", port.port_name),
+            None => port.port_name.clone(),
+        },
+        _ => port.port_name.clone(),
+    }
+}
+
+fn default_analog_probe_candidate(selector: &str) -> TargetCandidate {
+    TargetCandidate {
+        kind: TargetKind::AnalogStm32g431,
+        display_name: format!("STM32G431 probe ({selector})"),
+        port_path: None,
+        probe_selector: Some(selector.to_string()),
+        lan_base_url: None,
+        selector_source: Some(DEFAULT_ANALOG_PROBE_SELECTOR_SOURCE.to_string()),
+    }
+}
+
+fn stable_candidate_id(candidate: &TargetCandidate) -> String {
+    let mut hash = Sha256::new();
+    hash.update(format!("{:?}", candidate.kind));
+    hash.update(candidate.port_path.as_deref().unwrap_or(""));
+    hash.update(candidate.probe_selector.as_deref().unwrap_or(""));
+    hash.update(candidate.lan_base_url.as_deref().unwrap_or(""));
+    let digest = format!("{:x}", hash.finalize());
+    match candidate.kind {
+        TargetKind::DigitalEsp32s3 => format!("digital-{}", &digest[..12]),
+        TargetKind::AnalogStm32g431 => format!("analog-{}", &digest[..12]),
+        TargetKind::LanHttp => format!("lan-{}", &digest[..12]),
+        TargetKind::Mock => format!("mock-{}", &digest[..12]),
+    }
+}
+
+fn seed_mock_device(state: &AppState) {
+    let mut device = DeviceRecord {
+        id: "mock-loadlynx-devd".to_string(),
+        display_name: "Mock LoadLynx devd device".to_string(),
+        connection: ConnectionState::Disconnected,
+        digital_target: Some(TargetCandidate {
+            kind: TargetKind::DigitalEsp32s3,
+            display_name: "Mock ESP32-S3".to_string(),
+            port_path: Some("mock://esp32s3".to_string()),
+            probe_selector: None,
+            lan_base_url: None,
+            selector_source: Some("mock".to_string()),
+        }),
+        analog_target: Some(TargetCandidate {
+            kind: TargetKind::AnalogStm32g431,
+            display_name: "Mock STM32G431".to_string(),
+            port_path: None,
+            probe_selector: Some("mock-probe".to_string()),
+            lan_base_url: None,
+            selector_source: Some("mock".to_string()),
+        }),
+        lan_endpoint: Some("mock://loadlynx-devd".to_string()),
+        identity: Some(mock_identity(
+            "mock-loadlynx-devd",
+            "Mock LoadLynx devd device",
+        )),
+        usb_pd_cache: None,
+        selected_artifact_id: None,
+        log_decode: LogDecodeState::default(),
+        logs: VecDeque::new(),
+        trace: VecDeque::new(),
+    };
+    push_log(&mut device, "info", "devd", "mock device seeded");
+    state
+        .inner
+        .lock()
+        .expect("state lock")
+        .devices
+        .insert(device.id.clone(), device);
+}
+
+fn mock_identity(id: &str, name: &str) -> Value {
+    json!({
+        "device_id": id,
+        "hostname": "loadlynx-devd-mock.local",
+        "short_id": "devd01",
+        "digital_fw_version": "digital 0.1.0 (mock)",
+        "analog_fw_version": "analog 0.1.0 (mock)",
+        "protocol_version": 1,
+        "uptime_ms": 0,
+        "network": {"ip": "127.0.0.1", "mac": "00:00:00:00:00:00", "hostname": "loadlynx-devd-mock.local"},
+        "firmware": {
+            "name": name,
+            "build_id": "mock-build",
+            "build_profile": "debug",
+            "features": ["net_http", "usb_cdc_bridge"],
+            "protocol": "loadlynx.cdc.v1",
+            "defmt": {"enabled": true, "encoding": "defmt"}
+        },
+        "capabilities": {
+            "cc_supported": true,
+            "cv_supported": true,
+            "cp_supported": true,
+            "presets_supported": true,
+            "preset_count": 5,
+            "api_version": "2.0.0",
+            "devd": true,
+            "usb_cdc_bridge": true,
+            "mdns": true,
+            "dns_sd": true
+        }
+    })
+}
+
+fn push_log(device: &mut DeviceRecord, level: &str, target: &str, message: &str) {
+    push_bounded(
+        &mut device.logs,
+        SessionLog {
+            id: next_id(),
+            timestamp: now(),
+            level: level.to_string(),
+            target: target.to_string(),
+            message: message.to_string(),
+        },
+        LOG_LIMIT,
+    );
+}
+
+fn push_trace(device: &mut DeviceRecord, direction: &str, payload: Value) {
+    let redacted = redact_sensitive_frame(&payload);
+    push_bounded(
+        &mut device.trace,
+        SessionTrace {
+            id: next_id(),
+            timestamp: now(),
+            direction: direction.to_string(),
+            summary: summarize_frame(&redacted),
+            payload: redacted,
+        },
+        TRACE_LIMIT,
+    );
+}
+
+pub fn redact_sensitive_frame(frame: &Value) -> Value {
+    let mut redacted = frame.clone();
+    if redacted.get("type").and_then(Value::as_str) == Some("wifi_config") {
+        if let Some(obj) = redacted.as_object_mut() {
+            if obj.contains_key("psk") {
+                obj.insert("psk".to_string(), Value::String("<redacted>".to_string()));
+            }
+        }
+    }
+    redacted
+}
+
+fn summarize_frame(frame: &Value) -> String {
+    frame
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or("frame")
+        .to_string()
+}
+
+fn emit(state: &AppState, device_id: Option<String>, kind: &str, message: &str, payload: Value) {
+    let event = DevdEvent {
+        id: next_id(),
+        timestamp: now(),
+        device_id,
+        kind: kind.to_string(),
+        message: message.to_string(),
+        payload,
+    };
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        push_bounded(&mut guard.events, event.clone(), EVENT_LIMIT);
+    }
+    let _ = state.events.send(event);
+}
+
+fn push_bounded<T>(queue: &mut VecDeque<T>, item: T, limit: usize) {
+    queue.push_back(item);
+    while queue.len() > limit {
+        queue.pop_front();
+    }
+}
+
+fn tail<T: Clone>(queue: &VecDeque<T>, limit: usize) -> Vec<T> {
+    let len = queue.len();
+    queue
+        .iter()
+        .skip(len.saturating_sub(limit))
+        .cloned()
+        .collect()
+}
+
+fn next_id() -> String {
+    format!(
+        "devd-{}",
+        Utc::now().timestamp_nanos_opt().unwrap_or_default()
+    )
+}
+
+fn now() -> String {
+    Utc::now().to_rfc3339()
+}
+
+impl HttpError {
+    fn bad_request(code: &str, message: impl Into<String>) -> Self {
+        Self(error(code, message, false, None), StatusCode::BAD_REQUEST)
+    }
+
+    fn conflict(code: &str, message: impl Into<String>) -> Self {
+        Self(error(code, message, false, None), StatusCode::CONFLICT)
+    }
+
+    fn retryable(code: &str, message: impl Into<String>) -> Self {
+        Self(
+            error(code, message, true, None),
+            StatusCode::SERVICE_UNAVAILABLE,
+        )
+    }
+
+    fn not_found(code: &str, message: impl Into<String>) -> Self {
+        Self(error(code, message, false, None), StatusCode::NOT_FOUND)
+    }
+}
+
+fn error(
+    code: &str,
+    message: impl Into<String>,
+    retryable: bool,
+    details: Option<Value>,
+) -> ApiError {
+    ApiError {
+        code: code.to_string(),
+        message: message.into(),
+        retryable,
+        details,
+    }
+}
+
+impl IntoResponse for HttpError {
+    fn into_response(self) -> Response {
+        let body = Json(ApiErrorEnvelope { error: self.0 });
+        (self.1, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serialport::{SerialPortInfo, SerialPortType, UsbPortInfo};
+
+    fn test_artifact(artifact_id: &str, target: TargetKind) -> FirmwareArtifact {
+        FirmwareArtifact {
+            artifact_id: artifact_id.into(),
+            name: artifact_id.into(),
+            target,
+            package_version: "0.1.0".into(),
+            git_sha: "abc".into(),
+            build_id: "b".into(),
+            build_profile: "release".into(),
+            features: vec![],
+            protocol: "loadlynx.cdc.v1".into(),
+            defmt: DefmtMetadata {
+                enabled: true,
+                encoding: "defmt".into(),
+                elf_sha256: None,
+                table_sha256: None,
+            },
+            files: vec![],
+        }
+    }
+
+    #[test]
+    fn stable_candidate_id_is_deterministic() {
+        let candidate = TargetCandidate {
+            kind: TargetKind::DigitalEsp32s3,
+            display_name: "A".into(),
+            port_path: Some("/dev/cu.usbmodem1".into()),
+            probe_selector: None,
+            lan_base_url: None,
+            selector_source: None,
+        };
+        assert_eq!(
+            stable_candidate_id(&candidate),
+            stable_candidate_id(&candidate)
+        );
+    }
+
+    #[test]
+    fn espflash_port_helpers_match_default_candidates() {
+        assert!(is_espflash_default_port_candidate(&SerialPortInfo {
+            port_name: "/dev/cu.usbmodem101".into(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid: 0x303a,
+                pid: 0x1001,
+                serial_number: Some("abc".into()),
+                manufacturer: None,
+                product: Some("USB JTAG/serial debug unit".into()),
+            }),
+        }));
+        assert!(is_espflash_known_port(&SerialPortInfo {
+            port_name: "/dev/cu.usbmodem101".into(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid: 0x303a,
+                pid: 0x1001,
+                serial_number: Some("abc".into()),
+                manufacturer: None,
+                product: None,
+            }),
+        }));
+        assert!(!is_espflash_default_port_candidate(&SerialPortInfo {
+            port_name: "/dev/tty.usbmodem101".into(),
+            port_type: SerialPortType::UsbPort(UsbPortInfo {
+                vid: 0x303a,
+                pid: 0x1001,
+                serial_number: Some("abc".into()),
+                manufacturer: None,
+                product: None,
+            }),
+        }));
+        assert!(!is_espflash_default_port_candidate(&SerialPortInfo {
+            port_name: "/dev/cu.usbmodem101".into(),
+            port_type: SerialPortType::Unknown,
+        }));
+        assert!(
+            espflash_port_display_name(&SerialPortInfo {
+                port_name: "/dev/cu.usbmodem101".into(),
+                port_type: SerialPortType::UsbPort(UsbPortInfo {
+                    vid: 0x303a,
+                    pid: 0x1001,
+                    serial_number: Some("abc".into()),
+                    manufacturer: None,
+                    product: Some("USB JTAG/serial debug unit".into()),
+                }),
+            })
+            .contains("USB JTAG/serial debug unit")
+        );
+        assert!(!is_espflash_known_port(&SerialPortInfo {
+            port_name: "/dev/cu.usbmodem101".into(),
+            port_type: SerialPortType::Unknown,
+        }));
+    }
+
+    #[test]
+    fn loopback_dev_origin_allows_only_local_http_ports() {
+        assert!(is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://localhost:47821"
+        )));
+        assert!(is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://127.0.0.1:47821"
+        )));
+        assert!(is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://[::1]:47821"
+        )));
+        assert!(!is_loopback_dev_origin(&HeaderValue::from_static(
+            "https://127.0.0.1:47821"
+        )));
+        assert!(!is_loopback_dev_origin(&HeaderValue::from_static(
+            "http://example.com:47821"
+        )));
+    }
+
+    #[test]
+    fn redacts_wifi_psk() {
+        let frame = json!({"type": "wifi_config", "op": "set", "ssid": "lab", "psk": "secret"});
+        let redacted = redact_sensitive_frame(&frame);
+        assert_eq!(redacted["psk"], "<redacted>");
+        assert_eq!(redacted["ssid"], "lab");
+    }
+
+    #[test]
+    fn artifact_hash_verification_detects_mismatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let file_path = dir.path().join("fw.bin");
+        fs::write(&file_path, b"abc").unwrap();
+        let mut artifact = test_artifact("a", TargetKind::DigitalEsp32s3);
+        artifact.build_profile = "debug".into();
+        artifact.protocol = "p".into();
+        artifact.files = vec![ArtifactFile {
+            kind: "image".into(),
+            path: file_path.display().to_string(),
+            sha256: "bad".into(),
+            size: 3,
+            flash_address: None,
+        }];
+        assert!(verify_artifact_files(&artifact).is_err());
+    }
+
+    #[test]
+    fn espflash_operation_prefers_elf_flash() {
+        let mut artifact = test_artifact("a", TargetKind::DigitalEsp32s3);
+        artifact.files = vec![
+            ArtifactFile {
+                kind: "image".into(),
+                path: "firmware.bin".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: Some(0x10000),
+            },
+            ArtifactFile {
+                kind: "elf".into(),
+                path: "digital".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: None,
+            },
+        ];
+
+        let op = selected_espflash_operation(&artifact).unwrap();
+        assert_eq!(op.command, "flash");
+        assert_eq!(op.file_path, "digital");
+        assert_eq!(op.flash_address, None);
+    }
+
+    #[test]
+    fn espflash_image_operation_requires_flash_address() {
+        let mut artifact = test_artifact("a", TargetKind::DigitalEsp32s3);
+        artifact.files = vec![ArtifactFile {
+            kind: "image".into(),
+            path: "firmware.bin".into(),
+            sha256: "unused".into(),
+            size: 1,
+            flash_address: None,
+        }];
+
+        let err = selected_espflash_operation(&artifact).unwrap_err();
+        assert_eq!(err.0.code, "artifact_flash_address_missing");
+
+        artifact.files[0].flash_address = Some(0x10000);
+        let op = selected_espflash_operation(&artifact).unwrap();
+        assert_eq!(op.command, "write-bin");
+        assert_eq!(op.file_path, "firmware.bin");
+        assert_eq!(op.flash_address, Some(0x10000));
+    }
+
+    #[test]
+    fn analog_flash_uses_selected_elf_file_only() {
+        let mut artifact = test_artifact("analog", TargetKind::AnalogStm32g431);
+        artifact.files = vec![
+            ArtifactFile {
+                kind: "image".into(),
+                path: "analog.bin".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: Some(0x08000000),
+            },
+            ArtifactFile {
+                kind: "elf".into(),
+                path: "analog.elf".into(),
+                sha256: "unused".into(),
+                size: 1,
+                flash_address: None,
+            },
+        ];
+
+        assert_eq!(selected_analog_elf_file(&artifact).unwrap(), "analog.elf");
+
+        artifact.files.retain(|file| file.kind != "elf");
+        let err = selected_analog_elf_file(&artifact).unwrap_err();
+        assert_eq!(err.0.code, "artifact_flash_file_missing");
+    }
+
+    #[test]
+    fn probe_rs_selector_canonicalizes_legacy_index() {
+        assert_eq!(
+            canonicalize_probe_rs_selector("0483:3748-2:SERIAL"),
+            "0483:3748:SERIAL"
+        );
+        assert_eq!(
+            canonicalize_probe_rs_selector("0483:3748:SERIAL"),
+            "0483:3748:SERIAL"
+        );
+    }
+
+    #[test]
+    fn manifest_reader_accepts_single_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("artifact.json");
+        let artifact = test_artifact("digital", TargetKind::DigitalEsp32s3);
+        fs::write(&path, serde_json::to_string(&artifact).unwrap()).unwrap();
+
+        let artifacts = read_manifest(path.to_str().unwrap()).unwrap();
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].artifact_id, "digital");
+    }
+
+    #[test]
+    fn manifest_reader_accepts_firmware_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let catalog = FirmwareCatalog {
+            schema_version: "1".into(),
+            artifacts: vec![
+                test_artifact("digital", TargetKind::DigitalEsp32s3),
+                test_artifact("analog", TargetKind::AnalogStm32g431),
+            ],
+        };
+        fs::write(&path, serde_json::to_string(&catalog).unwrap()).unwrap();
+
+        let artifacts = read_manifest(path.to_str().unwrap()).unwrap();
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].artifact_id, "digital");
+        assert_eq!(artifacts[1].artifact_id, "analog");
+    }
+
+    #[tokio::test]
+    async fn select_artifact_requires_id_for_multi_artifact_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let catalog = FirmwareCatalog {
+            schema_version: "1".into(),
+            artifacts: vec![
+                test_artifact("digital", TargetKind::DigitalEsp32s3),
+                test_artifact("analog", TargetKind::AnalogStm32g431),
+            ],
+        };
+        fs::write(&path, serde_json::to_string(&catalog).unwrap()).unwrap();
+
+        let err = select_artifact(
+            State(AppState::new(PathBuf::from("."))),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(ArtifactSelectRequest {
+                manifest_path: Some(path.display().to_string()),
+                artifact_id: None,
+                artifact: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "artifact_id_required");
+    }
+
+    #[tokio::test]
+    async fn select_artifact_can_pick_from_firmware_catalog() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("catalog.json");
+        let catalog = FirmwareCatalog {
+            schema_version: "1".into(),
+            artifacts: vec![
+                test_artifact("digital", TargetKind::DigitalEsp32s3),
+                test_artifact("analog", TargetKind::AnalogStm32g431),
+            ],
+        };
+        fs::write(&path, serde_json::to_string(&catalog).unwrap()).unwrap();
+
+        let state = AppState::new(PathBuf::from("."));
+        let Json(body) = select_artifact(
+            State(state.clone()),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(ArtifactSelectRequest {
+                manifest_path: Some(path.display().to_string()),
+                artifact_id: Some("analog".to_string()),
+                artifact: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(body["artifact"]["artifact_id"], "analog");
+        let guard = state.inner.lock().expect("state lock");
+        assert!(guard.artifacts.contains_key("digital"));
+        assert!(guard.artifacts.contains_key("analog"));
+        assert_eq!(
+            guard
+                .devices
+                .get("mock-loadlynx-devd")
+                .unwrap()
+                .selected_artifact_id
+                .as_deref(),
+            Some("analog")
+        );
+    }
+
+    #[test]
+    fn artifact_match_requires_build_profile_and_features() {
+        let mut device = DeviceRecord {
+            id: "d".into(),
+            display_name: "d".into(),
+            connection: ConnectionState::Disconnected,
+            digital_target: None,
+            analog_target: None,
+            lan_endpoint: None,
+            identity: Some(
+                json!({"firmware": {"build_id": "b", "build_profile": "release", "features": ["net_http"]}}),
+            ),
+            usb_pd_cache: None,
+            selected_artifact_id: None,
+            log_decode: LogDecodeState::default(),
+            logs: VecDeque::new(),
+            trace: VecDeque::new(),
+        };
+        let artifact = FirmwareArtifact {
+            artifact_id: "a".into(),
+            name: "artifact".into(),
+            target: TargetKind::DigitalEsp32s3,
+            package_version: "0.1.0".into(),
+            git_sha: "abc".into(),
+            build_id: "b".into(),
+            build_profile: "release".into(),
+            features: vec!["net_http".into()],
+            protocol: "p".into(),
+            defmt: DefmtMetadata {
+                enabled: true,
+                encoding: "defmt".into(),
+                elf_sha256: None,
+                table_sha256: None,
+            },
+            files: vec![],
+        };
+        apply_artifact_match(&mut device, Some(&artifact));
+        assert_eq!(device.log_decode.status, "verified");
+    }
+
+    #[test]
+    fn default_digital_usb_port_creates_single_digital_candidate() {
+        let candidates = scan_serial_targets(Some("/dev/cu.usbmodem212101"));
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(
+            candidates[0].port_path.as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
+        assert_eq!(candidates[0].kind, TargetKind::DigitalEsp32s3);
+        assert_eq!(
+            candidates[0].selector_source.as_deref(),
+            Some(DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE)
+        );
+    }
+
+    #[test]
+    fn default_digital_usb_port_memory_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        write_default_digital_usb_port(dir.path(), " /dev/cu.usbmodem212101 ").unwrap();
+        assert_eq!(
+            read_default_digital_usb_port(dir.path()).as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
+    }
+
+    #[test]
+    fn default_digital_usb_port_reads_mcu_agentd_selector_record() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            default_digital_usb_port_path(dir.path()),
+            "/dev/cu.usbmodem212101\nmac=b8:f8:62:d6:86:38\n",
+        )
+        .unwrap();
+        assert_eq!(
+            read_default_digital_usb_port(dir.path()).as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
+    }
+
+    #[test]
+    fn default_analog_probe_selector_reads_plain_selector_record() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            default_analog_probe_path(dir.path()),
+            "0483:3748:ABCDEF\nserial=ignored\n",
+        )
+        .unwrap();
+
+        assert_eq!(
+            read_default_analog_probe_selector(dir.path()).as_deref(),
+            Some("0483:3748:ABCDEF")
+        );
+    }
+
+    #[tokio::test]
+    async fn scan_attaches_default_analog_probe_to_default_digital_device() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            default_digital_usb_port_path(dir.path()),
+            "/dev/cu.usbmodem212101\n",
+        )
+        .unwrap();
+        fs::write(default_analog_probe_path(dir.path()), "0483:3748:ABCDEF\n").unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+
+        let _ = scan_devices(State(state.clone())).await.unwrap();
+
+        let guard = state.inner.lock().expect("state lock");
+        let digital = guard
+            .devices
+            .values()
+            .find(|device| {
+                device
+                    .digital_target
+                    .as_ref()
+                    .and_then(|target| target.selector_source.as_deref())
+                    == Some(DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE)
+            })
+            .expect("digital device");
+        assert_eq!(
+            digital
+                .digital_target
+                .as_ref()
+                .and_then(|target| target.port_path.as_deref()),
+            Some("/dev/cu.usbmodem212101")
+        );
+        assert_eq!(
+            digital
+                .analog_target
+                .as_ref()
+                .and_then(|target| target.probe_selector.as_deref()),
+            Some("0483:3748:ABCDEF")
+        );
+        assert_eq!(
+            digital
+                .analog_target
+                .as_ref()
+                .and_then(|target| target.selector_source.as_deref()),
+            Some(DEFAULT_ANALOG_PROBE_SELECTOR_SOURCE)
+        );
+    }
+
+    #[test]
+    fn serial_json_extractor_recovers_frame_after_log_noise() {
+        let frames = extract_serial_json_frames(
+            "\u{fffd}\0binary log {\"type\":\"response\",\"request_id\":\"devd-get-identity\",\"ok\":true}\n",
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].frame.get("request_id").and_then(Value::as_str),
+            Some("devd-get-identity")
+        );
+        assert!(frames[0].non_protocol_bytes > 0);
+    }
+
+    #[test]
+    fn serial_json_extractor_keeps_clean_frame_clean() {
+        let frames = extract_serial_json_frames(
+            "{\"type\":\"response\",\"request_id\":\"devd-output-disable\",\"ok\":true}",
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].frame.get("request_id").and_then(Value::as_str),
+            Some("devd-output-disable")
+        );
+        assert_eq!(frames[0].non_protocol_bytes, 0);
+    }
+
+    #[test]
+    fn serial_json_extractor_prefers_outer_response_frame() {
+        let frames = extract_serial_json_frames(
+            "noise {\"type\":\"response\",\"request_id\":\"devd-get-status\",\"ok\":true,\"data\":{\"status\":{\"enable\":false}}}",
+        );
+
+        assert_eq!(frames.len(), 1);
+        assert_eq!(
+            frames[0].frame.get("request_id").and_then(Value::as_str),
+            Some("devd-get-status")
+        );
+        assert!(frames[0].frame.get("data").is_some());
+    }
+
+    #[test]
+    fn serial_response_inference_recovers_ok_fragment() {
+        let probe = SerialProtocolProbe {
+            frames: Vec::new(),
+            non_protocol_bytes: 80,
+            non_protocol_text:
+                "noise {\"type\":\"response\",\"request_id\":\"devd-output-disable\",\"ok\":true,"
+                    .to_string(),
+        };
+
+        let response = infer_serial_response_from_text(&probe, "devd-output-disable").unwrap();
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            response.get("recovered_from_text").and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn status_response_extractor_requires_real_status_payload() {
+        let data = status_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-status",
+            "ok": true,
+            "data": {
+                "status": {
+                    "enable": true,
+                    "v_local_mv": 5010,
+                    "i_local_ma": 120,
+                    "fault_flags": 0
+                }
+            }
+        })))
+        .unwrap();
+
+        assert_eq!(data["status"]["enable"], true);
+        assert_eq!(data["status"]["v_local_mv"], 5010);
+
+        let legacy = status_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-status",
+            "ok": true,
+            "status": {
+                "enable": false,
+                "v_local_mv": 9049,
+                "i_local_ma": 9,
+                "fault_flags": 0
+            },
+            "control": {
+                "mode": "cp",
+                "output_enabled": false
+            },
+            "dat_state": "ready"
+        })))
+        .unwrap();
+
+        assert_eq!(legacy["status"]["enable"], false);
+        assert_eq!(legacy["control"]["mode"], "cp");
+        assert_eq!(legacy["dat_state"], "ready");
+
+        let err = status_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-status",
+            "ok": true,
+            "data": {}
+        })))
+        .unwrap_err();
+        assert_eq!(err.0.code, "serial_response_invalid");
+    }
+
+    #[test]
+    fn identity_response_extractor_requires_real_identity_payload() {
+        let identity = identity_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-identity",
+            "ok": true,
+            "data": {
+                "device_id": "digital-esp32s3",
+                "target": "digital",
+                "mcu": "esp32s3",
+                "protocol": "loadlynx.cdc.v1"
+            }
+        })))
+        .unwrap();
+
+        assert_eq!(identity["device_id"], "digital-esp32s3");
+        assert_eq!(identity["target"], "digital");
+
+        let err = identity_data_from_serial_response(Some(json!({
+            "type": "response",
+            "request_id": "devd-get-identity",
+            "ok": true,
+            "data": {}
+        })))
+        .unwrap_err();
+        assert_eq!(err.0.code, "serial_response_invalid");
+    }
+
+    #[test]
+    fn serial_response_data_rejects_protocol_errors() {
+        let err = serial_response_data(
+            json!({
+                "type": "error",
+                "request_id": "devd-output-enable",
+                "ok": false,
+                "error": {
+                    "code": "LINK_DOWN",
+                    "message": "UART link is down"
+                }
+            }),
+            "USB CC control",
+        )
+        .unwrap_err();
+
+        assert_eq!(err.1, StatusCode::CONFLICT);
+        assert_eq!(err.0.code, "LINK_DOWN");
+        assert_eq!(err.0.message, "UART link is down");
+    }
+
+    #[test]
+    fn pd_post_requires_fresh_protocol_response() {
+        let err = pd_post_response_data(None).unwrap_err();
+        assert_eq!(err.0.code, "serial_response_missing");
+    }
+
+    #[test]
+    fn trace_text_sanitizer_removes_control_characters() {
+        let sanitized = sanitize_trace_text("a\0b\u{1b}c\n");
+        assert_eq!(sanitized, "a\\x00b\\x1bc\\x0a");
+        assert!(!sanitized.chars().any(char::is_control));
+    }
+
+    #[tokio::test]
+    async fn multiple_active_leases_require_explicit_selection() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let mut second = guard.devices.get("mock-loadlynx-devd").unwrap().clone();
+            second.id = "mock-loadlynx-devd-2".to_string();
+            guard.devices.insert(second.id.clone(), second);
+            guard.leases.insert(
+                "lease-1".to_string(),
+                WebLease {
+                    lease_id: "lease-1".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: None,
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+            guard.leases.insert(
+                "lease-2".to_string(),
+                WebLease {
+                    lease_id: "lease-2".to_string(),
+                    device_id: "mock-loadlynx-devd-2".to_string(),
+                    identity_device_id: None,
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+
+            let err = select_compat_device(&guard, None, None).unwrap_err();
+            assert_eq!(err.0.code, "device_selection_required");
+        }
+    }
+
+    #[tokio::test]
+    async fn expired_lease_is_released_and_disconnects_device() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let device = guard.devices.get_mut("mock-loadlynx-devd").unwrap();
+            device.connection = ConnectionState::Connected;
+            guard.leases.insert(
+                "expired".to_string(),
+                WebLease {
+                    lease_id: "expired".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: None,
+                    expires_at: Instant::now() - Duration::from_secs(1),
+                },
+            );
+        }
+
+        cleanup_expired_leases(&state);
+        let guard = state.inner.lock().expect("state lock");
+        assert!(!guard.leases.contains_key("expired"));
+        assert_eq!(
+            guard.devices.get("mock-loadlynx-devd").unwrap().connection,
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_operation_rejects_artifact_target_mismatch() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert(
+                "digital".to_string(),
+                test_artifact("digital", TargetKind::DigitalEsp32s3),
+            );
+        }
+
+        let err = resolve_operation(
+            &state,
+            "mock-loadlynx-devd",
+            Some(TargetKind::AnalogStm32g431),
+            Some("digital".to_string()),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(err.0.code, "artifact_target_mismatch");
+    }
+
+    #[tokio::test]
+    async fn real_flash_requires_matching_lease() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert(
+                "digital".to_string(),
+                test_artifact("digital", TargetKind::DigitalEsp32s3),
+            );
+        }
+
+        let err = flash_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(FlashRequest {
+                target: Some(TargetKind::DigitalEsp32s3),
+                artifact_id: Some("digital".to_string()),
+                dry_run: Some(false),
+                lease_id: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "web_session_required");
+    }
+
+    #[tokio::test]
+    async fn real_operation_requires_cached_selector_source() {
+        let state = AppState::new(PathBuf::from("."));
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard.devices.get("mock-loadlynx-devd").unwrap();
+        let err = ensure_real_operation_uses_cached_target(device, &TargetKind::DigitalEsp32s3)
+            .unwrap_err();
+        assert_eq!(err.0.code, "target_selector_not_cached");
+    }
+
+    #[tokio::test]
+    async fn serial_probe_persists_identity_and_refreshes_artifact_match() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert(
+                "digital".to_string(),
+                FirmwareArtifact {
+                    artifact_id: "digital".into(),
+                    name: "digital".into(),
+                    target: TargetKind::DigitalEsp32s3,
+                    package_version: "0.1.0".into(),
+                    git_sha: "abc".into(),
+                    build_id: "digital-build".into(),
+                    build_profile: "release".into(),
+                    features: vec!["net_http".into(), "usb_cdc_jsonl".into()],
+                    protocol: "loadlynx.cdc.v1".into(),
+                    defmt: DefmtMetadata {
+                        enabled: true,
+                        encoding: "defmt-espflash".into(),
+                        elf_sha256: None,
+                        table_sha256: None,
+                    },
+                    files: vec![],
+                },
+            );
+            let device = guard.devices.get_mut("mock-loadlynx-devd").unwrap();
+            device.selected_artifact_id = Some("digital".to_string());
+        }
+
+        record_serial_protocol_probe(
+            &state,
+            "mock-loadlynx-devd",
+            "/dev/cu.usbmodem212101",
+            "serial protocol probe completed",
+            SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "type": "response",
+                        "request_id": "devd-get-identity",
+                        "ok": true,
+                        "data": {
+                            "device_id": "digital-esp32s3",
+                            "firmware": {
+                                "build_id": "digital-build",
+                                "build_profile": "release",
+                                "features": ["net_http", "usb_cdc_jsonl"]
+                            }
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            },
+        );
+
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard.devices.get("mock-loadlynx-devd").unwrap();
+        assert_eq!(
+            device
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.get("device_id"))
+                .and_then(Value::as_str),
+            Some("digital-esp32s3")
+        );
+        assert_eq!(device.log_decode.status, "verified");
+    }
+}

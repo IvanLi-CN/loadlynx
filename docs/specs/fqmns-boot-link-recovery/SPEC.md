@@ -2,16 +2,17 @@
 
 ## 状态
 
-- Status: 已完成（HIL selector 缺失，软件验证完成）
+- Status: 已完成（冷上电测量可信性补强）
 - Created: 2026-04-25
-- Last: 2026-04-25
-- Notes: 软件实现与构建验证完成；HIL 因当前 worktree 缺失 analog/digital selector 阻断。
+- Last: 2026-05-01
+- Notes: 冷启动 recovery 进一步覆盖“有帧但测量仍为 0”的假正常状态。
 
 ## 背景 / 问题陈述
 
 - 数字板 Dashboard 的生产初始状态复用了 `UiSnapshot::demo()`，当 UART 从未收到模拟板有效帧时，屏幕仍显示一组看似真实的 demo 电压/电流/功率。
 - 整机上电偶发出现 Dashboard 数值冻结，但 FPS 仍波动；reset 任意一个 MCU 后通常 1–2 秒恢复，说明 UI 渲染任务仍活着，风险集中在 MCU↔MCU 链路冷启动/握手恢复。
 - 现有数字侧恢复逻辑主要覆盖 `LINK_UP=true` 之后的 `CalMissing`，对 `LAST_GOOD_FRAME_MS==0` 的“从未收到帧”冷启动窗口缺少限频重握手。
+- 仅收到 `HELLO`、ACK、没有后续 `FastStatus`，或只收到全零 `FastStatus`，都不足以证明测量链路可用；冷上电后存在“链路表面正常但实际电压读数长期为 0”的不可用状态。
 
 ## 目标 / 非目标
 
@@ -21,6 +22,7 @@
 - 数字板在冷启动从未收到 `HELLO` / `FAST_STATUS`，或链路持续 down 时，自动限频重发完整启动控制握手。
 - SoftReset ACK 等待必须绑定本次握手，不能被旧 ACK 状态误判为成功。
 - reset 任意 MCU 后，链路可在数秒内自动恢复，无需主人手动再 reset 另一侧。
+- 冷上电后必须先看到可信测量信号，才把 `0V/0A/0W` 当作真实读数；全零测量持续存在时继续触发限频恢复。
 
 ### Non-goals
 
@@ -47,6 +49,8 @@
 
 - `TelemetryModel::new()` 不能在生产路径显示 demo 数值；无帧状态必须表现为 `AnalogState::Offline`、`link_up=false`、`hello_seen=false`。
 - 数字板 SetMode TX 任务必须覆盖 `LAST_GOOD_FRAME_MS==0` 的冷启动无帧恢复路径。
+- 数字板 SetMode TX 任务必须覆盖“已有有效帧但尚未见过非零可信测量”的冷启动测量不可用路径。
+- UI 必须把测量尚未可信的状态显示为 unavailable，而不是把全零字段展示成真实读数。
 - 恢复握手必须包含 SoftReset、CalWrite 全量曲线、SetEnable(true)，并强制后续发送当前 SetMode snapshot。
 - SoftReset ACK 判定必须使用本次握手的 seq/ack baseline，避免陈旧 boolean 让新握手直接短路。
 - 恢复重试必须限频，避免在模拟板未供电或线缆断开时刷爆 UART。
@@ -68,6 +72,10 @@
   - `stats_task` 将 `LINK_UP=false`；
   - SetMode TX watchdog 在无 pending 控制 ACK 时限频重发启动握手；
   - 恢复后强制 SetMode snapshot，避免模拟板 reset 后停在默认 active control。
+- 链路表面建立但测量缺失或全零：
+  - `HELLO` 重新开始一轮测量可信性判定；
+  - 若 `FastStatus` 未到达，或在 boot grace 后仍没有非零电压、电流或功率信号，Dashboard 显示 `MEAS` 与 unavailable 数值；
+  - SetMode TX watchdog 以 `no-fast-status` 或 `zero-measurement` 原因限频重发完整恢复握手，直到收到可信测量信号。
 - SoftReset ACK：
   - 每次 handshake 记录发送前 ACK total 与本次 seq；
   - 只有 ACK total 增加且 ACK seq 匹配，才视为本次 SoftReset 成功。
@@ -84,6 +92,7 @@
 - Given 整机同时上电，When 无人工 reset，Then 数字板数秒内能收到 `HELLO` 或 `FAST_STATUS`，`fast_status ok` 递增，Dashboard 数值开始刷新。
 - Given reset analog 且 digital 不 reset，When 模拟板重新启动，Then digital 自动重发校准与 SetMode snapshot，链路恢复。
 - Given reset digital 且 analog 不 reset，When 数字板重新启动，Then SoftReset ACK 不被旧状态短路，后续启动握手真实发出。
+- Given 冷上电后已收到 `HELLO`/ACK 但没有后续 `FastStatus`，或 `FastStatus` 电压、电流、功率长期为 0，When 超过测量 grace，Then UI 不把 0 当真实读数，且 recovery 以 `no-fast-status` / `zero-measurement` 原因继续重同步。
 - Given 模拟板断开，When watchdog 运行，Then 日志限频且 UI 仍刷新 FPS/状态，不发生 panic 或长时间阻塞。
 
 ## 实现前置条件（Definition of Ready / Preconditions）
@@ -108,6 +117,7 @@
 - [x] M2: SoftReset ACK 改为本次 seq/baseline 绑定。
 - [x] M3: SetMode TX 增加冷启动/持续 down 的限频恢复握手。
 - [x] M4: 构建与可用 HIL 验证完成，文档同步（HIL selector 缺失，记录为阻断证据）。
+- [x] M5: 增加测量可信性判定，覆盖有帧但全零测量的冷上电假正常状态。
 
 ## 风险 / 开放问题 / 假设
 

@@ -2,6 +2,12 @@ export interface StoredDevice {
   id: string;
   name: string;
   baseUrl: string;
+  connectionMarks?: Array<"lan" | "usb" | "digital_flash" | "analog_flash">;
+  devd?: {
+    baseUrl: string;
+    deviceId: string;
+    leaseId?: string;
+  };
 }
 
 const STORAGE_KEY = "loadlynx.devices";
@@ -18,17 +24,33 @@ function sanitizeDevices(input: unknown): StoredDevice[] {
 
   const devices: StoredDevice[] = [];
   for (const item of input) {
+    const stored = item as StoredDevice;
+    const devd = stored.devd;
     if (
       item &&
       typeof item === "object" &&
-      typeof (item as StoredDevice).id === "string" &&
-      typeof (item as StoredDevice).name === "string" &&
-      typeof (item as StoredDevice).baseUrl === "string"
+      typeof stored.id === "string" &&
+      typeof stored.name === "string" &&
+      typeof stored.baseUrl === "string"
     ) {
       devices.push({
-        id: (item as StoredDevice).id,
-        name: (item as StoredDevice).name,
-        baseUrl: (item as StoredDevice).baseUrl,
+        id: stored.id,
+        name: stored.name,
+        baseUrl: stored.baseUrl,
+        connectionMarks: Array.isArray(stored.connectionMarks)
+          ? stored.connectionMarks
+          : undefined,
+        devd:
+          devd &&
+          typeof devd.baseUrl === "string" &&
+          typeof devd.deviceId === "string"
+            ? {
+                baseUrl: devd.baseUrl,
+                deviceId: devd.deviceId,
+                leaseId:
+                  typeof devd.leaseId === "string" ? devd.leaseId : undefined,
+              }
+            : undefined,
       });
     }
   }

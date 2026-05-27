@@ -436,6 +436,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         render_snapshot(&out_dir.join("main-display-cc.png"), &cc, None, None, None)?;
         return Ok(());
     }
+    if mode.as_deref() == Some("measurement-invalid") {
+        let out_dir = repo_root.join("tmp/ui-mock");
+        std::fs::create_dir_all(&out_dir)?;
+
+        let mut snapshot = ui::UiSnapshot::demo();
+        snapshot.analog_state = ui::AnalogState::MeasurementInvalid;
+        snapshot.set_control_overlay(
+            ui::CalibrationUiMode::Off,
+            2,
+            true,
+            LoadMode::Cc,
+            false,
+            true,
+            false,
+            true,
+            None,
+            None,
+        );
+        snapshot.set_control_row(12_000, 'A', control::AdjustDigit::DEFAULT);
+        snapshot.pd_state = ui::PdButtonState::ExtendedAllowed;
+        snapshot.pd_display_mode = ui::PdButtonDisplayMode::Fixed;
+        snapshot.pd_target_mv = Some(20_000);
+        snapshot.pd_target_available = true;
+        render_snapshot(
+            &out_dir.join("main-display-measurement-invalid.png"),
+            &snapshot,
+            None,
+            None,
+            None,
+        )?;
+        return Ok(());
+    }
     let out_dir = repo_root.join("docs/assets/main-display");
     let preset_dir = repo_root.join("docs/assets/on-device-preset-ui");
 

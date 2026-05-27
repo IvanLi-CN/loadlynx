@@ -1,0 +1,87 @@
+import type { Meta, StoryObj } from "@storybook/react";
+import { waitFor, within } from "@testing-library/dom";
+import userEvent from "@testing-library/user-event";
+import { RouteStoryHarness } from "../router/route-story-harness.tsx";
+
+const DEVD_DEVICE = {
+  id: "devd-bound",
+  name: "Mock LoadLynx devd device",
+  baseUrl: "mock://devd-lan",
+  connectionMarks: ["usb", "lan"] as Array<"usb" | "lan">,
+  devd: {
+    baseUrl: "http://127.0.0.1:30180",
+    deviceId: "mock-loadlynx-devd",
+    leaseId: "mock-lease-1",
+  },
+};
+
+function FirmwareRouteStory() {
+  return (
+    <RouteStoryHarness
+      initialPath="/devd-bound/firmware"
+      devices={[DEVD_DEVICE]}
+    />
+  );
+}
+
+function FirmwareRouteNoLeaseStory() {
+  return (
+    <RouteStoryHarness
+      initialPath="/devd-bound/firmware"
+      devices={[
+        {
+          ...DEVD_DEVICE,
+          devd: {
+            baseUrl: "http://127.0.0.1:30180",
+            deviceId: "mock-loadlynx-devd",
+          },
+        },
+      ]}
+    />
+  );
+}
+
+const meta = {
+  title: "Routes/Firmware",
+  component: FirmwareRouteStory,
+  parameters: {
+    viewport: { defaultViewport: "loadlynxLarge" },
+  },
+} satisfies Meta<typeof FirmwareRouteStory>;
+
+export default meta;
+type Story = StoryObj<typeof meta>;
+
+export const DevdBound: Story = {};
+
+export const DryRunEvidence: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await waitFor(() => {
+      canvas.getByRole("heading", { name: "Firmware" });
+    });
+    await userEvent.type(
+      canvas.getByPlaceholderText("Select or type a staged artifact id"),
+      "digital-release-aabbcc",
+    );
+    await userEvent.type(
+      canvas.getByPlaceholderText("/path/to/firmware-catalog.json"),
+      "/tmp/loadlynx-firmware-catalog.json",
+    );
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Verify flash dry-run" }),
+    );
+
+    await waitFor(() => {
+      canvas.getByText(/mock-loadlynx-devd/);
+      if (canvas.getAllByText(/target/).length < 3) {
+        throw new Error("Expected target evidence to render");
+      }
+    });
+  },
+};
+
+export const MissingLease: Story = {
+  render: () => <FirmwareRouteNoLeaseStory />,
+};

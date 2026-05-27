@@ -1,0 +1,252 @@
+# LoadLynx devd control plane（#e3rv6）
+
+## 状态
+
+- Status: 已完成
+
+## 背景 / 问题陈述
+
+LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、Web 控制台、`mcu-agentd` 硬件在环入口，以及 STM32G431 模拟板的 probe-rs 烧录路径。现有入口分散在浏览器 LAN API、Web Serial/USB 设想、`just agentd ...` 命令和人工选择串口/探针流程之间。
+
+`mains-aegis` 的 `tools/mains-aegis-devd` 已验证一个更稳的模式：本地 daemon 作为 Web/App/CLI 的唯一 USB HTTP bridge，负责设备扫描、显式绑定、独占 lease、固件 artifact 校验、烧录、reset、monitor 与 bounded logs。LoadLynx 需要类似能力，但不能直接照搬，因为 LoadLynx 有两个烧录目标、两个硬件选择器、ESP32-S3 到 STM32G431 的 UART 控制链路，以及高风险电子负载输出控制。
+
+## 目标 / 非目标
+
+### Goals
+
+- 新增 LoadLynx 专用 `loadlynx-devd` 本地 daemon，提供 localhost HTTP/SSE 设备控制面。
+- Web 界面支持固件烧录、局域网设备发现（mDNS/DNS-SD + 手工 `.local` + 受控子网扫描）、devd USB-HTTP bridge 和 USB/LAN 双连接合并。
+- CLI 支持通过以太网/LAN 与 USB/devd 操控硬件，并覆盖 discovery、status、flash、reset、monitor、safe control 与诊断导出。
+- 固件 artifact catalog 成为 Web、devd、CLI、本地构建和 release 的统一合同。
+- 保留 `mcu-agentd` 作为底层烧录/monitor fallback，但常规 owner-facing 操作优先走 `loadlynx-devd`。
+- 复用 `mains-aegis` 的安全模型：scan 不自动连接，多候选必须用户选择，USB 控制必须持有有效 lease，PSK/敏感字段不得回显，日志解码必须匹配 artifact identity。
+
+### Non-goals
+
+- 不在首轮实现远程高风险写控制的鉴权/TLS/账号体系；LAN 写控制仍按现有安全边界推进。
+- 不把浏览器端直接接管 probe-rs 或 espflash；非 Web Serial 直烧统一经 devd/CLI 调用本地工具。
+- 不让 devd 自动选择或切换 `.esp32-port` / `.stm32-port` selector。
+- 不要求跨 VLAN/跨网段 discovery；复杂网络以后用单独 discovery relay。
+- 不用 devd 取代固件内实时保护；模拟板仍必须本地独立限流、限压、过温和失联保护。
+
+## 范围
+
+### In Scope
+
+- `tools/loadlynx-devd/` Rust daemon。
+- `tools/loadlynx-devd/` 内的 `loadlynx` CLI 子命令。
+- Web 管理端新增 Firmware、Connect/Discovery、USB session、Logs/Monitor 能力。
+- `schemas/firmware-catalog.schema.json` 与 artifact generator。
+- ESP32-S3 固件 identity、USB CDC JSONL bridge、mDNS/DNS-SD 发布与 HTTP API 小幅扩展。
+- STM32G431 firmware identity 通过构建产物/defmt metadata 与数字板桥接状态暴露。
+
+### Out of Scope
+
+- 云端 fleet、账号、远程 NAT 穿透。
+- 浏览器内 probe-rs、浏览器内 STM32 烧录。
+- 未经用户明确确认的 selector 写入、端口切换或真实硬件 reset/flash。
+
+## 需求列表
+
+- MUST: `loadlynx-devd serve` 不接收固定设备端口；设备必须通过 `scan -> user selects -> bind/connect/lease` 流程进入控制。
+- MUST: `POST /api/v1/devices/scan` 返回 ESP32-S3 serial candidates、STM32 probe candidates、LAN discovered devices、mock devices，并保留完整候选信息。
+- MUST: 多个候选存在时 Web 和 CLI 均不得自动选择第一个、最近、已连接或已识别设备。
+- MUST: USB CDC 写入、WiFi 配网、safe settings、flash/reset/monitor 等需要占用 USB 的操作必须持有有效 per-device lease 或明确的 CLI exclusive session。
+- MUST: 固件烧录前校验 artifact 文件 SHA-256，并用 firmware identity 匹配 `build_id`、profile、features、target chip 和 defmt metadata。
+- MUST: ESP32-S3 烧录与 STM32G431 烧录目标分离；同一设备记录可包含 `digital_target` 与 `analog_target`。
+- MUST: Web 页面能通过 LAN 只读 API 使用 mDNS `.local`、DNS-SD 结果或用户手工 URL 连接设备。
+- MUST: CLI 同时支持 LAN base URL 和 devd USB target，输出 JSON 与人类可读摘要。
+- SHOULD: devd 可以托管生产 Web 静态文件，并为 Vite dev server 提供 `/api` proxy 目标。
+- SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/monitor 操作。
+- COULD: 后续支持 Web Serial 直烧 ESP32-S3，但仍需 artifact catalog 与 explicit warning gate。
+
+## 功能与行为规格
+
+### 设备模型
+
+LoadLynx devd 的顶层设备记录应允许把同一实体的多个连接面合并：
+
+- `identity.device_id`: 稳定 LoadLynx 设备 ID，优先来自 ESP32-S3 HTTP/USB identity。
+- `digital_target`: ESP32-S3 candidate，包含 serial port、USB VID/PID/serial、artifact target、firmware identity。
+- `analog_target`: STM32G431 candidate，包含 probe selector、probe serial、chip、artifact target、firmware identity 或 defmt ELF provenance。
+- `lan_endpoint`: `.local` hostname 或 IP base URL。
+- `connection_marks`: `lan`, `usb`, `digital_flash`, `analog_flash`, `uart_link`。
+- `lease`: 当前 USB/devd 独占控制租约。
+
+### devd HTTP API
+
+- `GET /api/v1/ping`
+- `GET /api/v1/devices`
+- `POST /api/v1/devices/scan`
+- `POST /api/v1/devices/{id}/bind`
+- `DELETE /api/v1/devices/{id}/binding`
+- `POST /api/v1/devices/{id}/connect`
+- `POST /api/v1/devices/{id}/disconnect`
+- `GET /api/v1/devices/{id}/identity`
+- `GET /api/v1/devices/{id}/status`
+- `GET /api/v1/devices/{id}/network`
+- `GET /api/v1/devices/{id}/session`
+- `GET /api/v1/devices/{id}/events`
+- `GET|POST /api/v1/devices/{id}/artifact`
+- `POST /api/v1/devices/{id}/flash`
+- `POST /api/v1/devices/{id}/reset`
+- `POST /api/v1/devices/{id}/monitor/start`
+- `POST /api/v1/devices/{id}/monitor/stop`
+- `POST /api/v1/serial/lease`
+- `POST|DELETE /api/v1/serial/lease/{lease_id}`
+- `GET /api/v1/serial/session`
+- `GET /api/v1/serial/events`
+
+Compatibility endpoints (`/api/v1/identity`, `/api/v1/status`, `/api/v1/network`) may exist only when a unique active lease or explicit `device_id/lease_id` selects the device; otherwise they return `device_selection_required`.
+
+### mDNS / LAN discovery
+
+- ESP32-S3 publishes hostname `loadlynx-<short-id>.local`.
+- DNS-SD service should be `_loadlynx._tcp.local` on the firmware HTTP port.
+- TXT records should include `device_id`, `short_id`, `api=v1`, `product=loadlynx`, `cap=net_http`.
+- Web discovery priority:
+  1. Saved devices and explicit URL.
+  2. Browser-accessible `.local` manual entry.
+  3. devd DNS-SD/mDNS scan result.
+  4. User-triggered limited `/24` HTTP scan.
+- Browser-only subnet scan remains explicit, bounded, and non-background.
+
+### USB-HTTP bridge
+
+ESP32-S3 USB CDC uses LF-delimited JSON frames. The bridge protocol should align with:
+
+- `hello`: protocol, capabilities, identity.
+- `request`: `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`.
+- `response` / `error`: API-compatible envelope with `request_id`.
+- `status`: periodic or requested status snapshot.
+- `log`: structured firmware log.
+- `wifi_config`: `op=set|clear`, with PSK redacted from traces and never echoed.
+
+The daemon may use the same CDC channel for monitor and command frames, but must serialize writes through one owner and bounded request timeouts.
+
+### 固件烧录
+
+Artifact catalog entries must represent both boards:
+
+- `target`: `digital_esp32s3` or `analog_stm32g431`.
+- `artifact_id`, `name`, `package_version`, `git_sha`, `build_id`, `build_profile`, `features`, `protocol`.
+- `defmt`: enabled, encoding, table/ELF hashes.
+- `files[]`: `kind=image|elf|manifest|metadata`, path, SHA-256, size, optional `flash_address`.
+
+Flash behavior:
+
+- `target=digital_esp32s3`: devd/Web firmware flows use devd's lease-gated direct `espflash` backend with the approved `.esp32-port` serial target; `mcu-agentd` is not the owner-facing devd digital flash path. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
+- `target=analog_stm32g431`: use probe-rs or `mcu-agentd` backend, exact probe selector required.
+- `dry_run=true` must validate target resolution, artifact presence and hashes without touching hardware.
+- Real flash must refuse if the requested target does not match the selected device/board identity.
+- If flashing digital firmware disrupts USB CDC, devd must release affected leases and surface reconnect instructions.
+
+### CLI
+
+CLI commands should map 1:1 to devd/LAN operations:
+
+- `loadlynx discover --mdns --lan-scan --json`
+- `loadlynx devices --devd http://127.0.0.1:<port>`
+- `loadlynx status --url http://loadlynx-xxxxxx.local`
+- `loadlynx status --device <id>`
+- `loadlynx flash digital --device <id> --artifact <artifact_id> [--dry-run]`
+- `loadlynx flash analog --device <id> --artifact <artifact_id> [--dry-run]`
+- `loadlynx reset digital|analog --device <id>`
+- `loadlynx monitor digital|analog --device <id> --tail 200`
+- `loadlynx output set --url <base_url> --enable false`
+
+CLI must print target evidence before hardware-changing operations: device id, transport, port/probe, artifact id, SHA-256 and dry-run/real mode.
+
+### Web UI
+
+- Connect page: LAN manual URL, devd local bridge, USB candidates, mDNS/DNS-SD result list, limited subnet scan.
+- Devices/Fleet: merge LAN and USB marks for the same `identity.device_id`.
+- Device detail: status, CC/CV/PD/control, calibration, firmware, logs/API.
+- Firmware page: artifact source, target board selector, match/mismatch warning, dry-run, flash progress, reconnect state.
+- USB session page/panel: lease state, heartbeat/reconnect, bounded logs, raw trace with sensitive redaction.
+
+## 验收标准
+
+- Given devd has two ESP32-S3 USB serial candidates, When Web opens Connect, Then it lists both and does not create a lease until the user selects one.
+- Given devd has one active USB lease, When another page requests the same device, Then devd returns `device_lease_conflict`.
+- Given no heartbeat arrives for the lease TTL, When cleanup runs, Then devd disconnects the USB session and releases the port within the configured bound.
+- Given a digital artifact with mismatched `build_id`, When selecting it for a connected digital target, Then log decode remains `unverified` and real flash requires explicit target confirmation.
+- Given an analog artifact is selected for a digital target, When flash is requested, Then devd returns a non-retryable target mismatch error.
+- Given mDNS is unavailable, When the owner enters `http://loadlynx-xxxxxx.local` and it fails, Then Web offers IP fallback without marking the device as broken.
+- Given CLI receives `--dry-run`, When `flash analog` is called, Then it verifies artifact hashes and target resolution but does not invoke probe-rs/espflash.
+- Given a USB CDC `wifi_config` frame contains PSK, When session traces are fetched, Then PSK is redacted.
+- Given Storybook exists, Web UI changes for Connect/Firmware/USB session must have stable stories and visual evidence before merge.
+
+## Visual Evidence
+
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Devices/DevdLeaseCreated`
+  state: devd candidate scan and USB lease creation
+  capture_scope: element
+  requested_viewport: `loadlynxLarge`
+  viewport_strategy: storybook-viewport
+  target_program: mock-only
+  sensitive_exclusion: N/A
+  evidence_note: verifies the Devices route can scan local devd candidates, create a USB lease, and merge the devd-bound device into the registry with Firmware navigation.
+
+![devd Devices lease evidence](./assets/devd-devices-lease.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Firmware/DryRunEvidence`
+  state: devd firmware dry-run evidence
+  capture_scope: element
+  requested_viewport: `loadlynxLarge`
+  viewport_strategy: storybook-viewport
+  target_program: mock-only
+  sensitive_exclusion: N/A
+  evidence_note: verifies the Firmware route can submit a devd dry-run flash request and render target evidence plus USB session logs/traces.
+
+![devd Firmware dry-run evidence](./assets/devd-firmware-dry-run.png)
+
+## 实现前置条件
+
+- `loadlynx-devd` and `loadlynx` ship as separate binaries from one Rust package.
+- devd uses direct `espflash` for real ESP32-S3 digital firmware flashing after Web lease, artifact hash verification and `.esp32-port` target evidence. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`. Analog/probe operations may use `mcu-agentd` while preserving selector mutation guardrails.
+- ESP32-S3 USB CDC JSONL bridge protocol is defined in `docs/interfaces/usb-cdc-jsonl-bridge.md`.
+- Firmware catalog schema and generator are available under `schemas/` and `tools/firmware-catalog/`.
+- Analog identity is represented through artifact/probe provenance in the first version, with direct analog runtime identity left as a follow-up.
+
+## 非功能性验收 / 质量门槛
+
+- Rust daemon unit tests cover candidate filtering, stable IDs, lease expiry, artifact matching, target mismatch, PSK redaction, error envelopes.
+- CLI tests cover JSON output and dry-run target evidence.
+- Web typecheck, Storybook, and route-level mock tests pass.
+- Firmware builds for digital and analog remain green.
+- HIL verification uses devd's approved `.esp32-port` evidence for Web/devd digital flashing and existing `mcu-agentd` guardrails for non-devd or analog/probe operations. It never changes selector caches without explicit owner approval.
+
+## 文档更新
+
+- Update `docs/dev-notes/mcu-agentd.md` to describe `loadlynx-devd` as owner-facing control plane and `mcu-agentd` as backend/fallback.
+- Update `docs/interfaces/network-http-api.md` with identity/artifact/discovery fields.
+- Update `docs/interfaces/uart-link.md` or a new USB CDC protocol doc with JSONL bridge frames.
+- Update `docs/README.md` and `docs/specs/README.md`.
+
+## 实现里程碑
+
+1. devd/CLI foundation: package scaffold, API envelope, mock devices, scan/list/bind/lease/session tests.
+2. Firmware catalog and artifact generator for digital and analog targets.
+3. ESP32-S3 identity, mDNS/DNS-SD, and USB CDC JSONL bridge contract.
+4. devd hardware backends for digital flash/reset/monitor and analog flash/reset/monitor with dry-run proof.
+5. Web Connect/Firmware/USB session UI with Storybook and visual evidence.
+6. CLI LAN and USB flows with dry-run and JSON output.
+7. HIL validation on approved cached selectors.
+
+## 风险与开放问题
+
+- STM32G431 identity may need a UART bridge request rather than direct probe metadata.
+- Web Serial ESP32 flashing has different browser support and should not be on the critical path.
+- LAN write operations need a separate safety review before exposing high-risk load control beyond existing HTTP APIs.
+- mDNS reliability varies by OS/router; UI must treat it as convenience, not the only path.
+- devd must avoid competing with `mcu-agentd` or a Web Serial session for the same USB port.
+
+## 假设
+
+- The owner wants a local-first toolchain with no cloud dependency.
+- The digital board remains the LAN/Web control endpoint.
+- Hardware-changing operations require explicit target evidence before execution.
+- Existing `mcu-agentd` selector guardrails continue to apply to any devd backend integration.

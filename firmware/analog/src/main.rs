@@ -41,12 +41,21 @@ mod calibration;
 mod pd;
 use calibration::{
     CalCurve, CalibrationState, CurveKind, inverse_piecewise, mv_to_raw_100uv, piecewise_linear,
-    raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
+    preserve_nonzero_uncalibrated, raw_100uv_to_dac_code_calibrated, raw_100uv_to_dac_code_vref,
 };
 
 // STM32G431 VREFBUF 基址/寄存器地址（同 pd-sink-stm32g431cbu6-rs 工程）
 const VREFBUF_BASE: u32 = 0x4001_0030;
 const VREFBUF_CSR_ADDR: *mut u32 = VREFBUF_BASE as *mut u32;
+const FLASH_BASE: u32 = 0x4002_2000;
+const FLASH_KEYR_ADDR: *mut u32 = (FLASH_BASE + 0x08) as *mut u32;
+const FLASH_OPTKEYR_ADDR: *mut u32 = (FLASH_BASE + 0x0c) as *mut u32;
+const FLASH_SR_ADDR: *mut u32 = (FLASH_BASE + 0x10) as *mut u32;
+const FLASH_CR_ADDR: *mut u32 = (FLASH_BASE + 0x14) as *mut u32;
+const FLASH_OPTR_ADDR: *mut u32 = (FLASH_BASE + 0x20) as *mut u32;
+const IWDG_KR_ADDR: *mut u32 = 0x4000_3000 as *mut u32;
+const IWDG_PR_ADDR: *mut u32 = 0x4000_3004 as *mut u32;
+const IWDG_RLR_ADDR: *mut u32 = 0x4000_3008 as *mut u32;
 
 bind_interrupts!(struct Irqs {
     USART3 => stm32::usart::InterruptHandler<stm32::peripherals::USART3>;
@@ -64,6 +73,44 @@ const CONTROL_TICKS_PER_STATUS: u32 = (FAST_STATUS_PERIOD_US / CONTROL_PERIOD_US
 const CONTROL_TICKS_PER_SEC: u32 = (1_000_000 / CONTROL_PERIOD_US) as u32;
 // 若超过该时间（ms）未收到任何来自数字板的有效控制帧，则认为链路当前异常。
 const LINK_DEAD_TIMEOUT_MS: u32 = 300;
+// 冷启动早期若数字板还没准备好接收，模拟板会短时重发 HELLO，
+// 帮助双方尽快重新建立启动握手。
+const COMM_BOOT_PROBE_WINDOW_MS: u32 = 2_500;
+// 启动探测窗口内重发 HELLO 的频率，用于让数字侧更快确认模拟板已可通信。
+const COMM_BOOT_HELLO_RETRY_MS: u32 = 150;
+// IWDG recovery is intentionally disabled in the normal build. Cold-boot failures
+// seen here happen before analog firmware can participate, while an early IWDG
+// can slow healthy boots if digital is still starting.
+const ENABLE_COMM_IWDG_RECOVERY: bool = false;
+const COMM_IWDG_TIMEOUT_RELOAD: u32 = 499;
+const IWDG_REFRESH_LINK_MAX_AGE_MS: u32 = 2_000;
+// STM32G4 BOR level 4 is the highest normal brown-out threshold, around 2.8 V.
+// This prevents slow or partial cold power ramps from releasing reset too early.
+const ENABLE_BOR_LEVEL_ENFORCE: bool = true;
+const REQUIRED_BOR_LEVEL: u32 = 4;
+const FLASH_OPTR_BOR_MASK: u32 = 0x07 << 8;
+const FLASH_OPTR_N_SWBOOT0: u32 = 1 << 26;
+const FLASH_OPTR_N_BOOT0: u32 = 1 << 27;
+const FLASH_CR_OPTSTRT: u32 = 1 << 17;
+const FLASH_CR_OBL_LAUNCH: u32 = 1 << 27;
+const FLASH_CR_OPTLOCK: u32 = 1 << 30;
+const FLASH_CR_LOCK: u32 = 1 << 31;
+const FLASH_SR_BSY: u32 = 1 << 16;
+const FLASH_SR_CLEAR_FLAGS: u32 = (1 << 0)
+    | (1 << 1)
+    | (1 << 3)
+    | (1 << 4)
+    | (1 << 5)
+    | (1 << 6)
+    | (1 << 7)
+    | (1 << 8)
+    | (1 << 9)
+    | (1 << 14)
+    | (1 << 15);
+const FLASH_KEY1: u32 = 0x4567_0123;
+const FLASH_KEY2: u32 = 0xCDEF_89AB;
+const FLASH_OPTKEY1: u32 = 0x0819_2A3B;
+const FLASH_OPTKEY2: u32 = 0x4C5D_6E7F;
 // 调试开关：如需只验证数字板→模拟板的 SetPoint 路径，可暂时关闭 FAST_STATUS TX。
 const ENABLE_FAST_STATUS_TX: bool = true;
 // Compact firmware identifier exported via HELLO; currently a simple placeholder
@@ -951,6 +998,8 @@ fn raw_100uv_to_mv(raw_100uv: i16) -> u32 {
 // When determining whether a current calibration curve has already compensated
 // the current-sense chain's 0A offset, accept a small residual around 0A.
 const CURRENT_ZERO_CURVE_OK_MA: i32 = 20;
+const STATUS_VOLTAGE_NONZERO_MIN_MV: i32 = 100;
+const STATUS_CURRENT_NONZERO_MIN_MA: i32 = 20;
 
 macro_rules! adc_avg_from_first {
     ($adc:expr, $ch:expr, $first:expr, $n:expr) => {{
@@ -1083,6 +1132,133 @@ fn active_control_reset() {
     ACTIVE_CTRL_MAX_P_MW.store(0, Ordering::Relaxed);
     ACTIVE_CTRL_UV_LATCHED.store(false, Ordering::Relaxed);
     ACTIVE_CTRL_SEQ.fetch_add(1, Ordering::Release);
+}
+
+fn flash_wait_ready() {
+    while unsafe { core::ptr::read_volatile(FLASH_SR_ADDR) } & FLASH_SR_BSY != 0 {}
+}
+
+fn ensure_bor_level() {
+    if !ENABLE_BOR_LEVEL_ENFORCE {
+        return;
+    }
+
+    let optr = unsafe { core::ptr::read_volatile(FLASH_OPTR_ADDR) };
+    let bor_level = (optr & FLASH_OPTR_BOR_MASK) >> 8;
+    let boot0_from_option = optr & FLASH_OPTR_N_SWBOOT0 == 0;
+    let option_boot0_low = optr & FLASH_OPTR_N_BOOT0 != 0;
+    info!(
+        "boot option check: bor={} required_bor={} boot0_from_option={} option_boot0_low={}",
+        bor_level, REQUIRED_BOR_LEVEL, boot0_from_option, option_boot0_low
+    );
+    if bor_level >= REQUIRED_BOR_LEVEL && boot0_from_option && option_boot0_low {
+        return;
+    }
+
+    warn!(
+        "boot option bytes not hardened; programming BOR level {} and forcing BOOT0 option low",
+        REQUIRED_BOR_LEVEL
+    );
+
+    flash_wait_ready();
+    unsafe {
+        let cr = core::ptr::read_volatile(FLASH_CR_ADDR);
+        if cr & FLASH_CR_LOCK != 0 {
+            core::ptr::write_volatile(FLASH_KEYR_ADDR, FLASH_KEY1);
+            core::ptr::write_volatile(FLASH_KEYR_ADDR, FLASH_KEY2);
+        }
+        if core::ptr::read_volatile(FLASH_CR_ADDR) & FLASH_CR_OPTLOCK != 0 {
+            core::ptr::write_volatile(FLASH_OPTKEYR_ADDR, FLASH_OPTKEY1);
+            core::ptr::write_volatile(FLASH_OPTKEYR_ADDR, FLASH_OPTKEY2);
+        }
+    }
+
+    flash_wait_ready();
+    unsafe {
+        core::ptr::write_volatile(FLASH_SR_ADDR, FLASH_SR_CLEAR_FLAGS);
+        let next_optr = (optr & !FLASH_OPTR_BOR_MASK & !FLASH_OPTR_N_SWBOOT0)
+            | (REQUIRED_BOR_LEVEL << 8)
+            | FLASH_OPTR_N_BOOT0;
+        core::ptr::write_volatile(FLASH_OPTR_ADDR, next_optr);
+        core::ptr::write_volatile(
+            FLASH_CR_ADDR,
+            core::ptr::read_volatile(FLASH_CR_ADDR) | FLASH_CR_OPTSTRT,
+        );
+    }
+    flash_wait_ready();
+
+    let sr = unsafe { core::ptr::read_volatile(FLASH_SR_ADDR) };
+    if sr & (FLASH_SR_CLEAR_FLAGS & !(1 << 0)) != 0 {
+        warn!("boot option programming reported FLASH_SR=0x{:08x}", sr);
+        return;
+    }
+
+    warn!("boot option bytes programmed; launching option byte reload reset");
+    unsafe {
+        core::ptr::write_volatile(
+            FLASH_CR_ADDR,
+            core::ptr::read_volatile(FLASH_CR_ADDR) | FLASH_CR_OBL_LAUNCH,
+        );
+    }
+    loop {
+        cortex_m::asm::wfi();
+    }
+}
+
+fn comm_iwdg_arm() {
+    unsafe {
+        // STM32 IWDG key register:
+        // 0x5555 unlock PR/RLR, 0xCCCC start, 0xAAAA refresh.
+        // LSI is typically ~32 kHz. PR=/256 and RLR=499 gives roughly 4s.
+        core::ptr::write_volatile(IWDG_KR_ADDR, 0x5555);
+        core::ptr::write_volatile(IWDG_PR_ADDR, 0x0006);
+        core::ptr::write_volatile(IWDG_RLR_ADDR, COMM_IWDG_TIMEOUT_RELOAD);
+        core::ptr::write_volatile(IWDG_KR_ADDR, 0xAAAA);
+        core::ptr::write_volatile(IWDG_KR_ADDR, 0xCCCC);
+    }
+}
+
+fn comm_iwdg_refresh() {
+    unsafe {
+        core::ptr::write_volatile(IWDG_KR_ADDR, 0xAAAA);
+    }
+}
+
+async fn send_hello_frame(
+    tx: &Mutex<CriticalSectionRawMutex, UartTx<'static, UartAsync>>,
+    raw_frame: &mut [u8; 192],
+    slip_frame: &mut [u8; 384],
+    label: &str,
+) {
+    let hello = Hello {
+        protocol_version: loadlynx_protocol::PROTOCOL_VERSION,
+        fw_version: HELLO_FW_VERSION,
+    };
+    let hello_seq = TX_SEQ.fetch_add(1, Ordering::Relaxed);
+    match encode_hello_frame(hello_seq, &hello, raw_frame) {
+        Ok(frame_len) => match slip_encode(&raw_frame[..frame_len], slip_frame) {
+            Ok(slip_len) => {
+                let mut tx = tx.lock().await;
+                match tx.write(&slip_frame[..slip_len]).await {
+                    Ok(_) => {
+                        info!(
+                            "HELLO {}: seq={} proto_ver={} fw_ver=0x{:08x}",
+                            label, hello_seq, hello.protocol_version, hello.fw_version
+                        );
+                    }
+                    Err(err) => {
+                        warn!("HELLO({}) write error: {:?}", label, err);
+                    }
+                }
+            }
+            Err(err) => {
+                warn!("HELLO({}) slip encode error: {:?}", label, err);
+            }
+        },
+        Err(err) => {
+            warn!("HELLO({}) encode error: {:?}", label, err);
+        }
+    }
 }
 
 fn active_control_set_uv_latched(v: bool) {
@@ -1239,6 +1415,16 @@ async fn main(_spawner: Spawner) -> ! {
         config.enable_ucpd1_dead_battery = true;
     }
     let p = stm32::init(config);
+
+    ensure_bor_level();
+
+    if ENABLE_COMM_IWDG_RECOVERY {
+        comm_iwdg_arm();
+        warn!(
+            "communication IWDG recovery armed early (timeout≈4s, refresh_link_age_ms={})",
+            IWDG_REFRESH_LINK_MAX_AGE_MS
+        );
+    }
 
     info!("LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)");
     {
@@ -1475,37 +1661,11 @@ async fn main(_spawner: Spawner) -> ! {
     let mut slip_frame = [0u8; 384];
 
     // 上电后发送一次 HELLO，携带最小协议/固件信息，供数字侧建立链路状态。
-    let hello = Hello {
-        protocol_version: loadlynx_protocol::PROTOCOL_VERSION,
-        fw_version: HELLO_FW_VERSION,
-    };
-    let hello_seq = TX_SEQ.fetch_add(1, Ordering::Relaxed);
-    match encode_hello_frame(hello_seq, &hello, &mut raw_frame) {
-        Ok(frame_len) => match slip_encode(&raw_frame[..frame_len], &mut slip_frame) {
-            Ok(slip_len) => {
-                let mut tx = uart_tx_shared.lock().await;
-                match tx.write(&slip_frame[..slip_len]).await {
-                    Ok(_) => {
-                        info!(
-                            "HELLO sent: seq={} proto_ver={} fw_ver=0x{:08x}",
-                            hello_seq, hello.protocol_version, hello.fw_version
-                        );
-                    }
-                    Err(err) => {
-                        warn!("HELLO write error: {:?}", err);
-                    }
-                }
-            }
-            Err(err) => {
-                warn!("HELLO slip encode error: {:?}", err);
-            }
-        },
-        Err(err) => {
-            warn!("HELLO encode error: {:?}", err);
-        }
-    }
+    send_hello_frame(uart_tx_shared, &mut raw_frame, &mut slip_frame, "sent").await;
+    comm_iwdg_refresh();
 
     let mut last_link_fault = false;
+    let mut next_boot_hello_ms = COMM_BOOT_HELLO_RETRY_MS;
 
     // 远端 sense 判定状态（3 帧进入 / 2 帧退出）。
     let mut remote_active: bool = false;
@@ -1667,6 +1827,12 @@ async fn main(_spawner: Spawner) -> ! {
         //   未再看到任何控制帧，则认为当前处于“通信异常”状态，让 LED1 闪烁；
         // - 一旦重新收到有效控制帧，则视作恢复正常，LED1 熄灭。
         let last_rx = LAST_RX_GOOD_MS.load(Ordering::Relaxed);
+        if ENABLE_COMM_IWDG_RECOVERY
+            && last_rx != 0
+            && now_ms.wrapping_sub(last_rx) <= IWDG_REFRESH_LINK_MAX_AGE_MS
+        {
+            comm_iwdg_refresh();
+        }
         let link_fault = if last_rx == 0 {
             now_ms > LINK_DEAD_TIMEOUT_MS
         } else {
@@ -1689,6 +1855,11 @@ async fn main(_spawner: Spawner) -> ! {
         }
 
         if link_fault {
+            if last_rx == 0 && now_ms < COMM_BOOT_PROBE_WINDOW_MS && next_boot_hello_ms <= now_ms {
+                send_hello_frame(uart_tx_shared, &mut raw_frame, &mut slip_frame, "retry").await;
+                next_boot_hello_ms = now_ms.saturating_add(COMM_BOOT_HELLO_RETRY_MS);
+            }
+
             // 以约 2 Hz 频率闪烁：每 250 ms 翻转一次。
             #[allow(clippy::manual_is_multiple_of)]
             if (now_ms / 250) % 2 == 0 {
@@ -2874,7 +3045,32 @@ async fn main(_spawner: Spawner) -> ! {
 
             let (status_v_local_mv, status_v_remote_mv, status_i_ch1_ma, status_i_ch2_ma) =
                 if cal_kind == CalKind::Off {
-                    (v_local_mv, v_remote_mv, i_ch1_ma, i_ch2_ma)
+                    (
+                        preserve_nonzero_uncalibrated(
+                            v_local_mv,
+                            v_local_mv_uncal,
+                            raw_v_nr_100uv,
+                            STATUS_VOLTAGE_NONZERO_MIN_MV,
+                        ),
+                        preserve_nonzero_uncalibrated(
+                            v_remote_mv,
+                            v_remote_mv_uncal,
+                            raw_v_rmt_100uv,
+                            STATUS_VOLTAGE_NONZERO_MIN_MV,
+                        ),
+                        preserve_nonzero_uncalibrated(
+                            i_ch1_ma,
+                            i_ch1_ma_uncal,
+                            raw_cur1_eff_100uv,
+                            STATUS_CURRENT_NONZERO_MIN_MA,
+                        ),
+                        preserve_nonzero_uncalibrated(
+                            i_ch2_ma,
+                            i_ch2_ma_uncal,
+                            raw_cur2_eff_100uv,
+                            STATUS_CURRENT_NONZERO_MIN_MA,
+                        ),
+                    )
                 } else {
                     let v_nr_sns_mv_sm = raw_100uv_to_mv(raw_v_nr_100uv_sm);
                     let v_rmt_sns_mv_sm = raw_100uv_to_mv(raw_v_rmt_100uv_sm);

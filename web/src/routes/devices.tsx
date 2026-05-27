@@ -3,6 +3,12 @@ import { Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { ENABLE_MOCK_DEVTOOLS, isHttpApiError } from "../api/client.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
+import {
+  buildDevdCompatBaseUrl,
+  DEFAULT_DEVD_BASE_URL,
+} from "../devd/client.ts";
+import { useCreateDevdLease, useDevdScan } from "../devd/hooks.ts";
+import type { DevdDevice } from "../devd/types.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
 import {
   type DiscoveredDevice,
@@ -39,6 +45,11 @@ export function DevicesRoute() {
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [scanResults, setScanResults] = useState<DiscoveredDevice[]>([]);
   const [scanError, setScanError] = useState<string | null>(null);
+  const devdScan = useDevdScan();
+  const createDevdLease = useCreateDevdLease();
+  const [devdDevices, setDevdDevices] = useState<DevdDevice[]>([]);
+  const [selectedDevdDeviceId, setSelectedDevdDeviceId] = useState("");
+  const [devdError, setDevdError] = useState<string | null>(null);
 
   const startScan = () => {
     setScanProgress({ scannedCount: 0, totalCount: 0, foundCount: 0 });
@@ -119,6 +130,8 @@ export function DevicesRoute() {
                   <span className="label-text">Device name</span>
                 </div>
                 <input
+                  id="device-name"
+                  name="device_name"
                   type="text"
                   value={newDeviceName}
                   onChange={(event) => setNewDeviceName(event.target.value)}
@@ -131,6 +144,8 @@ export function DevicesRoute() {
                   <span className="label-text">Base URL</span>
                 </div>
                 <input
+                  id="device-base-url"
+                  name="device_base_url"
                   type="text"
                   value={newDeviceBaseUrl}
                   onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
@@ -183,6 +198,176 @@ export function DevicesRoute() {
         </div>
       </div>
 
+      <div className="card bg-base-100 shadow-sm border border-base-200">
+        <div className="card-body p-4 gap-4">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <h3 className="card-title text-base">Local devd bridge</h3>
+              <p className="text-xs text-base-content/60">
+                Discover USB/probe candidates through{" "}
+                <code className="code">{DEFAULT_DEVD_BASE_URL}</code>. A device
+                is only connected after you choose a candidate and create a
+                lease.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="btn btn-sm btn-outline"
+              disabled={devdScan.isPending}
+              onClick={() => {
+                setDevdError(null);
+                devdScan.mutate(undefined, {
+                  onSuccess: (payload) => {
+                    setDevdDevices(payload.devices);
+                    setSelectedDevdDeviceId(payload.devices[0]?.id ?? "");
+                  },
+                  onError: (error) => {
+                    setDevdError(
+                      error instanceof Error
+                        ? error.message
+                        : "devd scan failed",
+                    );
+                  },
+                });
+              }}
+            >
+              {devdScan.isPending ? (
+                <span className="loading loading-spinner loading-xs"></span>
+              ) : null}
+              Scan devd
+            </button>
+          </div>
+
+          {devdError ? (
+            <div role="alert" className="alert alert-error py-2 text-sm">
+              <span>{devdError}</span>
+            </div>
+          ) : null}
+
+          {devdDevices.length > 0 ? (
+            <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
+              <label className="form-control">
+                <div className="label pb-1">
+                  <span className="label-text">devd candidate</span>
+                </div>
+                <select
+                  id="devd-candidate"
+                  name="devd_candidate"
+                  className="select select-bordered select-sm w-full"
+                  value={selectedDevdDeviceId}
+                  onChange={(event) =>
+                    setSelectedDevdDeviceId(event.target.value)
+                  }
+                >
+                  {devdDevices.map((device) => (
+                    <option key={device.id} value={device.id}>
+                      {device.display_name} · {device.id}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <button
+                type="button"
+                className="btn btn-primary btn-sm"
+                disabled={!selectedDevdDeviceId || createDevdLease.isPending}
+                onClick={() => {
+                  const candidate = devdDevices.find(
+                    (device) => device.id === selectedDevdDeviceId,
+                  );
+                  if (!candidate) return;
+                  createDevdLease.mutate(candidate.id, {
+                    onSuccess: (lease) => {
+                      const connectionMarks: StoredDevice["connectionMarks"] = [
+                        "usb",
+                      ];
+                      if (candidate.lan_endpoint) {
+                        connectionMarks.push("lan");
+                      }
+                      const devd = {
+                        baseUrl: DEFAULT_DEVD_BASE_URL,
+                        deviceId: candidate.id,
+                        leaseId: lease.lease_id,
+                      };
+                      const baseUrl = buildDevdCompatBaseUrl(devd);
+                      addRealDeviceMutation.mutate(
+                        {
+                          name: candidate.display_name,
+                          baseUrl,
+                          connectionMarks,
+                          devd,
+                        },
+                        {
+                          onSuccess: () => {
+                            queryClient.invalidateQueries({
+                              queryKey: ["devices"],
+                            });
+                          },
+                        },
+                      );
+                    },
+                    onError: (error) => {
+                      setDevdError(
+                        error instanceof Error
+                          ? error.message
+                          : "failed to create devd lease",
+                      );
+                    },
+                  });
+                }}
+              >
+                {createDevdLease.isPending ? (
+                  <span className="loading loading-spinner loading-xs"></span>
+                ) : null}
+                Create USB lease
+              </button>
+            </div>
+          ) : (
+            <div className="text-xs text-base-content/60">
+              Scan returns mock, cached selector and USB serial candidates
+              without auto-connecting to hardware.
+            </div>
+          )}
+
+          {devdDevices.length > 0 ? (
+            <div className="overflow-x-auto">
+              <table className="table table-xs">
+                <thead>
+                  <tr>
+                    <th>Candidate</th>
+                    <th>Digital</th>
+                    <th>Analog</th>
+                    <th>LAN</th>
+                    <th>State</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {devdDevices.map((device) => (
+                    <tr key={device.id}>
+                      <td>
+                        <div className="font-medium">{device.display_name}</div>
+                        <div className="font-mono text-[11px] opacity-60">
+                          {device.id}
+                        </div>
+                      </td>
+                      <td className="font-mono text-[11px]">
+                        {device.digital_target?.port_path ?? "-"}
+                      </td>
+                      <td className="font-mono text-[11px]">
+                        {device.analog_target?.probe_selector ?? "-"}
+                      </td>
+                      <td className="font-mono text-[11px]">
+                        {device.lan_endpoint ?? "-"}
+                      </td>
+                      <td>{device.connection}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+        </div>
+      </div>
+
       {/* Scan Panel Toggle */}
       <div className="flex justify-end">
         <button
@@ -232,6 +417,8 @@ export function DevicesRoute() {
                   <span className="label-text">Seed IP (Example Device)</span>
                 </div>
                 <input
+                  id="lan-scan-seed-ip"
+                  name="lan_scan_seed_ip"
                   type="text"
                   value={seedIp}
                   onChange={(e) => setSeedIp(e.target.value)}
@@ -486,6 +673,15 @@ function DeviceRow(props: { device: StoredDevice }) {
       <td className="font-mono text-xs">{device.id}</td>
       <td className="font-mono text-xs text-base-content/70">
         {device.baseUrl}
+        {device.connectionMarks?.length ? (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {device.connectionMarks.map((mark) => (
+              <span key={mark} className="badge badge-xs badge-outline">
+                {mark}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </td>
       <td>
         <div className="flex flex-col gap-1">
@@ -538,6 +734,13 @@ function DeviceRow(props: { device: StoredDevice }) {
           className="btn btn-sm btn-outline"
         >
           Open CC Control
+        </Link>
+        <Link
+          to="/$deviceId/firmware"
+          params={{ deviceId: device.id }}
+          className="btn btn-sm btn-ghost ml-2"
+        >
+          Firmware
         </Link>
       </td>
     </tr>

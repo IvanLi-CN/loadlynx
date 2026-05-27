@@ -6,6 +6,7 @@
 #[cfg(feature = "net_http")]
 extern crate alloc;
 
+use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use core::{convert::Infallible, ptr, slice};
 use defmt::*;
@@ -19,7 +20,7 @@ use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
 use embedded_hal_async::delay::DelayNs as AsyncDelayNs;
 use embedded_hal_async::spi::{Operation, SpiBus, SpiDevice};
-use embedded_io_async::Read as AsyncRead;
+use embedded_io_async::{Read as AsyncRead, Write as AsyncWrite};
 use esp_hal::gpio::OutputSignal as GpioOutputSignal;
 use esp_hal::gpio::interconnect::OutputSignal as OutputSignalPin;
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
@@ -29,6 +30,7 @@ use esp_hal::time::Instant as HalInstant;
 use esp_hal::timer::timg::TimerGroup;
 use esp_hal::uart::uhci::{self, RxConfig as UhciRxConfig, TxConfig as UhciTxConfig, Uhci};
 use esp_hal::uart::{Config as UartConfig, DataBits, Parity, RxConfig, StopBits, Uart};
+use esp_hal::usb_serial_jtag::{UsbSerialJtag, UsbSerialJtagRx, UsbSerialJtagTx};
 use esp_hal::{
     self as hal, Async,
     delay::Delay,
@@ -284,8 +286,12 @@ const SETMODE_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
 const SETMODE_TX_PERIOD_MS: u32 = 250;
 const BOOT_LINK_RECOVERY_GRACE_MS: u32 = 1_500;
 const LINK_DOWN_RECOVERY_GRACE_MS: u32 = 1_000;
+const MEASUREMENT_ZERO_RECOVERY_GRACE_MS: u32 = 2_500;
 const LINK_RECOVERY_RETRY_MS: u32 = 3_000;
 const LINK_RECOVERY_POST_RESET_QUIET_MS: u32 = 300;
+const MEASUREMENT_SIGNAL_MIN_MV: i32 = 100;
+const MEASUREMENT_SIGNAL_MIN_MA: i32 = 20;
+const MEASUREMENT_SIGNAL_MIN_MW: u32 = 500;
 
 // Fan PWM control (ESP32‑S3 本地，根据 G431 上报的 sink_core_temp + 功率驱动风扇占空比)。
 // 数值集中在此处，便于后续调参。
@@ -498,6 +504,10 @@ static LAST_ENABLE_BLOCK_CODE: AtomicU8 = AtomicU8::new(0);
 pub(crate) static LINK_UP: AtomicBool = AtomicBool::new(false);
 pub(crate) static HELLO_SEEN: AtomicBool = AtomicBool::new(false);
 pub(crate) static LAST_GOOD_FRAME_MS: AtomicU32 = AtomicU32::new(0);
+static LAST_FAST_STATUS_MS: AtomicU32 = AtomicU32::new(0);
+static MEASUREMENT_EVER_TRUSTED: AtomicBool = AtomicBool::new(false);
+static MEASUREMENT_UNTRUSTED: AtomicBool = AtomicBool::new(false);
+static LAST_TRUSTED_MEASUREMENT_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_SETPOINT_GATE_WARN_MS: AtomicU32 = AtomicU32::new(0);
 static LAST_FAULT_LOG_MS: AtomicU32 = AtomicU32::new(0);
 /// Last analog firmware version identifier observed from HELLO (0 means unknown).
@@ -646,6 +656,684 @@ fn recent_enable_block_abbrev(now_ms: u32) -> Option<&'static str> {
     } else {
         LAST_ENABLE_BLOCK_CODE.store(ENABLE_BLOCK_NONE, Ordering::Relaxed);
         None
+    }
+}
+
+fn write_json_string_escaped(buf: &mut heapless::String<2048>, s: &str) {
+    for ch in s.chars() {
+        match ch {
+            '"' => buf.push_str("\\\"").ok(),
+            '\\' => buf.push_str("\\\\").ok(),
+            '\n' => buf.push_str("\\n").ok(),
+            '\r' => buf.push_str("\\r").ok(),
+            '\t' => buf.push_str("\\t").ok(),
+            c if c < ' ' => buf.push('?').ok(),
+            c => buf.push(c).ok(),
+        };
+    }
+}
+
+fn json_string_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+    let idx = line.find(key)?;
+    let colon = line[idx..].find(':')?;
+    let mut rest = line[idx + colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    rest = &rest[1..];
+    let mut escaped = false;
+    for (idx, ch) in rest.char_indices() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(&rest[..idx]);
+        }
+    }
+    None
+}
+
+fn json_bool_value(line: &str, key: &str) -> Option<bool> {
+    let idx = line.find(key)?;
+    let colon = line[idx..].find(':')?;
+    let rest = line[idx + colon + 1..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn json_u32_value(line: &str, key: &str) -> Option<u32> {
+    let idx = line.find(key)?;
+    let colon = line[idx..].find(':')?;
+    let rest = line[idx + colon + 1..].trim_start();
+    let mut end = 0usize;
+    for ch in rest.chars() {
+        if ch.is_ascii_digit() {
+            end += ch.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if end == 0 {
+        return None;
+    }
+    rest[..end].parse().ok()
+}
+
+fn usb_pd_mode_value(line: &str) -> Option<control::PdMode> {
+    match json_string_value(line, "\"mode\"")? {
+        "fixed" => Some(control::PdMode::Fixed),
+        "pps" => Some(control::PdMode::Pps),
+        _ => None,
+    }
+}
+
+fn pd_object_pos(pos: u8, idx: usize) -> u8 {
+    if pos != 0 { pos } else { (idx + 1) as u8 }
+}
+
+fn usb_find_fixed_pdo(status: &PdStatus, object_pos: u8) -> Option<loadlynx_protocol::FixedPdo> {
+    status
+        .fixed_pdos
+        .iter()
+        .enumerate()
+        .find(|(idx, pdo)| pd_object_pos(pdo.pos, *idx) == object_pos)
+        .map(|(_idx, pdo)| *pdo)
+}
+
+fn usb_find_pps_pdo(status: &PdStatus, object_pos: u8) -> Option<loadlynx_protocol::PpsPdo> {
+    status
+        .pps_pdos
+        .iter()
+        .enumerate()
+        .find(|(idx, pdo)| pd_object_pos(pdo.pos, *idx) == object_pos)
+        .map(|(_idx, pdo)| *pdo)
+}
+
+async fn usb_cdc_write_line(
+    tx: &mut UsbSerialJtagTx<'static, Async>,
+    line: &heapless::String<2048>,
+) {
+    let _ = tx.write_all(line.as_bytes()).await;
+    let _ = tx.write_all(b"\n").await;
+    let _ = tx.flush().await;
+}
+
+fn write_usb_error_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    code: &str,
+    message: &str,
+) {
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":false,\"error\":{\"code\":\"").ok();
+    write_json_string_escaped(out, code);
+    out.push_str("\",\"message\":\"").ok();
+    write_json_string_escaped(out, message);
+    out.push_str("\"}}").ok();
+}
+
+async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_id: Option<&str>) {
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{\"device_id\":\"digital-esp32s3\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"protocol\":\"loadlynx.cdc.v1\",\"firmware_version\":\"").ok();
+    write_json_string_escaped(out, FW_VERSION);
+    out.push_str("\",\"digital_fw_version\":\"").ok();
+    write_json_string_escaped(out, FW_VERSION);
+    out.push_str("\",\"firmware\":{\"target\":\"digital_esp32s3\",\"package_version\":\"")
+        .ok();
+    write_json_string_escaped(out, env!("CARGO_PKG_VERSION"));
+    out.push_str("\",\"build_id\":\"").ok();
+    write_json_string_escaped(out, FW_VERSION);
+    out.push_str("\",\"build_profile\":\"").ok();
+    write_json_string_escaped(out, option_env!("LOADLYNX_FW_PROFILE").unwrap_or("unknown"));
+    out.push_str("\",\"target_triple\":\"").ok();
+    write_json_string_escaped(out, option_env!("LOADLYNX_FW_TARGET").unwrap_or("unknown"));
+    out.push_str("\",\"source_digest\":\"").ok();
+    write_json_string_escaped(
+        out,
+        option_env!("LOADLYNX_FW_SRC_DIGEST").unwrap_or("src unknown"),
+    );
+    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}}").ok();
+}
+
+async fn write_usb_status_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    let cal_mode = { calibration.lock().await.cal_mode };
+    let (active_preset_id, output_enabled, mode, target_i_ma, target_v_mv, target_p_mw, min_v_mv) = {
+        let guard = control.lock().await;
+        let effective = guard.effective_output_command(cal_mode);
+        (
+            guard.active_preset_id,
+            effective.output_enabled,
+            effective.preset.mode,
+            effective.preset.target_i_ma,
+            effective.preset.target_v_mv,
+            effective.preset.target_p_mw,
+            effective.preset.min_v_mv,
+        )
+    };
+    let (fast_status, analog_state) = {
+        let guard = telemetry.lock().await;
+        (
+            guard.last_status.unwrap_or(FastStatus::default()),
+            AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed)),
+        )
+    };
+    let mode_str = match mode {
+        LoadMode::Cc => "cc",
+        LoadMode::Cv => "cv",
+        LoadMode::Cp => "cp",
+        LoadMode::Reserved(_) => "cc",
+    };
+    let analog_state_str = match analog_state {
+        AnalogState::Offline => "offline",
+        AnalogState::CalMissing => "cal_missing",
+        AnalogState::Faulted => "faulted",
+        AnalogState::Ready => "ready",
+        AnalogState::MeasurementInvalid => "measurement_invalid",
+    };
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{").ok();
+    let _ = core::write!(
+        out,
+        "\"uptime_ms\":{},\"link_up\":{},\"hello_seen\":{},\"analog_state\":\"{}\",\"control\":{{\"active_preset_id\":{},\"output_enabled\":{},\"mode\":\"{}\",\"target_i_ma\":{},\"target_v_mv\":{},\"target_p_mw\":{},\"min_v_mv\":{}}},\"status\":{{\"state_flags\":{},\"fault_flags\":{},\"enable\":{},\"i_local_ma\":{},\"i_remote_ma\":{},\"v_local_mv\":{},\"v_remote_mv\":{},\"calc_p_mw\":{}}}}}",
+        now_ms32(),
+        if LINK_UP.load(Ordering::Relaxed) {
+            "true"
+        } else {
+            "false"
+        },
+        if HELLO_SEEN.load(Ordering::Relaxed) {
+            "true"
+        } else {
+            "false"
+        },
+        analog_state_str,
+        active_preset_id,
+        if output_enabled { "true" } else { "false" },
+        mode_str,
+        target_i_ma,
+        target_v_mv,
+        target_p_mw,
+        min_v_mv,
+        fast_status.state_flags,
+        fast_status.fault_flags,
+        if fast_status.enable { "true" } else { "false" },
+        fast_status.i_local_ma,
+        fast_status.i_remote_ma,
+        fast_status.v_local_mv,
+        fast_status.v_remote_mv,
+        fast_status.calc_p_mw,
+    );
+}
+
+async fn write_usb_pd_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    if !LINK_UP.load(Ordering::Relaxed) {
+        write_usb_error_response(out, request_id, "LINK_DOWN", "UART link is down");
+        return;
+    }
+
+    let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+    if matches!(analog_state, AnalogState::Faulted | AnalogState::Offline) {
+        write_usb_error_response(out, request_id, "LINK_DOWN", "analog board is not online");
+        return;
+    }
+
+    let (saved, allow_extended_voltage) = {
+        let guard = control.lock().await;
+        (guard.pd_saved, guard.allow_extended_voltage)
+    };
+    let status = { telemetry.lock().await.last_pd_status.clone() };
+    let ack_pending = PD_REQ_ACK_PENDING.load(Ordering::Relaxed);
+    let last_code = PD_LAST_RESULT_CODE.load(Ordering::Relaxed);
+    let last_ms = PD_LAST_RESULT_MS.load(Ordering::Relaxed);
+
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{").ok();
+
+    if let Some(status) = status {
+        out.push_str("\"attached\":").ok();
+        out.push_str(if status.attached { "true" } else { "false" })
+            .ok();
+        if status.attached {
+            let _ = core::write!(
+                out,
+                ",\"contract_mv\":{},\"contract_ma\":{}",
+                status.contract_mv,
+                status.contract_ma
+            );
+        } else {
+            out.push_str(",\"contract_mv\":null,\"contract_ma\":null")
+                .ok();
+        }
+
+        out.push_str(",\"fixed_pdos\":[").ok();
+        for (idx, pdo) in status.fixed_pdos.iter().enumerate() {
+            if idx != 0 {
+                out.push(',').ok();
+            }
+            let _ = core::write!(
+                out,
+                "{{\"pos\":{},\"mv\":{},\"max_ma\":{}}}",
+                pd_object_pos(pdo.pos, idx),
+                pdo.mv,
+                pdo.max_ma
+            );
+        }
+        out.push_str("],\"pps_pdos\":[").ok();
+        for (idx, pdo) in status.pps_pdos.iter().enumerate() {
+            if idx != 0 {
+                out.push(',').ok();
+            }
+            let _ = core::write!(
+                out,
+                "{{\"pos\":{},\"min_mv\":{},\"max_mv\":{},\"max_ma\":{}}}",
+                pd_object_pos(pdo.pos, idx),
+                pdo.min_mv,
+                pdo.max_mv,
+                pdo.max_ma
+            );
+        }
+        out.push(']').ok();
+    } else {
+        out.push_str(
+            "\"attached\":false,\"contract_mv\":null,\"contract_ma\":null,\"fixed_pdos\":[],\"pps_pdos\":[]",
+        )
+        .ok();
+    }
+
+    out.push_str(",\"epr_active\":false,\"epr_avs_pdos\":[],\"allow_extended_voltage\":")
+        .ok();
+    out.push_str(if allow_extended_voltage {
+        "true"
+    } else {
+        "false"
+    })
+    .ok();
+    out.push_str(",\"saved\":{\"mode\":\"").ok();
+    out.push_str(match saved.mode {
+        control::PdMode::Fixed => "fixed",
+        control::PdMode::Pps => "pps",
+    })
+    .ok();
+    let _ = core::write!(
+        out,
+        "\",\"fixed_object_pos\":{},\"pps_object_pos\":{},\"target_mv\":{},\"pps_target_mv\":{},\"i_req_ma\":{}}},\"apply\":{{\"pending\":{}",
+        saved.fixed_object_pos,
+        saved.pps_object_pos,
+        saved.target_mv,
+        saved.pps_target_mv,
+        saved.i_req_ma,
+        if ack_pending { "true" } else { "false" }
+    );
+    if last_code != 0 {
+        out.push_str(",\"last\":{\"code\":\"").ok();
+        out.push_str(match last_code {
+            1 => "ok",
+            2 => "nack",
+            3 => "timeout",
+            4 => "persist_fail",
+            _ => "failed",
+        })
+        .ok();
+        let _ = core::write!(out, "\",\"at_ms\":{}}}", last_ms);
+    }
+    out.push_str("}}}").ok();
+}
+
+async fn write_usb_set_pd_policy_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    line: &str,
+    control: &'static ControlMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+) {
+    let mode = match usb_pd_mode_value(line) {
+        Some(mode) => mode,
+        None => {
+            write_usb_error_response(
+                out,
+                request_id,
+                "INVALID_REQUEST",
+                "mode must be fixed or pps",
+            );
+            return;
+        }
+    };
+    let Some(object_pos) = json_u32_value(line, "\"object_pos\"").map(|v| v.min(255) as u8) else {
+        write_usb_error_response(out, request_id, "INVALID_REQUEST", "missing object_pos");
+        return;
+    };
+    let Some(i_req_ma) = json_u32_value(line, "\"i_req_ma\"") else {
+        write_usb_error_response(out, request_id, "INVALID_REQUEST", "missing i_req_ma");
+        return;
+    };
+    if object_pos == 0 || object_pos > control::MAX_PD_OBJECT_POS || i_req_ma < 50 {
+        write_usb_error_response(
+            out,
+            request_id,
+            "LIMIT_VIOLATION",
+            "PD request is out of range",
+        );
+        return;
+    }
+    if !LINK_UP.load(Ordering::Relaxed) {
+        write_usb_error_response(out, request_id, "LINK_DOWN", "UART link is down");
+        return;
+    }
+
+    let status = match telemetry.lock().await.last_pd_status.clone() {
+        Some(status) if status.attached => status,
+        _ => {
+            write_usb_error_response(out, request_id, "NOT_ATTACHED", "PD status unavailable");
+            return;
+        }
+    };
+
+    let mut ctrl = control.lock().await;
+    let mut cfg = ctrl.pd_saved;
+    cfg.mode = mode;
+    cfg.i_req_ma = i_req_ma;
+    match mode {
+        control::PdMode::Fixed => {
+            let Some(pdo) = usb_find_fixed_pdo(&status, object_pos) else {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected PDO not present",
+                );
+                return;
+            };
+            if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV || i_req_ma > pdo.max_ma {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected PDO exceeds limits",
+                );
+                return;
+            }
+            cfg.fixed_object_pos = object_pos;
+            cfg.target_mv = pdo.mv;
+        }
+        control::PdMode::Pps => {
+            let Some(apdo) = usb_find_pps_pdo(&status, object_pos) else {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected APDO not present",
+                );
+                return;
+            };
+            let Some(target_mv) = json_u32_value(line, "\"target_mv\"") else {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "INVALID_REQUEST",
+                    "missing target_mv for PPS",
+                );
+                return;
+            };
+            if target_mv < apdo.min_mv || target_mv > apdo.max_mv || i_req_ma > apdo.max_ma {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "selected APDO exceeds limits",
+                );
+                return;
+            }
+            cfg.pps_object_pos = object_pos;
+            cfg.target_mv = target_mv;
+            cfg.pps_target_mv = target_mv;
+        }
+    }
+
+    let allow_extended_voltage =
+        json_bool_value(line, "\"allow_extended_voltage\"").unwrap_or(ctrl.allow_extended_voltage);
+    let changed = cfg != ctrl.pd_saved || allow_extended_voltage != ctrl.allow_extended_voltage;
+    if changed {
+        let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
+        if eeprom.lock().await.write_pd_blob(&blob).await.is_err() {
+            PD_LAST_RESULT_CODE.store(4, Ordering::Relaxed);
+            PD_LAST_RESULT_MS.store(now_ms32(), Ordering::Relaxed);
+            write_usb_error_response(out, request_id, "UNAVAILABLE", "EEPROM write failed");
+            return;
+        }
+        ctrl.pd_saved = cfg;
+        ctrl.allow_extended_voltage = allow_extended_voltage;
+        if ctrl.ui_view == control::UiView::PdSettings {
+            ctrl.pd_draft = cfg;
+        }
+        bump_control_rev();
+    }
+    drop(ctrl);
+
+    if !allow_extended_voltage {
+        clear_pd_extended_voltage_failure();
+    }
+    let now = now_ms32();
+    start_pd_extended_voltage_retry_window(now);
+    PD_UI_APPLY_MS.store(now, Ordering::Relaxed);
+    PD_FORCE_SEND.store(true, Ordering::Release);
+    write_usb_pd_response(out, request_id, control, telemetry).await;
+}
+
+async fn write_usb_set_output_enabled_response(
+    out: &mut heapless::String<2048>,
+    request_id: Option<&str>,
+    line: &str,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+) {
+    let Some(enable) =
+        json_bool_value(line, "\"enable\"").or_else(|| json_bool_value(line, "\"output_enabled\""))
+    else {
+        write_usb_error_response(out, request_id, "BAD_REQUEST", "missing enable boolean");
+        return;
+    };
+
+    let cal_mode = { calibration.lock().await.cal_mode };
+    let mut guard = control.lock().await;
+    let preset = guard.effective_output_command(cal_mode).preset;
+    let setpoint_zero = match preset.mode {
+        LoadMode::Cp => preset.target_p_mw == 0,
+        LoadMode::Cv => preset.target_v_mv == 0,
+        LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+    };
+
+    let mut changed = false;
+    let mut ok = true;
+    let mut reason: Option<&'static str> = None;
+    if enable {
+        if setpoint_zero {
+            ok = false;
+            reason = Some("SETPOINT_ZERO");
+        } else if let Some(block) = current_load_enable_block_abbrev(preset.min_v_mv) {
+            ok = false;
+            reason = Some(block);
+            record_enable_block(block);
+        } else if guard.enable_output_for_mode(cal_mode) {
+            changed = true;
+        } else {
+            ok = false;
+            reason = Some("SETPOINT_ZERO");
+        }
+    } else if guard.output_enabled {
+        guard.disable_output_for_mode(cal_mode);
+        changed = true;
+    }
+    let output_enabled = guard.output_enabled;
+    drop(guard);
+    if changed {
+        bump_control_rev();
+    }
+
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    if ok {
+        let _ = core::write!(
+            out,
+            ",\"ok\":true,\"data\":{{\"output_enabled\":{},\"changed\":{}}}}}",
+            if output_enabled { "true" } else { "false" },
+            if changed { "true" } else { "false" }
+        );
+    } else {
+        out.push_str(",\"ok\":false,\"error\":{\"code\":\"ENABLE_BLOCKED\",\"message\":\"")
+            .ok();
+        write_json_string_escaped(out, reason.unwrap_or("blocked"));
+        out.push_str("\"}}").ok();
+    }
+}
+
+async fn handle_usb_jsonl_request(
+    line: &str,
+    out: &mut heapless::String<2048>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+) {
+    let request_id = json_string_value(line, "\"request_id\"");
+    let Some(op) = json_string_value(line, "\"op\"") else {
+        write_usb_error_response(out, request_id, "BAD_REQUEST", "missing op");
+        return;
+    };
+
+    match op {
+        "get_identity" => write_usb_identity_response(out, request_id).await,
+        "get_status" => {
+            write_usb_status_response(out, request_id, control, calibration, telemetry).await
+        }
+        "get_pd" => write_usb_pd_response(out, request_id, control, telemetry).await,
+        "set_pd_policy" => {
+            write_usb_set_pd_policy_response(out, request_id, line, control, telemetry, eeprom)
+                .await
+        }
+        "set_output_enabled" => {
+            write_usb_set_output_enabled_response(out, request_id, line, control, calibration).await
+        }
+        _ => write_usb_error_response(out, request_id, "UNKNOWN_OP", "unsupported op"),
+    }
+}
+
+#[embassy_executor::task]
+async fn usb_cdc_jsonl_task(
+    mut rx: UsbSerialJtagRx<'static, Async>,
+    mut tx: UsbSerialJtagTx<'static, Async>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+) {
+    info!("USB CDC JSONL task starting (protocol=loadlynx.cdc.v1)");
+    let mut out = heapless::String::<2048>::new();
+    out.push_str("{\"type\":\"hello\",\"protocol\":\"loadlynx.cdc.v1\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"firmware_version\":\"").ok();
+    write_json_string_escaped(&mut out, FW_VERSION);
+    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}")
+        .ok();
+    usb_cdc_write_line(&mut tx, &out).await;
+
+    let mut read_buf = [0_u8; 64];
+    let mut line_buf = [0_u8; 512];
+    let mut line_len = 0usize;
+
+    loop {
+        let n = match rx.read(&mut read_buf).await {
+            Ok(0) => {
+                yield_now().await;
+                continue;
+            }
+            Ok(n) => n,
+            Err(_) => {
+                cooperative_delay_ms(20).await;
+                continue;
+            }
+        };
+
+        for &byte in &read_buf[..n] {
+            match byte {
+                b'\n' => {
+                    let line = core::str::from_utf8(&line_buf[..line_len]).unwrap_or("");
+                    let line = line.trim();
+                    if !line.is_empty() {
+                        handle_usb_jsonl_request(
+                            line,
+                            &mut out,
+                            control,
+                            calibration,
+                            telemetry,
+                            eeprom,
+                        )
+                        .await;
+                        usb_cdc_write_line(&mut tx, &out).await;
+                    }
+                    line_len = 0;
+                }
+                b'\r' => {}
+                byte if line_len < line_buf.len() => {
+                    line_buf[line_len] = byte;
+                    line_len += 1;
+                }
+                _ => {
+                    line_len = 0;
+                    write_usb_error_response(
+                        &mut out,
+                        None,
+                        "LINE_TOO_LONG",
+                        "request line too long",
+                    );
+                    usb_cdc_write_line(&mut tx, &out).await;
+                }
+            }
+        }
     }
 }
 
@@ -4790,6 +5478,8 @@ async fn apply_fast_status(
     telemetry: &'static TelemetryMutex,
     status: &FastStatus,
 ) {
+    let now = now_ms32();
+    LAST_FAST_STATUS_MS.store(now, Ordering::Relaxed);
     let link_up = LINK_UP.load(Ordering::Relaxed);
     let fault_flags = status.fault_flags;
     LAST_FAULT_FLAGS.store(fault_flags, Ordering::Relaxed);
@@ -4825,6 +5515,15 @@ async fn apply_fast_status(
     };
     prompt_tone::set_warn_flags(warn_flags);
     let link_flag = (status.state_flags & STATE_FLAG_LINK_GOOD) != 0;
+    let measurement_has_signal = fast_status_has_measurement_signal(status);
+    if measurement_has_signal {
+        MEASUREMENT_EVER_TRUSTED.store(true, Ordering::Relaxed);
+        MEASUREMENT_UNTRUSTED.store(false, Ordering::Relaxed);
+        LAST_TRUSTED_MEASUREMENT_MS.store(now, Ordering::Relaxed);
+    } else if !MEASUREMENT_EVER_TRUSTED.load(Ordering::Relaxed) {
+        MEASUREMENT_UNTRUSTED.store(true, Ordering::Relaxed);
+    }
+    let measurement_untrusted = MEASUREMENT_UNTRUSTED.load(Ordering::Relaxed);
 
     // Offline 主要由 LINK_UP 推导；仅在 LINK_UP 与模拟侧 LINK_GOOD 均为 false 时视为离线，
     // 避免模拟侧未完全实现 LINK_GOOD 时 UI 误报 OFFLINE。
@@ -4835,6 +5534,8 @@ async fn apply_fast_status(
         AnalogState::Offline
     } else if fault_flags != 0 {
         AnalogState::Faulted
+    } else if measurement_untrusted {
+        AnalogState::MeasurementInvalid
     } else if enabled || !desired_output_enabled || uv_latched {
         AnalogState::Ready
     } else {
@@ -5937,6 +6638,10 @@ async fn feed_decoder(
                                 // identity endpoint) can expose a compact analog firmware
                                 // identifier without having to inspect UART traffic.
                                 ANALOG_FW_VERSION_RAW.store(hello.fw_version, Ordering::Relaxed);
+                                LAST_FAST_STATUS_MS.store(0, Ordering::Relaxed);
+                                MEASUREMENT_EVER_TRUSTED.store(false, Ordering::Relaxed);
+                                MEASUREMENT_UNTRUSTED.store(false, Ordering::Relaxed);
+                                LAST_TRUSTED_MEASUREMENT_MS.store(0, Ordering::Relaxed);
 
                                 let first = !HELLO_SEEN.swap(true, Ordering::Relaxed);
                                 if first {
@@ -6101,6 +6806,72 @@ fn record_uart_error() {
 fn record_link_activity() {
     let now = now_ms32();
     LAST_GOOD_FRAME_MS.store(now, Ordering::Relaxed);
+}
+
+fn fast_status_has_measurement_signal(status: &FastStatus) -> bool {
+    status.v_local_mv.abs() >= MEASUREMENT_SIGNAL_MIN_MV
+        || status.v_remote_mv.abs() >= MEASUREMENT_SIGNAL_MIN_MV
+        || status.i_local_ma.abs() >= MEASUREMENT_SIGNAL_MIN_MA
+        || status.i_remote_ma.abs() >= MEASUREMENT_SIGNAL_MIN_MA
+        || status.calc_p_mw >= MEASUREMENT_SIGNAL_MIN_MW
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum LinkRecoveryReason {
+    NeverSeenFrame,
+    StaleLinkDown,
+    NoFastStatus,
+    ZeroMeasurement,
+}
+
+impl LinkRecoveryReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::NeverSeenFrame => "never-seen-frame",
+            Self::StaleLinkDown => "stale-link-down",
+            Self::NoFastStatus => "no-fast-status",
+            Self::ZeroMeasurement => "zero-measurement",
+        }
+    }
+}
+
+fn link_recovery_reason(
+    now: u32,
+    task_start_ms: u32,
+    last_good_frame_ms: u32,
+    link_up: bool,
+    last_fast_status_ms: u32,
+    measurement_untrusted: bool,
+) -> Option<LinkRecoveryReason> {
+    let never_seen_frame = last_good_frame_ms == 0;
+    if never_seen_frame && now.wrapping_sub(task_start_ms) >= BOOT_LINK_RECOVERY_GRACE_MS {
+        return Some(LinkRecoveryReason::NeverSeenFrame);
+    }
+
+    if !never_seen_frame
+        && !link_up
+        && now.wrapping_sub(last_good_frame_ms) >= LINK_DOWN_RECOVERY_GRACE_MS
+    {
+        return Some(LinkRecoveryReason::StaleLinkDown);
+    }
+
+    if !never_seen_frame
+        && link_up
+        && last_fast_status_ms == 0
+        && now.wrapping_sub(task_start_ms) >= MEASUREMENT_ZERO_RECOVERY_GRACE_MS
+    {
+        return Some(LinkRecoveryReason::NoFastStatus);
+    }
+
+    if !never_seen_frame
+        && link_up
+        && measurement_untrusted
+        && now.wrapping_sub(task_start_ms) >= MEASUREMENT_ZERO_RECOVERY_GRACE_MS
+    {
+        return Some(LinkRecoveryReason::ZeroMeasurement);
+    }
+
+    None
 }
 
 fn handle_setpoint_ack(header: &FrameHeader) {
@@ -6529,6 +7300,8 @@ async fn main(spawner: Spawner) {
         initial_pd,
         initial_allow_extended_voltage,
     )));
+    let usb_serial = UsbSerialJtag::new(peripherals.USB_DEVICE).into_async();
+    let (usb_rx, usb_tx) = usb_serial.split();
     CONTROL_REV.store(1, Ordering::Relaxed);
     LAST_USER_ACTIVITY_MS.store(now_ms32(), Ordering::Relaxed);
     SCREEN_POWER_STATE.store(SCREEN_POWER_STATE_ACTIVE, Ordering::Relaxed);
@@ -6670,6 +7443,17 @@ async fn main(spawner: Spawner) {
     spawner.spawn(ticker()).expect("ticker spawn");
     info!("spawning diag task");
     spawner.spawn(diag_task()).expect("diag_task spawn");
+    info!("spawning USB CDC JSONL task");
+    spawner
+        .spawn(usb_cdc_jsonl_task(
+            usb_rx,
+            usb_tx,
+            control,
+            calibration,
+            telemetry,
+            eeprom,
+        ))
+        .expect("usb_cdc_jsonl_task spawn");
 
     #[cfg(not(feature = "mock_setpoint"))]
     {
@@ -7449,7 +8233,7 @@ async fn setpoint_tx_task(
 
                     continue;
                 }
-                AnalogState::Offline | AnalogState::Ready => {
+                AnalogState::Offline | AnalogState::MeasurementInvalid | AnalogState::Ready => {
                     // Leaving CalMissing; reset stuck timer.
                     calmissing_since_ms = None;
                 }
@@ -7817,27 +8601,28 @@ async fn setmode_tx_task(
         // forever-offline snapshot.
         let last_good = LAST_GOOD_FRAME_MS.load(Ordering::Relaxed);
         let link_up_now = LINK_UP.load(Ordering::Relaxed);
-        let never_seen_frame = last_good == 0;
-        let no_frame_past_boot_grace =
-            never_seen_frame && now.wrapping_sub(task_start_ms) >= BOOT_LINK_RECOVERY_GRACE_MS;
-        let stale_link_down = !never_seen_frame
-            && !link_up_now
-            && now.wrapping_sub(last_good) >= LINK_DOWN_RECOVERY_GRACE_MS;
-        if (no_frame_past_boot_grace || stale_link_down)
+        let last_fast_status = LAST_FAST_STATUS_MS.load(Ordering::Relaxed);
+        let recovery_reason = link_recovery_reason(
+            now,
+            task_start_ms,
+            last_good,
+            link_up_now,
+            last_fast_status,
+            MEASUREMENT_UNTRUSTED.load(Ordering::Relaxed),
+        );
+        if recovery_reason.is_some()
             && pending.is_none()
             && pd_pending.is_none()
             && now.wrapping_sub(last_boot_link_recovery_ms) >= LINK_RECOVERY_RETRY_MS
         {
             last_boot_link_recovery_ms = now;
-            let reason = if never_seen_frame {
-                "never-seen-frame"
-            } else {
-                "stale-link-down"
-            };
+            let reason = recovery_reason.unwrap().as_str();
             warn!(
-                "link recovery handshake starting (reason={}, last_good_frame_ms={}, hello_seen={}, link_up={})",
+                "link recovery handshake starting (reason={}, last_good_frame_ms={}, last_fast_status_ms={}, last_trusted_measurement_ms={}, hello_seen={}, link_up={})",
                 reason,
                 last_good,
+                last_fast_status,
+                LAST_TRUSTED_MEASUREMENT_MS.load(Ordering::Relaxed),
                 HELLO_SEEN.load(Ordering::Relaxed),
                 link_up_now
             );
@@ -8295,6 +9080,7 @@ async fn setmode_tx_task(
                         continue;
                     }
                     AnalogState::Ready => {}
+                    AnalogState::MeasurementInvalid => {}
                 }
             }
 
@@ -9196,6 +9982,60 @@ mod tests {
                 Some(&status),
             ),
             Some(control::PdConfig::DEFAULT_TARGET_MV)
+        );
+    }
+
+    #[test]
+    fn fast_status_measurement_signal_requires_nonzero_measurement() {
+        let zero = FastStatus::default();
+        assert!(!fast_status_has_measurement_signal(&zero));
+
+        let with_voltage = FastStatus {
+            v_local_mv: MEASUREMENT_SIGNAL_MIN_MV,
+            ..FastStatus::default()
+        };
+        assert!(fast_status_has_measurement_signal(&with_voltage));
+
+        let with_power = FastStatus {
+            calc_p_mw: MEASUREMENT_SIGNAL_MIN_MW,
+            ..FastStatus::default()
+        };
+        assert!(fast_status_has_measurement_signal(&with_power));
+    }
+
+    #[test]
+    fn link_recovery_covers_hello_without_fast_status() {
+        assert_eq!(
+            link_recovery_reason(MEASUREMENT_ZERO_RECOVERY_GRACE_MS, 0, 1, true, 0, false),
+            Some(LinkRecoveryReason::NoFastStatus)
+        );
+    }
+
+    #[test]
+    fn link_recovery_covers_never_trusted_zero_measurement_fast_status() {
+        assert_eq!(
+            link_recovery_reason(MEASUREMENT_ZERO_RECOVERY_GRACE_MS, 0, 1, true, 1, true),
+            Some(LinkRecoveryReason::ZeroMeasurement)
+        );
+    }
+
+    #[test]
+    fn link_recovery_ignores_trusted_zero_measurement_fast_status() {
+        assert_eq!(
+            link_recovery_reason(MEASUREMENT_ZERO_RECOVERY_GRACE_MS, 0, 1, true, 1, false),
+            None
+        );
+    }
+
+    #[test]
+    fn link_recovery_keeps_existing_boot_and_stale_paths() {
+        assert_eq!(
+            link_recovery_reason(BOOT_LINK_RECOVERY_GRACE_MS, 0, 0, false, 0, false),
+            Some(LinkRecoveryReason::NeverSeenFrame)
+        );
+        assert_eq!(
+            link_recovery_reason(LINK_DOWN_RECOVERY_GRACE_MS + 1, 0, 1, false, 1, false),
+            Some(LinkRecoveryReason::StaleLinkDown)
         );
     }
 }

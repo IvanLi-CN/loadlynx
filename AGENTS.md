@@ -32,9 +32,11 @@ Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for 
 - Firmware verification relies on on‑device logs: look for `info!("LoadLynx analog alive; ...")` on G431, `info!("LoadLynx digital alive; ...")` on S3, and periodic `info!("fast_status ok (count=...)")` once the UART link is running.
 - Provide a short test plan in PRs (build, flash, logs, basic behavior observed).
 
-## Agent Firmware Verification Workflow
+## Firmware Flash/Reset/Monitor Workflow
 
-Hardware-in-the-loop verification is now driven by the external `mcu-agentd` daemon + CLI (sibling checkout at `../mcu-agentd`), with per-project config `mcu-agentd.toml` and cached selectors in `.esp32-port` / `.stm32-port`. Prefer the `just` wrappers below.
+Firmware flash/reset/monitor operations are driven by the external `mcu-agentd` daemon + CLI (sibling checkout at `../mcu-agentd`), with per-project config `mcu-agentd.toml` and cached selectors in `.esp32-port` / `.stm32-port`. Prefer the `just` wrappers below for those firmware operations only.
+
+Web control-plane and `loadlynx-devd` USB CDC verification are separate from `mcu-agentd`. They must use `tools/loadlynx-devd` directly against the intended ESP32-S3 digital USB CDC device. Set the default digital hardware USB port through `loadlynx usb-port set digital <path>`, which reuses `.esp32-port`; do not call or change `mcu-agentd selector` state for Web/devd verification. When the current task is the devd/Web firmware flow, real ESP32-S3 digital flash must also go through devd's lease-gated direct `espflash` path using the approved `.esp32-port` target, not `just agentd flash digital`.
 
 ### Build-time versioning and boot logs
 
@@ -58,14 +60,32 @@ Hardware-in-the-loop verification is now driven by the external `mcu-agentd` dae
 
 ### Notes
 
-- Flash/reset/monitor must go through `mcu-agentd` (`just agentd ...`).
+- Non-devd firmware flash/reset/monitor must go through `mcu-agentd` (`just agentd ...`).
+- Web/devd control-plane verification must not go through `mcu-agentd`; use the `loadlynx-devd` HTTP API plus the USB CDC JSONL protocol documented in `docs/interfaces/usb-cdc-jsonl-bridge.md`.
 
 ### Expectations
 
-- Prefer `mcu-agentd` for build/flash/reset/log capture; do not ask the user to run scripts manually. If a port/probe is unknown,在获得用户明确同意后再使用 `just agentd selector set ...` 或 `just agentd selector list ...`，不得擅自调用或更换连接设备。
+- Prefer `mcu-agentd` for firmware flash/reset/log capture; do not ask the user to run scripts manually. If a port/probe is unknown,在获得用户明确同意后再使用 `just agentd selector set ...` 或 `just agentd selector list ...`，不得擅自调用或更换连接设备。
 - `agentd` will first use its cached port/probe or auto-select a likely candidate; only if it cannot resolve a usable port/probe and returns an error should the user be asked to confirm or provide one.
 - When analyzing logs, always cross-check `LOADLYNX_FW_VERSION` against local `tmp/{analog|digital}-fw-version.txt`.
 - Treat probe-rs/espflash failures as repository engineering issues first; adjust config or command arguments before escalating.
+
+### Web/Devd USB CDC Verification
+
+- Follow `skills/loadlynx-usb-devd/SKILL.md` for Web/devd USB CDC CLI workflows.
+- The default digital USB port exists only as an Agent safety guardrail: it prevents CLI/devd work from guessing or touching the wrong ESP32-S3 USB CDC device.
+- During development, set the default digital USB port only through `just loadlynx usb-port set digital <path>` after the owner explicitly approves the exact ESP32-S3 digital USB CDC path. This writes the repo-local `.esp32-port` memory used by subsequent CLI/devd operations.
+- The CLI also supports human interactive use (`just loadlynx usb-port set` or `just loadlynx usb-port set digital`) with arrow-key selection over espflash-style serial port candidates, but an Agent must not use interactive candidate selection to bypass owner approval of the exact port.
+- Reuse `.esp32-port` as the sole memory file for this setting; do not introduce a replacement file or alternate memory scheme.
+- `.esp32-port` may retain mcu-agentd-compatible metadata lines such as `mac=...`; CLI/devd must treat only the approved port path line as the default USB port.
+- Never change `.esp32-port` or rerun `just loadlynx usb-port set digital ...` without explicit owner approval for the new exact path. Vague instructions like “继续”, “再试”, or “你自己处理” are not approval to change USB ports.
+- If `.esp32-port` is missing, stale, unreadable, or does not match the ESP32-S3 digital device the owner approved, stop and ask the owner which USB port to use. Do not scan candidates and silently pick one.
+- After the default digital USB port is set, start `loadlynx-devd` directly from this repository, for example through `just devd-serve ...`. Do not pass hardware port arguments to the devd startup command.
+- Start the Web app with `VITE_LOADLYNX_DEVD_URL` pointed at the active devd URL.
+- For devd/Web firmware flashing, use the devd HTTP/CLI flash operation. The real ESP32-S3 digital flash path must hold a valid Web lease, resolve the selected artifact, verify hashes, and invoke direct `espflash` against the approved `.esp32-port` target. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
+- Prove real-device coverage through devd-owned USB CDC evidence: the selected candidate path, a Web lease, and decoded JSONL frames or successful `hello`/`get_identity`/`get_status` responses from the device.
+- Mock identity, mock status, serial-open-only probes, or firmware dry-run target evidence are not sufficient to claim real-device Web/devd verification.
+- Do not call `just agentd selector set`, `just agentd flash`, `just agentd reset`, or `just agentd monitor` as part of Web/devd control-plane verification. If the task explicitly includes devd/Web digital firmware flashing, stay on devd's direct `espflash` path; `mcu-agentd` remains for non-devd firmware workflows and analog/probe operations.
 
 ### Hardware Safety Guardrails (STRICT)
 
