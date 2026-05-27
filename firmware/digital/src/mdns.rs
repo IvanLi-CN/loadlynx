@@ -382,7 +382,7 @@ fn build_service_response(buf: &mut [u8], cfg: &MdnsConfig, ip: Ipv4Address) -> 
     buf[4] = 0;
     buf[5] = 0; // QDCOUNT
     buf[6] = 0;
-    buf[7] = 5; // ANCOUNT: PTR + PTR + SRV + TXT + A
+    buf[7] = 7; // ANCOUNT: PTR + PTR + two SRV/TXT pairs + A
     buf[8] = 0;
     buf[9] = 0;
     buf[10] = 0;
@@ -421,6 +421,14 @@ fn build_service_response(buf: &mut [u8], cfg: &MdnsConfig, ip: Ipv4Address) -> 
         loadlynx_instance.as_str(),
         cfg.hostname.as_str(),
     )?;
+    offset = write_srv_rr(
+        buf,
+        offset,
+        http_instance.as_str(),
+        cfg.port,
+        cfg.hostname_fqdn.as_str(),
+    )?;
+    offset = write_txt_rr(buf, offset, http_instance.as_str(), cfg.hostname.as_str())?;
     offset = write_a_rr(buf, offset, cfg.hostname_fqdn.as_str(), ip)?;
     Some(offset)
 }
@@ -750,9 +758,10 @@ mod tests {
         let mut buf = [0u8; 512];
         let len = build_service_response(&mut buf, &cfg, ip).unwrap();
 
-        assert_eq!(buf[7], 5);
+        assert_eq!(buf[7], 7);
         let packet = core::str::from_utf8(&buf[..len]).unwrap_or("");
         assert!(packet.contains("_loadlynx"));
+        assert!(packet.contains("_http"));
         assert!(packet.contains("product=loadlynx"));
         assert!(packet.contains("device_id=loadlynx-aabbcc"));
     }

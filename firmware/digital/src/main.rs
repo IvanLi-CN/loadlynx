@@ -794,7 +794,23 @@ async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_i
     }
     out.push_str(",\"ok\":true,\"data\":{\"device_id\":\"digital-esp32s3\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"protocol\":\"loadlynx.cdc.v1\",\"firmware_version\":\"").ok();
     write_json_string_escaped(out, FW_VERSION);
-    out.push_str("\",\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}}").ok();
+    out.push_str("\",\"digital_fw_version\":\"").ok();
+    write_json_string_escaped(out, FW_VERSION);
+    out.push_str("\",\"firmware\":{\"target\":\"digital_esp32s3\",\"package_version\":\"")
+        .ok();
+    write_json_string_escaped(out, env!("CARGO_PKG_VERSION"));
+    out.push_str("\",\"build_id\":\"").ok();
+    write_json_string_escaped(out, FW_VERSION);
+    out.push_str("\",\"build_profile\":\"").ok();
+    write_json_string_escaped(out, option_env!("LOADLYNX_FW_PROFILE").unwrap_or("unknown"));
+    out.push_str("\",\"target_triple\":\"").ok();
+    write_json_string_escaped(out, option_env!("LOADLYNX_FW_TARGET").unwrap_or("unknown"));
+    out.push_str("\",\"source_digest\":\"").ok();
+    write_json_string_escaped(
+        out,
+        option_env!("LOADLYNX_FW_SRC_DIGEST").unwrap_or("src unknown"),
+    );
+    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}}").ok();
 }
 
 async fn write_usb_status_response(

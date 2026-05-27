@@ -1911,6 +1911,12 @@ fn record_serial_protocol_probe(
     probe: SerialProtocolProbe,
 ) {
     let mut guard = state.inner.lock().expect("state lock");
+    let selected_artifact = guard
+        .devices
+        .get(device_id)
+        .and_then(|device| device.selected_artifact_id.as_ref())
+        .and_then(|id| guard.artifacts.get(id))
+        .cloned();
     let Some(device) = guard.devices.get_mut(device_id) else {
         return;
     };
@@ -1954,6 +1960,17 @@ fn record_serial_protocol_probe(
             }
             for event in probe.frames {
                 if event.direction == "rx"
+                    && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
+                    && event
+                        .frame
+                        .get("request_id")
+                        .and_then(Value::as_str)
+                        .is_some_and(|id| id == "devd-get-identity")
+                    && let Some(data) = event.frame.get("data").cloned()
+                {
+                    device.identity = Some(data);
+                    apply_artifact_match(device, selected_artifact.as_ref());
+                } else if event.direction == "rx"
                     && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
                     && event
                         .frame
@@ -3110,5 +3127,75 @@ mod tests {
         let err = ensure_real_operation_uses_cached_target(device, &TargetKind::DigitalEsp32s3)
             .unwrap_err();
         assert_eq!(err.0.code, "target_selector_not_cached");
+    }
+
+    #[tokio::test]
+    async fn serial_probe_persists_identity_and_refreshes_artifact_match() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert(
+                "digital".to_string(),
+                FirmwareArtifact {
+                    artifact_id: "digital".into(),
+                    name: "digital".into(),
+                    target: TargetKind::DigitalEsp32s3,
+                    package_version: "0.1.0".into(),
+                    git_sha: "abc".into(),
+                    build_id: "digital-build".into(),
+                    build_profile: "release".into(),
+                    features: vec!["net_http".into(), "usb_cdc_jsonl".into()],
+                    protocol: "loadlynx.cdc.v1".into(),
+                    defmt: DefmtMetadata {
+                        enabled: true,
+                        encoding: "defmt-espflash".into(),
+                        elf_sha256: None,
+                        table_sha256: None,
+                    },
+                    files: vec![],
+                },
+            );
+            let device = guard.devices.get_mut("mock-loadlynx-devd").unwrap();
+            device.selected_artifact_id = Some("digital".to_string());
+        }
+
+        record_serial_protocol_probe(
+            &state,
+            "mock-loadlynx-devd",
+            "/dev/cu.usbmodem212101",
+            "serial protocol probe completed",
+            SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "type": "response",
+                        "request_id": "devd-get-identity",
+                        "ok": true,
+                        "data": {
+                            "device_id": "digital-esp32s3",
+                            "firmware": {
+                                "build_id": "digital-build",
+                                "build_profile": "release",
+                                "features": ["net_http", "usb_cdc_jsonl"]
+                            }
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            },
+        );
+
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard.devices.get("mock-loadlynx-devd").unwrap();
+        assert_eq!(
+            device
+                .identity
+                .as_ref()
+                .and_then(|identity| identity.get("device_id"))
+                .and_then(Value::as_str),
+            Some("digital-esp32s3")
+        );
+        assert_eq!(device.log_decode.status, "verified");
     }
 }
