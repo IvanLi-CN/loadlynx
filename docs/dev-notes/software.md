@@ -282,7 +282,7 @@
 
 ## 7. 数字板：睡眠待机指示灯（触摸电源键白光呼吸）
 
-为便于在熄屏时从远处快速判断“设备仍处于待机而非断电”，数字板固件在 **`ScreenPowerState::Off`**（熄屏/睡眠待机）期间让触摸电源键指示灯输出白光低频呼吸（Plan #6mre7）。
+为便于在熄屏时从远处快速判断“设备仍处于待机而非断电”，数字板固件在 **`ScreenPowerState::Off`**（熄屏/睡眠待机）期间让触摸电源键指示灯输出白光低频呼吸（Spec #v3g2c）。
 
 - **状态源**：`ScreenPowerState::Off`（`firmware/digital/src/main.rs` 中的 `SCREEN_POWER_STATE` 原子变量）。
 - **硬件**：`TOUCH_SPRING`（GPIO14/TouchPad14）作为触摸电源键；RGB 指示灯为 `RGB_R/G/B_PWM`（GPIO38/39/40，active-low）。

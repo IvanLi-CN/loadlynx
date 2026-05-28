@@ -55,7 +55,7 @@ Use a local-first control plane:
 ## References
 
 - `docs/specs/e3rv6-loadlynx-devd-control-plane/SPEC.md`
-- `docs/specs/0004-mdns-and-lan-discovery/SPEC.md`
+- `docs/specs/yy7th-mdns-and-lan-discovery/SPEC.md`
 - `docs/interfaces/network-http-api.md`
 - `docs/interfaces/uart-link.md`
 - `/Users/ivan/Projects/Ivan/mains-aegis/tools/mains-aegis-devd/src/main.rs`

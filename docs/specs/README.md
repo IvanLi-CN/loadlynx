@@ -6,7 +6,7 @@
 
 ## 快速新增一个规格
 
-1. 生成一个新的规格 `ID`（推荐 5 个字符的 nanoId 风格，降低并行建规格时的冲突概率）。
+1. 生成一个新的规格 `ID`（推荐 5 个字符的 nanoId 风格，必须以字母开头；不要使用纯数字编号）。
 2. 新建目录：`docs/specs/<id>-<title>/`（`<title>` 用简短 slug，建议 kebab-case）。
 3. 在该目录下创建 `SPEC.md`、`IMPLEMENTATION.md`、`HISTORY.md`。
 4. 在下方 Index 表新增一行，并把 `Lifecycle` 设为 `active`，把 `Status` 设为当前规格状态。
@@ -25,32 +25,32 @@
 
 | ID | Title | Status | Lifecycle | Spec | Implementation | Last | Notes |
 |---:|-------|--------|-----------|------|----------------|------|-------|
-| 0001 | CC 负载开关（Load Switch）：设置值 / 生效值分离 | 已完成 | active | `0001-cc-load-switch-toggle/SPEC.md` | `0001-cc-load-switch-toggle/IMPLEMENTATION.md` | 2025-12-26 | migrated |
-| 0002 | CV 模式 + Preset 需求与概要设计 | 已完成 | active | `0002-cv-mode-presets/SPEC.md` | `0002-cv-mode-presets/IMPLEMENTATION.md` | 2026-01-03 | migrated |
-| 0003 | FT6336U 触控（P024C128-CTP）驱动与 digital 集成设计（草案） | 已完成 | active | `0003-ft6336u-touch-int/SPEC.md` | `0003-ft6336u-touch-int/IMPLEMENTATION.md` | 2025-12-25 | migrated |
-| 0004 | mDNS 与局域网发现设计草案 | 已完成 | active | `0004-mdns-and-lan-discovery/SPEC.md` | `0004-mdns-and-lan-discovery/IMPLEMENTATION.md` | 2025-12-11 | migrated |
-| 0005 | 本机 Preset UI（触屏 + 旋钮）需求与概要设计 | 已完成 | active | `0005-on-device-preset-ui/SPEC.md` | `0005-on-device-preset-ui/IMPLEMENTATION.md` | 2026-01-07 | migrated |
-| 0006 | Preset UI：UVLO / OCP / OPP 命名与三线约束（需求与概要设计） | 已完成 | active | `0006-preset-ui-protection-labels/SPEC.md` | `0006-preset-ui-protection-labels/IMPLEMENTATION.md` | 2026-01-07 | migrated |
-| 0007 | 提示音管理器（蜂鸣器 Prompt Tone）设计 | 已完成 | active | `0007-prompt-tone-manager/SPEC.md` | `0007-prompt-tone-manager/IMPLEMENTATION.md` | 2026-01-07 | migrated |
-| 0008 | Web Storybook 组件工作台：需求分析与概要设计 | 已完成 | active | `0008-storybook-component-workshop/SPEC.md` | `0008-storybook-component-workshop/IMPLEMENTATION.md` | 2025-12-23 | migrated |
-| 0009 | MCU↔MCU 串口通信问题说明与排查方案（记录规范 & 实测数据） | 已完成 | active | `0009-uart-comm-troubleshooting/SPEC.md` | `0009-uart-comm-troubleshooting/IMPLEMENTATION.md` | 2026-01-05 | migrated |
-| 0010 | USB‑PD Sink：5V/20V 两态切换（STM32G431 UCPD） | 已完成 | active | `0010-usb-pd-sink-toggle/SPEC.md` | `0010-usb-pd-sink-toggle/IMPLEMENTATION.md` | 2026-01-07 | migrated |
-| 0011 | Web UI Layout 规范化（Layouts 抽象） | 已完成 | active | `0011-web-layouts/SPEC.md` | `0011-web-layouts/IMPLEMENTATION.md` | 2025-12-26 | migrated |
-| 0012 | Web：Responsive Drawer Sidebar（ConsoleLayout 导航） | 已完成 | active | `0012-web-responsive-drawer-sidebar/SPEC.md` | `0012-web-responsive-drawer-sidebar/IMPLEMENTATION.md` | 2025-12-26 | migrated |
-| 0013 | USB‑PD 设置面板：Fixed PDO / PPS APDO（UI + UART 协议 + HTTP API） | 已完成 | active | `0013-usb-pd-pps-and-fixed-settings/SPEC.md` | `0013-usb-pd-pps-and-fixed-settings/IMPLEMENTATION.md` | 2026-01-12 | migrated |
-| 0014 | Web：USB‑PD 设置页（对接 /api/v1/pd） | 已完成 | active | `0014-web-usb-pd-settings/SPEC.md` | `0014-web-usb-pd-settings/IMPLEMENTATION.md` | 2026-01-13 | migrated |
-| 0015 | 数字板：屏幕自动调暗与熄屏 | 已完成 | active | `0015-auto-screen-dim-off/SPEC.md` | `0015-auto-screen-dim-off/IMPLEMENTATION.md` | 2026-01-13 | migrated |
-| 0016 | PD 设置：触屏友好的目标值编辑（PD Settings Touch Value Editor） | 已完成 | active | `0016-pd-settings-touch-value-editor/SPEC.md` | `0016-pd-settings-touch-value-editor/IMPLEMENTATION.md` | 2026-01-15 | migrated |
-| 0017 | CP 模式：本机屏幕界面 + HTTP API | 已完成 | active | `0017-cp-mode-ui-http-api/SPEC.md` | `0017-cp-mode-ui-http-api/IMPLEMENTATION.md` | 2026-01-18 | migrated |
-| 0018 | Web：CP 模式控制页 | 已完成 | active | `0018-web-cp-mode-ui/SPEC.md` | `0018-web-cp-mode-ui/IMPLEMENTATION.md` | 2026-01-19 | migrated |
-| 0019 | 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed） | 已完成 | active | `0019-dashboard-pd-button-label/SPEC.md` | `0019-dashboard-pd-button-label/IMPLEMENTATION.md` | 2026-01-19 | migrated |
-| 0020 | Web：仪器风格主界面（左监右控） | 已完成 | active | `0020-web-instrument-control-ui/SPEC.md` | `0020-web-instrument-control-ui/IMPLEMENTATION.md` | 2026-01-20 | migrated |
-| 0021 | 触摸弹簧（GPIO14）负载开关 + RGB 指示 + 语音播放（MAX98357A / I²S） | 已完成 | active | `0021-touch-spring-load-switch-rgb-led/SPEC.md` | `0021-touch-spring-load-switch-rgb-led/IMPLEMENTATION.md` | 2026-02-03 | migrated |
-| 0022 | Storybook：隐藏断点竖线标尺（768/1024） | 已完成 | active | `0022-storybook-hide-breakpoint-guides/SPEC.md` | `0022-storybook-hide-breakpoint-guides/IMPLEMENTATION.md` | 2026-01-20 | migrated |
-| 0023 | GitHub Pages：Web Deploy 失败修复（lockfile/CI） | 已完成 | active | `0023-web-pages-deploy-lockfile/SPEC.md` | `0023-web-pages-deploy-lockfile/IMPLEMENTATION.md` | 2026-01-21 | migrated |
-| 0024 | Web：版本号展示 + GitHub 分支跳转 | 已完成 | active | `0024-web-version-github-link/SPEC.md` | `0024-web-version-github-link/IMPLEMENTATION.md` | 2026-01-21 | migrated |
-| 0025 | 服务端口规范化 | 已完成 | active | `0025-service-ports-avoid-defaults/SPEC.md` | `0025-service-ports-avoid-defaults/IMPLEMENTATION.md` | 2026-01-21 | migrated |
-| 6mre7 | 触摸电源按键：睡眠待机白光低频呼吸 | 已完成 | active | `6mre7-touch-power-button-standby-breathing-white/SPEC.md` | `6mre7-touch-power-button-standby-breathing-white/IMPLEMENTATION.md` | 2026-02-03 | migrated |
+| y5ztx | CC 负载开关（Load Switch）：设置值 / 生效值分离 | 已完成 | active | `y5ztx-cc-load-switch-toggle/SPEC.md` | `y5ztx-cc-load-switch-toggle/IMPLEMENTATION.md` | 2025-12-26 | migrated |
+| exkw2 | CV 模式 + Preset 需求与概要设计 | 已完成 | active | `exkw2-cv-mode-presets/SPEC.md` | `exkw2-cv-mode-presets/IMPLEMENTATION.md` | 2026-01-03 | migrated |
+| c67hy | FT6336U 触控（P024C128-CTP）驱动与 digital 集成设计（草案） | 已完成 | active | `c67hy-ft6336u-touch-int/SPEC.md` | `c67hy-ft6336u-touch-int/IMPLEMENTATION.md` | 2025-12-25 | migrated |
+| yy7th | mDNS 与局域网发现设计草案 | 已完成 | active | `yy7th-mdns-and-lan-discovery/SPEC.md` | `yy7th-mdns-and-lan-discovery/IMPLEMENTATION.md` | 2025-12-11 | migrated |
+| mq8ht | 本机 Preset UI（触屏 + 旋钮）需求与概要设计 | 已完成 | active | `mq8ht-on-device-preset-ui/SPEC.md` | `mq8ht-on-device-preset-ui/IMPLEMENTATION.md` | 2026-01-07 | migrated |
+| trrw7 | Preset UI：UVLO / OCP / OPP 命名与三线约束（需求与概要设计） | 已完成 | active | `trrw7-preset-ui-protection-labels/SPEC.md` | `trrw7-preset-ui-protection-labels/IMPLEMENTATION.md` | 2026-01-07 | migrated |
+| bd4vh | 提示音管理器（蜂鸣器 Prompt Tone）设计 | 已完成 | active | `bd4vh-prompt-tone-manager/SPEC.md` | `bd4vh-prompt-tone-manager/IMPLEMENTATION.md` | 2026-01-07 | migrated |
+| hthpy | Web Storybook 组件工作台：需求分析与概要设计 | 已完成 | active | `hthpy-storybook-component-workshop/SPEC.md` | `hthpy-storybook-component-workshop/IMPLEMENTATION.md` | 2025-12-23 | migrated |
+| z5ey6 | MCU↔MCU 串口通信问题说明与排查方案（记录规范 & 实测数据） | 已完成 | active | `z5ey6-uart-comm-troubleshooting/SPEC.md` | `z5ey6-uart-comm-troubleshooting/IMPLEMENTATION.md` | 2026-01-05 | migrated |
+| h3gz5 | USB‑PD Sink：5V/20V 两态切换（STM32G431 UCPD） | 已完成 | active | `h3gz5-usb-pd-sink-toggle/SPEC.md` | `h3gz5-usb-pd-sink-toggle/IMPLEMENTATION.md` | 2026-01-07 | migrated |
+| cqu4e | Web UI Layout 规范化（Layouts 抽象） | 已完成 | active | `cqu4e-web-layouts/SPEC.md` | `cqu4e-web-layouts/IMPLEMENTATION.md` | 2025-12-26 | migrated |
+| t4zh9 | Web：Responsive Drawer Sidebar（ConsoleLayout 导航） | 已完成 | active | `t4zh9-web-responsive-drawer-sidebar/SPEC.md` | `t4zh9-web-responsive-drawer-sidebar/IMPLEMENTATION.md` | 2025-12-26 | migrated |
+| j24my | USB‑PD 设置面板：Fixed PDO / PPS APDO（UI + UART 协议 + HTTP API） | 已完成 | active | `j24my-usb-pd-pps-and-fixed-settings/SPEC.md` | `j24my-usb-pd-pps-and-fixed-settings/IMPLEMENTATION.md` | 2026-01-12 | migrated |
+| rbcuw | Web：USB‑PD 设置页（对接 /api/v1/pd） | 已完成 | active | `rbcuw-web-usb-pd-settings/SPEC.md` | `rbcuw-web-usb-pd-settings/IMPLEMENTATION.md` | 2026-01-13 | migrated |
+| guysf | 数字板：屏幕自动调暗与熄屏 | 已完成 | active | `guysf-auto-screen-dim-off/SPEC.md` | `guysf-auto-screen-dim-off/IMPLEMENTATION.md` | 2026-01-13 | migrated |
+| ye27x | PD 设置：触屏友好的目标值编辑（PD Settings Touch Value Editor） | 已完成 | active | `ye27x-pd-settings-touch-value-editor/SPEC.md` | `ye27x-pd-settings-touch-value-editor/IMPLEMENTATION.md` | 2026-01-15 | migrated |
+| k7nhc | CP 模式：本机屏幕界面 + HTTP API | 已完成 | active | `k7nhc-cp-mode-ui-http-api/SPEC.md` | `k7nhc-cp-mode-ui-http-api/IMPLEMENTATION.md` | 2026-01-18 | migrated |
+| ejgp8 | Web：CP 模式控制页 | 已完成 | active | `ejgp8-web-cp-mode-ui/SPEC.md` | `ejgp8-web-cp-mode-ui/IMPLEMENTATION.md` | 2026-01-19 | migrated |
+| wjhba | 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed） | 已完成 | active | `wjhba-dashboard-pd-button-label/SPEC.md` | `wjhba-dashboard-pd-button-label/IMPLEMENTATION.md` | 2026-01-19 | migrated |
+| t5x4k | Web：仪器风格主界面（左监右控） | 已完成 | active | `t5x4k-web-instrument-control-ui/SPEC.md` | `t5x4k-web-instrument-control-ui/IMPLEMENTATION.md` | 2026-01-20 | migrated |
+| swzqu | 触摸弹簧（GPIO14）负载开关 + RGB 指示 + 语音播放（MAX98357A / I²S） | 已完成 | active | `swzqu-touch-spring-load-switch-rgb-led/SPEC.md` | `swzqu-touch-spring-load-switch-rgb-led/IMPLEMENTATION.md` | 2026-02-03 | migrated |
+| j6tmd | Storybook：隐藏断点竖线标尺（768/1024） | 已完成 | active | `j6tmd-storybook-hide-breakpoint-guides/SPEC.md` | `j6tmd-storybook-hide-breakpoint-guides/IMPLEMENTATION.md` | 2026-01-20 | migrated |
+| rjkcw | GitHub Pages：Web Deploy 失败修复（lockfile/CI） | 已完成 | active | `rjkcw-web-pages-deploy-lockfile/SPEC.md` | `rjkcw-web-pages-deploy-lockfile/IMPLEMENTATION.md` | 2026-01-21 | migrated |
+| yff7v | Web：版本号展示 + GitHub 分支跳转 | 已完成 | active | `yff7v-web-version-github-link/SPEC.md` | `yff7v-web-version-github-link/IMPLEMENTATION.md` | 2026-01-21 | migrated |
+| sjb5t | 服务端口规范化 | 已完成 | active | `sjb5t-service-ports-avoid-defaults/SPEC.md` | `sjb5t-service-ports-avoid-defaults/IMPLEMENTATION.md` | 2026-01-21 | migrated |
+| v3g2c | 触摸电源按键：睡眠待机白光低频呼吸 | 已完成 | active | `v3g2c-touch-power-button-standby-breathing-white/SPEC.md` | `v3g2c-touch-power-button-standby-breathing-white/IMPLEMENTATION.md` | 2026-02-03 | migrated |
 | e3rv6 | LoadLynx devd 本地设备控制面 | 已完成 | active | `e3rv6-loadlynx-devd-control-plane/SPEC.md` | `e3rv6-loadlynx-devd-control-plane/IMPLEMENTATION.md` | 2026-05-24 | 首版实现：devd/CLI、Web devd+Firmware、firmware catalog、digital identity/DNS-SD、Storybook/视觉证据 |
 | fhpfk | LoadLynx operational skills packaging and workflow boundary | 已更新 | active | `fhpfk-loadlynx-operational-skills/SPEC.md` | `fhpfk-loadlynx-operational-skills/IMPLEMENTATION.md` | 2026-05-28 | PR #78；用户/开发者 skill 场景拆分、CLI-only 硬件操作、USB 优先、硬件记忆门禁、vercel-labs/skills 安装验证 |
 | fqmns | Dashboard Boot Link Recovery | 已完成 | active | `fqmns-boot-link-recovery/SPEC.md` | `fqmns-boot-link-recovery/IMPLEMENTATION.md` | 2026-04-25 | 软件实现与构建验证完成；HIL 因当前 worktree 缺失 selector 阻断 |

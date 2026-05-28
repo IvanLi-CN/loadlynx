@@ -146,7 +146,7 @@
 - `docs/specs/README.md`: 记录状态、Last 与 PR 号
 - `docs/specs/y4sf4-display-psram-dma-pipeline/SPEC.md`: 跟踪 milestone、HIL 证据和 review 修复
 
-## 计划资产（Plan assets）
+## 计划资产（Spec assets）
 
 - Directory: `docs/specs/y4sf4-display-psram-dma-pipeline/assets/`
 - PR visual evidence source: 本次如需截图，只能放在该目录并从 `## Visual Evidence (PR)` 引用
@@ -209,4 +209,4 @@ None
 - `firmware/digital/src/ui/mod.rs`
 - `docs/interfaces/pinmaps/esp32-s3.md`
 - `docs/other-datasheets/esp32-s3.md`
-- `docs/specs/0009-uart-comm-troubleshooting/SPEC.md`
+- `docs/specs/z5ey6-uart-comm-troubleshooting/SPEC.md`

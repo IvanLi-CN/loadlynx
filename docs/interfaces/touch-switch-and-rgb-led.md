@@ -1,10 +1,10 @@
-# Touch Switch and RGB LED (Plan #0021)
+# Touch Switch and RGB LED (Spec #swzqu)
 
 This document describes the **touch spring switch** and the **RGB indicator LED** used on the digital board, including intended behavior, electrical constraints, and layout guidance.
 
 For the authoritative pin assignment, see:
 - `docs/interfaces/pinmaps/esp32-s3.md` (ESP32‑S3 pinmap)
-- `docs/specs/0021-touch-spring-load-switch-rgb-led/SPEC.md` (scope and acceptance)
+- `docs/specs/swzqu-touch-spring-load-switch-rgb-led/SPEC.md` (scope and acceptance)
 
 ## Goals
 

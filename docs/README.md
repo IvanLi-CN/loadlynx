@@ -33,7 +33,7 @@
   - 本地设备控制面复用方案：`solutions/devices/local-device-control-plane.md`
   - 固件 catalog schema：`../schemas/firmware-catalog.schema.json`
   - 用户手动校准功能：`dev-notes/user-calibration.md`
-  - 蜂鸣器提示音管理器：`specs/0007-prompt-tone-manager/SPEC.md`
+  - 蜂鸣器提示音管理器：`specs/bd4vh-prompt-tone-manager/SPEC.md`
 
 - 外部数据手册（Other Datasheets，MinerU 转换）
   - ESP32‑S3：`other-datasheets/esp32-s3.md`

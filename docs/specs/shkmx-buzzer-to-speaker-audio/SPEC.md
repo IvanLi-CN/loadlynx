@@ -53,7 +53,7 @@
 - 模拟板（STM32G431）控制策略变更。
 - 新增或修改 HTTP API / UART 协议。
 - 音频压缩格式（MP3/Opus）与复杂混音/优先级系统（只覆盖现有提示音/告警音）。
-- 不包含 Plan #0021 的语音播放功能测试（#0021 为独立功能测试项）。
+- 不包含 Spec #swzqu 的语音播放功能测试（#swzqu 为独立功能测试项）。
 
 ### 需求（Requirements）
 
@@ -112,7 +112,7 @@ None
 
 - `docs/boards/control-board.md`: 明确声明当前硬件版本已经没贴装蜂鸣器相关器件；音频提示走扬声器（MAX98357A/I²S）。
 
-### 计划资产（Plan assets）
+### 计划资产（Spec assets）
 
 - None
 
@@ -142,7 +142,7 @@ None
 
 ### 变更记录（Change log）
 
-- 2026-02-01: 创建计划 #shkmx
+- 2026-02-01: 创建规格 #shkmx
 - 2026-02-03: digital: 将 `prompt_tone` 从蜂鸣器迁移到扬声器（MAX98357A/I²S），并更新控制板文档说明（待 HIL 声音验收）。
 - 2026-02-05: HIL: 设备实测确认触摸/旋钮反馈音与连续告警音均可正常从扬声器输出；固件通过 `just d-build` + `just agentd flash/monitor digital` 验证。
 
@@ -150,5 +150,5 @@ None
 
 - `firmware/digital/src/prompt_tone.rs`
 - `docs/power/netlists/digital-board-netlist.enet`（U6=MAX98357A）
-- `docs/specs/0007-prompt-tone-manager/SPEC.md`
-- `docs/specs/0021-touch-spring-load-switch-rgb-led/SPEC.md`
+- `docs/specs/bd4vh-prompt-tone-manager/SPEC.md`
+- `docs/specs/swzqu-touch-spring-load-switch-rgb-led/SPEC.md`

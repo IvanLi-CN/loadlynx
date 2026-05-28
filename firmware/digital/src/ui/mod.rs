@@ -1642,7 +1642,7 @@ fn format_setpoint_milli(value_milli: i32, unit: char) -> String<7> {
     // Fixed-width numeric text for the control row:
     // - A/V: "DD.dddU" (7 chars)
     // - W:   "DDD.ddU" (7 chars)
-    // Matches `docs/specs/0005-on-device-preset-ui/SPEC.md` (+ CP extension).
+    // Matches `docs/specs/mq8ht-on-device-preset-ui/SPEC.md` (+ CP extension).
     let mut s = String::<7>::new();
     let v = value_milli.max(0) as u32;
 

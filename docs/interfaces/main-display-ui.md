@@ -6,7 +6,7 @@
 
 > Mock is rendered at 320×240 px, matching the landscape frame buffer of the P024C128-CTP module (`docs/other-datasheets/p024c128-ctp.md`).
 >
-> NOTE: The main-screen control row interaction is defined by `docs/specs/0005-on-device-preset-ui/SPEC.md` and replaces the legacy “tap CC/CV + encoder digit adjust” behavior previously described here.
+> NOTE: The main-screen control row interaction is defined by `docs/specs/mq8ht-on-device-preset-ui/SPEC.md` and replaces the legacy “tap CC/CV + encoder digit adjust” behavior previously described here.
 > NOTE: The two controls below the remote/local voltage bar now follow `docs/specs/w4cpd-dashboard-extended-voltage-toggle/SPEC.md`: the left `PD` button is the extended-voltage toggle, and the right circular button is the PD settings entry.
 
 ## 需求说明
@@ -58,7 +58,7 @@
 
 | Pair | Payload | Font | Color | Placement |
 | --- | --- | --- | --- | --- |
-| Control row | 主界面 Preset 概览与入口：默认显示左侧两行 `M#` / `CC|CV|CP`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更）；**当设备处于 calibration mode 时，左侧切换为 `C1/C2/V` / `CAL`，右侧显示当前 calibration target（若有）** | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；`CP` 紫 `#B27BFF`；`CAL` 蓝 `#4CC9F0`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；正常模式显示 active preset（含编号与 mode）+ target 摘要；calibration mode 显示 channel/kind + 当前 calibration target。交互语义详见 `docs/specs/0005-on-device-preset-ui/SPEC.md`。 |
+| Control row | 主界面 Preset 概览与入口：默认显示左侧两行 `M#` / `CC|CV|CP`（独立按钮）+ 右侧 target 摘要（独立按钮，单位随 mode 变更）；**当设备处于 calibration mode 时，左侧切换为 `C1/C2/V` / `CAL`，右侧显示当前 calibration target（若有）** | SmallFont + SetpointFont | 背景 `#1C2638`；`CC` 红 `#FF5252`；`CV` 橙 `#FFB347`；`CP` 紫 `#B27BFF`；`CAL` 蓝 `#4CC9F0`；数字 `#DFE7FF`；单位 `#9AB0D8` | 两个圆角矩形：Preset/Mode `(198,10)-(228,38)`；Setpoint `(232,10)-(314,38)`；正常模式显示 active preset（含编号与 mode）+ target 摘要；calibration mode 显示 channel/kind + 当前 calibration target。交互语义详见 `docs/specs/mq8ht-on-device-preset-ui/SPEC.md`。 |
 | Voltage pair | 左列 REMOTE `24.52 V`，右列 LOCAL `24.47 V` | 标签 SmallFont；数值 SmallFont（字符间距 0，强制 4 位数格式） | 文本 `#DFE7FF`、标签 `#6D7FA4` | 左列起点 (198,50)，右列起点 (258,50) |
 | Voltage mirror bar | 中心 0 V，左右各 55 px 行程（上限 40 V） | — | 轨道 `#1C2638`，填充与两侧条统一使用 `#4CC9F0`，中心刻度 `#6D7FA4` | 长条 `(198,84)-(314,91)`，中心 x=256 |
 | Extended-voltage toggle | 两行：`PD/<V>V`（`/` 代表换行）；短按切换“仅 Safe5V / 允许扩展电压” | SmallFont | 灰=`#555F75`（仅 Safe5V）；蓝=`#4CC9F0`（允许扩展电压）；红=`#FF5252`（允许扩展电压但最近一次非 Safe5V 请求失败） | 圆角矩形 `(198,118)-(277,145)`；顶部文案固定为 `PD`；第二行显示 `5V` 或已保存目标电压（当前设计稿示例为 `20V`） |
@@ -188,7 +188,7 @@
 ### Preset entry + quick switch
 
 - Tap the Preset/Mode pill (`M# / CC|CV`) to open the Preset Panel.
-- Press-and-swipe within the Preset/Mode pill performs a quick preset preview; releasing commits activation (and forces load OFF). Exact behavior and safety rules are defined in `docs/specs/0005-on-device-preset-ui/SPEC.md`.
+- Press-and-swipe within the Preset/Mode pill performs a quick preset preview; releasing commits activation (and forces load OFF). Exact behavior and safety rules are defined in `docs/specs/mq8ht-on-device-preset-ui/SPEC.md`.
 - Tap the Setpoint pill (`DD.dddU`) to cycle encoder step size for the active preset (1.000 → 0.100 → 0.010 → 0.001 → …).
 
 ### Operator quick guide
