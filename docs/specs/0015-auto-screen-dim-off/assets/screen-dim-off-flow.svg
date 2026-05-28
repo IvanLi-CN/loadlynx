@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="520" viewBox="0 0 1200 520">
+  <defs>
+    <style>
+      .bg { fill: #0b1020; }
+      .panel { fill: #121a31; stroke: #243153; stroke-width: 2; }
+      .title { fill: #e6eeff; font: 800 22px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .subtitle { fill: #8aa0c7; font: 600 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .boxTitle { fill: #e6eeff; font: 800 20px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .text { fill: #8aa0c7; font: 600 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .arrow { fill: none; stroke: #8aa0c7; stroke-width: 2.5; }
+      .arrowLabel { fill: #e6eeff; font: 700 13px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+    </style>
+
+    <marker id="arrowHead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#8aa0c7"/>
+    </marker>
+  </defs>
+
+  <!-- background -->
+  <rect class="bg" x="0" y="0" width="1200" height="520"/>
+
+  <!-- header -->
+  <text class="title" x="60" y="70">屏幕自动调暗 / 熄屏：状态流程</text>
+  <text class="subtitle" x="60" y="96">适用条件：仅在 LOAD OFF 时计时；任意输入会重置计时；熄屏状态下输入仅用于唤醒且被消费</text>
+
+  <!-- boxes -->
+  <rect class="panel" x="80" y="140" width="280" height="180" rx="16"/>
+  <text class="boxTitle" x="108" y="180">Active</text>
+  <text class="text" x="108" y="210">背光 = orig_pct</text>
+  <text class="text" x="108" y="234">UI = 正常</text>
+  <text class="text" x="108" y="258">仅 LOAD OFF 时计时</text>
+  <text class="text" x="108" y="282">任意输入：重置 idle</text>
+
+  <rect class="panel" x="460" y="140" width="280" height="180" rx="16"/>
+  <text class="boxTitle" x="488" y="180">Dim</text>
+  <text class="text" x="488" y="210">背光 = dim_pct = min(orig_pct, 10)</text>
+  <text class="text" x="488" y="234">UI = 正常</text>
+  <text class="text" x="488" y="258">任意输入 / LOAD ON：回到 Active</text>
+
+  <rect class="panel" x="840" y="140" width="280" height="180" rx="16"/>
+  <text class="boxTitle" x="868" y="180">Off</text>
+  <text class="text" x="868" y="210">刷白屏（fill white）</text>
+  <text class="text" x="868" y="234">背光 = 0</text>
+  <text class="text" x="868" y="258">Display::sleep()</text>
+  <text class="text" x="868" y="282">任意输入（被消费）/ LOAD ON：唤醒</text>
+
+  <!-- arrows: forward -->
+  <path class="arrow" d="M 360 230 L 460 230" marker-end="url(#arrowHead)"/>
+  <text class="arrowLabel" x="410" y="206" text-anchor="middle">LOAD OFF 且 idle ≥ 2min</text>
+
+  <path class="arrow" d="M 740 230 L 840 230" marker-end="url(#arrowHead)"/>
+  <text class="arrowLabel" x="790" y="206" text-anchor="middle">LOAD OFF 且 idle ≥ 5min</text>
+
+  <!-- arrows: back to active -->
+  <path class="arrow" d="M 600 320 C 600 388 220 388 220 320" marker-end="url(#arrowHead)"/>
+  <text class="arrowLabel" x="410" y="382" text-anchor="middle">任意输入 或 LOAD ON</text>
+
+  <path class="arrow" d="M 980 320 C 980 460 220 460 220 320" marker-end="url(#arrowHead)"/>
+  <text class="arrowLabel" x="600" y="454" text-anchor="middle">任意输入（被消费）或 LOAD ON</text>
+
+  <!-- footer -->
+  <text class="subtitle" x="60" y="500">idle = 距上次任意输入的时间；Off → Active：wake → 恢复背光 → 强制整帧刷新</text>
+</svg>

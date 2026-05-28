@@ -1,5 +1,7 @@
 # 提示音管理器（蜂鸣器 Prompt Tone）设计（#0007）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0007-prompt-tone-manager/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成
@@ -145,7 +147,7 @@ SoundEvent:
 
 ## 默认音型与参数建议（需实机试听后微调）
 
-基准频率建议：`~2200Hz`（低于 2.7kHz 共振点，听感更柔和）。  
+基准频率建议：`~2200Hz`（低于 2.7kHz 共振点，听感更柔和）。
 占空比建议：操作音更小、故障音可略高但仍保守（最终以实机风险与听感为准）。
 
 建议的音型（示意；需保证三类可盲听区分）：

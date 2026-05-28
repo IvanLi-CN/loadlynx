@@ -1,5 +1,7 @@
 # 主界面：PD 按钮两行文案规范（Detach / PPS / Fixed）（#0019）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0019-dashboard-pd-button-label/SPEC.md`.
+
 > 说明：当前主界面这一区域的设计与交互，统一以 `docs/specs/w4cpd-dashboard-extended-voltage-toggle/SPEC.md` 为准；本文保留为早期两行 `PD` 文案设计记录。
 
 

@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="700" viewBox="0 0 1200 700">
+  <defs>
+    <style>
+      .bg { fill: #0b1020; }
+      .phone { fill: #0b1020; stroke: #243153; stroke-width: 4; }
+      .panel { fill: #121a31; stroke: #243153; stroke-width: 2; }
+      .card { fill: #0f172c; stroke: #243153; stroke-width: 2; }
+      .muted { fill: #8aa0c7; font: 500 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .text { fill: #e6eeff; font: 600 16px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .title { fill: #e6eeff; font: 800 18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .kpi { fill: #e6eeff; font: 800 18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .chip { fill: #152245; stroke: #2a3a66; stroke-width: 2; }
+      .ok { fill: #1b8f5a; }
+      .btn { fill: #1b2a55; stroke: #3a55a2; stroke-width: 2; }
+      .btn2 { fill: #1b8f5a; stroke: #2dbb7b; stroke-width: 2; }
+      .btnText { fill: #e6eeff; font: 800 14px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .iconText { fill: #e6eeff; font: 800 18px ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto; }
+      .overlay { fill: rgba(0,0,0,0.45); }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="1200" height="700"/>
+
+  <!-- phone frame -->
+  <rect class="phone" x="420" y="30" width="360" height="640" rx="40"/>
+  <rect class="panel" x="440" y="60" width="320" height="580" rx="22"/>
+
+  <!-- top bar -->
+  <rect class="panel" x="440" y="60" width="320" height="56" rx="22"/>
+  <rect class="btn" x="452" y="70" width="48" height="36" rx="12"/>
+  <text class="iconText" x="476" y="88" text-anchor="middle" dominant-baseline="middle">≡</text>
+  <text class="title" x="508" y="94">Status</text>
+  <text class="muted" x="578" y="94">192.168.1.100</text>
+
+  <!-- content -->
+  <rect class="card" x="456" y="132" width="288" height="88" rx="14"/>
+  <text class="muted" x="476" y="164">VBUS</text>
+  <text class="kpi" x="476" y="196">19.9 V</text>
+
+  <rect class="card" x="456" y="234" width="288" height="188" rx="14"/>
+  <text class="text" x="476" y="270">USB‑PD</text>
+  <rect class="chip ok" x="548" y="252" width="92" height="22" rx="11"/>
+  <text class="btnText" x="594" y="263" text-anchor="middle" dominant-baseline="middle">ATTACHED</text>
+
+  <text class="muted" x="476" y="306">Contract</text>
+  <text class="kpi" x="476" y="334">20V @ 1.5A</text>
+
+  <rect class="btn2" x="520" y="356" width="200" height="44" rx="12"/>
+  <text class="btnText" x="620" y="378" text-anchor="middle" dominant-baseline="middle">Open PD settings</text>
+
+  <!-- drawer overlay -->
+  <rect class="overlay" x="440" y="116" width="320" height="524" rx="0"/>
+  <rect class="panel" x="440" y="116" width="220" height="524" rx="0"/>
+  <text class="text" x="462" y="154">Menu</text>
+  <text class="muted" x="462" y="190">Status</text>
+  <text class="muted" x="462" y="220">CC</text>
+  <text class="muted" x="462" y="250">Presets</text>
+  <text class="muted" x="462" y="280">Calibration</text>
+  <text class="muted" x="462" y="310">…</text>
+
+  <text class="muted" x="60" y="640">Mobile composition: Drawer sidebar + Status → USB‑PD card secondary entry.</text>
+</svg>

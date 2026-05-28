@@ -1,5 +1,7 @@
 # mDNS 与局域网发现设计草案（#0004）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0004-mdns-and-lan-discovery/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

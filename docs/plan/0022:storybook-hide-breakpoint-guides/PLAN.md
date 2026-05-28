@@ -1,5 +1,7 @@
 # Storybook：隐藏断点竖线标尺（768/1024）（#0022）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0022-storybook-hide-breakpoint-guides/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

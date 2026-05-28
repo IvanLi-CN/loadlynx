@@ -1,5 +1,7 @@
 # FT6336U 触控（P024C128-CTP）驱动与 digital 集成设计（草案）（#0003）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0003-ft6336u-touch-int/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

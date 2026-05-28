@@ -1,5 +1,7 @@
 # 数字板：屏幕自动调暗与熄屏（#0015）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0015-auto-screen-dim-off/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

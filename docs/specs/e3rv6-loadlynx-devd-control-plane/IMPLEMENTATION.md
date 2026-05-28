@@ -9,7 +9,7 @@ The first implementation is complete and ready for PR review. It adds a local `l
 - `mains-aegis` `tools/mains-aegis-devd` provides the reference pattern for localhost HTTP/SSE, scan/list/bind/connect, Web USB leases, artifact selection, dry-run flash, reset, monitor, bounded session logs and PSK redaction.
 - `mains-aegis` `docs/specs/p8k3d-mains-aegis-devd/SPEC.md` defines the daemon safety model.
 - `mains-aegis` `docs/specs/ypfpu-web-management-ui/SPEC.md` defines Web devd, firmware page, USB lease and artifact mismatch behavior.
-- LoadLynx `docs/plan/0004:mdns-and-lan-discovery/PLAN.md` already defines ESP32-S3 hostname and browser subnet scan behavior.
+- LoadLynx `docs/specs/0004-mdns-and-lan-discovery/SPEC.md` already defines ESP32-S3 hostname and browser subnet scan behavior.
 - LoadLynx `docs/interfaces/network-http-api.md` and `docs/interfaces/uart-link.md` define the current LAN API and dual-MCU control boundary.
 
 ## Implementation Notes

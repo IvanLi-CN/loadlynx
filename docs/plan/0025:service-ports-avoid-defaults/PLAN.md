@@ -1,5 +1,7 @@
 # 服务端口规范化（#0025）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0025-service-ports-avoid-defaults/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成
@@ -109,22 +111,22 @@
 
 ### Core path
 
-- Given 端口未被占用  
-  When 运行 `web/` 的 dev 服务  
+- Given 端口未被占用
+  When 运行 `web/` 的 dev 服务
   Then 实际监听端口等于 `LOADLYNX_WEB_DEV_PORT`（或默认端口），且不发生端口漂移。
 
-- Given 端口被占用  
-  When 运行任一服务（Vite dev/preview、Storybook dev、Storybook 测试静态站点）  
+- Given 端口被占用
+  When 运行任一服务（Vite dev/preview、Storybook dev、Storybook 测试静态站点）
   Then 进程以非零退出码失败，并输出包含端口号的“端口占用”错误信息；不自动切换端口。
 
-- Given 设置了端口环境变量覆盖  
-  When 运行对应服务  
+- Given 设置了端口环境变量覆盖
+  When 运行对应服务
   Then 服务监听端口等于覆盖值，且 Playwright/脚本引用的 URL 与之同步。
 
 ### Edge cases
 
-- Given `LOADLYNX_*_PORT` 为非数字或超出范围  
-  When 启动服务  
+- Given `LOADLYNX_*_PORT` 为非数字或超出范围
+  When 启动服务
   Then 进程在启动阶段失败，并提示变量名与非法值（不回退到默认端口、不自动找端口）。
 
 ## 实现前置条件（Definition of Ready / Preconditions）

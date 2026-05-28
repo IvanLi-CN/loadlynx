@@ -1,5 +1,7 @@
 # Preset UI：UVLO / OCP / OPP 命名与三线约束（需求与概要设计）（#0006）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0006-preset-ui-protection-labels/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成
@@ -84,40 +86,40 @@
 
 ### 显示一致性
 
-- Given：进入 Preset 设置面板，`mode=CC`  
-  When：渲染字段  
+- Given：进入 Preset 设置面板，`mode=CC`
+  When：渲染字段
   Then：按顺序显示 `TARGET(A) / UVLO(V) / OCP(A) / OPP(W)`。
 
-- Given：进入 Preset 设置面板，`mode=CV`  
-  When：渲染字段  
+- Given：进入 Preset 设置面板，`mode=CV`
+  When：渲染字段
   Then：按顺序显示 `TARGET(V) / UVLO(V) / OCP(A) / OPP(W)`。
 
 ### A2 联动（CC）
 
-- Given：`mode=CC`，`TARGET=3.000A`，`OCP=5.000A`  
-  When：用户将 `OCP` 下调至 `2.500A`  
+- Given：`mode=CC`，`TARGET=3.000A`，`OCP=5.000A`
+  When：用户将 `OCP` 下调至 `2.500A`
   Then：`TARGET` 自动变为 `2.500A`，且系统不出现 `TARGET>OCP` 的状态。
 
-- Given：`mode=CC`，`OCP=2.500A`  
-  When：用户尝试将 `TARGET` 上调到 `>2.500A`  
+- Given：`mode=CC`，`OCP=2.500A`
+  When：用户尝试将 `TARGET` 上调到 `>2.500A`
   Then：`TARGET` 被钳制为 `2.500A`。
 
 ### A2 联动（CV）
 
-- Given：`mode=CV`，`TARGET=5.000V`，`UVLO=1.000V`  
-  When：用户将 `UVLO` 上调至 `6.000V`  
+- Given：`mode=CV`，`TARGET=5.000V`，`UVLO=1.000V`
+  When：用户将 `UVLO` 上调至 `6.000V`
   Then：`UVLO=6.000V` 且 `TARGET` 自动变为 `6.000V`（安全线不回退）。
 
-- Given：`mode=CV`，`TARGET=5.000V`，`UVLO=4.500V`  
-  When：用户尝试将 `TARGET` 下调到 `4.000V`  
+- Given：`mode=CV`，`TARGET=5.000V`，`UVLO=4.500V`
+  When：用户尝试将 `TARGET` 下调到 `4.000V`
   Then：`TARGET` 被钳制为 `4.500V`（`UVLO` 不变）。
 
 ### 欠压锁存（UVLO）
 
-- Given：`output_enabled=true` 且 `UVLO=X>0`  
-  When：`V_main ≤ X`  
+- Given：`output_enabled=true` 且 `UVLO=X>0`
+  When：`V_main ≤ X`
   Then：触发欠压锁存并退流到 0；仅在用户“关→开”后允许恢复出力。
 
-- Given：`UVLO=0`  
-  When：电压跌落  
+- Given：`UVLO=0`
+  When：电压跌落
   Then：不得因为 UVLO 阈值触发欠压锁存（等价禁用）。

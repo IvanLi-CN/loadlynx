@@ -1,5 +1,7 @@
 # Web：版本号展示 + GitHub 分支跳转（#0024）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0024-web-version-github-link/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

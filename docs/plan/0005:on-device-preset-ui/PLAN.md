@@ -1,5 +1,7 @@
 # 本机 Preset UI（触屏 + 旋钮）需求与概要设计（#0005）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0005-on-device-preset-ui/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

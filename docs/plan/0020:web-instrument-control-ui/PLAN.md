@@ -1,5 +1,7 @@
 # Web：仪器风格主界面（左监右控）（#0020）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0020-web-instrument-control-ui/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

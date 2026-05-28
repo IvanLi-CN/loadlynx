@@ -1,5 +1,7 @@
 # Web UI Layout 规范化（Layouts 抽象）（#0011）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0011-web-layouts/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

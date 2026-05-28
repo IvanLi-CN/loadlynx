@@ -1,5 +1,7 @@
 # USB‑PD 设置面板：Fixed PDO / PPS APDO（UI + UART 协议 + HTTP API）（#0013）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0013-usb-pd-pps-and-fixed-settings/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

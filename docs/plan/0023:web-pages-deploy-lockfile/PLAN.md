@@ -1,5 +1,7 @@
 # GitHub Pages：Web Deploy 失败修复（lockfile/CI）（#0023）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0023-web-pages-deploy-lockfile/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

@@ -1,5 +1,7 @@
 # Web：CP 模式控制页（#0018）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0018-web-cp-mode-ui/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

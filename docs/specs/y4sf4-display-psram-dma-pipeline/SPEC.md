@@ -209,4 +209,4 @@ None
 - `firmware/digital/src/ui/mod.rs`
 - `docs/interfaces/pinmaps/esp32-s3.md`
 - `docs/other-datasheets/esp32-s3.md`
-- `docs/plan/0009:uart-comm-troubleshooting/PLAN.md`
+- `docs/specs/0009-uart-comm-troubleshooting/SPEC.md`

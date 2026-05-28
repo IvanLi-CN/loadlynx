@@ -1,5 +1,7 @@
 # 触摸弹簧（GPIO14）负载开关 + RGB 指示 + 语音播放（MAX98357A / I²S）（#0021）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0021-touch-spring-load-switch-rgb-led/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

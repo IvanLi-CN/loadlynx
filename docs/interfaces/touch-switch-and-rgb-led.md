@@ -4,7 +4,7 @@ This document describes the **touch spring switch** and the **RGB indicator LED*
 
 For the authoritative pin assignment, see:
 - `docs/interfaces/pinmaps/esp32-s3.md` (ESP32‑S3 pinmap)
-- `docs/plan/0021:touch-spring-load-switch-rgb-led/PLAN.md` (scope and acceptance)
+- `docs/specs/0021-touch-spring-load-switch-rgb-led/SPEC.md` (scope and acceptance)
 
 ## Goals
 

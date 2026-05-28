@@ -1,5 +1,7 @@
 # 计划（Plan）总览
 
+> Migration status: pending delete approval. Canonical specs now live in `docs/specs/**`; do not add new entries under `docs/plan/**`.
+
 本目录用于管理“先计划、后实现”的工作项：每个计划在这里冻结范围与验收标准，进入实现前先把口径对齐，避免边做边改导致失控。
 
 ## 快速新增一个计划

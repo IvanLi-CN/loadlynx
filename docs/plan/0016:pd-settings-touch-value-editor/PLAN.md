@@ -1,5 +1,7 @@
 # #0016 PD 设置：触屏友好的目标值编辑（PD Settings Touch Value Editor）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0016-pd-settings-touch-value-editor/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

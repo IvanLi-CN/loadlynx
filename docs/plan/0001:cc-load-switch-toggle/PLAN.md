@@ -1,5 +1,7 @@
 # CC 负载开关（Load Switch）：设置值 / 生效值分离（#0001）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0001-cc-load-switch-toggle/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

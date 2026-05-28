@@ -1,5 +1,7 @@
 # 音频迁移：蜂鸣器 → 扬声器（#shkmx）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/shkmx-buzzer-to-speaker-audio/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

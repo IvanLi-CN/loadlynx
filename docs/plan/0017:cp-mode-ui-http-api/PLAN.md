@@ -1,5 +1,7 @@
 # CP 模式：本机屏幕界面 + HTTP API（#0017）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0017-cp-mode-ui-http-api/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

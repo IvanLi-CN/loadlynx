@@ -1,5 +1,7 @@
 # Web：Responsive Drawer Sidebar（ConsoleLayout 导航）（#0012）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0012-web-responsive-drawer-sidebar/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

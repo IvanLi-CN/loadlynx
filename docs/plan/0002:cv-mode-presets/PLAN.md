@@ -1,5 +1,7 @@
 # CV 模式 + Preset 需求与概要设计（#0002）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0002-cv-mode-presets/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成

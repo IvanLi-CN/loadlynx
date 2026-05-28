@@ -1,5 +1,7 @@
 # Web：USB‑PD 设置页（对接 /api/v1/pd）（#0014）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/0014-web-usb-pd-settings/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成
@@ -190,8 +192,8 @@
 
 > 说明：在我们发布 `1.0` 之前，不做有成本的向前兼容。本计划冻结以下策略：
 >
-> 1) **实现时先确认接口文档是否存在**：若 `docs/interfaces/network-http-api.md` 中不存在 `/api/v1/pd`（或缺少必要字段/错误码定义），则先补齐文档；  
-> 2) **按文档实现**：Web 与固件只实现并消费“一个”当前口径，不做解析器/适配层来兼容多个 schema；  
+> 1) **实现时先确认接口文档是否存在**：若 `docs/interfaces/network-http-api.md` 中不存在 `/api/v1/pd`（或缺少必要字段/错误码定义），则先补齐文档；
+> 2) **按文档实现**：Web 与固件只实现并消费“一个”当前口径，不做解析器/适配层来兼容多个 schema；
 > 3) **接口不够用就改接口**：当业务需要超出当前文档能力时，直接更新文档与固件实现，再更新 Web；不通过 Web 侧兼容来兜底历史版本。
 
 ### 实现阶段的接口确认流程（强制）

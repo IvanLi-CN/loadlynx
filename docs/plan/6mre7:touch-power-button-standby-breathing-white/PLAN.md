@@ -1,5 +1,7 @@
 # 触摸电源按键：睡眠待机白光低频呼吸（#6mre7）
 
+> Migration status: pending delete approval. Canonical spec: `docs/specs/6mre7-touch-power-button-standby-breathing-white/SPEC.md`.
+
 ## 状态
 
 - Status: 已完成
