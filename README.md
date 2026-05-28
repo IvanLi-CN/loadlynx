@@ -30,7 +30,7 @@
 - probe-rs（由 `mcu-agentd` 作为 STM32 后端调用）
 - ESP32‑S3 Xtensa 工具链（`espup`）与 `espflash`（由 `mcu-agentd` 作为 ESP32 后端调用）
 
-推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；固件烧录/复位/监视通过 `mcu-agentd`（见下文 `MCU Agent`）。Web 控制台与 `loadlynx-devd` 的 USB CDC 验证不使用 `mcu-agentd` selector。
+推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；固件烧录/复位/监视通过 `mcu-agentd`（见下文 `MCU Agent`）。CLI/devd 的 USB CDC 验证不使用 `mcu-agentd` selector。
 
 ### G431（analog）
 
@@ -95,9 +95,11 @@ just agentd-get-port digital
 just agentd-get-port analog
 ```
 
-### Web + devd USB CDC 控制面
+### CLI + devd USB CDC 控制面
 
-`loadlynx-devd` 是 Web 控制台访问 ESP32-S3 USB CDC JSONL 的本地守护。验证 Web/devd 控制面时通过 `just loadlynx usb-port set digital <path>` 复用 `.esp32-port` 作为默认端口记忆，不要切换 `mcu-agentd selector`。devd/Web 的 ESP32-S3 digital firmware flash 也走 devd：持有 Web lease、校验 artifact hash，并对批准的 `.esp32-port` 端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。不要退回 `just agentd flash digital`。如果 `.esp32-port` 包含 `mac=...` 等 selector metadata，CLI/devd 只使用端口路径行。
+`loadlynx-devd` 是 CLI 访问 ESP32-S3 USB CDC JSONL 的本地守护。验证 CLI/devd 控制面时通过 `just loadlynx usb-port set digital <path>` 复用 `.esp32-port` 作为默认端口记忆，不要切换 `mcu-agentd selector`。CLI/devd 的 ESP32-S3 digital firmware flash 也走 devd：持有 lease/session、校验 artifact hash，并对批准的 `.esp32-port` 端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。不要退回 `just agentd flash digital`。如果 `.esp32-port` 包含 `mac=...` 等 selector metadata，CLI/devd 只使用端口路径行。
+
+普通用户需要操作硬件时，应从 GitHub Releases 下载对应平台的 `loadlynx-host-tools-*.tar.gz`，并通过 `loadlynx` CLI 操作硬件：USB/devd 优先，HTTP 其次。该发布包包含 `loadlynx-devd` 本地守护程序 / USB bridge，以及 `loadlynx` CLI 工具（当前源码可见命令包括 `discover`、`devices`、`status`、`output set`、`usb-port set`、`flash`、`reset`、`monitor`）。用户侧 CLI 需要负责记忆用户保存或连接过的硬件，后续优先找回 USB 设备，再 fallback 到 HTTP 设备；若安装版 CLI 不支持硬件记忆或 WiFi 配置，不能退回 Web UI，需要进入开发/维护路径补齐并发布。用户侧固件烧录必须使用同一 Release 发布的 firmware catalog/assets，并先确认当前 `loadlynx flash --help` 支持所需流程。从源码构建、`just`、`.esp32-port` 开发守卫、缺失 CLI 功能实现和 HIL 验证属于开发/维护路径。
 
 常用本地入口：
 
@@ -115,7 +117,7 @@ just devd-serve --bind 127.0.0.1:30180 --allow-dev-cors
 (cd web && VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:30180 bun run dev)
 ```
 
-真机验证应证明 devd 对指定串口完成 USB CDC JSONL 通信，例如收到 `hello` 或成功执行 `get_identity` / `get_status`。仅证明串口能打开、出现候选设备、创建 Web lease，或只完成 firmware dry-run，不足以说明 Web/devd 真机链路可用。
+真机验证应证明 devd 对指定串口完成 USB CDC JSONL 通信，例如收到 `hello` 或成功执行 `get_identity` / `get_status`。仅证明串口能打开、出现候选设备、创建 lease/session，或只完成 firmware dry-run，不足以说明 CLI/devd 真机链路可用。
 
 ## 目录结构
 

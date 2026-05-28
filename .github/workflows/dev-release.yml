@@ -6,7 +6,92 @@ on:
       - main
 
 jobs:
+  host-tools:
+    name: Build host tools (${{ matrix.slug }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - slug: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            archive: loadlynx-host-tools-linux-x86_64.tar.gz
+          - slug: macos-aarch64
+            os: macos-14
+            target: aarch64-apple-darwin
+            archive: loadlynx-host-tools-macos-aarch64.tar.gz
+          - slug: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+            archive: loadlynx-host-tools-macos-x86_64.tar.gz
+          - slug: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            archive: loadlynx-host-tools-windows-x86_64.tar.gz
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Linux host dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libudev-dev
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.90
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and devd target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            tools/loadlynx-devd/target
+          key: ${{ runner.os }}-${{ matrix.target }}-devd-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-devd-cargo-
+
+      - name: Build loadlynx host tools
+        run: cargo build --manifest-path tools/loadlynx-devd/Cargo.toml --release --locked --bins --target "${{ matrix.target }}"
+
+      - name: Package loadlynx host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin_ext=""
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            bin_ext=".exe"
+          fi
+
+          package_dir="dist/package"
+          mkdir -p "$package_dir"
+          cp "tools/loadlynx-devd/target/${{ matrix.target }}/release/loadlynx-devd${bin_ext}" "$package_dir/"
+          cp "tools/loadlynx-devd/target/${{ matrix.target }}/release/loadlynx${bin_ext}" "$package_dir/"
+          printf '%s\n' \
+            'LoadLynx host tools' \
+            '' \
+            '- loadlynx-devd: local USB CDC bridge for loadlynx CLI workflows.' \
+            '- loadlynx: command-line helper for USB/devd-first LoadLynx hardware workflows.' \
+            '' \
+            'Use the user operations skill for released CLI-only hardware operation and the developer operations skill for maintenance.' \
+            > "$package_dir/README.txt"
+          tar -czf "dist/${{ matrix.archive }}" -C "$package_dir" .
+
+      - name: Upload host tool artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: loadlynx-host-tools-${{ matrix.slug }}
+          path: dist/${{ matrix.archive }}
+          if-no-files-found: error
+
   dev-release:
+    needs: host-tools
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -42,6 +127,13 @@ jobs:
         working-directory: firmware/analog
         run: cargo build --release --target thumbv7em-none-eabihf
 
+      - name: Download host tool assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: loadlynx-host-tools-*
+          path: dist/host-tools
+          merge-multiple: true
+
       - name: Generate development version
         id: dev_version
         run: |
@@ -50,7 +142,7 @@ jobs:
           echo "Development version: $DEV_VERSION"
 
       - name: Create development release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.dev_version.outputs.version }}
           name: "Development Build ${{ steps.dev_version.outputs.version }} (LoadLynx analog)"
@@ -63,6 +155,7 @@ jobs:
 
             Files
             - `analog` - ELF firmware (STM32G431, thumbv7em-none-eabihf)
+            - `loadlynx-host-tools-*.tar.gz` - Host companion/devd bridge and CLI (`loadlynx-devd`, `loadlynx`)
 
             How to Flash (local, mcu-agentd):
             ```bash
@@ -72,6 +165,7 @@ jobs:
             ```
           files: |
             firmware/analog/target/thumbv7em-none-eabihf/release/analog
+            dist/host-tools/loadlynx-host-tools-*.tar.gz
           prerelease: true
           draft: false
         env:

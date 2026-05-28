@@ -70,3 +70,4 @@
 | wh4s9 | Calibration 页面模式同步与状态链路稳定化 | 已完成 | `wh4s9-calibration-mode-sync-stability/SPEC.md` | 2026-04-16 | 本地校准页稳定性修复、Storybook/E2E 回归与视觉证据已完成 |
 | fqmns | Dashboard Boot Link Recovery | 已完成 | `fqmns-boot-link-recovery/SPEC.md` | 2026-04-25 | 软件实现与构建验证完成；HIL 因当前 worktree 缺失 selector 阻断 |
 | e3rv6 | LoadLynx devd 本地设备控制面 | 已完成 | `e3rv6-loadlynx-devd-control-plane/SPEC.md` | 2026-05-24 | 首版实现：devd/CLI、Web devd+Firmware、firmware catalog、digital identity/DNS-SD、Storybook/视觉证据 |
+| fhpfk | LoadLynx operational skills packaging and workflow boundary | 已更新 | `fhpfk-loadlynx-operational-skills/SPEC.md` | 2026-05-28 | PR #78；用户/开发者 skill 场景拆分、CLI-only 硬件操作、USB 优先、硬件记忆门禁、vercel-labs/skills 安装验证 |

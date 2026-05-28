@@ -1,0 +1,4 @@
+interface:
+  display_name: "LoadLynx User Operations"
+  short_description: "End-user USB-first released CLI workflows."
+  default_prompt: "Use $loadlynx-user-operations to install released LoadLynx host tools, prefer USB/devd before HTTP, verify CLI hardware memory and available commands, download released firmware assets, and operate LoadLynx hardware through the loadlynx CLI only."
