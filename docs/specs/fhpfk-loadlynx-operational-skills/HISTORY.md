@@ -19,7 +19,7 @@ The user skill now includes released CLI firmware flash, WiFi configuration, and
 
 ## CLI hardware memory
 
-Hardware memory is a `loadlynx` CLI feature, not a Web UI or project-local feature. The CLI stores saved and successfully connected USB/HTTP hardware in the user's OS config directory, with `LOADLYNX_HOME` as an override for tests or explicit advanced setup. USB records sort before HTTP records so normal user workflows try the local USB/devd path before HTTP fallback.
+Hardware memory is a `loadlynx` CLI feature, not a Web UI or project-local feature. The CLI stores saved and successfully connected USB/HTTP hardware in the user's OS config directory, with `LOADLYNX_HOME` as an override for tests or explicit advanced setup. USB records sort before HTTP records so normal user workflows try the local USB/devd path before HTTP fallback. Dedicated `hardware available` and `hardware recent` commands expose currently connectable devices and recent devices without overloading the remembered-device list.
 
 ## CLI-only hardware operation
 

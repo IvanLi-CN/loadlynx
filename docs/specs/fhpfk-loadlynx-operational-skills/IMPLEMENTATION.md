@@ -9,7 +9,7 @@
 - Official and development release workflows build platform host-tools archives before creating a GitHub Release. Each archive includes `loadlynx-devd`, `loadlynx`, and a short package README.
 - The user skill and project README now point normal USB bridge setup at released host tools instead of source builds.
 - The user skill includes owner-facing host-tools installation steps: choose the platform Release asset, extract to a user-local bin directory, configure user PATH, verify both binaries, and start `loadlynx-devd serve` for USB operation.
-- `loadlynx` implements user-level hardware memory through `loadlynx hardware path/list/save/forget`, `loadlynx status --hardware <id>`, and automatic updates after successful `status --device` or `status --url`.
+- `loadlynx` implements user-level hardware memory through `loadlynx hardware available/recent/path/list/save/forget`, `loadlynx status --hardware <id>`, and best-effort automatic updates after successful `status --device` or `status --url`.
 - CLI hardware memory is stored in the user's OS config directory, not in the repository checkout: macOS `~/Library/Application Support/LoadLynx/devices.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`, Windows `%APPDATA%\LoadLynx\devices.json`; `LOADLYNX_HOME` overrides the directory for tests or advanced setups.
 - The user skill explicitly treats missing `loadlynx wifi ...` support as a stop condition because the current CLI command surface does not implement that complete user capability.
 

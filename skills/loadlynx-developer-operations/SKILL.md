@@ -49,7 +49,7 @@ just loadlynx <args>
 - Firmware development uses `just a-build` for STM32G431 analog and `just d-build` for ESP32-S3 digital.
 - Release maintenance must keep GitHub Releases publishing the user-facing assets required by the user skill: platform `loadlynx-host-tools-<platform>.tar.gz` archives, firmware assets/catalogs when user CLI flashing is advertised, and accurate release notes.
 - If user docs require `loadlynx wifi ...`, first verify that the CLI, devd API, firmware protocol, persistence behavior, and release binaries implement it. If absent, implement and test it before presenting WiFi configuration as a user capability.
-- If user docs require remembered hardware, verify `loadlynx hardware path/list/save/forget` and `loadlynx status --hardware ...`. The registry must remain user-level config, not project checkout state.
+- If user docs require remembered hardware, verify `loadlynx hardware available/recent/path/list/save/forget` and `loadlynx status --hardware ...`. The registry must remain user-level config, not project checkout state.
 
 ## Device Selection
 
@@ -78,6 +78,8 @@ just devd-serve --bind 127.0.0.1:<port> --allow-dev-cors
 
 ```bash
 just loadlynx --devd http://127.0.0.1:<port> devices
+just loadlynx hardware available
+just loadlynx hardware recent
 just loadlynx hardware list
 just loadlynx --devd http://127.0.0.1:<port> status --device <device-id>
 just loadlynx status --hardware <saved-hardware-id>

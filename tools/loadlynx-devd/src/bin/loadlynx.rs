@@ -114,7 +114,12 @@ enum UsbPortCommand {
 
 #[derive(Debug, Subcommand)]
 enum HardwareCommand {
+    Available {
+        #[arg(long)]
+        scan: bool,
+    },
     List,
+    Recent,
     Path,
     Save {
         #[arg(long)]
@@ -237,7 +242,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
     let client = Client::new();
     let payload = match cli.command {
-        Command::Hardware { command } => handle_hardware_command(command)?,
+        Command::Hardware { command } => {
+            handle_hardware_command(command, &client, &cli.devd).await?
+        }
         Command::UsbPort {
             command: UsbPortCommand::Set { args },
         } => {
@@ -288,7 +295,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .error_for_status()?
                             .json::<Value>()
                             .await?;
-                        remember_connected_usb(&hardware_id, &resolved.device, &resolved.devd)?;
+                        let _ =
+                            remember_connected_usb(&hardware_id, &resolved.device, &resolved.devd);
                         status
                     }
                     ResolvedHardware::Http { url } => {
@@ -299,7 +307,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .error_for_status()?
                             .json::<Value>()
                             .await?;
-                        remember_connected_http(&hardware_id, &url)?;
+                        let _ = remember_connected_http(&hardware_id, &url);
                         status
                     }
                 }
@@ -312,7 +320,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .json::<Value>()
                     .await?;
                 let id = generated_http_hardware_id(&url)?;
-                remember_connected_http(&id, &url)?;
+                let _ = remember_connected_http(&id, &url);
                 status
             } else if let Some(device) = device {
                 let status = client
@@ -326,7 +334,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     .json::<Value>()
                     .await?;
                 let id = generated_usb_hardware_id(&device);
-                remember_connected_usb(&id, &device, &cli.devd)?;
+                let _ = remember_connected_usb(&id, &device, &cli.devd);
                 status
             } else {
                 return Err("status requires --hardware, --device, or --url".into());
@@ -499,14 +507,62 @@ fn choose_digital_usb_port_interactive() -> io::Result<String> {
     Ok(candidates[selected].port_path.clone())
 }
 
-fn handle_hardware_command(
+async fn handle_hardware_command(
     command: HardwareCommand,
+    client: &Client,
+    devd: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let path = hardware_registry_path()?;
     match command {
+        HardwareCommand::Available { scan } => {
+            let registry = read_hardware_registry(&path)?;
+            let scan_result = if scan {
+                Some(match api_url(devd, "/api/v1/devices/scan") {
+                    Ok(url) => match client.post(url).send().await {
+                        Ok(response) => match response.error_for_status() {
+                            Ok(response) => match response.json::<Value>().await {
+                                Ok(value) => json!({"ok": true, "response": value}),
+                                Err(error) => devd_error_payload(error),
+                            },
+                            Err(error) => devd_error_payload(error),
+                        },
+                        Err(error) => devd_error_payload(error),
+                    },
+                    Err(error) => devd_error_payload(error),
+                })
+            } else {
+                None
+            };
+            let devd_devices = match api_url(devd, "/api/v1/devices") {
+                Ok(url) => match client.get(url).send().await {
+                    Ok(response) => match response.error_for_status() {
+                        Ok(response) => match response.json::<Value>().await {
+                            Ok(value) => json!({"ok": true, "response": value}),
+                            Err(error) => devd_error_payload(error),
+                        },
+                        Err(error) => devd_error_payload(error),
+                    },
+                    Err(error) => devd_error_payload(error),
+                },
+                Err(error) => devd_error_payload(error),
+            };
+            Ok(available_hardware_payload(
+                path,
+                devd,
+                scan,
+                scan_result,
+                devd_devices,
+                registry,
+            ))
+        }
         HardwareCommand::List => {
             let mut registry = read_hardware_registry(&path)?;
             sort_hardware(&mut registry.hardware);
+            Ok(json!({"path": path, "hardware": registry.hardware}))
+        }
+        HardwareCommand::Recent => {
+            let mut registry = read_hardware_registry(&path)?;
+            sort_recent_hardware(&mut registry.hardware);
             Ok(json!({"path": path, "hardware": registry.hardware}))
         }
         HardwareCommand::Path => Ok(json!({"path": path})),
@@ -556,7 +612,7 @@ fn resolve_saved_hardware(
         .find(|hardware| hardware.id == id)
         .ok_or_else(|| format!("saved hardware not found: {id}"))?;
 
-    match hardware.transport {
+    match &hardware.transport {
         SavedTransport::Usb => {
             let device = hardware
                 .device
@@ -736,6 +792,56 @@ fn sort_hardware(hardware: &mut [SavedHardware]) {
             .cmp(&transport_rank(&right.transport))
             .then_with(|| left.id.cmp(&right.id))
     });
+}
+
+fn sort_recent_hardware(hardware: &mut [SavedHardware]) {
+    hardware.sort_by(|left, right| {
+        right
+            .last_seen_unix_seconds
+            .unwrap_or(0)
+            .cmp(&left.last_seen_unix_seconds.unwrap_or(0))
+            .then_with(|| transport_rank(&left.transport).cmp(&transport_rank(&right.transport)))
+            .then_with(|| left.id.cmp(&right.id))
+    });
+}
+
+fn available_hardware_payload(
+    path: PathBuf,
+    devd: &str,
+    scan: bool,
+    scan_result: Option<Value>,
+    devd_devices: Value,
+    mut registry: HardwareRegistry,
+) -> Value {
+    sort_hardware(&mut registry.hardware);
+    let remembered_usb = registry
+        .hardware
+        .iter()
+        .filter(|hardware| hardware.transport == SavedTransport::Usb)
+        .cloned()
+        .collect::<Vec<_>>();
+    let remembered_http = registry
+        .hardware
+        .iter()
+        .filter(|hardware| hardware.transport == SavedTransport::Http)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    json!({
+        "path": path,
+        "devd": devd,
+        "scan_requested": scan,
+        "scan": scan_result,
+        "usb": {
+            "devices": devd_devices,
+            "remembered": remembered_usb,
+        },
+        "http_fallback": remembered_http,
+    })
+}
+
+fn devd_error_payload(error: impl std::fmt::Display) -> Value {
+    json!({"ok": false, "error": error.to_string()})
 }
 
 fn transport_rank(transport: &SavedTransport) -> u8 {
@@ -1104,6 +1210,22 @@ mod tests {
             }
             _ => panic!("expected status command"),
         }
+
+        let cli = Cli::try_parse_from(["loadlynx", "hardware", "available", "--scan"]).unwrap();
+        match cli.command {
+            Command::Hardware {
+                command: HardwareCommand::Available { scan },
+            } => assert!(scan),
+            _ => panic!("expected hardware available command"),
+        }
+
+        let cli = Cli::try_parse_from(["loadlynx", "hardware", "recent"]).unwrap();
+        match cli.command {
+            Command::Hardware {
+                command: HardwareCommand::Recent,
+            } => {}
+            _ => panic!("expected hardware recent command"),
+        }
     }
 
     #[test]
@@ -1116,6 +1238,101 @@ mod tests {
             generated_http_hardware_id("http://loadlynx-1234.local:8080").unwrap(),
             "http-loadlynx-1234-local-8080"
         );
+    }
+
+    #[test]
+    fn recent_hardware_sorts_by_last_seen_descending() {
+        let mut hardware = vec![
+            SavedHardware {
+                id: "old-usb".to_string(),
+                name: None,
+                transport: SavedTransport::Usb,
+                device: Some("old".to_string()),
+                url: None,
+                devd: None,
+                last_seen_unix_seconds: Some(10),
+            },
+            SavedHardware {
+                id: "new-http".to_string(),
+                name: None,
+                transport: SavedTransport::Http,
+                device: None,
+                url: Some("http://new.local".to_string()),
+                devd: None,
+                last_seen_unix_seconds: Some(30),
+            },
+            SavedHardware {
+                id: "new-usb".to_string(),
+                name: None,
+                transport: SavedTransport::Usb,
+                device: Some("new".to_string()),
+                url: None,
+                devd: None,
+                last_seen_unix_seconds: Some(30),
+            },
+        ];
+
+        sort_recent_hardware(&mut hardware);
+
+        assert_eq!(
+            hardware
+                .iter()
+                .map(|hardware| hardware.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["new-usb", "new-http", "old-usb"]
+        );
+    }
+
+    #[test]
+    fn available_hardware_payload_keeps_usb_and_http_fallback_separate() {
+        let mut registry = HardwareRegistry::default();
+        upsert_hardware(
+            &mut registry,
+            SavedHardware {
+                id: "http-bench".to_string(),
+                name: None,
+                transport: SavedTransport::Http,
+                device: None,
+                url: Some("http://loadlynx.local".to_string()),
+                devd: None,
+                last_seen_unix_seconds: Some(10),
+            },
+        );
+        upsert_hardware(
+            &mut registry,
+            SavedHardware {
+                id: "usb-bench".to_string(),
+                name: None,
+                transport: SavedTransport::Usb,
+                device: Some("digital-1".to_string()),
+                url: None,
+                devd: Some("http://127.0.0.1:30180".to_string()),
+                last_seen_unix_seconds: Some(20),
+            },
+        );
+
+        let payload = available_hardware_payload(
+            PathBuf::from("/tmp/loadlynx/devices.json"),
+            "http://127.0.0.1:30180",
+            false,
+            None,
+            json!({"devices": [{"id": "digital-1"}]}),
+            registry,
+        );
+
+        assert_eq!(
+            payload
+                .pointer("/usb/remembered/0/id")
+                .and_then(Value::as_str),
+            Some("usb-bench")
+        );
+        assert_eq!(
+            payload
+                .pointer("/http_fallback/0/id")
+                .and_then(Value::as_str),
+            Some("http-bench")
+        );
+        assert_eq!(payload.get("scan").unwrap(), &Value::Null);
     }
 
     #[test]

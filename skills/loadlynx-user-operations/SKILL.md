@@ -88,6 +88,8 @@ loadlynx-devd serve --bind 127.0.0.1:30180
 - CLI discovery and status:
 
 ```bash
+loadlynx hardware available
+loadlynx hardware recent
 loadlynx hardware list
 loadlynx --devd http://127.0.0.1:30180 devices
 loadlynx --devd http://127.0.0.1:30180 status --device <device-id>
@@ -99,13 +101,17 @@ loadlynx status --hardware <saved-hardware-id>
 
 ```bash
 loadlynx hardware path
+loadlynx hardware available --scan
+loadlynx hardware recent
 loadlynx hardware list
 loadlynx hardware save --id <name> --transport usb --device <device-id> --devd http://127.0.0.1:30180
 loadlynx hardware save --id <name> --transport http --url http://<device-host-or-ip>
 loadlynx hardware forget <saved-hardware-id>
 ```
 
-- `loadlynx status --device ...` and `loadlynx status --url ...` update the CLI hardware memory after a successful connection.
+- Use `hardware available` to see currently visible USB/devd devices plus saved HTTP fallback entries; add `--scan` when the bridge should refresh device visibility first. If devd is not running, use the reported USB error and saved HTTP fallback to decide whether to start the bridge or use HTTP.
+- Use `hardware recent` to list remembered hardware by most recent successful connection or save time.
+- `loadlynx status --device ...` and `loadlynx status --url ...` best-effort update the CLI hardware memory after a successful connection; a memory write failure must not hide a successful status result.
 - The memory file lives in the user's OS config directory: macOS `~/Library/Application Support/LoadLynx/devices.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`, Windows `%APPDATA%\LoadLynx\devices.json`; `LOADLYNX_HOME` overrides the directory.
 - List saved hardware before scanning, then use `--hardware <saved-hardware-id>` instead of retyping device IDs or URLs.
 - CLI output control:
