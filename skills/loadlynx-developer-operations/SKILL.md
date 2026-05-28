@@ -1,6 +1,6 @@
 ---
 name: loadlynx-developer-operations
-description: "Operate LoadLynx developer and maintenance workflows from a source checkout: verify or clone the repository when a developer task requires it, install/check toolchains, build firmware and host tools from source, run Just recipes for loadlynx/devd/Web development, maintain GitHub Release firmware and host-tools assets, implement missing CLI capabilities such as WiFi configuration, maintain CLI hardware memory, and perform guarded hardware work through CLI/Just-controlled paths."
+description: "Operate LoadLynx developer and maintenance workflows from a source checkout: verify or clone the repository when a developer task requires it, install/check toolchains, build firmware and host tools from source, run Just recipes for loadlynx/devd/Web development, maintain GitHub Release firmware and host-tools assets, implement missing CLI business capabilities for identity/status/telemetry, electronic-load output/preset/CC/CV/CP control, USB-PD settings, WiFi, firmware flashing, and CLI hardware memory, and perform guarded hardware work through CLI/Just-controlled paths."
 ---
 
 # LoadLynx Developer Operations
@@ -50,6 +50,17 @@ just loadlynx <args>
 - Release maintenance must keep GitHub Releases publishing the user-facing assets required by the user skill: platform `loadlynx-host-tools-<platform>.tar.gz` archives, firmware assets/catalogs when user CLI flashing is advertised, and accurate release notes.
 - If user docs require `loadlynx wifi ...`, first verify that the CLI, devd API, firmware protocol, persistence behavior, and release binaries implement it. If absent, implement and test it before presenting WiFi configuration as a user capability.
 - If user docs require remembered hardware, verify `loadlynx hardware available/recent/path/list/save/forget` and `loadlynx status --hardware ...`. The registry must remain user-level config, not project checkout state.
+
+## Business Capability Development
+
+- Keep the released CLI as the user-facing control surface for LoadLynx business operations. Web-only or raw-HTTP-only behavior is incomplete for skill-driven user operation.
+- Business capability coverage includes:
+  - Identity/status/telemetry: firmware identity, uptime, network identity, link state, analog state, fault flags, voltage, current, power, temperature, and USB-PD attach/contract state.
+  - Electronic-load control: output enable/disable, CC/CV/CP runtime setpoints, limits, preset edit/apply, and post-write status verification.
+  - USB-PD control: Source capability readback, Fixed/PPS request/apply, Safe5V and extended-voltage gating, and failure-state reporting.
+  - User lifecycle: released firmware catalog/assets, CLI dry-run/real flash, reset/reconnect evidence, and runtime WiFi configuration when implemented.
+- When adding a business workflow, implement the full chain needed for a released user CLI command: firmware/protocol support if needed, devd API, `loadlynx` CLI surface, help text, tests, redaction for secrets, release packaging, and skill/spec documentation.
+- Do not document a user business workflow as available until `loadlynx --help` and the released host-tools artifact expose it.
 
 ## Device Selection
 

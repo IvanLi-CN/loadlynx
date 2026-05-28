@@ -1,6 +1,6 @@
 ---
 name: loadlynx-user-operations
-description: "Operate LoadLynx hardware from an end-user machine through the released loadlynx CLI only: install GitHub Release host tools, prefer USB/devd access before HTTP access, use CLI-saved hardware memory for previously connected devices, download released firmware/catalog assets, discover devices, check status, control output, flash firmware, and configure WiFi only when the installed CLI actually exposes those commands. Do not use Web UI, source checkouts, Just, Rust, mcu-agentd, probe tooling, or project-local developer caches for skill-driven hardware operation."
+description: "Operate LoadLynx hardware from an end-user machine through the released loadlynx CLI only: install GitHub Release host tools, prefer USB/devd access before HTTP access, use CLI-saved hardware memory for previously connected devices, and perform user business workflows such as device identity/status/telemetry checks, electronic-load output control, presets or CC/CV/CP/PD controls when the installed CLI exposes them, released firmware flashing, and WiFi configuration only when released. Do not use Web UI, source checkouts, Just, Rust, mcu-agentd, probe tooling, or project-local developer caches for skill-driven hardware operation."
 ---
 
 # LoadLynx User Operations
@@ -75,6 +75,24 @@ loadlynx-devd serve --bind 127.0.0.1:30180
 - After a successful USB or HTTP connection, save or update that hardware through the CLI if the installed release exposes a saved-device command.
 - Prefer a saved USB device over a saved HTTP endpoint for the same hardware. Use the saved HTTP endpoint only as fallback.
 - If the installed CLI cannot remember previously connected hardware, report that the current release lacks required user hardware memory and escalate to developer work to implement/release it.
+
+## LoadLynx Business Workflows
+
+- Treat transport selection as preparation only. The user-facing job is operating the LoadLynx electronic-load and USB-PD device safely through released CLI commands.
+- Identity and status:
+  - Identify the selected hardware before writes.
+  - Read firmware versions, uptime, network identity, link state, analog board state, fault flags, voltage, current, power, temperature, and USB-PD attach/contract state when the CLI/status payload exposes them.
+- Electronic-load operation:
+  - Enable or disable output only after confirming the hardware ID, intended mode, and target state.
+  - Use released CLI commands for CC/CV/CP/preset editing or applying only when `loadlynx --help` exposes them.
+  - If the installed CLI only supports output switching and status, do not present preset or CC/CV/CP editing as available.
+- USB-PD operation:
+  - Read Source capabilities, current contract, Fixed/PPS selection, Safe5V, and extended-voltage gate state only through released CLI commands when present.
+  - Do not use Web UI or raw HTTP to apply PD settings if the CLI has not shipped that workflow.
+- Firmware and network lifecycle:
+  - Firmware flash is a user workflow only when the Release provides firmware catalog/assets and the installed CLI can select and verify them.
+  - WiFi configuration is a user workflow only when the installed CLI exposes a real WiFi command.
+- If a requested business workflow is absent from the installed CLI, stop and escalate to the developer skill to implement, test, package, and release that CLI capability.
 
 ## Download Released Firmware
 
