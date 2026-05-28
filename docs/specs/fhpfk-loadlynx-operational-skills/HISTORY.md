@@ -15,7 +15,11 @@ The user workflow depends on a local USB bridge as the preferred hardware path, 
 
 ## CLI capability gate
 
-The user skill now includes released CLI firmware flash, WiFi configuration, and saved hardware as user-facing workflow areas, but requires command-surface verification before giving steps. This is intentional: the current `loadlynx` CLI exposes flash/reset/monitor/status/output/USB-port commands, but does not expose WiFi configuration or complete user-level saved hardware commands. Agents must report those gaps instead of inventing commands or falling back to Web UI operation.
+The user skill now includes released CLI firmware flash, WiFi configuration, and saved hardware as user-facing workflow areas, but requires command-surface verification before giving steps. This is intentional: agents must report missing commands instead of inventing commands or falling back to Web UI operation.
+
+## CLI hardware memory
+
+Hardware memory is a `loadlynx` CLI feature, not a Web UI or project-local feature. The CLI stores saved and successfully connected USB/HTTP hardware in the user's OS config directory, with `LOADLYNX_HOME` as an override for tests or explicit advanced setup. USB records sort before HTTP records so normal user workflows try the local USB/devd path before HTTP fallback.
 
 ## CLI-only hardware operation
 

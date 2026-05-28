@@ -88,16 +88,30 @@ loadlynx-devd serve --bind 127.0.0.1:30180
 - CLI discovery and status:
 
 ```bash
+loadlynx hardware list
 loadlynx --devd http://127.0.0.1:30180 devices
 loadlynx --devd http://127.0.0.1:30180 status --device <device-id>
 loadlynx status --url http://<device-host-or-ip>
+loadlynx status --hardware <saved-hardware-id>
 ```
 
-- When saved hardware commands exist, list saved devices before scanning, then use the saved device identifier instead of retyping ports or URLs.
+- Hardware memory:
+
+```bash
+loadlynx hardware path
+loadlynx hardware list
+loadlynx hardware save --id <name> --transport usb --device <device-id> --devd http://127.0.0.1:30180
+loadlynx hardware save --id <name> --transport http --url http://<device-host-or-ip>
+loadlynx hardware forget <saved-hardware-id>
+```
+
+- `loadlynx status --device ...` and `loadlynx status --url ...` update the CLI hardware memory after a successful connection.
+- The memory file lives in the user's OS config directory: macOS `~/Library/Application Support/LoadLynx/devices.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`, Windows `%APPDATA%\LoadLynx\devices.json`; `LOADLYNX_HOME` overrides the directory.
+- List saved hardware before scanning, then use `--hardware <saved-hardware-id>` instead of retyping device IDs or URLs.
 - CLI output control:
   - Confirm `loadlynx output --help` and `loadlynx output set --help` expose the needed command.
-  - Require the user to confirm the target base URL and intended output state before changing output.
-  - Verify the result with `loadlynx status --url <base-url>` or `loadlynx --devd <devd-url> status --device <device-id>`.
+  - Require the user to confirm the saved hardware ID or target base URL and intended output state before changing output.
+  - Verify the result with `loadlynx status --hardware <saved-hardware-id>`, `loadlynx status --url <base-url>`, or `loadlynx --devd <devd-url> status --device <device-id>`.
 - CLI firmware flash:
   - Confirm `loadlynx flash --help` supports the needed artifact/catalog options.
   - Use dry-run first whenever the CLI exposes it.

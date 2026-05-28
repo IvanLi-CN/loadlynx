@@ -77,7 +77,7 @@ jobs:
             'LoadLynx host tools' \
             '' \
             '- loadlynx-devd: local USB CDC bridge for loadlynx CLI workflows.' \
-            '- loadlynx: command-line helper for USB/devd-first LoadLynx hardware workflows.' \
+            '- loadlynx: command-line helper for USB/devd-first LoadLynx hardware workflows, including user-level hardware memory.' \
             '' \
             'Use the user operations skill for released CLI-only hardware operation and the developer operations skill for maintenance.' \
             > "$package_dir/README.txt"

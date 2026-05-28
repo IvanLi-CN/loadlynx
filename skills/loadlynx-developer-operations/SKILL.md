@@ -1,6 +1,6 @@
 ---
 name: loadlynx-developer-operations
-description: "Operate LoadLynx developer and maintenance workflows from a source checkout: verify or clone the repository when a developer task requires it, install/check toolchains, build firmware and host tools from source, run Just recipes for loadlynx/devd/Web development, maintain GitHub Release firmware and host-tools assets, implement missing CLI capabilities such as WiFi configuration, and perform guarded hardware work through CLI/Just-controlled paths."
+description: "Operate LoadLynx developer and maintenance workflows from a source checkout: verify or clone the repository when a developer task requires it, install/check toolchains, build firmware and host tools from source, run Just recipes for loadlynx/devd/Web development, maintain GitHub Release firmware and host-tools assets, implement missing CLI capabilities such as WiFi configuration, maintain CLI hardware memory, and perform guarded hardware work through CLI/Just-controlled paths."
 ---
 
 # LoadLynx Developer Operations
@@ -49,7 +49,7 @@ just loadlynx <args>
 - Firmware development uses `just a-build` for STM32G431 analog and `just d-build` for ESP32-S3 digital.
 - Release maintenance must keep GitHub Releases publishing the user-facing assets required by the user skill: platform `loadlynx-host-tools-<platform>.tar.gz` archives, firmware assets/catalogs when user CLI flashing is advertised, and accurate release notes.
 - If user docs require `loadlynx wifi ...`, first verify that the CLI, devd API, firmware protocol, persistence behavior, and release binaries implement it. If absent, implement and test it before presenting WiFi configuration as a user capability.
-- If user docs require remembered hardware, first verify that the CLI can save/list/select/update/forget previously connected USB and HTTP devices. User workflows must prefer saved USB targets before saved HTTP endpoints.
+- If user docs require remembered hardware, verify `loadlynx hardware path/list/save/forget` and `loadlynx status --hardware ...`. The registry must remain user-level config, not project checkout state.
 
 ## Device Selection
 
@@ -78,7 +78,9 @@ just devd-serve --bind 127.0.0.1:<port> --allow-dev-cors
 
 ```bash
 just loadlynx --devd http://127.0.0.1:<port> devices
+just loadlynx hardware list
 just loadlynx --devd http://127.0.0.1:<port> status --device <device-id>
+just loadlynx status --hardware <saved-hardware-id>
 ```
 
 - Web development may point a local UI at devd with `VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:<port>`, but skill-driven hardware operations still use CLI commands.
