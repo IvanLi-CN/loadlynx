@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-19
-- Legacy source retained pending delete approval: `docs/specs/0019-dashboard-pd-button-label/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0019:dashboard-pd-button-label/PLAN.md`
 
 ## Implementation Summary
 

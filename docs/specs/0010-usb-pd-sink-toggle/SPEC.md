@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-07
-- Legacy source: `docs/specs/0010-usb-pd-sink-toggle/SPEC.md`
+- Legacy source: `docs/plan/0010:usb-pd-sink-toggle/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0010-usb-pd-sink-toggle/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0010:usb-pd-sink-toggle/PLAN.md`.
 
 ## Specification
 

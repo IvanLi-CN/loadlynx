@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-20
-- Legacy source retained pending delete approval: `docs/specs/0022-storybook-hide-breakpoint-guides/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0022:storybook-hide-breakpoint-guides/PLAN.md`
 
 ## Implementation Summary
 

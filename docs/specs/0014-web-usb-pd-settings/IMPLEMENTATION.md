@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-13
-- Legacy source retained pending delete approval: `docs/specs/0014-web-usb-pd-settings/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0014:web-usb-pd-settings/PLAN.md`
 
 ## Implementation Summary
 

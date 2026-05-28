@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2025-12-26
-- Legacy source retained pending delete approval: `docs/specs/0011-web-layouts/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0011:web-layouts/PLAN.md`
 
 ## Implementation Summary
 

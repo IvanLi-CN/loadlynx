@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0025-service-ports-avoid-defaults/SPEC.md`.
+- Migrated from `docs/plan/0025:service-ports-avoid-defaults/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

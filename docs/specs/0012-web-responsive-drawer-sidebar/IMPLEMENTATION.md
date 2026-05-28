@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2025-12-26
-- Legacy source retained pending delete approval: `docs/specs/0012-web-responsive-drawer-sidebar/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0012:web-responsive-drawer-sidebar/PLAN.md`
 
 ## Implementation Summary
 

@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0021-touch-spring-load-switch-rgb-led/SPEC.md`.
+- Migrated from `docs/plan/0021:touch-spring-load-switch-rgb-led/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

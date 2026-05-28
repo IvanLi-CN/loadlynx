@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2025-12-23
-- Legacy source retained pending delete approval: `docs/specs/0008-storybook-component-workshop/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0008:storybook-component-workshop/PLAN.md`
 
 ## Implementation Summary
 

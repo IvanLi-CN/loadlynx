@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0011-web-layouts/SPEC.md`.
+- Migrated from `docs/plan/0011:web-layouts/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

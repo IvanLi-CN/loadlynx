@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2025-12-25
-- Legacy source retained pending delete approval: `docs/specs/0003-ft6336u-touch-int/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0003:ft6336u-touch-int/PLAN.md`
 
 ## Implementation Summary
 

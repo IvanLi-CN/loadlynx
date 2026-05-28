@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2025-12-11
-- Legacy source retained pending delete approval: `docs/specs/0004-mdns-and-lan-discovery/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0004:mdns-and-lan-discovery/PLAN.md`
 
 ## Implementation Summary
 

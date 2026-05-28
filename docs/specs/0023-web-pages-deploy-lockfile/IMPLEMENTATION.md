@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-21
-- Legacy source retained pending delete approval: `docs/specs/0023-web-pages-deploy-lockfile/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0023:web-pages-deploy-lockfile/PLAN.md`
 
 ## Implementation Summary
 

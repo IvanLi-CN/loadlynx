@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-19
-- Legacy source: `docs/specs/0018-web-cp-mode-ui/SPEC.md`
+- Legacy source: `docs/plan/0018:web-cp-mode-ui/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0018-web-cp-mode-ui/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0018:web-cp-mode-ui/PLAN.md`.
 
 ## Specification
 

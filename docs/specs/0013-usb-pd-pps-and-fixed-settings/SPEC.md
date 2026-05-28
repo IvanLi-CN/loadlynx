@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-12
-- Legacy source: `docs/specs/0013-usb-pd-pps-and-fixed-settings/SPEC.md`
+- Legacy source: `docs/plan/0013:usb-pd-pps-and-fixed-settings/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0013-usb-pd-pps-and-fixed-settings/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0013:usb-pd-pps-and-fixed-settings/PLAN.md`.
 
 ## Specification
 

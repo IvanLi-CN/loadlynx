@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/shkmx-buzzer-to-speaker-audio/SPEC.md`.
+- Migrated from `docs/plan/shkmx-buzzer-to-speaker-audio/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-20
-- Legacy source retained pending delete approval: `docs/specs/0020-web-instrument-control-ui/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0020:web-instrument-control-ui/PLAN.md`
 
 ## Implementation Summary
 

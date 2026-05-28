@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0012-web-responsive-drawer-sidebar/SPEC.md`.
+- Migrated from `docs/plan/0012:web-responsive-drawer-sidebar/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

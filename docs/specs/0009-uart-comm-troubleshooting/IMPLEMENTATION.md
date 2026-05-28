@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-05
-- Legacy source retained pending delete approval: `docs/specs/0009-uart-comm-troubleshooting/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0009:uart-comm-troubleshooting/PLAN.md`
 
 ## Implementation Summary
 

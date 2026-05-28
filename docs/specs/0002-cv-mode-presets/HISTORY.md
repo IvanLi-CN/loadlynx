@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0002-cv-mode-presets/SPEC.md`.
+- Migrated from `docs/plan/0002:cv-mode-presets/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

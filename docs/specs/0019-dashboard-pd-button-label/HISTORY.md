@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0019-dashboard-pd-button-label/SPEC.md`.
+- Migrated from `docs/plan/0019:dashboard-pd-button-label/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

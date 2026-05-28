@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0007-prompt-tone-manager/SPEC.md`.
+- Migrated from `docs/plan/0007:prompt-tone-manager/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

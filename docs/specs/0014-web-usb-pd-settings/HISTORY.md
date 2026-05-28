@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0014-web-usb-pd-settings/SPEC.md`.
+- Migrated from `docs/plan/0014:web-usb-pd-settings/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

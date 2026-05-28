@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0020-web-instrument-control-ui/SPEC.md`.
+- Migrated from `docs/plan/0020:web-instrument-control-ui/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

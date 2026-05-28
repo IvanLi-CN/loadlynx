@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-07
-- Legacy source retained pending delete approval: `docs/specs/0007-prompt-tone-manager/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0007:prompt-tone-manager/PLAN.md`
 
 ## Implementation Summary
 

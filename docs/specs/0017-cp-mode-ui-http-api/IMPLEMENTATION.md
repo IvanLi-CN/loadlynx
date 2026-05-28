@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-18
-- Legacy source retained pending delete approval: `docs/specs/0017-cp-mode-ui-http-api/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0017:cp-mode-ui-http-api/PLAN.md`
 
 ## Implementation Summary
 

@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0008-storybook-component-workshop/SPEC.md`.
+- Migrated from `docs/plan/0008:storybook-component-workshop/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

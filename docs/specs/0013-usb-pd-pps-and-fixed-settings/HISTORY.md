@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0013-usb-pd-pps-and-fixed-settings/SPEC.md`.
+- Migrated from `docs/plan/0013:usb-pd-pps-and-fixed-settings/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

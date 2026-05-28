@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-21
-- Legacy source: `docs/specs/0025-service-ports-avoid-defaults/SPEC.md`
+- Legacy source: `docs/plan/0025:service-ports-avoid-defaults/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0025-service-ports-avoid-defaults/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0025:service-ports-avoid-defaults/PLAN.md`.
 
 ## Specification
 

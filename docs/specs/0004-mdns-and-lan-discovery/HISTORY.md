@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0004-mdns-and-lan-discovery/SPEC.md`.
+- Migrated from `docs/plan/0004:mdns-and-lan-discovery/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0005-on-device-preset-ui/SPEC.md`.
+- Migrated from `docs/plan/0005:on-device-preset-ui/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

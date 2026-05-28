@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-02-03
-- Legacy source retained pending delete approval: `docs/specs/6mre7-touch-power-button-standby-breathing-white/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/6mre7:touch-power-button-standby-breathing-white/PLAN.md`
 
 ## Implementation Summary
 

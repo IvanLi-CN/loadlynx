@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0018-web-cp-mode-ui/SPEC.md`.
+- Migrated from `docs/plan/0018:web-cp-mode-ui/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

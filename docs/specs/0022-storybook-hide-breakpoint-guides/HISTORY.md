@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0022-storybook-hide-breakpoint-guides/SPEC.md`.
+- Migrated from `docs/plan/0022:storybook-hide-breakpoint-guides/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

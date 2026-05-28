@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0016-pd-settings-touch-value-editor/SPEC.md`.
+- Migrated from `docs/plan/0016:pd-settings-touch-value-editor/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

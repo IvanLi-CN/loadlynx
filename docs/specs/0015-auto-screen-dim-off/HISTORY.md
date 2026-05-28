@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0015-auto-screen-dim-off/SPEC.md`.
+- Migrated from `docs/plan/0015:auto-screen-dim-off/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

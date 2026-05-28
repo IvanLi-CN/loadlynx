@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2025-12-23
-- Legacy source: `docs/specs/0008-storybook-component-workshop/SPEC.md`
+- Legacy source: `docs/plan/0008:storybook-component-workshop/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0008-storybook-component-workshop/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0008:storybook-component-workshop/PLAN.md`.
 
 ## Specification
 

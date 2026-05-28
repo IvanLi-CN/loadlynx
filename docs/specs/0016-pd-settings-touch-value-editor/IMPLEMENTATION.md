@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-15
-- Legacy source retained pending delete approval: `docs/specs/0016-pd-settings-touch-value-editor/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0016:pd-settings-touch-value-editor/PLAN.md`
 
 ## Implementation Summary
 

@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-13
-- Legacy source: `docs/specs/0015-auto-screen-dim-off/SPEC.md`
+- Legacy source: `docs/plan/0015:auto-screen-dim-off/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0015-auto-screen-dim-off/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0015:auto-screen-dim-off/PLAN.md`.
 
 ## Specification
 

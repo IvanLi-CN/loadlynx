@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0024-web-version-github-link/SPEC.md`.
+- Migrated from `docs/plan/0024:web-version-github-link/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

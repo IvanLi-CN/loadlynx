@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0003-ft6336u-touch-int/SPEC.md`.
+- Migrated from `docs/plan/0003:ft6336u-touch-int/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

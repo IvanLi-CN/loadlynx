@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0001-cc-load-switch-toggle/SPEC.md`.
+- Migrated from `docs/plan/0001:cc-load-switch-toggle/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

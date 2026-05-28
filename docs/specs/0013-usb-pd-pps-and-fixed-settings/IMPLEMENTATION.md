@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-12
-- Legacy source retained pending delete approval: `docs/specs/0013-usb-pd-pps-and-fixed-settings/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0013:usb-pd-pps-and-fixed-settings/PLAN.md`
 
 ## Implementation Summary
 

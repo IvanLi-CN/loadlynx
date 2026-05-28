@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-02-05
-- Legacy source retained pending delete approval: `docs/specs/shkmx-buzzer-to-speaker-audio/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/shkmx-buzzer-to-speaker-audio/PLAN.md`
 
 ## Implementation Summary
 

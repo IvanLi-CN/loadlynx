@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0006-preset-ui-protection-labels/SPEC.md`.
+- Migrated from `docs/plan/0006:preset-ui-protection-labels/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

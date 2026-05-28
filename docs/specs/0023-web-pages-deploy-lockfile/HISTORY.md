@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0023-web-pages-deploy-lockfile/SPEC.md`.
+- Migrated from `docs/plan/0023:web-pages-deploy-lockfile/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0009-uart-comm-troubleshooting/SPEC.md`.
+- Migrated from `docs/plan/0009:uart-comm-troubleshooting/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2025-12-25
-- Legacy source: `docs/specs/0003-ft6336u-touch-int/SPEC.md`
+- Legacy source: `docs/plan/0003:ft6336u-touch-int/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0003-ft6336u-touch-int/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0003:ft6336u-touch-int/PLAN.md`.
 
 ## Specification
 

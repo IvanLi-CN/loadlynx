@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-07
-- Legacy source retained pending delete approval: `docs/specs/0010-usb-pd-sink-toggle/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0010:usb-pd-sink-toggle/PLAN.md`
 
 ## Implementation Summary
 

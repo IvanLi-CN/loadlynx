@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-15
-- Legacy source: `docs/specs/0016-pd-settings-touch-value-editor/SPEC.md`
+- Legacy source: `docs/plan/0016:pd-settings-touch-value-editor/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/0016-pd-settings-touch-value-editor/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/0016:pd-settings-touch-value-editor/PLAN.md`.
 
 ## Specification
 

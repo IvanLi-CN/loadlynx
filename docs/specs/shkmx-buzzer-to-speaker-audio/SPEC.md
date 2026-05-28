@@ -6,12 +6,12 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-02-05
-- Legacy source: `docs/specs/shkmx-buzzer-to-speaker-audio/SPEC.md`
+- Legacy source: `docs/plan/shkmx-buzzer-to-speaker-audio/PLAN.md`
 - Delete approval: pending
 
 ## Background And Scope
 
-Legacy source retained pending delete approval: `docs/specs/shkmx-buzzer-to-speaker-audio/SPEC.md`.
+Legacy source retained pending delete approval: `docs/plan/shkmx-buzzer-to-speaker-audio/PLAN.md`.
 
 ## Specification
 

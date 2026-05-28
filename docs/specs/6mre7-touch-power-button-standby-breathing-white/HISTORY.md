@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/6mre7-touch-power-button-standby-breathing-white/SPEC.md`.
+- Migrated from `docs/plan/6mre7:touch-power-button-standby-breathing-white/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

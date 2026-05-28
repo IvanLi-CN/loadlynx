@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-02-03
-- Legacy source retained pending delete approval: `docs/specs/0021-touch-spring-load-switch-rgb-led/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0021:touch-spring-load-switch-rgb-led/PLAN.md`
 
 ## Implementation Summary
 

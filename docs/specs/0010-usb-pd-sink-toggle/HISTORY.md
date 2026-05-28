@@ -2,7 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/specs/0010-usb-pd-sink-toggle/SPEC.md`.
+- Migrated from `docs/plan/0010:usb-pd-sink-toggle/PLAN.md`.
 - Legacy source is retained pending delete approval.
 
 ## Key Decisions

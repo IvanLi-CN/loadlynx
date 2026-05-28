@@ -4,7 +4,7 @@
 
 - Current status: 已完成
 - Last updated: 2026-01-13
-- Legacy source retained pending delete approval: `docs/specs/0015-auto-screen-dim-off/SPEC.md`
+- Legacy source retained pending delete approval: `docs/plan/0015:auto-screen-dim-off/PLAN.md`
 
 ## Implementation Summary
 
