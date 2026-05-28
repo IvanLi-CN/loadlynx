@@ -1,11 +1,11 @@
 ---
 name: loadlynx-developer-operations
-description: "Operate LoadLynx developer and maintenance workflows from a source checkout: verify or clone the repository when a developer task requires it, install/check toolchains, build firmware and host tools from source, run Just recipes for loadlynx/devd/Web development, maintain GitHub Release firmware and host-tools assets, implement missing CLI business capabilities for identity/status/telemetry, electronic-load output/preset/CC/CV/CP control, USB-PD settings, WiFi, firmware flashing, and CLI hardware memory, and perform guarded hardware work through CLI/Just-controlled paths."
+description: "Operate LoadLynx developer and maintenance workflows as a superset of loadlynx-user-operations: inherit the released CLI-only user business workflows, USB-first/HTTP-fallback connection order, CLI hardware memory, and command-availability gates, then add source checkout/clone, toolchain checks, Just recipes for loadlynx/devd/Web development, firmware and host-tool builds, GitHub Release asset maintenance, missing CLI business capability implementation, calibration, reset/monitor, and HIL verification."
 ---
 
 # LoadLynx Developer Operations
 
-Use this skill for engineering, maintenance, release, and hardware-debug work. It complements `skills/loadlynx-user-operations/SKILL.md`; do not duplicate ordinary user tutorials. When this skill operates hardware, use CLI/Just-controlled paths, not Web UI operation.
+Use this skill for engineering, maintenance, release, and hardware-debug work. This skill is a superset of `skills/loadlynx-user-operations/SKILL.md`: when the task includes ordinary LoadLynx hardware operation, first apply the user skill's CLI-only business workflows, USB-first/HTTP-fallback connection order, CLI hardware memory, command-availability gates, and safety checks. Then add the developer-only source checkout, Just, firmware, release, calibration, reset/monitor, and HIL rules below. When this skill operates hardware, use CLI/Just-controlled paths, not Web UI operation.
 
 ## Start Here
 
@@ -32,7 +32,7 @@ git clone https://github.com/IvanLi-CN/loadlynx.git
 cd loadlynx
 ```
 
-- If the task is ordinary use of released programs on a user's machine, use the user skill instead of cloning.
+- If the task is ordinary use of released programs on a user's machine and does not require source, use the user skill directly. If a developer task includes the same ordinary operation as setup, validation, or reproduction, inherit the user skill behavior instead of restating or bypassing it.
 
 ## Tooling Checks
 
