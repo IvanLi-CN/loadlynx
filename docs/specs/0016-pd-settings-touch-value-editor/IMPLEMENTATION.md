@@ -8,7 +8,7 @@
 
 ## Implementation Summary
 
-This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes after the legacy source was removed.
+This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes.
 
 ## Milestones
 
@@ -17,5 +17,3 @@ This canonical companion document was initialized from the legacy plan migration
 - [x] 产出并确认 3 张效果图（PPS Vreq focused / PPS Ireq focused / Fixed Ireq focused）
 
 ## Remaining Gaps
-
-- Confirm deletion of the retained legacy source after canonical links have been reviewed.
