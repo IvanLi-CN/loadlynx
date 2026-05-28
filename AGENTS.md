@@ -34,9 +34,9 @@ Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for 
 
 ## Firmware Flash/Reset/Monitor Workflow
 
-Firmware flash/reset/monitor operations are driven by the external `mcu-agentd` daemon + CLI (sibling checkout at `../mcu-agentd`), with per-project config `mcu-agentd.toml` and cached selectors in `.esp32-port` / `.stm32-port`. Prefer the `just` wrappers below for those firmware operations only.
+Firmware flash/reset/monitor operations are driven by the external `mcu-agentd` daemon + CLI (sibling checkout at `../mcu-agentd`), with per-project config `mcu-agentd.toml` and repo-local development selector caches. Prefer the `just` wrappers below for those firmware operations only.
 
-CLI/devd USB CDC verification is separate from `mcu-agentd`. It must use `tools/loadlynx-devd` directly against the intended ESP32-S3 digital USB CDC device. Set the default digital hardware USB port through `loadlynx usb-port set digital <path>`, which reuses `.esp32-port`; do not call or change `mcu-agentd selector` state for CLI/devd verification. When the current task is the CLI/devd firmware flow, real ESP32-S3 digital flash must also go through devd's lease-gated direct `espflash` path using the approved `.esp32-port` target, not `just agentd flash digital`.
+CLI/devd USB CDC verification is separate from `mcu-agentd`. It must use `tools/loadlynx-devd` directly against the intended ESP32-S3 digital USB CDC device. Set the default digital hardware USB port through `loadlynx usb-port set digital <path>`, which reuses the repo-local development digital port cache; do not call or change `mcu-agentd selector` state for CLI/devd verification. When the current task is the CLI/devd firmware flow, real ESP32-S3 digital flash must also go through devd's lease-gated direct `espflash` path using the approved repo-local development digital port target, not `just agentd flash digital`.
 
 ### Build-time versioning and boot logs
 
@@ -74,17 +74,17 @@ CLI/devd USB CDC verification is separate from `mcu-agentd`. It must use `tools/
 
 - Follow `skills/loadlynx-user-operations/SKILL.md` for released owner-facing hardware operation on a user machine: CLI-only operation, USB/devd first, HTTP fallback second, CLI-saved hardware memory, GitHub Release host-tools installation, released firmware download, and released CLI workflows that the installed `loadlynx --help` actually supports.
 - Follow `skills/loadlynx-developer-operations/SKILL.md` for source checkout/clone, Just-based devd/CLI workflows, local firmware builds, release maintenance, missing CLI feature implementation, calibration writes, reset/monitor, and HIL verification.
-- User-facing CLI hardware memory is managed with `loadlynx hardware available/recent/path/list/save/forget` and `loadlynx status --hardware <id>`. It is stored in the user's OS config directory, not in the repository checkout or `.esp32-port`.
+- User-facing CLI hardware memory is managed with `loadlynx hardware available/recent/path/list/save/forget` and `loadlynx status --hardware <id>`. It is stored in the user's OS config directory, not in the repository checkout or developer port/probe caches.
 - The default digital USB port exists only as an Agent safety guardrail: it prevents CLI/devd work from guessing or touching the wrong ESP32-S3 USB CDC device.
-- During development, set the default digital USB port only through `just loadlynx usb-port set digital <path>` after the owner explicitly approves the exact ESP32-S3 digital USB CDC path. This writes the repo-local `.esp32-port` memory used by subsequent CLI/devd operations.
+- During development, set the default digital USB port only through `just loadlynx usb-port set digital <path>` after the owner explicitly approves the exact ESP32-S3 digital USB CDC path. This writes the repo-local development digital port memory used by subsequent CLI/devd operations.
 - The CLI also supports human interactive use (`just loadlynx usb-port set` or `just loadlynx usb-port set digital`) with arrow-key selection over espflash-style serial port candidates, but an Agent must not use interactive candidate selection to bypass owner approval of the exact port.
-- Reuse `.esp32-port` as the sole memory file for this setting; do not introduce a replacement file or alternate memory scheme.
-- `.esp32-port` may retain mcu-agentd-compatible metadata lines such as `mac=...`; CLI/devd must treat only the approved port path line as the default USB port.
-- Never change `.esp32-port` or rerun `just loadlynx usb-port set digital ...` without explicit owner approval for the new exact path. Vague instructions like “继续”, “再试”, or “你自己处理” are not approval to change USB ports.
-- If `.esp32-port` is missing, stale, unreadable, or does not match the ESP32-S3 digital device the owner approved, stop and ask the owner which USB port to use. Do not scan candidates and silently pick one.
+- Reuse the existing repo-local development digital port memory for this setting; do not introduce a replacement file or alternate memory scheme.
+- The repo-local development digital port memory may retain mcu-agentd-compatible metadata lines; CLI/devd must treat only the approved port path line as the default USB port.
+- Never change the repo-local development digital port memory or rerun `just loadlynx usb-port set digital ...` without explicit owner approval for the new exact path. Vague instructions like “继续”, “再试”, or “你自己处理” are not approval to change USB ports.
+- If the repo-local development digital port memory is missing, stale, unreadable, or does not match the ESP32-S3 digital device the owner approved, stop and ask the owner which USB port to use. Do not scan candidates and silently pick one.
 - After the default digital USB port is set, start `loadlynx-devd` directly from this repository, for example through `just devd-serve ...`. Do not pass hardware port arguments to the devd startup command.
 - For local Web development, start the Web app with `VITE_LOADLYNX_DEVD_URL` pointed at the active devd URL, but skill-driven hardware operations still use CLI.
-- For CLI/devd firmware flashing, use the devd HTTP/CLI flash operation. The real ESP32-S3 digital flash path must hold a valid lease/session, resolve the selected artifact, verify hashes, and invoke direct `espflash` against the approved `.esp32-port` target. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
+- For CLI/devd firmware flashing, use the devd HTTP/CLI flash operation. The real ESP32-S3 digital flash path must hold a valid lease/session, resolve the selected artifact, verify hashes, and invoke direct `espflash` against the approved repo-local development digital port target. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
 - Prove real-device coverage through devd-owned USB CDC evidence: the selected candidate path, a lease/session, and decoded JSONL frames or successful `hello`/`get_identity`/`get_status` responses from the device.
 - Mock identity, mock status, serial-open-only probes, or firmware dry-run target evidence are not sufficient to claim real-device CLI/devd verification.
 - Do not call `just agentd selector set`, `just agentd flash`, `just agentd reset`, or `just agentd monitor` as part of CLI/devd control-plane verification. If the task explicitly includes CLI/devd digital firmware flashing, stay on devd's direct `espflash` path; `mcu-agentd` remains for non-devd firmware workflows and analog/probe operations.
@@ -102,7 +102,7 @@ These rules exist to prevent an Agent from silently switching the owner's connec
 - **Do not "try switching probes/ports" as a debugging tactic.**
   - If `flash/reset/monitor` fails, collect evidence (logs + `just agentd-get-port ...` + `just agentd selector list ...`) and ask the owner which probe/port to use.
 - **Avoid side-channel device selection changes.**
-  - Do not edit or write to any device-selection cache files (e.g. `.stm32-port`, `.esp32-port`) unless the owner explicitly asks.
+  - Do not edit or write to any repo-local device-selection cache files unless the owner explicitly asks.
 - **Before any HIL action, echo the target device selection.**
   - Always state which `analog` probe selector / `digital` serial port will be used (as returned by `just agentd-get-port ...`) before running `flash/reset`.
 

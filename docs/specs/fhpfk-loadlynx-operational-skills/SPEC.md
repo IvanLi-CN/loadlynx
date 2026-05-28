@@ -78,7 +78,7 @@ cd loadlynx
 ```
 
 - 开发者版必须通过 `just` 运行本地 CLI/devd/固件常用入口：`just devd-build`、`just devd-test`、`just devd-serve`、`just loadlynx <args>`、`just a-build`、`just d-build`。
-- 开发者版必须保留硬件选择、`.esp32-port` / `.stm32-port`、devd lease、`mcu-agentd`、WiFi secret、校准、flash/reset/monitor 与 HIL 的安全门禁。
+- 开发者版必须保留项目开发端口/探针缓存、devd lease、`mcu-agentd`、WiFi secret、校准、flash/reset/monitor 与 HIL 的安全门禁；具体缓存文件名只在开发者 skill 中列出。
 - Release 维护不得发布声称支持用户 CLI 烧录或 WiFi 配置、但缺少对应程序/固件资产/命令实现的 Release。
 
 ### SHOULD
@@ -95,7 +95,7 @@ cd loadlynx
 - CLI-only：skill 驱动的硬件操作只允许 released `loadlynx` CLI。
 - USB 优先：启动 released `loadlynx-devd serve --bind 127.0.0.1:<port>`，用 CLI 通过 devd 操作硬件。
 - HTTP 其次：当 USB 不可用或用户选择 HTTP 时，用 CLI 对 explicit URL/IP/mDNS host 操作。
-- 硬件记忆：CLI 负责保存、列出可连接设备、列出最近连接设备、列出已记住设备、选择、更新、遗忘曾经连接过的 USB 与 HTTP 设备，后续操作优先使用保存的 USB 设备；该记忆属于用户配置目录，不属于源码 checkout 或 `.esp32-port` 开发守卫。
+- 硬件记忆：CLI 负责保存、列出可连接设备、列出最近连接设备、列出已记住设备、选择、更新、遗忘曾经连接过的 USB 与 HTTP 设备，后续操作优先使用保存的 USB 设备；该记忆属于用户配置目录，不属于源码 checkout 或项目开发端口缓存。
 - 固件：下载 Release 固件 catalog/assets，先 dry-run，再在身份、target、artifact、hash、lease/session 清楚时 real flash。
 - WiFi：只使用 released CLI 中真实存在的 WiFi 命令；保护 PSK，不把密钥写入聊天、日志、截图、trace 或 PR。
 - 禁止项：clone、`just`、源码构建、`mcu-agentd`、probe selector、HIL、校准写入、raw HTTP 绕过、手改缓存。
@@ -125,7 +125,7 @@ cd loadlynx
 - Connect Hardware:
   - USB/devd 优先，HTTP fallback 其次。
   - USB 时启动 `loadlynx-devd serve --bind 127.0.0.1:30180`。
-  - 只使用 released CLI 的用户选择流程，不手改 `.esp32-port` / `.stm32-port`。
+  - 只使用 released CLI 的用户选择流程，不手改项目开发端口/探针缓存。
 - CLI Hardware Memory:
   - CLI 是保存硬件的唯一用户侧来源，不使用 Web local storage 或项目缓存。
   - CLI 支持 `loadlynx hardware available/recent/path/list/save/forget`、`loadlynx status --hardware <id>`，并在成功 `status --device` / `status --url` 后 best-effort 自动更新曾经连接过的 USB 与 HTTP 设备。
@@ -159,7 +159,7 @@ cd loadlynx
   - Release 维护验证 host-tools、固件 catalog/assets 与 release notes 一致。
 - Device Selection:
   - 禁止猜测或静默切换硬件目标。
-  - CLI/devd ESP32-S3 USB CDC 使用 owner 批准的 `.esp32-port`。
+  - CLI/devd ESP32-S3 USB CDC 使用 owner 批准的项目开发端口缓存。
   - selector/cache 写入必须有 owner 对 exact command/path 的批准。
 - devd And USB CDC:
   - 使用 `loadlynx-devd`，不走 `mcu-agentd` selector。

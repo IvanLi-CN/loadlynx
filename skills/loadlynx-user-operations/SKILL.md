@@ -65,7 +65,7 @@ loadlynx-devd serve --bind 127.0.0.1:30180
 ```
 
 - Keep the bridge running while using USB. Use `http://127.0.0.1:30180` as the devd URL.
-- Use only the released CLI's user-facing selection flow for USB targets. Do not edit `.esp32-port`, `.stm32-port`, or any selector/cache file by hand.
+- Use only the released CLI's user-facing selection flow for USB targets. Do not edit project-local developer port/probe caches or any selector file by hand.
 - Use HTTP only when USB is unavailable, explicitly not desired, or the user chooses a saved HTTP device. HTTP targets may be explicit base URLs, IP addresses, or `loadlynx-<short-id>.local`.
 
 ## CLI Hardware Memory
