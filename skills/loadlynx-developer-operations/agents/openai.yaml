@@ -1,0 +1,4 @@
+interface:
+  display_name: "LoadLynx Developer Operations"
+  short_description: "Source checkout, Just, release, firmware, and HIL workflows."
+  default_prompt: "Use $loadlynx-developer-operations to verify or clone the LoadLynx source checkout before running Just-based CLI/devd, firmware, release, WiFi, calibration, or HIL workflows."
