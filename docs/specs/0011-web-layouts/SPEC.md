@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2025-12-26
-- Legacy source: `docs/plan/0011:web-layouts/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/0011:web-layouts/PLAN.md`.
 
 ## Specification
 

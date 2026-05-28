@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-03
-- Legacy source: `docs/plan/0002:cv-mode-presets/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/0002:cv-mode-presets/PLAN.md`.
 
 ## Specification
 

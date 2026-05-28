@@ -2,8 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/plan/0012:web-responsive-drawer-sidebar/PLAN.md`.
-- Legacy source is retained pending delete approval.
+- Migrated from legacy planning docs into the canonical specs taxonomy.
 
 ## Key Decisions
 

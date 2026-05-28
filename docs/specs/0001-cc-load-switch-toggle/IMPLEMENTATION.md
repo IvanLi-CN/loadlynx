@@ -4,11 +4,11 @@
 
 - Current status: 已完成
 - Last updated: 2025-12-26
-- Legacy source retained pending delete approval: `docs/plan/0001:cc-load-switch-toggle/PLAN.md`
+- Origin: migrated from legacy planning docs.
 
 ## Implementation Summary
 
-This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes until the legacy source is approved for deletion.
+This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes after the legacy source was removed.
 
 ## Milestones
 

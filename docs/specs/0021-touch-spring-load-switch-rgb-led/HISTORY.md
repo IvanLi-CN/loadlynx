@@ -2,8 +2,7 @@
 
 ## Origin
 
-- Migrated from `docs/plan/0021:touch-spring-load-switch-rgb-led/PLAN.md`.
-- Legacy source is retained pending delete approval.
+- Migrated from legacy planning docs into the canonical specs taxonomy.
 
 ## Key Decisions
 

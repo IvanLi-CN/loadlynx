@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2025-12-11
-- Legacy source: `docs/plan/0004:mdns-and-lan-discovery/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/0004:mdns-and-lan-discovery/PLAN.md`.
 
 ## Specification
 

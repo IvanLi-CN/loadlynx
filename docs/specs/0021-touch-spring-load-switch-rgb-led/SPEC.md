@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-02-03
-- Legacy source: `docs/plan/0021:touch-spring-load-switch-rgb-led/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/0021:touch-spring-load-switch-rgb-led/PLAN.md`.
 
 ## Specification
 

@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-13
-- Legacy source: `docs/plan/0014:web-usb-pd-settings/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/0014:web-usb-pd-settings/PLAN.md`.
 
 ## Specification
 
@@ -128,7 +122,7 @@ Legacy source retained pending delete approval: `docs/plan/0014:web-usb-pd-setti
 
 - **计划阶段产物边界（冻结）**
   - 本规格的所有界面效果图与资源文件必须存放在 `assets/` 目录树下。
-  - 计划阶段不在 `docs/plan/` 目录之外新增或修改任何文件；任何临时预览图仅可生成在工作区外（例如系统临时目录），不得入库。
+  - 计划阶段不在 本 spec 目录之外新增或修改任何文件；任何临时预览图仅可生成在工作区外（例如系统临时目录），不得入库。
 
 - **PPS 底部操作区（Active + Apply）**
   - `Active` 信息框与 `Apply` 按钮 **高度必须相同**：`44px`。

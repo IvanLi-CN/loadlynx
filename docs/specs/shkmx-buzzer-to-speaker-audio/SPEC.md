@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-02-05
-- Legacy source: `docs/plan/shkmx-buzzer-to-speaker-audio/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/shkmx-buzzer-to-speaker-audio/PLAN.md`.
 
 ## Specification
 
@@ -114,7 +108,7 @@ None
 
 ### 文档更新（Docs to Update）
 
-说明：计划阶段不修改 `docs/` 下非 `docs/plan/` 的文档；以下更新在实现阶段随代码一起落地并作为验收的一部分。
+说明：计划阶段不修改 `docs/` 下非本 spec 目录的文档；以下更新在实现阶段随代码一起落地并作为验收的一部分。
 
 - `docs/boards/control-board.md`: 明确声明当前硬件版本已经没贴装蜂鸣器相关器件；音频提示走扬声器（MAX98357A/I²S）。
 

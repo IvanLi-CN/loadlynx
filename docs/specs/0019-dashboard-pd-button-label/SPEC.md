@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-19
-- Legacy source: `docs/plan/0019:dashboard-pd-button-label/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/0019:dashboard-pd-button-label/PLAN.md`.
 
 ## Specification
 

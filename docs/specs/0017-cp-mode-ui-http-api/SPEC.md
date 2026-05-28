@@ -6,12 +6,6 @@
 - Lifecycle: active
 - Status: 已完成
 - Last: 2026-01-18
-- Legacy source: `docs/plan/0017:cp-mode-ui-http-api/PLAN.md`
-- Delete approval: pending
-
-## Background And Scope
-
-Legacy source retained pending delete approval: `docs/plan/0017:cp-mode-ui-http-api/PLAN.md`.
 
 ## Specification
 
