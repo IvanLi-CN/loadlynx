@@ -127,7 +127,7 @@ Legacy source retained pending delete approval: `docs/plan/0014:web-usb-pd-setti
 > 目的：避免“高度还原”把瑕疵也复制到成品；本节以可量化的 UI 规则描述关键对齐与尺寸。
 
 - **计划阶段产物边界（冻结）**
-  - 本计划的所有界面效果图与资源文件必须存放在 `` 目录树下（当前为 `assets/`）。
+  - 本规格的所有界面效果图与资源文件必须存放在 `assets/` 目录树下。
   - 计划阶段不在 `docs/plan/` 目录之外新增或修改任何文件；任何临时预览图仅可生成在工作区外（例如系统临时目录），不得入库。
 
 - **PPS 底部操作区（Active + Apply）**
