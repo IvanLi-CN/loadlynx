@@ -3,8 +3,7 @@ name: Notify failed release
 on:
   workflow_run:
     workflows:
-      - Release (LoadLynx analog)
-      - Development Release (LoadLynx analog)
+      - Release (LoadLynx)
     types:
       - completed
     branches:
@@ -27,6 +26,7 @@ jobs:
       run_attempt: ${{ github.event.workflow_run.run_attempt }}
       actor: ${{ github.event.workflow_run.triggering_actor.login || github.event.workflow_run.actor.login || github.actor }}
       event_name: ${{ github.event.workflow_run.event }}
+      extra_details: "Release workflow owns PR label release intent; inspect the failed run summary for type/channel/version context."
     secrets:
       SHOUTRRR_URL: ${{ secrets.SHOUTRRR_URL }}
 

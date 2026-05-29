@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "policy": {
+    "source_of_truth": "pull-request-labels",
+    "trusted_gate_workflow": "Label Gate",
+    "release_workflow": "Release (LoadLynx)",
+    "failure_notification_workflow": "Notify failed release",
+    "unknown_release_labels": "fail",
+    "duplicate_release_labels": "fail",
+    "missing_required_release_labels": "fail",
+    "persist_release_intent": {
+      "mode": "mainline-snapshot",
+      "snapshot_artifact": "release-intent.json"
+    }
+  },
+  "label_groups": [
+    {
+      "name": "type",
+      "prefix": "type:",
+      "required": true,
+      "cardinality": "exactly-one",
+      "allowed": ["type:major", "type:minor", "type:patch", "type:none"]
+    },
+    {
+      "name": "channel",
+      "prefix": "channel:",
+      "required": true,
+      "cardinality": "exactly-one",
+      "allowed": ["channel:stable", "channel:beta", "channel:dev"]
+    },
+    {
+      "name": "component",
+      "prefix": "component:",
+      "required": false,
+      "cardinality": "zero-or-more",
+      "allowed": [
+        "component:firmware",
+        "component:web",
+        "component:host-tools",
+        "component:docs"
+      ]
+    }
+  ],
+  "release_snapshot": {
+    "fields": [
+      "pull_request",
+      "merge_commit_sha",
+      "head_sha",
+      "labels",
+      "type",
+      "channel",
+      "components",
+      "base_version",
+      "version",
+      "tag",
+      "artifact_names",
+      "run_url"
+    ]
+  },
+  "required_quality_gate": {
+    "check_name": "Label Gate",
+    "quality_gates_declaration": ".github/quality-gates.json"
+  }
+}

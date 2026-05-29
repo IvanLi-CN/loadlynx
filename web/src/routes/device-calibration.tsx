@@ -3663,9 +3663,7 @@ function CurrentCalibration({
                 </thead>
                 <tbody>
                   {draftPoints.map((sample, idx) => (
-                    <tr
-                      key={`${idx}-${sample.raw}-${sample.ua}-${sample.dac_code}`}
-                    >
+                    <tr key={`${sample.raw}-${sample.ua}-${sample.dac_code}`}>
                       <td>{sample.raw}</td>
                       <td>{sample.dac_code ?? "--"}</td>
                       <td>{formatUaToUnit(sample.ua, inputUnit)}</td>
@@ -3750,8 +3748,8 @@ function CurrentCalibration({
                   </tr>
                 </thead>
                 <tbody>
-                  {devicePoints.map((point, idx) => (
-                    <tr key={`${point.raw}-${point.ua}-${idx}`}>
+                  {devicePoints.map((point) => (
+                    <tr key={`${point.raw}-${point.ua}-${point.dac_code}`}>
                       <td>{point.raw}</td>
                       <td>{point.dac_code ?? "--"}</td>
                       <td>{formatUaToUnit(point.ua, inputUnit)}</td>

@@ -798,7 +798,7 @@ async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_i
     write_json_string_escaped(out, FW_VERSION);
     out.push_str("\",\"firmware\":{\"target\":\"digital_esp32s3\",\"package_version\":\"")
         .ok();
-    write_json_string_escaped(out, env!("CARGO_PKG_VERSION"));
+    write_json_string_escaped(out, env!("LOADLYNX_PACKAGE_VERSION"));
     out.push_str("\",\"build_id\":\"").ok();
     write_json_string_escaped(out, FW_VERSION);
     out.push_str("\",\"build_profile\":\"").ok();

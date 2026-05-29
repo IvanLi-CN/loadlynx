@@ -31,7 +31,7 @@ short_sha=$(git rev-parse --short HEAD)
 branch_name=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "detached")
 
 # Optional latest tag (for debugging/visibility)
-latest_tag=$(git describe --tags --abbrev=0 2>/dev/null || true)
+latest_tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
 
 if [ "$branch_name" = "main" ]; then
   app_version="${base_version}+${short_sha}"

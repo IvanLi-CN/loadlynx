@@ -7,7 +7,7 @@
     "commitlint-plugin-function-rules": "^4.0.2"
   },
   "scripts": {
-    "commitlint": "commitlint --edit"
+    "commitlint": "commitlint --edit",
+    "test:release-labels": "node .github/scripts/release-labels.test.mjs"
   }
 }
-

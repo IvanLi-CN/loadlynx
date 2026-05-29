@@ -2,13 +2,15 @@
 
 ## Status
 
-- Current status: 待实现
-- Last updated: 2026-04-12
+- Current status: 已更新
+- Last updated: 2026-05-29
 
 ## Implementation Summary
 
-This companion document records implementation status for the canonical spec. Existing implementation evidence remains in the spec body, referenced PRs, visual evidence, and related project documents.
+- `notify-release-failure.yml` now watches the unified `Release (LoadLynx)` workflow.
+- Release failure notifications stay scoped to release workflow failures; ordinary PR CI failures remain GitHub check feedback only.
+- The release workflow summary and release intent snapshot carry PR label release context for failure investigation.
 
 ## Remaining Gaps
 
-- Refresh this implementation summary when the spec is next materially updated.
+- Telegram smoke remains available through the workflow's manual dispatch path.

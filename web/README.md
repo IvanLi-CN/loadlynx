@@ -83,6 +83,7 @@ Examples:
 
 - GitHub Actions calls `.github/scripts/compute-version.sh` to emit `APP_EFFECTIVE_VERSION` (from `APP_BASE_VERSION` or `package.json` plus git metadata).
 - `scripts/write-version.mjs` consumes `APP_EFFECTIVE_VERSION` during `bun run build` to write `dist/public/version.json`.
+- Official GitHub Releases bypass the package base version and inject the release workflow's computed version/tag directly through `APP_EFFECTIVE_VERSION`, `VITE_APP_VERSION`, and `VITE_APP_GIT_TAG`.
 
 ## UI version + GitHub source link
 

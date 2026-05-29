@@ -1,0 +1,12 @@
+# History
+
+## Origin
+
+- Created to repair the PR label and GitHub Actions release flow after the first official release showed that labels did not drive version updates and package-visible versions stayed disconnected from release tags.
+
+## Key Decisions
+
+- PR labels are the release intent source of truth.
+- Version injection is performed at release build time; package manifests are not rewritten for each release.
+- Development releases are channel-driven instead of created for every `main` push.
+- Telegram remains scoped to release failures to avoid PR CI notification noise.

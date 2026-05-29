@@ -1197,7 +1197,7 @@ async fn render_identity_json(
     buf.push_str("\"firmware\":{");
     buf.push_str("\"target\":\"digital_esp32s3\",");
     buf.push_str("\"package_version\":\"");
-    write_json_string_escaped(buf, env!("CARGO_PKG_VERSION"));
+    write_json_string_escaped(buf, env!("LOADLYNX_PACKAGE_VERSION"));
     buf.push_str("\",\"build_id\":\"");
     write_json_string_escaped(buf, FW_VERSION);
     buf.push_str("\",\"build_profile\":\"");
