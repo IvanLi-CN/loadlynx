@@ -92,9 +92,11 @@ struct DevdState {
 struct SerialOwnerRegistry {
     owners: HashMap<String, SerialOwnerHandle>,
     exclusive_ports: HashMap<String, String>,
+    next_owner_id: u64,
 }
 
 struct SerialOwnerHandle {
+    id: u64,
     tx: std_mpsc::SyncSender<SerialWorkerCommand>,
     join: thread::JoinHandle<()>,
 }
@@ -118,6 +120,17 @@ struct SerialWorkerError {
     code: &'static str,
     message: String,
     retryable: bool,
+}
+
+struct SerialExclusiveGuard {
+    state: AppState,
+    port_path: String,
+}
+
+impl Drop for SerialExclusiveGuard {
+    fn drop(&mut self) {
+        clear_serial_exclusive(&self.state, &self.port_path);
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1106,6 +1119,8 @@ fn serial_owner_sender(
     }
 
     let (tx, rx) = std_mpsc::sync_channel(SERIAL_COMMAND_QUEUE_LIMIT);
+    registry.next_owner_id += 1;
+    let owner_id = registry.next_owner_id;
     let worker_state = state.clone();
     let worker_port = port_path.to_string();
     let join = thread::Builder::new()
@@ -1113,11 +1128,12 @@ fn serial_owner_sender(
             "loadlynx-serial-{}",
             sanitize_thread_name(&port_key)
         ))
-        .spawn(move || serial_worker_loop(worker_state, worker_port, rx))
+        .spawn(move || serial_worker_loop(worker_state, worker_port, owner_id, rx))
         .expect("spawn serial worker");
     registry.owners.insert(
         port_key,
         SerialOwnerHandle {
+            id: owner_id,
             tx: tx.clone(),
             join,
         },
@@ -1179,6 +1195,18 @@ fn clear_serial_exclusive(state: &AppState, port_path: &str) {
         .expect("serial registry lock")
         .exclusive_ports
         .remove(&port_key);
+}
+
+fn reserve_serial_exclusive(
+    state: &AppState,
+    port_path: &str,
+    reason: &str,
+) -> Result<SerialExclusiveGuard, HttpError> {
+    mark_serial_exclusive(state, port_path, reason)?;
+    Ok(SerialExclusiveGuard {
+        state: state.clone(),
+        port_path: port_path.to_string(),
+    })
 }
 
 async fn compat_identity(
@@ -2056,7 +2084,7 @@ async fn run_espflash_digital(
         let operation = selected_espflash_operation(artifact)?;
         (port_path, operation)
     };
-    mark_serial_exclusive(state, &port_path, "digital flash")?;
+    let _exclusive = reserve_serial_exclusive(state, &port_path, "digital flash")?;
 
     {
         let mut guard = state.inner.lock().expect("state lock");
@@ -2101,7 +2129,6 @@ async fn run_espflash_digital(
         .stdin(Stdio::null())
         .output()
         .await;
-    clear_serial_exclusive(state, &port_path);
     let output = output_result
         .map_err(|error| HttpError::retryable("espflash_launch_failed", error.to_string()))?;
 
@@ -2171,7 +2198,7 @@ async fn run_espflash_reset_digital(state: &AppState, device_id: &str) -> Result
                 )
             })?
     };
-    mark_serial_exclusive(state, &port_path, "digital reset")?;
+    let _exclusive = reserve_serial_exclusive(state, &port_path, "digital reset")?;
 
     {
         let mut guard = state.inner.lock().expect("state lock");
@@ -2196,7 +2223,6 @@ async fn run_espflash_reset_digital(state: &AppState, device_id: &str) -> Result
         .stdin(Stdio::null())
         .output()
         .await;
-    clear_serial_exclusive(state, &port_path);
     let output = output_result
         .map_err(|error| HttpError::retryable("espflash_launch_failed", error.to_string()))?;
 
@@ -2966,6 +2992,7 @@ fn serial_jsonl_request_on_port(
 fn serial_worker_loop(
     state: AppState,
     port_path: String,
+    owner_id: u64,
     rx: std_mpsc::Receiver<SerialWorkerCommand>,
 ) {
     let port_key = canonical_port_key(&port_path);
@@ -3082,7 +3109,13 @@ fn serial_worker_loop(
     }
 
     let mut registry = state.serial.lock().expect("serial registry lock");
-    registry.owners.remove(&port_key);
+    if registry
+        .owners
+        .get(&port_key)
+        .is_some_and(|owner| owner.id == owner_id)
+    {
+        registry.owners.remove(&port_key);
+    }
 }
 
 fn serial_response_for_request(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
