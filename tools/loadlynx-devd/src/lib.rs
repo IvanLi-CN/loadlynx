@@ -925,15 +925,16 @@ async fn create_lease(
                 format!("USB serial port is reserved for {reason}"),
             ));
         }
-        if !port_path.starts_with("mock://")
-            && read_default_digital_usb_port(&state.repo_root)
-                .as_deref()
-                .is_some_and(|default| default != port_path)
-        {
-            return Err(HttpError::conflict(
-                "target_selector_not_cached",
-                "USB lease requires the selected port to match the approved default digital USB port",
-            ));
+        if !port_path.starts_with("mock://") {
+            match read_default_digital_usb_port(&state.repo_root) {
+                Some(default) if default == port_path => {}
+                _ => {
+                    return Err(HttpError::conflict(
+                        "target_selector_not_cached",
+                        "USB lease requires the selected port to match the approved default digital USB port",
+                    ));
+                }
+            }
         }
         validate_port_not_leased_by_other_device(&state, &input.device_id, port_path)?;
         if is_default_or_scanned_usb_source(&state, &input.device_id) {
@@ -4442,6 +4443,41 @@ mod tests {
         clear_serial_exclusive(&state, "mock://esp32s3");
         assert_eq!(err.0.code, "operation_in_progress");
         let guard = state.inner.lock().expect("state lock");
+        assert_eq!(
+            guard.devices.get("mock-loadlynx-devd").unwrap().connection,
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn create_lease_rejects_real_port_without_approved_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let target = guard
+                .devices
+                .get_mut("mock-loadlynx-devd")
+                .unwrap()
+                .digital_target
+                .as_mut()
+                .unwrap();
+            target.port_path = Some("/dev/cu.usbmodem-test".to_string());
+            target.selector_source = Some("serialport scan".to_string());
+        }
+
+        let err = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "target_selector_not_cached");
+        let guard = state.inner.lock().expect("state lock");
+        assert!(guard.leases.is_empty());
         assert_eq!(
             guard.devices.get("mock-loadlynx-devd").unwrap().connection,
             ConnectionState::Disconnected
