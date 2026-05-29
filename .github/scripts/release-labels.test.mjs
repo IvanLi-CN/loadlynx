@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildReleaseComment,
   bumpVersion,
+  resolveExplicitTag,
   resolveVersion,
   validateLabels,
 } from "./release-labels.mjs";
@@ -103,6 +104,14 @@ assert.deepEqual(
     should_release: false,
   },
 );
+
+assert.deepEqual(resolveExplicitTag("v0.1.1", { baseVersion: "0.1.0" }), {
+  base_version: "0.1.0",
+  version: "0.1.1",
+  tag: "v0.1.1",
+  prerelease: false,
+  should_release: true,
+});
 
 const comment = buildReleaseComment(
   {

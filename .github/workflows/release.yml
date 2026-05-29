@@ -10,11 +10,15 @@ on:
         description: "PR number to backfill/re-run release intent for"
         required: false
         type: string
+      release_tag:
+        description: "Existing or explicit tag to backfill without recomputing the bump"
+        required: false
+        type: string
 
 permissions:
   contents: write
   issues: write
-  pull-requests: read
+  pull-requests: write
 
 concurrency:
   group: release-main
@@ -46,15 +50,18 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          args=""
+          args=()
           if [ -n "${{ github.event.inputs.pr_number || '' }}" ]; then
-            args="--pr-number ${{ github.event.inputs.pr_number }}"
+            args+=(--pr-number "${{ github.event.inputs.pr_number }}")
+          fi
+          if [ -n "${{ github.event.inputs.release_tag || '' }}" ]; then
+            args+=(--release-tag "${{ github.event.inputs.release_tag }}")
           fi
           node .github/scripts/release-labels.mjs resolve \
             --event "$GITHUB_EVENT_PATH" \
             --policy .github/release-label-policy.json \
             --output release-intent.json \
-            $args
+            "${args[@]}"
 
       - name: Upload release intent snapshot
         uses: actions/upload-artifact@v4
@@ -314,7 +321,7 @@ jobs:
         id: changelog
         run: |
           set -euo pipefail
-          LAST_TAG=$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | head -n 1 || true)
+          LAST_TAG=$(git tag --list 'v[0-9]*' --sort=-version:refname | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | grep -vx "$RELEASE_TAG" | head -n 1 || true)
           {
             echo "## Changes"
             echo
@@ -322,9 +329,10 @@ jobs:
               echo "Initial release"
             else
               git log --pretty=format:"- %s (%h)" "$LAST_TAG"..HEAD
+              echo
             fi
           } > CHANGELOG.md
-          if [ "$(wc -l < CHANGELOG.md)" -le 2 ]; then
+          if ! grep -q '^- ' CHANGELOG.md; then
             echo "- Code optimization and bug fixes" >> CHANGELOG.md
           fi
           echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
