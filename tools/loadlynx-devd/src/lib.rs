@@ -1813,13 +1813,20 @@ fn has_active_lease_for_port(state: &AppState, port_path: &str) -> bool {
     let port_key = canonical_port_key(port_path);
     let guard = state.inner.lock().expect("state lock");
     guard.leases.values().any(|lease| {
-        lease.expires_at > Instant::now()
-            && guard
-                .devices
-                .get(&lease.device_id)
-                .and_then(|device| device.digital_target.as_ref())
-                .and_then(|target| target.port_path.as_deref())
-                .is_some_and(|other| canonical_port_key(other) == port_key)
+        if lease.expires_at <= Instant::now() {
+            return false;
+        }
+        lease
+            .port_path
+            .as_deref()
+            .or_else(|| {
+                guard
+                    .devices
+                    .get(&lease.device_id)
+                    .and_then(|device| device.digital_target.as_ref())
+                    .and_then(|target| target.port_path.as_deref())
+            })
+            .is_some_and(|other| canonical_port_key(other) == port_key)
     })
 }
 
@@ -4432,6 +4439,40 @@ mod tests {
 
         cleanup_expired_leases(&state);
 
+        let registry = state.serial.lock().expect("serial registry lock");
+        assert!(!registry.owners.contains_key(&canonical_port_key(port_path)));
+    }
+
+    #[tokio::test]
+    async fn releasing_one_removed_device_lease_keeps_owner_for_other_port_lease() {
+        let state = AppState::new(PathBuf::from("."));
+        let port_path = "mock://shared-removed-device";
+        let sender = serial_owner_sender(&state, port_path);
+        drop(sender);
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.devices.remove("mock-loadlynx-devd");
+            for lease_id in ["lease-1", "lease-2"] {
+                guard.leases.insert(
+                    lease_id.to_string(),
+                    WebLease {
+                        lease_id: lease_id.to_string(),
+                        device_id: "mock-loadlynx-devd".to_string(),
+                        identity_device_id: None,
+                        port_path: Some(port_path.to_string()),
+                        expires_at: Instant::now() + Duration::from_secs(30),
+                    },
+                );
+            }
+        }
+
+        assert!(release_lease_inner(&state, "lease-1", "released"));
+        {
+            let registry = state.serial.lock().expect("serial registry lock");
+            assert!(registry.owners.contains_key(&canonical_port_key(port_path)));
+        }
+
+        assert!(release_lease_inner(&state, "lease-2", "released"));
         let registry = state.serial.lock().expect("serial registry lock");
         assert!(!registry.owners.contains_key(&canonical_port_key(port_path)));
     }
