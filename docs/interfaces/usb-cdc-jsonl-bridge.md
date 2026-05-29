@@ -24,7 +24,7 @@ LoadLynx digital firmware and `loadlynx-devd` use LF-delimited JSON frames on th
       "features": ["net_http", "mdns_dns_sd", "usb_cdc_jsonl"]
     }
   },
-  "capabilities": ["get_identity", "get_status", "get_pd", "set_pd_policy"]
+  "capabilities": ["get_identity", "get_status", "get_pd", "set_pd_policy", "set_output_enabled", "set_cc_target"]
 }
 ```
 
@@ -37,6 +37,18 @@ Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy
   "type": "request",
   "request_id": "req-1",
   "op": "get_status"
+}
+```
+
+`set_output_enabled` accepts `enable`. When `target_i_ma` is present, firmware applies the active preset as CC mode with that current target before enabling or disabling output:
+
+```json
+{
+  "type": "request",
+  "request_id": "req-2",
+  "op": "set_output_enabled",
+  "enable": true,
+  "target_i_ma": 2000
 }
 ```
 
@@ -74,6 +86,8 @@ Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy
 The browser and user-facing CLI never write directly to this channel. Web and CLI operations use devd's internal lease protocol, and `loadlynx-devd` is the single owner of the USB CDC port inside one daemon process.
 
 For each physical USB port, devd runs one serial owner while any lease for that port is active. JSONL commands from multiple clients are queued through that owner, devd assigns a unique `request_id`, and a command succeeds only when a matching response frame is received. Other response IDs are recorded as trace evidence and do not satisfy the request.
+
+ESP32-S3 USB Serial/JTAG may interleave binary log bytes with JSONL response text. devd prefers a complete matching `request_id` response. For status and output-control operations, it may recover a response only from frames observed after the matching transmit frame and only when the recovered payload has the expected status/control or output-control shape; unrelated or mismatched `request_id` frames still do not satisfy the command.
 
 Monitor/log/event reads consume devd's bounded in-memory session state and do not open the serial port. The serial owner is also the only reader while active, so unsolicited `hello`, `status` and `log` frames are recorded and broadcast from one place.
 

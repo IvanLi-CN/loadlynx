@@ -810,7 +810,7 @@ async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_i
         out,
         option_env!("LOADLYNX_FW_SRC_DIGEST").unwrap_or("src unknown"),
     );
-    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}}").ok();
+    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\"]}}").ok();
 }
 
 async fn write_usb_status_response(
@@ -1175,6 +1175,129 @@ async fn write_usb_set_output_enabled_response(
         return;
     };
 
+    if let Some(target_i_ma_raw) = json_u32_value(line, "\"target_i_ma\"") {
+        let target_i_ma = target_i_ma_raw.min(i32::MAX as u32) as i32;
+        if target_i_ma > TARGET_I_MAX_MA || target_i_ma > LIMIT_PROFILE_DEFAULT.max_i_ma {
+            write_usb_error_response(
+                out,
+                request_id,
+                "LIMIT_VIOLATION",
+                "target current exceeds allowed range",
+            );
+            return;
+        }
+
+        let cal_mode = { calibration.lock().await.cal_mode };
+        let setpoint_i_ma = target_i_ma.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA);
+        let requested_load_enabled = enable && setpoint_i_ma != 0;
+        let changed;
+        let output_enabled;
+        let effective_i_ma;
+        if control::calibration_mode_uses_cc_override(cal_mode) {
+            let mut guard = control.lock().await;
+            if requested_load_enabled {
+                let min_v_mv = guard.effective_output_command(cal_mode).preset.min_v_mv;
+                if let Some(block) = current_load_enable_block_abbrev(min_v_mv) {
+                    record_enable_block(block);
+                    drop(guard);
+                    out.clear();
+                    out.push_str("{\"type\":\"response\"").ok();
+                    if let Some(id) = request_id {
+                        out.push_str(",\"request_id\":\"").ok();
+                        write_json_string_escaped(out, id);
+                        out.push('"').ok();
+                    }
+                    out.push_str(
+                        ",\"ok\":false,\"error\":{\"code\":\"ENABLE_BLOCKED\",\"message\":\"",
+                    )
+                    .ok();
+                    write_json_string_escaped(out, block);
+                    out.push_str("\"}}").ok();
+                    return;
+                }
+            }
+            let before = guard.effective_output_command(cal_mode);
+            guard.set_calibration_cc_override(setpoint_i_ma, requested_load_enabled);
+            let after = guard.effective_output_command(cal_mode);
+            changed = before.preset.target_i_ma != after.preset.target_i_ma
+                || before.output_enabled != after.output_enabled;
+            output_enabled = after.output_enabled;
+            effective_i_ma = if output_enabled {
+                after.preset.target_i_ma
+            } else {
+                0
+            };
+        } else {
+            let mut guard = control.lock().await;
+            if requested_load_enabled {
+                let min_v_mv = guard.effective_output_command(cal_mode).preset.min_v_mv;
+                if let Some(block) = current_load_enable_block_abbrev(min_v_mv) {
+                    record_enable_block(block);
+                    drop(guard);
+                    out.clear();
+                    out.push_str("{\"type\":\"response\"").ok();
+                    if let Some(id) = request_id {
+                        out.push_str(",\"request_id\":\"").ok();
+                        write_json_string_escaped(out, id);
+                        out.push('"').ok();
+                    }
+                    out.push_str(
+                        ",\"ok\":false,\"error\":{\"code\":\"ENABLE_BLOCKED\",\"message\":\"",
+                    )
+                    .ok();
+                    write_json_string_escaped(out, block);
+                    out.push_str("\"}}").ok();
+                    return;
+                }
+            }
+            let before = guard.effective_output_command(cal_mode);
+            let active_preset_id = guard.active_preset_id;
+            let idx = active_preset_id.saturating_sub(1) as usize;
+            if let Some(preset) = guard.presets.get_mut(idx) {
+                preset.mode = LoadMode::Cc;
+                preset.target_i_ma = setpoint_i_ma;
+                preset.target_p_mw = 0;
+                preset.target_v_mv = 0;
+                *preset = preset.clamp();
+            }
+            guard.update_dirty_for_preset_id(active_preset_id);
+            if requested_load_enabled {
+                let _ = guard.enable_output_for_mode(cal_mode);
+            } else {
+                guard.disable_output_for_mode(cal_mode);
+            }
+            let after = guard.effective_output_command(cal_mode);
+            changed =
+                before.preset != after.preset || before.output_enabled != after.output_enabled;
+            output_enabled = after.output_enabled;
+            effective_i_ma = if output_enabled {
+                after.preset.target_i_ma
+            } else {
+                0
+            };
+        }
+        if changed {
+            bump_control_rev();
+        }
+
+        out.clear();
+        out.push_str("{\"type\":\"response\"").ok();
+        if let Some(id) = request_id {
+            out.push_str(",\"request_id\":\"").ok();
+            write_json_string_escaped(out, id);
+            out.push('"').ok();
+        }
+        let _ = core::write!(
+            out,
+            ",\"ok\":true,\"data\":{{\"output_enabled\":{},\"target_i_ma\":{},\"effective_i_ma\":{},\"changed\":{}}}}}",
+            if output_enabled { "true" } else { "false" },
+            setpoint_i_ma,
+            effective_i_ma,
+            if changed { "true" } else { "false" }
+        );
+        return;
+    }
+
     let cal_mode = { calibration.lock().await.cal_mode };
     let mut guard = control.lock().await;
     let preset = guard.effective_output_command(cal_mode).preset;
@@ -1277,7 +1400,7 @@ async fn usb_cdc_jsonl_task(
     let mut out = heapless::String::<2048>::new();
     out.push_str("{\"type\":\"hello\",\"protocol\":\"loadlynx.cdc.v1\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"firmware_version\":\"").ok();
     write_json_string_escaped(&mut out, FW_VERSION);
-    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\"]}")
+    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\"]}")
         .ok();
     usb_cdc_write_line(&mut tx, &out).await;
 

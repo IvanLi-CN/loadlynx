@@ -48,7 +48,7 @@ const LOG_LIMIT: usize = 500;
 const TRACE_LIMIT: usize = 2_000;
 const SERIAL_PROBE_BAUD: u32 = 115_200;
 const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
-const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 1_500;
+const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
 const SERIAL_PROBE_MAX_BYTES: usize = 4096;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
@@ -362,6 +362,7 @@ struct CompatQuery {
 #[derive(Debug, Deserialize)]
 struct CcRequest {
     enable: bool,
+    target_i_ma: Option<i32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1287,6 +1288,7 @@ async fn request_usb_identity(
                 Err(error) => return Err(error),
             };
         let response = serial_response_for_request(&probe, &request_id)
+            .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
             .or_else(|| infer_serial_response_from_text(&probe, &request_id));
 
         record_serial_protocol_probe(
@@ -1326,6 +1328,7 @@ async fn compat_status(
     let (request_id, probe) =
         serial_owner_jsonl_request(&state, &device_id, &port_path, "get_status", None).await?;
     let response = serial_response_for_request(&probe, &request_id)
+        .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
         .or_else(|| infer_serial_response_from_text(&probe, &request_id));
     record_serial_protocol_probe(
         &state,
@@ -1416,7 +1419,10 @@ async fn compat_cc(
         &device_id,
         &port_path,
         "set_output_enabled",
-        Some(json!({"enable": input.enable})),
+        Some(match input.target_i_ma {
+            Some(target_i_ma) => json!({"enable": input.enable, "target_i_ma": target_i_ma}),
+            None => json!({"enable": input.enable}),
+        }),
     )
     .await?;
     let response = probe
@@ -1432,6 +1438,7 @@ async fn compat_cc(
                     .is_some_and(|id| id == request_id)
         })
         .map(|event| event.frame.clone())
+        .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
         .or_else(|| infer_serial_response_from_text(&probe, &request_id));
 
     record_serial_protocol_probe(
@@ -3127,6 +3134,8 @@ fn serial_worker_loop(
                 ) {
                     Ok(probe) => {
                         if serial_response_for_request(&probe, &request.request_id).is_some()
+                            || infer_serial_response_from_fragments(&probe, &request.request_id)
+                                .is_some()
                             || infer_serial_response_from_text(&probe, &request.request_id)
                                 .is_some()
                         {
@@ -3274,14 +3283,115 @@ fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str
         && text.contains(request_id)
         && text.contains("\"ok\":true")
     {
+        let requested_enable = probe.frames.iter().find_map(|event| {
+            (event.direction == "tx"
+                && event
+                    .frame
+                    .get("request_id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id == request_id))
+            .then(|| event.frame.get("enable").and_then(Value::as_bool))
+            .flatten()
+        });
+        let output_enabled = if text.contains("\"output_enabled\":false") {
+            Some(false)
+        } else if text.contains("\"output_enabled\":true") {
+            Some(true)
+        } else {
+            requested_enable
+        };
+        let changed = if text.contains("\"changed\":false") {
+            Some(false)
+        } else if text.contains("\"changed\":true") {
+            Some(true)
+        } else {
+            None
+        };
+        let mut data = serde_json::Map::new();
+        if let Some(output_enabled) = output_enabled {
+            data.insert("output_enabled".to_string(), json!(output_enabled));
+        }
+        if let Some(changed) = changed {
+            data.insert("changed".to_string(), json!(changed));
+        }
         return Some(json!({
             "type": "response",
             "request_id": request_id,
             "ok": true,
+            "data": Value::Object(data),
             "recovered_from_text": true
         }));
     }
     None
+}
+
+fn infer_serial_response_from_fragments(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    if !serial_request_id_matches_op(request_id, "devd-get-status") {
+        return None;
+    }
+    let tx_index = probe.frames.iter().position(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+    })?;
+    let mut control = None;
+    let mut status = None;
+    for event in probe.frames.iter().skip(tx_index + 1) {
+        if event.direction != "rx" || event.frame.get("request_id").is_some() {
+            continue;
+        }
+        let frame = &event.frame;
+        if frame.get("status").is_some() {
+            let mut data = frame.clone();
+            data.as_object_mut()?
+                .insert("recovered_from_fragments".to_string(), json!(true));
+            return Some(json!({
+                "type": "response",
+                "request_id": request_id,
+                "ok": true,
+                "data": data,
+                "recovered_from_fragments": true
+            }));
+        }
+        if frame.get("active_preset_id").is_some()
+            && frame.get("mode").is_some()
+            && frame.get("output_enabled").is_some()
+        {
+            control = Some(frame.clone());
+        }
+        if frame.get("state_flags").is_some()
+            && frame.get("fault_flags").is_some()
+            && frame.get("v_local_mv").is_some()
+            && frame.get("i_local_ma").is_some()
+        {
+            status = Some(frame.clone());
+        }
+        if control.is_some() && status.is_some() {
+            break;
+        }
+    }
+    let status = status?;
+    let mut data = serde_json::Map::new();
+    data.insert("status".to_string(), status);
+    if let Some(control) = control {
+        data.insert("control".to_string(), control);
+    }
+    data.insert("link_up".to_string(), json!(true));
+    data.insert("hello_seen".to_string(), json!(true));
+    data.insert("recovered_from_fragments".to_string(), json!(true));
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": Value::Object(data),
+        "recovered_from_fragments": true
+    }))
 }
 
 fn is_output_control_request_id(request_id: &str) -> bool {
@@ -4168,6 +4278,135 @@ mod tests {
             Some(request_id)
         );
         assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            response
+                .pointer("/data/output_enabled")
+                .and_then(Value::as_bool),
+            None
+        );
+    }
+
+    #[test]
+    fn serial_response_inference_recovers_fragmented_output_disable_payload() {
+        let request_id = "devd-set-output-enabled-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({
+                    "type": "request",
+                    "request_id": request_id,
+                    "op": "set_output_enabled",
+                    "enable": false
+                }),
+            }],
+            non_protocol_bytes: 128,
+            non_protocol_text: format!(
+                "noise {{\"type\":\"response\",\"request_id\":\"{request_id}\",\"ok\":true,\"data\":{{\"output_enabled\":false,\"changed\""
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        assert_eq!(
+            response
+                .pointer("/data/output_enabled")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn status_response_inference_recovers_fragmented_status_payload() {
+        let request_id = "devd-get-status-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_status"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "active_preset_id": 1,
+                        "mode": "cc",
+                        "output_enabled": true,
+                        "target_i_ma": 2000,
+                        "target_v_mv": 0,
+                        "target_p_mw": 0,
+                        "min_v_mv": 0
+                    }),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "state_flags": 6,
+                        "fault_flags": 0,
+                        "enable": true,
+                        "i_local_ma": 998,
+                        "i_remote_ma": 986,
+                        "v_local_mv": 11845,
+                        "v_remote_mv": -858,
+                        "calc_p_mw": 23500
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        assert_eq!(
+            response.get("request_id").and_then(Value::as_str),
+            Some(request_id)
+        );
+        let data = status_data_from_serial_response(Some(response)).unwrap();
+        assert_eq!(data["status"]["enable"], true);
+        assert_eq!(data["control"]["target_i_ma"], 2000);
+        assert_eq!(data["recovered_from_fragments"], true);
+    }
+
+    #[test]
+    fn status_response_inference_recovers_embedded_status_payload() {
+        let request_id = "devd-get-status-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_status"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "analog_state": "ready",
+                        "control": {
+                            "active_preset_id": 1,
+                            "mode": "cc",
+                            "output_enabled": false,
+                            "target_i_ma": 2000
+                        },
+                        "hello_seen": true,
+                        "link_up": true,
+                        "status": {
+                            "state_flags": 2,
+                            "fault_flags": 0,
+                            "enable": false,
+                            "i_local_ma": 11,
+                            "i_remote_ma": 8,
+                            "v_local_mv": 12046,
+                            "v_remote_mv": -876,
+                            "calc_p_mw": 228
+                        }
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let data = status_data_from_serial_response(Some(response)).unwrap();
+        assert_eq!(data["status"]["enable"], false);
+        assert_eq!(data["control"]["output_enabled"], false);
+        assert_eq!(data["recovered_from_fragments"], true);
     }
 
     #[test]

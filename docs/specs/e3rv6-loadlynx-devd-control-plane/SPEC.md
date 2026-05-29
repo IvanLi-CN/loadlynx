@@ -124,6 +124,8 @@ ESP32-S3 USB CDC uses LF-delimited JSON frames. The bridge protocol should align
 
 The daemon owns each USB CDC port through a per-port serial owner while any lease for that port is active. HTTP commands enqueue JSONL requests through that owner, devd generates a unique `request_id` per operation, and only matching responses may satisfy the request. Mismatched responses are trace evidence, not success. The owner continuously reads unsolicited monitor frames and publishes them through bounded session/event state. Serial open or I/O failures must be retryable per command; a transient failure must not poison the owner until the lease is released.
 
+Status and output-control response recovery may compensate for ESP32-S3 USB Serial/JTAG log noise only inside the same queued command window. A recovered success must be derived from frames after the matching transmit frame and must have the operation-specific payload shape; unrelated response IDs or stale monitor frames are not valid command responses.
+
 Flash/reset operations that need vendor tools such as `espflash --port` must pause and close the per-port serial owner before running. During that exclusive window, JSONL status/control/PD requests for the same port must either wait behind the owner boundary or return a clear `operation_in_progress` / `device_busy` style error; they must never open the same serial port concurrently.
 
 ### 固件烧录
@@ -155,7 +157,9 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx flash analog --device <id> --artifact <artifact_id> [--dry-run]`
 - `loadlynx reset digital|analog --device <id>`
 - `loadlynx monitor digital|analog --device <id> --tail 200`
-- `loadlynx output set --url <base_url> --enable false`
+- `loadlynx pd set --device <id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
+- `loadlynx output set --hardware <id> --enable --target-i-ma <ma>`
+- `loadlynx output set --hardware <id> --disable`
 
 CLI must print target evidence before hardware-changing operations: device id, transport, port/probe, artifact id, SHA-256 and dry-run/real mode.
 
@@ -176,6 +180,8 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Given an analog artifact is selected for a digital target, When flash is requested, Then devd returns a non-retryable target mismatch error.
 - Given mDNS is unavailable, When the owner enters `http://loadlynx-xxxxxx.local` and it fails, Then Web offers IP fallback without marking the device as broken.
 - Given CLI receives `--dry-run`, When `flash analog` is called, Then it verifies artifact hashes and target resolution but does not invoke probe-rs/espflash.
+- Given CLI sets a USB target to 12V PD and enables a 2A CC load, When `status` is read through devd, Then the response shows the PD contract, CC target, output enabled state and measured current without direct CLI serial access.
+- Given CLI disables output, When `status` is read through devd, Then output enabled and analog enable are false and measured current is near zero.
 - Given a USB CDC `wifi_config` frame contains PSK, When session traces are fetched, Then PSK is redacted.
 - Given Storybook exists, Web UI changes for Connect/Firmware/USB session must have stable stories and visual evidence before merge.
 
