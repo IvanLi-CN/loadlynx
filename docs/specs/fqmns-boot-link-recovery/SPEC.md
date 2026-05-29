@@ -127,6 +127,6 @@
 ## References
 
 - `docs/solutions/firmware/boot-link-recovery-watchdog.md`
-- `docs/plan/0009:uart-comm-troubleshooting/PLAN.md`（legacy UART troubleshooting record；pending canonical migration/deletion decision）
+- `docs/specs/z5ey6-uart-comm-troubleshooting/SPEC.md`（legacy UART troubleshooting record；pending canonical migration/deletion decision）
 - `docs/interfaces/uart-link.md`
 - `docs/dev-notes/software.md`

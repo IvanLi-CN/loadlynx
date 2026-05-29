@@ -68,9 +68,9 @@
 | 40 | GPIO35 | I2S_BCLK | MAX98357A I²S：位时钟（BCLK）。 |
 | 41 | GPIO36 | I2S_LRCLK | MAX98357A I²S：字选择/左右时钟（LRCLK）。 |
 | 42 | GPIO37 | I2S_DIN | MAX98357A I²S：数据输入（DIN，ESP→AMP）。 |
-| 43 | GPIO38 | RGB_R_PWM | RGB（共阳/COM=3V3）红通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
-| 44 | MTCK (GPIO39) | RGB_G_PWM | RGB（共阳/COM=3V3）绿通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）；需禁用 PAD-JTAG。 |
-| 45 | MTDO (GPIO40) | RGB_B_PWM | RGB（共阳/COM=3V3）蓝通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）；需禁用 PAD-JTAG。 |
+| 43 | GPIO38 | RGB_R_PWM | RGB（共阳/COM=3V3）红通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻（Spec #swzqu，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
+| 44 | MTCK (GPIO39) | RGB_G_PWM | RGB（共阳/COM=3V3）绿通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻（Spec #swzqu，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）；需禁用 PAD-JTAG。 |
+| 45 | MTDO (GPIO40) | RGB_B_PWM | RGB（共阳/COM=3V3）蓝通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻（Spec #swzqu，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）；需禁用 PAD-JTAG。 |
 
 #### 3.3.1 旋转编码器（EC11）
 
@@ -119,7 +119,7 @@
 | 16 | GPIO11 | MOSI | 已用 | 同上。 |
 | 17 | GPIO12 | SCLK | 已用 | 同上。 |
 | 18 | GPIO13 | CS | 已用 | 同上。 |
-| 19 | GPIO14 | TOUCH_SPRING | 规划 | Touch Sensor：`TouchPad14`；电极为触摸弹簧，顶住亚克力背面（0.8–1.0 mm）；固件用作触摸电源键/本地输入（熄屏时用于唤醒，Plan #6mre7）；注意与 `I2S_BCLK` 等高速时钟、RGB PWM 走线隔离（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
+| 19 | GPIO14 | TOUCH_SPRING | 规划 | Touch Sensor：`TouchPad14`；电极为触摸弹簧，顶住亚克力背面（0.8–1.0 mm）；固件用作触摸电源键/本地输入（熄屏时用于唤醒，Spec #v3g2c）；注意与 `I2S_BCLK` 等高速时钟、RGB PWM 走线隔离（Spec #swzqu，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
 | 20 | VDD3P3_RTC | 3V3 | 已用 | RTC 供电。 |
 | 21 | GPIO15 | BLK | 已用 | 背光使能/PWM。 |
 | 22 | GPIO16 | — | 空 | 预留 IO。 |
@@ -139,13 +139,13 @@
 | 36 | SPICLK_N | — | 保留 | [FLASH] 差分。 |
 | 37 | SPICLK_P | — | 保留 | [FLASH] 差分。 |
 | 38 | GPIO33 | ALG_EN | 已用 | 电源开关使能；`GPIO33` 经 `R1=100Ω` 串联后为 `ALG_EN` 并通过 FPC 输出；未被内置 Flash/PSRAM 占用（本板 ESP32‑S3FH4R2，Quad‑SPI）。 |
-| 39 | GPIO34 | AMP_SD_MODE | 规划 | MAX98357A：`SD_MODE`（shutdown + channel select）；固件可用作 AMP_EN（低=shutdown；高=Left）（Plan #0021）。 |
-| 40 | GPIO35 | I2S_BCLK | 规划 | MAX98357A I²S：位时钟（BCLK）；三线占用需连续封装引脚（Plan #0021）。 |
-| 41 | GPIO36 | I2S_LRCLK | 规划 | MAX98357A I²S：字选择/左右时钟（LRCLK）；三线占用需连续封装引脚（Plan #0021）。 |
-| 42 | GPIO37 | I2S_DIN | 规划 | MAX98357A I²S：数据输入（DIN，ESP→AMP）；三线占用需连续封装引脚（Plan #0021）。 |
-| 43 | GPIO38 | RGB_R_PWM | 规划 | RGB（共阳/COM=3V3）红通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻；连续封装引脚（Pin 43/44/45）（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
-| 44 | MTCK / GPIO39 | RGB_G_PWM | 规划 | RGB（共阳/COM=3V3）绿通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻；默认 JTAG TCK，需禁用 PAD-JTAG；连续封装引脚（Pin 43/44/45）（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
-| 45 | MTDO / GPIO40 | RGB_B_PWM | 规划 | RGB（共阳/COM=3V3）蓝通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻；默认 JTAG TDO，需禁用 PAD-JTAG；连续封装引脚（Pin 43/44/45）（Plan #0021，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
+| 39 | GPIO34 | AMP_SD_MODE | 规划 | MAX98357A：`SD_MODE`（shutdown + channel select）；固件可用作 AMP_EN（低=shutdown；高=Left）（Spec #swzqu）。 |
+| 40 | GPIO35 | I2S_BCLK | 规划 | MAX98357A I²S：位时钟（BCLK）；三线占用需连续封装引脚（Spec #swzqu）。 |
+| 41 | GPIO36 | I2S_LRCLK | 规划 | MAX98357A I²S：字选择/左右时钟（LRCLK）；三线占用需连续封装引脚（Spec #swzqu）。 |
+| 42 | GPIO37 | I2S_DIN | 规划 | MAX98357A I²S：数据输入（DIN，ESP→AMP）；三线占用需连续封装引脚（Spec #swzqu）。 |
+| 43 | GPIO38 | RGB_R_PWM | 规划 | RGB（共阳/COM=3V3）红通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻；连续封装引脚（Pin 43/44/45）（Spec #swzqu，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
+| 44 | MTCK / GPIO39 | RGB_G_PWM | 规划 | RGB（共阳/COM=3V3）绿通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻；默认 JTAG TCK，需禁用 PAD-JTAG；连续封装引脚（Pin 43/44/45）（Spec #swzqu，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
+| 45 | MTDO / GPIO40 | RGB_B_PWM | 规划 | RGB（共阳/COM=3V3）蓝通道 PWM，GPIO 灌电流（active-low）；直驱需串联限流电阻；默认 JTAG TDO，需禁用 PAD-JTAG；连续封装引脚（Pin 43/44/45）（Spec #swzqu，详见 `docs/interfaces/touch-switch-and-rgb-led.md`）。 |
 | 46 | VDD3P3_CPU | 3V3 | 已用 | 数字核供电。 |
 | 47 | MTDI / GPIO41 | FAN_PWM | 已用 | 默认 JTAG TDI；需禁用 PAD-JTAG。 |
 | 48 | MTMS / GPIO42 | FAN_TACH | 已用 | 默认 JTAG TMS；需禁用 PAD-JTAG。 |

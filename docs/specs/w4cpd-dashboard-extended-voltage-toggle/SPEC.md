@@ -172,10 +172,10 @@
 ## 文档更新（Docs to Update）
 
 - `docs/interfaces/main-display-ui.md`: 主界面 control row 下方两个按钮的语义与布局说明。
-- `docs/plan/0010:usb-pd-sink-toggle/PLAN.md`: 作为历史方案引用时补充指向新 spec 的说明（如仍保留）。
-- `docs/plan/0019:dashboard-pd-button-label/PLAN.md`: 作为历史设计依据时补充指向新 spec 的说明（如仍保留）。
+- `docs/specs/h3gz5-usb-pd-sink-toggle/SPEC.md`: 作为历史方案引用时补充指向新 spec 的说明（如仍保留）。
+- `docs/specs/wjhba-dashboard-pd-button-label/SPEC.md`: 作为历史设计依据时补充指向新 spec 的说明（如仍保留）。
 
-## 计划资产（Plan assets）
+## 计划资产（Spec assets）
 
 - Directory: `docs/specs/w4cpd-dashboard-extended-voltage-toggle/assets/`
 - In-plan references:
@@ -225,8 +225,8 @@ None
 ## 参考（References）
 
 - `docs/interfaces/main-display-ui.md`
-- `docs/plan/0010:usb-pd-sink-toggle/PLAN.md`
-- `docs/plan/0013:usb-pd-pps-and-fixed-settings/PLAN.md`
-- `docs/plan/0019:dashboard-pd-button-label/PLAN.md`
+- `docs/specs/h3gz5-usb-pd-sink-toggle/SPEC.md`
+- `docs/specs/j24my-usb-pd-pps-and-fixed-settings/SPEC.md`
+- `docs/specs/wjhba-dashboard-pd-button-label/SPEC.md`
 - `firmware/digital/src/ui/mod.rs`
 - `firmware/digital/src/main.rs`

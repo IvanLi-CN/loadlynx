@@ -88,7 +88,7 @@ const SCREEN_DIM_AFTER_MS: u32 = 2 * 60 * 1000;
 const SCREEN_OFF_AFTER_MS: u32 = 5 * 60 * 1000;
 const SCREEN_DIM_MAX_PCT: u8 = 10;
 
-// Plan #0021: touch spring (GPIO14 TouchPad14) + RGB status LED (GPIO38/39/40).
+// Spec #swzqu: touch spring (GPIO14 TouchPad14) + RGB status LED (GPIO38/39/40).
 const TOUCH_SPRING_STARTUP_DELAY_MS: u32 = 300;
 const TOUCH_SPRING_CAL_SAMPLES: u32 = 64;
 const TOUCH_SPRING_POLL_MS: u32 = 10;
@@ -101,7 +101,7 @@ const RGB_STATUS_SOLID_BRIGHTNESS_PCT: u8 = 35;
 const RGB_STATUS_BLINK_BRIGHTNESS_PCT: u8 = 35;
 const RGB_STATUS_BLINK_TOGGLE_MS: u32 = 250; // 2 Hz: toggle every 250ms
 
-// Plan #6mre7: when the device is in "sleep standby" (ScreenPowerState::Off),
+// Spec #v3g2c: when the device is in "sleep standby" (ScreenPowerState::Off),
 // show a low-tempo white breathing indicator on the touch power button LED.
 const STANDBY_BREATH_PERIOD_MS: u32 = 14_000; // 7s up + 7s down
 const STANDBY_BREATH_MAX_BRIGHTNESS_PCT: u8 = 12;
@@ -557,7 +557,7 @@ fn note_user_activity_and_should_consume_off() -> bool {
 }
 
 fn fault_flags_abbrev(flags: u32) -> &'static str {
-    // Public, user-facing abbreviations (frozen by docs/plan/0005:on-device-preset-ui/PLAN.md).
+    // Public, user-facing abbreviations (frozen by docs/specs/mq8ht-on-device-preset-ui/SPEC.md).
     if flags & FAULT_OVERVOLTAGE != 0 {
         "OVP"
     } else if flags & (FAULT_MCU_OVER_TEMP | FAULT_SINK_OVER_TEMP) != 0 {
@@ -570,7 +570,7 @@ fn fault_flags_abbrev(flags: u32) -> &'static str {
 }
 
 fn current_load_block_abbrev() -> Option<&'static str> {
-    // Priority is frozen by docs/plan/0005:on-device-preset-ui/PLAN.md.
+    // Priority is frozen by docs/specs/mq8ht-on-device-preset-ui/SPEC.md.
     let fault_flags = LAST_FAULT_FLAGS.load(Ordering::Relaxed);
     if fault_flags != 0 {
         Some(fault_flags_abbrev(fault_flags))
@@ -605,7 +605,7 @@ fn current_uvlo_inhibit(min_v_mv: i32) -> bool {
 }
 
 fn current_load_enable_block_abbrev(min_v_mv: i32) -> Option<&'static str> {
-    // Priority is frozen by docs/plan/0005:on-device-preset-ui/PLAN.md.
+    // Priority is frozen by docs/specs/mq8ht-on-device-preset-ui/SPEC.md.
     let fault_flags = LAST_FAULT_FLAGS.load(Ordering::Relaxed);
     if fault_flags != 0 {
         Some(fault_flags_abbrev(fault_flags))
@@ -2293,7 +2293,7 @@ async fn touch_spring_task(
 
                     // Touch power button:
                     // - always counts as user activity (wakes screen),
-                    // - BUT when the screen is OFF, the first touch is consumed (Plan #0015/#6mre7),
+                    // - BUT when the screen is OFF, the first touch is consumed (Spec #guysf/#v3g2c),
                     //   i.e. it must not toggle LOAD / change business state.
                     let consume = note_user_activity_and_should_consume_off();
                     if consume {
@@ -2458,8 +2458,8 @@ async fn touch_spring_task(
         }
 
         // Status LED policy:
-        // - Standby indicator (Plan #6mre7): ScreenPowerState::Off => low-tempo white breathing.
-        // - Otherwise, mapping frozen by Plan #0021:
+        // - Standby indicator (Spec #v3g2c): ScreenPowerState::Off => low-tempo white breathing.
+        // - Otherwise, mapping frozen by Spec #swzqu:
         //   abnormal (yellow blink) > load_enabled=ON (green) > load_enabled=OFF (red).
         let screen_off = screen_power_state_is_off();
         if screen_off != last_screen_off {
@@ -7221,7 +7221,7 @@ async fn main(spawner: Spawner) {
         .set_duty(FAN_DUTY_DEFAULT_PCT)
         .expect("fan duty default");
 
-    // RGB status LED (Plan #0021): low-speed LEDC Timer3 + Channel3/4/5.
+    // RGB status LED (Spec #swzqu): low-speed LEDC Timer3 + Channel3/4/5.
     // Pin map (digital board netlist): R=GPIO38, G=GPIO39(MTCK), B=GPIO40(MTDO).
     let mut rgb_timer = ledc.timer::<LowSpeed>(ledc_timer::Number::Timer3);
     rgb_timer
