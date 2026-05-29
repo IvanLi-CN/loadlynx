@@ -1570,7 +1570,10 @@ async fn compat_pd_get(
     };
 
     let (request_id, probe) =
-        serial_owner_jsonl_request(&state, &device_id, &port_path, "get_pd", None).await?;
+        match serial_owner_jsonl_request(&state, &device_id, &port_path, "get_pd", None).await {
+            Ok(result) => result,
+            Err(error) => return pd_cache_or_serial_error(&state, &device_id, error),
+        };
     let response = probe
         .frames
         .iter()
@@ -1601,6 +1604,26 @@ async fn compat_pd_get(
         "serial_response_missing",
         "USB PD GET did not return a protocol response",
     ))
+}
+
+fn pd_cache_or_serial_error(
+    state: &AppState,
+    device_id: &str,
+    error: HttpError,
+) -> Result<Json<Value>, HttpError> {
+    if is_serial_response_gap_error(&error)
+        && let Some(cached) = cached_pd_view(state, device_id)
+    {
+        return Ok(Json(cached));
+    }
+    Err(error)
+}
+
+fn is_serial_response_gap_error(error: &HttpError) -> bool {
+    matches!(
+        error.0.code.as_str(),
+        "serial_response_timeout" | "serial_response_mismatch"
+    )
 }
 
 async fn compat_pd_post(
@@ -4251,6 +4274,54 @@ mod tests {
     fn pd_post_requires_fresh_protocol_response() {
         let err = pd_post_response_data(None).unwrap_err();
         assert_eq!(err.0.code, "serial_response_missing");
+    }
+
+    #[tokio::test]
+    async fn pd_get_uses_cache_after_response_gap_errors() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard
+                .devices
+                .get_mut("mock-loadlynx-devd")
+                .unwrap()
+                .usb_pd_cache = Some(json!({"attached": true, "cached": true}));
+        }
+
+        let Json(cached) = pd_cache_or_serial_error(
+            &state,
+            "mock-loadlynx-devd",
+            HttpError::retryable(
+                "serial_response_timeout",
+                "USB request did not receive a matching response",
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(cached["attached"], true);
+        assert_eq!(cached["cached"], true);
+    }
+
+    #[tokio::test]
+    async fn pd_get_does_not_cache_fallback_for_serial_open_errors() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard
+                .devices
+                .get_mut("mock-loadlynx-devd")
+                .unwrap()
+                .usb_pd_cache = Some(json!({"attached": true}));
+        }
+
+        let err = pd_cache_or_serial_error(
+            &state,
+            "mock-loadlynx-devd",
+            HttpError::retryable("serial_open_failed", "port unavailable"),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "serial_open_failed");
     }
 
     #[test]
