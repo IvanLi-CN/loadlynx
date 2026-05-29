@@ -238,6 +238,10 @@ async function findPullRequestForSha(sha, prNumber) {
   throw new Error(`No pull request associated with commit ${sha}`);
 }
 
+export function releaseMergeCommitSha(pull, fallbackSha) {
+  return pull.merge_commit_sha ?? fallbackSha;
+}
+
 export function buildReleaseComment(snapshot, releaseUrl, assets = []) {
   return [
     RELEASE_COMMENT_MARKER,
@@ -317,7 +321,7 @@ async function resolveCommand(args) {
   const snapshot = {
     pull_request: pull.number,
     pull_request_url: pull.html_url,
-    merge_commit_sha: sha,
+    merge_commit_sha: releaseMergeCommitSha(pull, sha),
     head_sha: pull.head?.sha ?? null,
     labels: intent.labels,
     type: intent.type,
