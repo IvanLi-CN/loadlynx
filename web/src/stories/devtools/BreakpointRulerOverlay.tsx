@@ -73,7 +73,7 @@ export function BreakpointRulerOverlay() {
   useEffect(() => {
     const onPointerMove = (event: PointerEvent) => {
       const dragState = dragStateRef.current;
-      if (!dragState || !dragState.active) return;
+      if (!dragState?.active) return;
       if (event.pointerId !== dragState.pointerId) return;
 
       const card = cardRef.current;
@@ -89,7 +89,7 @@ export function BreakpointRulerOverlay() {
 
     const onPointerUp = (event: PointerEvent) => {
       const dragState = dragStateRef.current;
-      if (!dragState || !dragState.active) return;
+      if (!dragState?.active) return;
       if (event.pointerId !== dragState.pointerId) return;
 
       dragStateRef.current = null;

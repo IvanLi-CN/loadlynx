@@ -24,8 +24,8 @@ export function AlertDialog({
         <p className="py-3 text-sm">{body}</p>
         {details.length > 0 && (
           <ul className="list-disc pl-5 text-sm space-y-1">
-            {details.map((line, idx) => (
-              <li key={`${idx}:${line}`}>{line}</li>
+            {details.map((line) => (
+              <li key={line}>{line}</li>
             ))}
           </ul>
         )}

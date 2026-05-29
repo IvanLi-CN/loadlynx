@@ -127,6 +127,19 @@ just devd-serve --bind 127.0.0.1:30180 --allow-dev-cors
 - `docs/` — 控制环路 / 热设计 / 接口协议与板级文档
 - `scripts/` — 开发辅助脚本
 
+## 发布流程
+
+LoadLynx 的正式发布意图由 PR labels 决定。每个 PR 必须恰好包含一个
+`type:major|minor|patch|none` 和一个 `channel:stable|beta|dev`；可选
+`component:firmware|web|host-tools|docs` 用于说明影响面。`Label Gate`
+在合并前校验该契约。
+
+合并到 `main` 后，`Release (LoadLynx)` 会读取源 PR 的 labels，计算下一版本，
+并把该版本注入固件、Web 与 host-tools 发布包。Stable 发布使用 `vX.Y.Z` tag；
+beta/dev 发布为 prerelease。发布成功后 workflow 会在源 PR 留下版本、release
+链接、产物列表和 run 链接。Telegram 通知只覆盖 release workflow 失败，不覆盖普通
+PR CI 失败。
+
 ## 片间通信建议
 
 - 默认：UART + 帧编码（CBOR/SLIP），易调试、鲁棒、带宽足够
