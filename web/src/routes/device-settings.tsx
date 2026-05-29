@@ -1,7 +1,17 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
-import { getIdentity, isHttpApiError, postSoftReset } from "../api/client.ts";
+import {
+  deleteWifiConfig,
+  exportDiagnostics,
+  getIdentity,
+  getWifiStatus,
+  isDevdCompatBaseUrl,
+  isHttpApiError,
+  isMockBaseUrl,
+  postSoftReset,
+  postWifiConfig,
+} from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
 import { ConfirmDialog } from "../components/common/confirm-dialog.tsx";
 import { PageContainer } from "../components/layout/page-container.tsx";
@@ -10,6 +20,11 @@ import { useDeviceContext } from "../layouts/device-layout.tsx";
 export function DeviceSettingsRoute() {
   const { deviceId, baseUrl } = useDeviceContext();
   const [confirmSoftResetOpen, setConfirmSoftResetOpen] = useState(false);
+  const [confirmWifiAction, setConfirmWifiAction] = useState<
+    "save" | "clear" | null
+  >(null);
+  const [wifiSsid, setWifiSsid] = useState("");
+  const [wifiPsk, setWifiPsk] = useState("");
 
   const identityQuery = useQuery<Identity, HttpApiError>({
     queryKey: ["device", deviceId, "identity"],
@@ -18,6 +33,17 @@ export function DeviceSettingsRoute() {
         throw new Error("Device base URL is not available");
       }
       return getIdentity(baseUrl);
+    },
+    enabled: Boolean(baseUrl),
+  });
+
+  const wifiQuery = useQuery({
+    queryKey: ["device", deviceId, "wifi"],
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getWifiStatus(baseUrl);
     },
     enabled: Boolean(baseUrl),
   });
@@ -44,6 +70,44 @@ export function DeviceSettingsRoute() {
     },
   });
 
+  const wifiMutation = useMutation({
+    mutationFn: async () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return postWifiConfig(baseUrl, {
+        ssid: wifiSsid.trim(),
+        psk: wifiPsk,
+        wait: false,
+      });
+    },
+    onSuccess: () => {
+      setWifiPsk("");
+      void wifiQuery.refetch();
+    },
+  });
+
+  const wifiClearMutation = useMutation({
+    mutationFn: async () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return deleteWifiConfig(baseUrl);
+    },
+    onSuccess: () => {
+      void wifiQuery.refetch();
+    },
+  });
+
+  const diagnosticsMutation = useMutation({
+    mutationFn: async () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return exportDiagnostics(baseUrl);
+    },
+  });
+
   const softResetError = (() => {
     const err = softResetMutation.error;
     if (!err || !isHttpApiError(err)) return null;
@@ -62,12 +126,32 @@ export function DeviceSettingsRoute() {
   })();
 
   const identity = identityQuery.data;
+  const wifi = wifiQuery.data;
+  const wifiLanConfirmationRequired = baseUrl
+    ? !isMockBaseUrl(baseUrl) && !isDevdCompatBaseUrl(baseUrl)
+    : false;
 
   const handleSoftReset = () => {
     if (!baseUrl) {
       return;
     }
     setConfirmSoftResetOpen(true);
+  };
+
+  const handleWifiSave = () => {
+    if (wifiLanConfirmationRequired) {
+      setConfirmWifiAction("save");
+      return;
+    }
+    wifiMutation.mutate();
+  };
+
+  const handleWifiClear = () => {
+    if (wifiLanConfirmationRequired) {
+      setConfirmWifiAction("clear");
+      return;
+    }
+    wifiClearMutation.mutate();
   };
 
   return (
@@ -85,6 +169,32 @@ export function DeviceSettingsRoute() {
           setConfirmSoftResetOpen(false);
           softResetMutation.reset();
           softResetMutation.mutate();
+        }}
+      />
+      <ConfirmDialog
+        open={confirmWifiAction !== null}
+        title={confirmWifiAction === "clear" ? "Clear User WiFi" : "Save WiFi"}
+        body="This LAN request writes WiFi settings over the network."
+        details={[
+          "Use the local USB/devd path when available.",
+          "The PSK will not be shown in diagnostics or traces.",
+        ]}
+        confirmLabel={
+          confirmWifiAction === "clear" ? "Clear User WiFi" : "Save WiFi"
+        }
+        destructive={confirmWifiAction === "clear"}
+        confirmDisabled={
+          wifiMutation.isPending || wifiClearMutation.isPending || !baseUrl
+        }
+        onCancel={() => setConfirmWifiAction(null)}
+        onConfirm={() => {
+          const action = confirmWifiAction;
+          setConfirmWifiAction(null);
+          if (action === "clear") {
+            wifiClearMutation.mutate();
+          } else if (action === "save") {
+            wifiMutation.mutate();
+          }
         }}
       />
       <header>
@@ -215,7 +325,72 @@ export function DeviceSettingsRoute() {
           </div>
         </div>
 
-        {/* 4. Actions */}
+        {/* 4. WiFi */}
+        <div className="card bg-base-100 shadow-sm border border-base-200">
+          <div className="card-body p-6">
+            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+              WiFi
+            </h3>
+            <div className="grid gap-3">
+              <div className="grid grid-cols-2 gap-3 text-xs">
+                <span className="text-base-content/60">SSID</span>
+                <span className="truncate">{wifi?.ssid ?? "..."}</span>
+                <span className="text-base-content/60">Source</span>
+                <span>{wifi?.source ?? "..."}</span>
+                <span className="text-base-content/60">State</span>
+                <span>{wifi?.state ?? "..."}</span>
+                <span className="text-base-content/60">IP</span>
+                <span>{wifi?.ip ?? "..."}</span>
+              </div>
+              <input
+                className="input input-bordered input-sm w-full"
+                placeholder="SSID"
+                value={wifiSsid}
+                onChange={(event) => setWifiSsid(event.target.value)}
+              />
+              <input
+                className="input input-bordered input-sm w-full"
+                placeholder="PSK"
+                type="password"
+                value={wifiPsk}
+                onChange={(event) => setWifiPsk(event.target.value)}
+              />
+              {wifiMutation.error && isHttpApiError(wifiMutation.error) ? (
+                <div className="alert alert-error shadow-sm text-xs">
+                  <span>
+                    WiFi update failed: {wifiMutation.error.code ?? "HTTP"} —{" "}
+                    {wifiMutation.error.message}
+                  </span>
+                </div>
+              ) : null}
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  className="btn btn-neutral btn-sm"
+                  disabled={
+                    !wifiSsid.trim() ||
+                    !wifiPsk ||
+                    wifiMutation.isPending ||
+                    !baseUrl
+                  }
+                  onClick={handleWifiSave}
+                >
+                  Save WiFi
+                </button>
+                <button
+                  type="button"
+                  className="btn btn-outline btn-sm"
+                  disabled={wifiClearMutation.isPending || !baseUrl}
+                  onClick={handleWifiClear}
+                >
+                  Clear User WiFi
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* 5. Actions */}
         <div className="card bg-base-100 shadow-sm border border-base-200">
           <div className="card-body p-6">
             <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
@@ -247,6 +422,19 @@ export function DeviceSettingsRoute() {
               >
                 Soft Reset
               </button>
+              <button
+                type="button"
+                className="btn btn-outline btn-sm"
+                disabled={diagnosticsMutation.isPending || !baseUrl}
+                onClick={() => diagnosticsMutation.mutate()}
+              >
+                Export Diagnostics
+              </button>
+              {diagnosticsMutation.isSuccess ? (
+                <pre className="max-h-48 overflow-auto rounded bg-base-200 p-3 text-[11px] leading-relaxed">
+                  {JSON.stringify(diagnosticsMutation.data, null, 2)}
+                </pre>
+              ) : null}
             </div>
           </div>
         </div>

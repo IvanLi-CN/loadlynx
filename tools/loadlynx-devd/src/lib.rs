@@ -49,9 +49,11 @@ const TRACE_LIMIT: usize = 2_000;
 const SERIAL_PROBE_BAUD: u32 = 115_200;
 const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
+const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
 const SERIAL_PROBE_MAX_BYTES: usize = 4096;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
+const SERIAL_WIFI_WAIT_OPERATION_WAIT_MS: u64 = 40_000;
 
 #[derive(Debug, Clone)]
 pub struct DevdConfig {
@@ -348,6 +350,7 @@ struct LeaseRequest {
 
 #[derive(Debug, Deserialize)]
 struct SessionQuery {
+    device_id: Option<String>,
     lease_id: Option<String>,
     logs_limit: Option<usize>,
     trace_limit: Option<usize>,
@@ -372,6 +375,14 @@ struct PdRequest {
     target_mv: Option<u32>,
     i_req_ma: Option<u32>,
     allow_extended_voltage: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WifiSetRequest {
+    ssid: String,
+    psk: String,
+    #[serde(default)]
+    wait: bool,
 }
 
 pub async fn serve(config: DevdConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -436,8 +447,41 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
         .route("/api/v1/identity", get(compat_identity))
         .route("/api/v1/status", get(compat_status))
         .route("/api/v1/network", get(compat_network))
+        .route(
+            "/api/v1/wifi",
+            get(compat_wifi_get)
+                .post(compat_wifi_post)
+                .delete(compat_wifi_delete),
+        )
         .route("/api/v1/cc", post(compat_cc))
         .route("/api/v1/pd", get(compat_pd_get).post(compat_pd_post))
+        .route(
+            "/api/v1/control",
+            get(compat_control_get)
+                .post(compat_control_post)
+                .put(compat_control_post),
+        )
+        .route(
+            "/api/v1/presets",
+            get(compat_presets_get)
+                .post(compat_presets_post)
+                .put(compat_presets_post),
+        )
+        .route("/api/v1/presets/apply", post(compat_presets_apply))
+        .route(
+            "/api/v1/calibration/profile",
+            get(compat_calibration_profile),
+        )
+        .route("/api/v1/calibration/apply", post(compat_calibration_apply))
+        .route(
+            "/api/v1/calibration/commit",
+            post(compat_calibration_commit),
+        )
+        .route("/api/v1/calibration/reset", post(compat_calibration_reset))
+        .route("/api/v1/calibration/mode", post(compat_calibration_mode))
+        .route("/api/v1/soft-reset", post(compat_soft_reset))
+        .route("/api/v1/diagnostics", get(compat_diagnostics_export))
+        .route("/api/v1/diagnostics/export", get(compat_diagnostics_export))
         .with_state(state);
 
     if allow_dev_cors {
@@ -446,7 +490,7 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
                 .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
                     is_loopback_dev_origin(origin)
                 }))
-                .allow_methods([Method::GET, Method::POST, Method::DELETE])
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
                 .allow_headers(tower_http::cors::Any),
         );
     }
@@ -1078,6 +1122,7 @@ async fn serial_owner_jsonl_request(
         ));
     }
 
+    let operation_wait_ms = serial_operation_wait_ms(op, extra.as_ref());
     let command = SerialJsonlCommand {
         device_id: device_id.to_string(),
         port_path: port_path.to_string(),
@@ -1101,7 +1146,7 @@ async fn serial_owner_jsonl_request(
                 "USB serial owner stopped before accepting the request",
             ),
         })?;
-    let result = tokio::time::timeout(Duration::from_millis(SERIAL_OPERATION_WAIT_MS), rx)
+    let result = tokio::time::timeout(Duration::from_millis(operation_wait_ms), rx)
         .await
         .map_err(|_| {
             HttpError::retryable(
@@ -1464,6 +1509,359 @@ async fn compat_cc(
     })))
 }
 
+async fn compat_usb_json_request(
+    state: &AppState,
+    query: &CompatQuery,
+    op: &str,
+    extra: Option<Value>,
+    success_message: &str,
+    operation: &str,
+) -> Result<(String, Value), HttpError> {
+    cleanup_expired_leases(state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, query, operation)?
+    };
+
+    let (request_id, probe) =
+        serial_owner_jsonl_request(state, &device_id, &port_path, op, extra).await?;
+    let response = serial_response_for_request(&probe, &request_id)
+        .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
+        .or_else(|| infer_serial_response_from_text(&probe, &request_id));
+    record_serial_protocol_probe(state, &device_id, &port_path, success_message, probe);
+    Ok((
+        request_id,
+        serial_response_data_required(response, operation)?,
+    ))
+}
+
+fn serial_response_data_required(
+    response: Option<Value>,
+    operation: &str,
+) -> Result<Value, HttpError> {
+    let response = response.ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            format!("{operation} did not return a protocol response"),
+        )
+    })?;
+    serial_response_data(response, operation)
+}
+
+async fn compat_wifi_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_wifi_status",
+        None,
+        "USB WiFi status completed",
+        "USB WiFi status",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_wifi_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    Json(input): Json<WifiSetRequest>,
+) -> Result<Json<Value>, HttpError> {
+    let extra = json!({
+        "ssid": input.ssid,
+        "psk": input.psk,
+        "wait": input.wait,
+    });
+    let (request_id, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "set_wifi_config",
+        Some(extra),
+        "USB WiFi set completed",
+        "USB WiFi set",
+    )
+    .await?;
+    Ok(Json(json!({"request_id": request_id, "wifi": data})))
+}
+
+async fn compat_wifi_delete(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (request_id, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "clear_wifi_config",
+        None,
+        "USB WiFi clear completed",
+        "USB WiFi clear",
+    )
+    .await?;
+    Ok(Json(json!({"request_id": request_id, "wifi": data})))
+}
+
+async fn compat_control_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_control",
+        None,
+        "USB control GET completed",
+        "USB control GET",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_control_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "set_control",
+        Some(input),
+        "USB control SET completed",
+        "USB control SET",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_presets_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_presets",
+        None,
+        "USB presets GET completed",
+        "USB presets GET",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_presets_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "set_preset",
+        Some(input),
+        "USB preset SET completed",
+        "USB preset SET",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_presets_apply(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "apply_preset",
+        Some(input),
+        "USB preset APPLY completed",
+        "USB preset APPLY",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_profile(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_calibration_profile",
+        None,
+        "USB calibration profile completed",
+        "USB calibration profile",
+    )
+    .await?;
+    Ok(Json(expand_compact_calibration_profile(data)?))
+}
+
+async fn compat_calibration_apply(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_apply",
+        Some(input),
+        "USB calibration apply completed",
+        "USB calibration apply",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_commit(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_commit",
+        Some(input),
+        "USB calibration commit completed",
+        "USB calibration commit",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_reset(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_reset",
+        Some(input),
+        "USB calibration reset completed",
+        "USB calibration reset",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_mode(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_mode",
+        Some(input),
+        "USB calibration mode completed",
+        "USB calibration mode",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_soft_reset(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "soft_reset",
+        Some(input),
+        "USB soft reset completed",
+        "USB soft reset",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_diagnostics_export(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let compat_query = CompatQuery {
+        device_id: query.device_id.clone(),
+        lease_id: query.lease_id.clone(),
+    };
+    let (_, firmware) = compat_usb_json_request(
+        &state,
+        &compat_query,
+        "get_diagnostics",
+        None,
+        "USB diagnostics export completed",
+        "USB diagnostics export",
+    )
+    .await?;
+
+    cleanup_expired_leases(&state);
+    let guard = state.inner.lock().expect("state lock");
+    let device = select_compat_device(
+        &guard,
+        query.lease_id.as_deref(),
+        query.device_id.as_deref(),
+    )?;
+    let leases = guard
+        .leases
+        .values()
+        .filter(|lease| lease.device_id == device.id)
+        .map(lease_json)
+        .collect::<Vec<_>>();
+    let events = guard
+        .events
+        .iter()
+        .filter(|event| event.device_id.as_deref().is_none_or(|id| id == device.id))
+        .map(redact_sensitive_event)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema_version": 1,
+        "exported_at": now(),
+        "device": redact_sensitive_frame(&json!(device)),
+        "firmware": redact_sensitive_frame(&firmware),
+        "leases": leases,
+        "session": session_json(device, query.logs_limit, query.trace_limit),
+        "events": events,
+        "redaction": {
+            "psk": true,
+            "password": true
+        }
+    })))
+}
+
+fn redact_sensitive_event(event: &DevdEvent) -> DevdEvent {
+    DevdEvent {
+        id: event.id.clone(),
+        timestamp: event.timestamp.clone(),
+        device_id: event.device_id.clone(),
+        kind: event.kind.clone(),
+        message: event.message.clone(),
+        payload: redact_sensitive_frame(&event.payload),
+    }
+}
+
+fn parse_compat_json_body(body: &str) -> Result<Value, HttpError> {
+    serde_json::from_str(body)
+        .map_err(|error| HttpError::bad_request("invalid_request", error.to_string()))
+}
+
 fn select_serial_port_for_compat(
     state: &DevdState,
     query: &CompatQuery,
@@ -1536,6 +1934,107 @@ fn status_data_from_serial_response(response: Option<Value>) -> Result<Value, Ht
         ));
     }
     Ok(data)
+}
+
+fn expand_compact_calibration_profile(data: Value) -> Result<Value, HttpError> {
+    let Some(compact) = data.as_object() else {
+        return Ok(data);
+    };
+    if compact.get("compact").and_then(Value::as_str) != Some("cal_profile_v1") {
+        return Ok(data);
+    }
+
+    let active = compact_array(compact, "a")?;
+    if active.len() != 3 {
+        return Err(compact_calibration_error("active tuple must have 3 items"));
+    }
+    let source = active[0]
+        .as_str()
+        .ok_or_else(|| compact_calibration_error("active source must be a string"))?;
+    let fmt_version = compact_u64(&active[1], "fmt_version")?;
+    let hw_rev = compact_u64(&active[2], "hw_rev")?;
+
+    Ok(json!({
+        "active": {
+            "source": source,
+            "fmt_version": fmt_version,
+            "hw_rev": hw_rev,
+        },
+        "current_ch1_points": expand_compact_current_curve(compact, "c1")?,
+        "current_ch2_points": expand_compact_current_curve(compact, "c2")?,
+        "v_local_points": expand_compact_voltage_curve(compact, "vl")?,
+        "v_remote_points": expand_compact_voltage_curve(compact, "vr")?,
+    }))
+}
+
+fn compact_array<'a>(
+    compact: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a Vec<Value>, HttpError> {
+    compact.get(key).and_then(Value::as_array).ok_or_else(|| {
+        compact_calibration_error(format!("compact calibration field {key} missing"))
+    })
+}
+
+fn expand_compact_current_curve(
+    compact: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Value, HttpError> {
+    let mut points = Vec::new();
+    for point in compact_array(compact, key)? {
+        let tuple = point
+            .as_array()
+            .ok_or_else(|| compact_calibration_error("current point must be an array"))?;
+        if tuple.len() != 3 {
+            return Err(compact_calibration_error(
+                "current point tuple must have 3 items",
+            ));
+        }
+        points.push(json!({
+            "raw_100uv": compact_i64(&tuple[0], "raw_100uv")?,
+            "raw_dac_code": compact_u64(&tuple[1], "raw_dac_code")?,
+            "meas_ma": compact_i64(&tuple[2], "meas_ma")?,
+        }));
+    }
+    Ok(Value::Array(points))
+}
+
+fn expand_compact_voltage_curve(
+    compact: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Value, HttpError> {
+    let mut points = Vec::new();
+    for point in compact_array(compact, key)? {
+        let tuple = point
+            .as_array()
+            .ok_or_else(|| compact_calibration_error("voltage point must be an array"))?;
+        if tuple.len() != 2 {
+            return Err(compact_calibration_error(
+                "voltage point tuple must have 2 items",
+            ));
+        }
+        points.push(json!({
+            "raw_100uv": compact_i64(&tuple[0], "raw_100uv")?,
+            "meas_mv": compact_i64(&tuple[1], "meas_mv")?,
+        }));
+    }
+    Ok(Value::Array(points))
+}
+
+fn compact_i64(value: &Value, field: &str) -> Result<i64, HttpError> {
+    value
+        .as_i64()
+        .ok_or_else(|| compact_calibration_error(format!("{field} must be an integer")))
+}
+
+fn compact_u64(value: &Value, field: &str) -> Result<u64, HttpError> {
+    value
+        .as_u64()
+        .ok_or_else(|| compact_calibration_error(format!("{field} must be a non-negative integer")))
+}
+
+fn compact_calibration_error(message: impl Into<String>) -> HttpError {
+    HttpError::retryable("serial_response_invalid", message)
 }
 
 fn serial_response_data(response: Value, operation: &str) -> Result<Value, HttpError> {
@@ -2658,6 +3157,30 @@ fn next_request_id(op: &str) -> String {
     )
 }
 
+fn serial_request_expects_wifi_wait(op: &str, extra: Option<&Value>) -> bool {
+    op == "set_wifi_config"
+        && extra
+            .and_then(|value| value.get("wait"))
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+fn serial_protocol_timeout_ms(op: &str, extra: Option<&Value>) -> u64 {
+    if serial_request_expects_wifi_wait(op, extra) {
+        SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS
+    } else {
+        SERIAL_PROTOCOL_TIMEOUT_MS
+    }
+}
+
+fn serial_operation_wait_ms(op: &str, extra: Option<&Value>) -> u64 {
+    if serial_request_expects_wifi_wait(op, extra) {
+        SERIAL_WIFI_WAIT_OPERATION_WAIT_MS
+    } else {
+        SERIAL_OPERATION_WAIT_MS
+    }
+}
+
 fn validate_port_not_leased_by_other_device(
     state: &AppState,
     device_id: &str,
@@ -2782,6 +3305,42 @@ fn mock_serial_probe(request_id: &str, op: &str, extra: Option<Value>) -> Serial
         "set_output_enabled" => {
             json!({"enable": extra.and_then(|v| v.get("enable").cloned()).unwrap_or(json!(false))})
         }
+        "get_wifi_status" | "set_wifi_config" | "clear_wifi_config" => json!({
+            "ssid": extra.as_ref().and_then(|v| v.get("ssid")).and_then(Value::as_str).unwrap_or("LoadLynx-Test"),
+            "source": if op == "clear_wifi_config" { "factory" } else { "user" },
+            "state": "connected",
+            "ip": "192.0.2.10",
+            "last_error": null
+        }),
+        "get_control" | "set_control" | "apply_preset" => json!({
+            "active_preset_id": extra.as_ref().and_then(|v| v.get("preset_id")).and_then(Value::as_u64).unwrap_or(1),
+            "output_enabled": extra.as_ref().and_then(|v| v.get("output_enabled")).and_then(Value::as_bool).unwrap_or(false),
+            "uv_latched": false,
+            "preset": mock_preset(extra.as_ref().and_then(|v| v.get("preset_id")).and_then(Value::as_u64).unwrap_or(1) as u8)
+        }),
+        "get_presets" => json!({
+            "presets": (1_u8..=5).map(mock_preset).collect::<Vec<_>>()
+        }),
+        "set_preset" => extra.unwrap_or_else(|| mock_preset(1)),
+        "get_calibration_profile" => json!({
+            "active": {"source": "factory-default", "fmt_version": 3, "hw_rev": 1},
+            "current_ch1_points": [],
+            "current_ch2_points": [],
+            "v_local_points": [],
+            "v_remote_points": []
+        }),
+        "calibration_apply" | "calibration_commit" | "calibration_reset" | "calibration_mode" => {
+            json!({"ok": true})
+        }
+        "soft_reset" => json!({
+            "accepted": true,
+            "reason": extra.as_ref().and_then(|v| v.get("reason")).and_then(Value::as_str).unwrap_or("manual")
+        }),
+        "get_diagnostics" => json!({
+            "schema_version": 1,
+            "events": [],
+            "redaction": {"psk": true, "password": true}
+        }),
         _ => json!({}),
     };
     SerialProtocolProbe {
@@ -2798,6 +3357,19 @@ fn mock_serial_probe(request_id: &str, op: &str, extra: Option<Value>) -> Serial
         non_protocol_bytes: 0,
         non_protocol_text: String::new(),
     }
+}
+
+fn mock_preset(preset_id: u8) -> Value {
+    json!({
+        "preset_id": preset_id.clamp(1, 5),
+        "mode": "cc",
+        "target_i_ma": 0,
+        "target_v_mv": 12000,
+        "target_p_mw": 0,
+        "min_v_mv": 0,
+        "max_i_ma_total": 10000,
+        "max_p_mw": 120000
+    })
 }
 
 fn record_serial_protocol_probe(
@@ -3062,6 +3634,7 @@ fn serial_jsonl_request_on_port(
     op: &str,
     extra: Option<Value>,
 ) -> io::Result<SerialProtocolProbe> {
+    let protocol_timeout_ms = serial_protocol_timeout_ms(op, extra.as_ref());
     let mut frames = Vec::new();
     let mut line_buf = Vec::new();
     let mut non_protocol_bytes = 0usize;
@@ -3081,7 +3654,7 @@ fn serial_jsonl_request_on_port(
 
     write_serial_request(&mut *port, &mut frames, request_id, op, extra)?;
     line_buf.clear();
-    let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
+    let deadline = Instant::now() + Duration::from_millis(protocol_timeout_ms);
     let _ = read_serial_jsonl_until(
         &mut *port,
         deadline,
@@ -3631,14 +4204,25 @@ fn push_trace(device: &mut DeviceRecord, direction: &str, payload: Value) {
 }
 
 pub fn redact_sensitive_frame(frame: &Value) -> Value {
-    let mut redacted = frame.clone();
-    if redacted.get("type").and_then(Value::as_str) == Some("wifi_config")
-        && let Some(obj) = redacted.as_object_mut()
-        && obj.contains_key("psk")
-    {
-        obj.insert("psk".to_string(), Value::String("<redacted>".to_string()));
+    match frame {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let key_lc = key.to_ascii_lowercase();
+                    if matches!(
+                        key_lc.as_str(),
+                        "psk" | "password" | "passphrase" | "secret" | "token"
+                    ) {
+                        (key.clone(), Value::String("<redacted>".to_string()))
+                    } else {
+                        (key.clone(), redact_sensitive_frame(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_frame).collect()),
+        _ => frame.clone(),
     }
-    redacted
 }
 
 fn summarize_frame(frame: &Value) -> String {
@@ -3758,6 +4342,40 @@ mod tests {
             },
             files: vec![],
         }
+    }
+
+    #[test]
+    fn expands_compact_usb_calibration_profile() {
+        let expanded = expand_compact_calibration_profile(json!({
+            "compact": "cal_profile_v1",
+            "a": ["user-calibrated", 3, 1],
+            "c1": [[0, 0, 0], [25000, 4095, 5000]],
+            "c2": [[1, 2, 3]],
+            "vl": [[0, 0]],
+            "vr": [[100, 120]]
+        }))
+        .unwrap();
+
+        assert_eq!(expanded["active"]["source"], "user-calibrated");
+        assert_eq!(expanded["active"]["fmt_version"], 3);
+        assert_eq!(expanded["current_ch1_points"][1]["raw_dac_code"], 4095);
+        assert_eq!(expanded["current_ch2_points"][0]["meas_ma"], 3);
+        assert_eq!(expanded["v_remote_points"][0]["meas_mv"], 120);
+    }
+
+    #[test]
+    fn rejects_malformed_compact_usb_calibration_profile() {
+        let err = expand_compact_calibration_profile(json!({
+            "compact": "cal_profile_v1",
+            "a": ["factory-default", 3, 1],
+            "c1": [[0, 0]],
+            "c2": [],
+            "vl": [],
+            "vr": []
+        }))
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "serial_response_invalid");
     }
 
     #[test]
@@ -4913,6 +5531,7 @@ mod tests {
         let Json(session) = compat_session(
             State(state.clone()),
             Query(SessionQuery {
+                device_id: None,
                 lease_id: Some(lease_id),
                 logs_limit: None,
                 trace_limit: None,

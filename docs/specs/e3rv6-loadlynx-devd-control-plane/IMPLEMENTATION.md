@@ -2,7 +2,7 @@
 
 ## Current State
 
-The first implementation is complete and ready for PR review. It adds a local `loadlynx-devd` daemon, `loadlynx` CLI, Web devd/Firmware routes, firmware catalog tooling, digital identity/DNS-SD contract updates and mock-first Storybook coverage.
+The control plane is implemented across the local daemon, CLI, Web routes and ESP32-S3 USB JSONL bridge. The current implementation covers devd leases, per-port serial ownership, firmware artifact flows, PD/output control and the expanded compatibility surface for control, presets, calibration, WiFi status, soft reset and diagnostics. User WiFi credentials persist in the digital board EEPROM and the WiFi task reloads those credentials at runtime, falling back to factory `.env` credentials when no user blob is present.
 
 ## Design Inputs
 
@@ -29,7 +29,13 @@ The first implementation is complete and ready for PR review. It adds a local `l
 - CLI firmware flash/reset dry-runs do not create leases or touch USB serial state; real flash/reset operations create an internal lease before calling devd.
 - Lease creation validates target port availability before marking a device connected, so rejected lease attempts do not leave misleading connected state. For real non-mock USB CDC ports, lease creation requires the selected port to match the approved default digital USB port memory; missing or unreadable `.esp32-port` state returns `target_selector_not_cached` rather than probing hardware.
 - The devd USB compatibility surface includes PD sink reads and writes. Digital firmware exposes `get_pd` and `set_pd_policy`; devd maps them to `/api/v1/pd` and caches the last complete PD view from protocol frames so intermittent USB log noise cannot make Web lose a valid real-device PD snapshot.
+- The devd USB compatibility surface now includes `/api/v1/control`, `/api/v1/presets`, `/api/v1/calibration/*`, `/api/v1/wifi`, `/api/v1/soft-reset` and diagnostics export. devd maps those HTTP-compatible calls onto compact USB JSONL ops and requires the same lease/selection rules as PD and CC writes.
+- USB calibration profile reads use a 4096-byte JSONL output frame and a compact `cal_profile_v1` firmware payload for curve arrays. devd expands that compact payload to the HTTP/Web profile shape before returning it to callers, so valid 24-point curves do not fail as oversized single-frame responses.
+- Sensitive diagnostic/trace payloads use recursive redaction for `psk`, `password`, `passphrase`, `secret` and `token` fields instead of relying on one frame shape.
+- Digital firmware stores user WiFi credentials in a dedicated EEPROM blob. `set_wifi_config` writes the blob and may wait for connection state, `clear_wifi_config` invalidates it, and the WiFi task reconnects when the EEPROM credential source changes.
 - CLI USB workflows cover PD policy writes and output control without exposing lease IDs. `output set` requires exactly one of `--enable` or `--disable`; `--target-i-ma` applies the active firmware preset as CC mode before enabling output.
+- CLI business workflows cover WiFi show/set/clear, control get/set, preset list/set/apply, calibration profile/mode/apply/commit/reset, soft-reset and diagnostics export. Control writes require explicit `--enable` or `--disable`. LAN WiFi writes require `--allow-insecure-lan-wifi`; USB/devd writes create short-lived leases internally. CLI output is human-readable by default, with `--json` preserving structured automation output.
+- Web Settings exposes devd-backed WiFi status/config and diagnostics export. LAN WiFi writes require a confirmation dialog; USB/devd writes proceed as local physical-access operations.
 - ESP32-S3 USB Serial/JTAG can interleave binary logs with JSONL response text. devd prefers complete matching `request_id` responses and recovers status/output-control responses only from operation-shaped frames observed after the matching transmit frame.
 - Firmware flash/reset paths default to dry-run and include target evidence. Real ESP32-S3 digital flash calls direct `espflash` through devd after artifact hash verification and a valid Web lease: ELF artifacts use `espflash flash`, and raw image artifacts require `flash_address` before using `espflash write-bin`. Analog flash/reset and reset-only paths continue to use existing backend guardrails.
 - Web Storybook coverage uses canvas stories for Devices devd lease creation and Firmware dry-run/session states.
@@ -43,12 +49,14 @@ The first implementation is complete and ready for PR review. It adds a local `l
 
 ## Verification Results
 
-- `cargo test --manifest-path tools/loadlynx-devd/Cargo.toml`
-- `bun run check`
-- `bun run build`
-- `bun run build-storybook --quiet`
-- `bun run test:storybook:ci`
-- `PROFILE=release just d-build`
+- `cargo check` in `tools/loadlynx-devd`
+- `cargo test` in `tools/loadlynx-devd`
+- `bun run check` in `web`
+- `bun run build` in `web`
+- `bun run build-storybook --quiet` in `web`
+- Storybook mock screenshot for `Routes/Settings` with PSK leak assertion
+
+Digital firmware `cargo check` reached the firmware build script and stopped before Rust compilation because the current worktree has no repo-root `.env` with `DIGITAL_WIFI_SSID` and `DIGITAL_WIFI_PSK`.
 - `PROFILE=release just a-build`
 - Real ESP32-S3 digital flash through devd direct `espflash` on `/dev/cu.usbmodem212101`; post-flash USB CDC `get_identity` matched the local digital firmware version.
 - Real USB PD sink verification through devd `/api/v1/pd`: read attached 9V/500mA contract and PDO/APDO capabilities, applied fixed 5V/500mA, observed contract transition to 5V, restored fixed 9V/500mA, and observed contract return to 9V while load output stayed disabled.

@@ -83,6 +83,36 @@ enum Command {
         #[command(subcommand)]
         command: PdCommand,
     },
+    Wifi {
+        #[command(subcommand)]
+        command: WifiCommand,
+    },
+    Control {
+        #[command(subcommand)]
+        command: ControlCommand,
+    },
+    Preset {
+        #[command(subcommand)]
+        command: PresetCommand,
+    },
+    Calibration {
+        #[command(subcommand)]
+        command: CalibrationCommand,
+    },
+    SoftReset {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long, default_value = "manual")]
+        reason: String,
+    },
+    Diagnostics {
+        #[command(subcommand)]
+        command: DiagnosticsCommand,
+    },
     UsbPort {
         #[command(subcommand)]
         command: UsbPortCommand,
@@ -126,6 +156,161 @@ enum PdCommand {
         i_req_ma: Option<u32>,
         #[arg(long = "allow-extended-voltage")]
         allow_extended_voltage: Option<bool>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum WifiCommand {
+    Show {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+    },
+    Set {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        ssid: String,
+        #[arg(long)]
+        psk: String,
+        #[arg(long)]
+        wait: bool,
+        #[arg(long)]
+        allow_insecure_lan_wifi: bool,
+    },
+    Clear {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        allow_insecure_lan_wifi: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ControlCommand {
+    Get {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+    },
+    Set {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        enable: bool,
+        #[arg(long)]
+        disable: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PresetCommand {
+    List {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+    },
+    Set {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    Apply {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        preset_id: u8,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum CalibrationCommand {
+    Profile {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+    },
+    Mode {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        kind: String,
+    },
+    Apply {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    Commit {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        file: PathBuf,
+    },
+    Reset {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        kind: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DiagnosticsCommand {
+    Export {
+        #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
     },
 }
 
@@ -283,6 +468,7 @@ fn api_url(base: &str, path: &str) -> Result<Url, Box<dyn std::error::Error + Se
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
+    let json_output = cli.json;
     let client = Client::new();
     let payload = match cli.command {
         Command::Hardware { command } => {
@@ -587,9 +773,334 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 result?
             }
         },
+        Command::Wifi { command } => match command {
+            WifiCommand::Show {
+                url,
+                device,
+                hardware,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::GET,
+                    "/api/v1/wifi",
+                    None,
+                    false,
+                )
+                .await?
+            }
+            WifiCommand::Set {
+                url,
+                device,
+                hardware,
+                ssid,
+                psk,
+                wait,
+                allow_insecure_lan_wifi,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/wifi",
+                    Some(json!({"ssid": ssid, "psk": psk, "wait": wait})),
+                    allow_insecure_lan_wifi,
+                )
+                .await?
+            }
+            WifiCommand::Clear {
+                url,
+                device,
+                hardware,
+                allow_insecure_lan_wifi,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::DELETE,
+                    "/api/v1/wifi",
+                    None,
+                    allow_insecure_lan_wifi,
+                )
+                .await?
+            }
+        },
+        Command::Control { command } => match command {
+            ControlCommand::Get {
+                url,
+                device,
+                hardware,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::GET,
+                    "/api/v1/control",
+                    None,
+                    false,
+                )
+                .await?
+            }
+            ControlCommand::Set {
+                url,
+                device,
+                hardware,
+                enable,
+                disable,
+            } => {
+                let output_enabled = resolve_output_enable(enable, disable)?;
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/control",
+                    Some(json!({"output_enabled": output_enabled})),
+                    false,
+                )
+                .await?
+            }
+        },
+        Command::Preset { command } => match command {
+            PresetCommand::List {
+                url,
+                device,
+                hardware,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::GET,
+                    "/api/v1/presets",
+                    None,
+                    false,
+                )
+                .await?
+            }
+            PresetCommand::Set {
+                url,
+                device,
+                hardware,
+                file,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/presets",
+                    Some(read_json_file(&file)?),
+                    false,
+                )
+                .await?
+            }
+            PresetCommand::Apply {
+                url,
+                device,
+                hardware,
+                preset_id,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/presets/apply",
+                    Some(json!({"preset_id": preset_id})),
+                    false,
+                )
+                .await?
+            }
+        },
+        Command::Calibration { command } => match command {
+            CalibrationCommand::Profile {
+                url,
+                device,
+                hardware,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::GET,
+                    "/api/v1/calibration/profile",
+                    None,
+                    false,
+                )
+                .await?
+            }
+            CalibrationCommand::Mode {
+                url,
+                device,
+                hardware,
+                kind,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/calibration/mode",
+                    Some(json!({"kind": kind})),
+                    false,
+                )
+                .await?
+            }
+            CalibrationCommand::Apply {
+                url,
+                device,
+                hardware,
+                file,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/calibration/apply",
+                    Some(read_json_file(&file)?),
+                    false,
+                )
+                .await?
+            }
+            CalibrationCommand::Commit {
+                url,
+                device,
+                hardware,
+                file,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/calibration/commit",
+                    Some(read_json_file(&file)?),
+                    false,
+                )
+                .await?
+            }
+            CalibrationCommand::Reset {
+                url,
+                device,
+                hardware,
+                kind,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::POST,
+                    "/api/v1/calibration/reset",
+                    Some(json!({"kind": kind})),
+                    false,
+                )
+                .await?
+            }
+        },
+        Command::SoftReset {
+            url,
+            device,
+            hardware,
+            reason,
+        } => {
+            request_api_value(
+                &client,
+                &cli.devd,
+                ApiSelector {
+                    url,
+                    device,
+                    hardware,
+                },
+                reqwest::Method::POST,
+                "/api/v1/soft-reset",
+                Some(json!({"reason": reason})),
+                false,
+            )
+            .await?
+        }
+        Command::Diagnostics { command } => match command {
+            DiagnosticsCommand::Export {
+                url,
+                device,
+                hardware,
+            } => {
+                request_api_value(
+                    &client,
+                    &cli.devd,
+                    ApiSelector {
+                        url,
+                        device,
+                        hardware,
+                    },
+                    reqwest::Method::GET,
+                    "/api/v1/diagnostics/export",
+                    None,
+                    false,
+                )
+                .await?
+            }
+        },
     };
 
-    println!("{}", serde_json::to_string_pretty(&payload)?);
+    print_cli_payload(&payload, json_output)?;
     Ok(())
 }
 
@@ -621,6 +1132,252 @@ fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
     Value::Object(body)
 }
 
+fn print_cli_payload(
+    payload: &Value,
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let payload = redact_cli_sensitive(payload);
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&payload)?);
+    } else {
+        println!("{}", render_human_payload(&payload)?);
+    }
+    Ok(())
+}
+
+fn render_human_payload(payload: &Value) -> Result<String, serde_json::Error> {
+    let view = payload.get("wifi").unwrap_or(payload);
+    if view.get("state").is_some() && view.get("source").is_some() && view.get("ssid").is_some() {
+        return Ok(format!(
+            "WiFi: {} ssid={} source={} ip={}{}",
+            str_field(view, "state").unwrap_or("unknown"),
+            str_field(view, "ssid").unwrap_or("-"),
+            str_field(view, "source").unwrap_or("-"),
+            str_field(view, "ip").unwrap_or("-"),
+            str_field(view, "last_error")
+                .map(|error| format!(" error={error}"))
+                .unwrap_or_default()
+        ));
+    }
+
+    if payload.get("output_enabled").is_some() && payload.get("active_preset_id").is_some() {
+        return Ok(format!(
+            "Control: output={} active_preset={} uv_latched={}",
+            bool_field(payload, "output_enabled").unwrap_or(false),
+            payload
+                .get("active_preset_id")
+                .and_then(Value::as_u64)
+                .unwrap_or_default(),
+            bool_field(payload, "uv_latched").unwrap_or(false)
+        ));
+    }
+
+    if let Some(presets) = payload.get("presets").and_then(Value::as_array) {
+        let mut out = String::from("Presets:");
+        for preset in presets {
+            out.push_str("\n  ");
+            out.push_str(&render_preset_line(preset));
+        }
+        return Ok(out);
+    }
+
+    if payload.get("accepted").and_then(Value::as_bool) == Some(true) {
+        return Ok(format!(
+            "Accepted: {}",
+            str_field(payload, "reason").unwrap_or("request")
+        ));
+    }
+
+    if payload.get("ok").and_then(Value::as_bool) == Some(true) {
+        return Ok("OK".to_string());
+    }
+
+    if let Some(devices) = payload.get("devices").and_then(Value::as_array) {
+        return Ok(format!("Devices: {} discovered", devices.len()));
+    }
+
+    serde_json::to_string_pretty(payload)
+}
+
+fn render_preset_line(preset: &Value) -> String {
+    format!(
+        "#{:<2} mode={} i={}mA v={}mV p={}mW",
+        preset
+            .get("preset_id")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        str_field(preset, "mode").unwrap_or("-"),
+        preset
+            .get("target_i_ma")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        preset
+            .get("target_v_mv")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+        preset
+            .get("target_p_mw")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    )
+}
+
+fn str_field<'a>(value: &'a Value, field: &str) -> Option<&'a str> {
+    value.get(field).and_then(|value| match value {
+        Value::String(s) => Some(s.as_str()),
+        Value::Null => None,
+        _ => None,
+    })
+}
+
+fn bool_field(value: &Value, field: &str) -> Option<bool> {
+    value.get(field).and_then(Value::as_bool)
+}
+
+fn redact_cli_sensitive(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let key_lc = key.to_ascii_lowercase();
+                    if matches!(
+                        key_lc.as_str(),
+                        "psk" | "password" | "passphrase" | "secret" | "token"
+                    ) {
+                        (key.clone(), Value::String("<redacted>".to_string()))
+                    } else {
+                        (key.clone(), redact_cli_sensitive(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_cli_sensitive).collect()),
+        _ => value.clone(),
+    }
+}
+
+#[derive(Debug)]
+struct ApiSelector {
+    url: Option<String>,
+    device: Option<String>,
+    hardware: Option<String>,
+}
+
+fn read_json_file(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(serde_json::from_slice(&fs::read(path)?)?)
+}
+
+async fn request_api_value(
+    client: &Client,
+    default_devd: &str,
+    selector: ApiSelector,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+    allow_insecure_lan_wifi: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    ensure_one_api_selector(
+        selector.url.as_ref(),
+        selector.device.as_ref(),
+        selector.hardware.as_ref(),
+    )?;
+    let is_wifi_write = path == "/api/v1/wifi"
+        && (method == reqwest::Method::POST || method == reqwest::Method::DELETE);
+
+    if let Some(hardware_id) = selector.hardware {
+        match resolve_saved_hardware(&hardware_id, default_devd)? {
+            ResolvedHardware::Usb(resolved) => {
+                request_devd_usb_value(client, &resolved, method, path, body).await
+            }
+            ResolvedHardware::Http { url } => {
+                if is_wifi_write && !allow_insecure_lan_wifi {
+                    return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
+                }
+                request_http_value(client, &url, method, path, body).await
+            }
+        }
+    } else if let Some(url) = selector.url {
+        if is_wifi_write && !allow_insecure_lan_wifi {
+            return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
+        }
+        request_http_value(client, &url, method, path, body).await
+    } else if let Some(device) = selector.device {
+        let resolved = ResolvedUsbHardware {
+            device,
+            devd: default_devd.to_string(),
+        };
+        request_devd_usb_value(client, &resolved, method, path, body).await
+    } else {
+        Err("command requires --hardware, --device, or --url".into())
+    }
+}
+
+async fn request_http_value(
+    client: &Client,
+    base: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let mut request = client.request(method, api_url(base, path)?);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    Ok(request
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?)
+}
+
+async fn request_devd_usb_value(
+    client: &Client,
+    resolved: &ResolvedUsbHardware,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let lease = create_cli_lease(client, &resolved.devd, &resolved.device).await?;
+    let heartbeat = spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let mut url = api_url(&resolved.devd, path)?;
+    url.query_pairs_mut()
+        .append_pair("device_id", &resolved.device)
+        .append_pair("lease_id", &lease.lease_id);
+    let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+        let mut request = client.request(method, url);
+        if let Some(body) = body {
+            request = request.json(&body);
+        }
+        Ok(request
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?)
+    }
+    .await;
+    let _ = release_cli_lease(client, &resolved.devd, &lease.lease_id).await;
+    heartbeat.abort();
+    result
+}
+
+fn ensure_one_api_selector(
+    url: Option<&String>,
+    device: Option<&String>,
+    hardware: Option<&String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let count = [url.is_some(), device.is_some(), hardware.is_some()]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count();
+    match count {
+        0 => Err("command requires --hardware, --device, or --url".into()),
+        1 => Ok(()),
+        _ => Err("command accepts only one of --hardware, --device, or --url".into()),
+    }
+}
+
 fn resolve_output_enable(
     enable: bool,
     disable: bool,
@@ -628,8 +1385,8 @@ fn resolve_output_enable(
     match (enable, disable) {
         (true, false) => Ok(true),
         (false, true) => Ok(false),
-        (true, true) => Err("output set accepts only one of --enable or --disable".into()),
-        (false, false) => Err("output set requires --enable or --disable".into()),
+        (true, true) => Err("command accepts only one of --enable or --disable".into()),
+        (false, false) => Err("command requires --enable or --disable".into()),
     }
 }
 
@@ -1754,6 +2511,32 @@ mod tests {
             ])
             .is_err()
         );
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "control",
+            "set",
+            "--hardware",
+            "usb-digital-1",
+            "--enable",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Control {
+                command:
+                    ControlCommand::Set {
+                        hardware,
+                        enable,
+                        disable,
+                        ..
+                    },
+            } => {
+                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+                assert!(enable);
+                assert!(!disable);
+            }
+            _ => panic!("expected control set command"),
+        }
     }
 
     #[test]

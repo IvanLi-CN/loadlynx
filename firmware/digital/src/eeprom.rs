@@ -1,3 +1,4 @@
+use core::str;
 use embassy_futures::yield_now;
 use embedded_hal_async::i2c::I2c as EhI2c;
 use heapless::Vec;
@@ -14,6 +15,53 @@ pub const EEPROM_PRESETS_BASE_ADDR: u16 = EEPROM_PROFILE_BASE_ADDR + (EEPROM_PRO
 pub const EEPROM_PRESETS_LEN: usize = 256;
 pub const EEPROM_PD_BASE_ADDR: u16 = EEPROM_PRESETS_BASE_ADDR + (EEPROM_PRESETS_LEN as u16);
 pub const EEPROM_PD_LEN: usize = 32;
+pub const EEPROM_WIFI_BASE_ADDR: u16 = EEPROM_PD_BASE_ADDR + (EEPROM_PD_LEN as u16);
+pub const EEPROM_WIFI_LEN: usize = 192;
+pub const WIFI_BLOB_MAGIC: &[u8; 8] = b"LLWIFI1\0";
+pub const WIFI_MAX_SSID_LEN: usize = 32;
+pub const WIFI_MAX_PSK_LEN: usize = 64;
+
+pub struct WifiBlobParts<'a> {
+    pub ssid: &'a str,
+    pub psk: &'a str,
+}
+
+pub fn encode_wifi_blob(ssid: &str, psk: &str) -> Result<[u8; EEPROM_WIFI_LEN], &'static str> {
+    let ssid_bytes = ssid.as_bytes();
+    let psk_bytes = psk.as_bytes();
+    if ssid_bytes.is_empty() || ssid_bytes.len() > WIFI_MAX_SSID_LEN {
+        return Err("ssid length must be 1..32 bytes");
+    }
+    if psk_bytes.len() < 8 || psk_bytes.len() > WIFI_MAX_PSK_LEN {
+        return Err("psk length must be 8..64 bytes");
+    }
+    let mut blob = [0xFFu8; EEPROM_WIFI_LEN];
+    blob[..WIFI_BLOB_MAGIC.len()].copy_from_slice(WIFI_BLOB_MAGIC);
+    blob[8] = ssid_bytes.len() as u8;
+    blob[9] = psk_bytes.len() as u8;
+    let ssid_start = 10;
+    let psk_start = ssid_start + WIFI_MAX_SSID_LEN;
+    blob[ssid_start..ssid_start + ssid_bytes.len()].copy_from_slice(ssid_bytes);
+    blob[psk_start..psk_start + psk_bytes.len()].copy_from_slice(psk_bytes);
+    Ok(blob)
+}
+
+pub fn decode_wifi_blob(blob: &[u8; EEPROM_WIFI_LEN]) -> Option<WifiBlobParts<'_>> {
+    if &blob[..WIFI_BLOB_MAGIC.len()] != WIFI_BLOB_MAGIC {
+        return None;
+    }
+    let ssid_len = blob[8] as usize;
+    let psk_len = blob[9] as usize;
+    if ssid_len == 0 || ssid_len > WIFI_MAX_SSID_LEN || psk_len < 8 || psk_len > WIFI_MAX_PSK_LEN {
+        return None;
+    }
+    let ssid_start = 10;
+    let psk_start = ssid_start + WIFI_MAX_SSID_LEN;
+    Some(WifiBlobParts {
+        ssid: str::from_utf8(&blob[ssid_start..ssid_start + ssid_len]).ok()?,
+        psk: str::from_utf8(&blob[psk_start..psk_start + psk_len]).ok()?,
+    })
+}
 
 #[derive(Debug, Clone, Copy, defmt::Format)]
 pub enum EepromError {
@@ -187,6 +235,24 @@ impl SharedM24c64 {
         // to firmware defaults on next boot.
         let buf = [0xFFu8; EEPROM_PD_LEN];
         self.write_pd_blob(&buf).await
+    }
+
+    pub async fn write_wifi_blob(
+        &mut self,
+        blob: &[u8; EEPROM_WIFI_LEN],
+    ) -> Result<(), EepromError> {
+        self.write(EEPROM_WIFI_BASE_ADDR, blob).await
+    }
+
+    pub async fn read_wifi_blob(&mut self) -> Result<[u8; EEPROM_WIFI_LEN], EepromError> {
+        let mut buf = [0u8; EEPROM_WIFI_LEN];
+        self.read(EEPROM_WIFI_BASE_ADDR, &mut buf).await?;
+        Ok(buf)
+    }
+
+    pub async fn clear_wifi_blob(&mut self) -> Result<(), EepromError> {
+        let buf = [0xFFu8; EEPROM_WIFI_LEN];
+        self.write_wifi_blob(&buf).await
     }
 
     async fn wait_ready(&mut self, probe_addr: u16) -> Result<(), EepromError> {
