@@ -919,6 +919,12 @@ async fn create_lease(
     }
     let lease_port_path = device_digital_port(&state, &input.device_id);
     if let Some(port_path) = lease_port_path.as_deref() {
+        if let Some(reason) = serial_exclusive_reason(&state, port_path) {
+            return Err(HttpError::conflict(
+                "operation_in_progress",
+                format!("USB serial port is reserved for {reason}"),
+            ));
+        }
         if !port_path.starts_with("mock://")
             && read_default_digital_usb_port(&state.repo_root)
                 .as_deref()
@@ -938,7 +944,15 @@ async fn create_lease(
                     port_path,
                     identity,
                 )?,
-                Err(error) if port_path.starts_with("mock://") => return Err(error),
+                Err(error)
+                    if port_path.starts_with("mock://")
+                        || matches!(
+                            error.0.code.as_str(),
+                            "operation_in_progress" | "device_busy"
+                        ) =>
+                {
+                    return Err(error);
+                }
                 Err(error) => {
                     let mut guard = state.inner.lock().expect("state lock");
                     if let Some(device) = guard.devices.get_mut(&input.device_id) {
@@ -1720,25 +1734,33 @@ fn select_compat_device<'a>(
             .get(&lease.device_id)
             .ok_or_else(|| HttpError::not_found("device_not_found", "leased device is not known"));
     }
-    let active = state
+    let mut selected_device_id = None;
+    for lease in state
         .leases
         .values()
         .filter(|lease| lease.expires_at > Instant::now())
-        .collect::<Vec<_>>();
-    match active.as_slice() {
-        [lease] => state
-            .devices
-            .get(&lease.device_id)
-            .ok_or_else(|| HttpError::not_found("device_not_found", "leased device is not known")),
-        [] => Err(HttpError::bad_request(
+    {
+        match selected_device_id {
+            None => selected_device_id = Some(lease.device_id.as_str()),
+            Some(id) if id == lease.device_id => {}
+            Some(_) => {
+                return Err(HttpError::bad_request(
+                    "device_selection_required",
+                    "multiple Web USB leases are active; specify lease_id or device_id",
+                ));
+            }
+        }
+    }
+    let Some(device_id) = selected_device_id else {
+        return Err(HttpError::bad_request(
             "web_session_required",
             "Web USB lease or explicit device_id is required",
-        )),
-        _ => Err(HttpError::bad_request(
-            "device_selection_required",
-            "multiple Web USB leases are active; specify lease_id or device_id",
-        )),
-    }
+        ));
+    };
+    state
+        .devices
+        .get(device_id)
+        .ok_or_else(|| HttpError::not_found("device_not_found", "leased device is not known"))
 }
 
 fn ensure_lease_for_target(
@@ -4273,6 +4295,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn same_device_leases_are_unambiguous_for_compat_selection() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            for lease_id in ["lease-1", "lease-2"] {
+                guard.leases.insert(
+                    lease_id.to_string(),
+                    WebLease {
+                        lease_id: lease_id.to_string(),
+                        device_id: "mock-loadlynx-devd".to_string(),
+                        identity_device_id: None,
+                        port_path: Some("mock://esp32s3".to_string()),
+                        expires_at: Instant::now() + Duration::from_secs(30),
+                    },
+                );
+            }
+
+            let device = select_compat_device(&guard, None, None).unwrap();
+            assert_eq!(device.id, "mock-loadlynx-devd");
+        }
+    }
+
+    #[tokio::test]
     async fn failed_lease_validation_does_not_connect_device() {
         let state = AppState::new(PathBuf::from("."));
         {
@@ -4302,6 +4347,29 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(err.0.code, "device_port_in_use");
+        let guard = state.inner.lock().expect("state lock");
+        assert_eq!(
+            guard.devices.get("mock-loadlynx-devd").unwrap().connection,
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn create_lease_rejects_exclusive_port_reservation() {
+        let state = AppState::new(PathBuf::from("."));
+        mark_serial_exclusive(&state, "mock://esp32s3", "digital flash").unwrap();
+
+        let err = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        clear_serial_exclusive(&state, "mock://esp32s3");
+        assert_eq!(err.0.code, "operation_in_progress");
         let guard = state.inner.lock().expect("state lock");
         assert_eq!(
             guard.devices.get("mock-loadlynx-devd").unwrap().connection,
