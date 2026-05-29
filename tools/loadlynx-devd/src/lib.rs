@@ -968,6 +968,8 @@ async fn create_lease(
                             ),
                         );
                     }
+                    stop_serial_owner(&state, port_path);
+                    return Err(error);
                 }
             }
         }
@@ -4720,6 +4722,52 @@ mod tests {
         assert_eq!(
             guard.devices.get("mock-loadlynx-devd").unwrap().connection,
             ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn create_lease_rejects_unavailable_real_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let unavailable_port = dir.path().join("missing-serial-port");
+        let unavailable_port = unavailable_port.to_string_lossy().to_string();
+        write_default_digital_usb_port(dir.path(), &unavailable_port).unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let target = guard
+                .devices
+                .get_mut("mock-loadlynx-devd")
+                .unwrap()
+                .digital_target
+                .as_mut()
+                .unwrap();
+            target.port_path = Some(unavailable_port);
+            target.selector_source = Some("serialport scan".to_string());
+        }
+
+        let err = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "serial_open_failed");
+        let guard = state.inner.lock().expect("state lock");
+        assert!(guard.leases.is_empty());
+        assert_eq!(
+            guard.devices.get("mock-loadlynx-devd").unwrap().connection,
+            ConnectionState::Disconnected
+        );
+        assert!(
+            state
+                .serial
+                .lock()
+                .expect("serial registry lock")
+                .owners
+                .is_empty()
         );
     }
 
