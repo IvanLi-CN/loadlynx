@@ -932,7 +932,12 @@ async fn create_lease(
         validate_port_not_leased_by_other_device(&state, &input.device_id, port_path)?;
         if is_default_or_scanned_usb_source(&state, &input.device_id) {
             match request_usb_identity(&state, &input.device_id, port_path).await {
-                Ok(identity) => update_device_identity(&state, &input.device_id, identity)?,
+                Ok(identity) => update_device_identity_for_lease_probe(
+                    &state,
+                    &input.device_id,
+                    port_path,
+                    identity,
+                )?,
                 Err(error) if port_path.starts_with("mock://") => return Err(error),
                 Err(error) => {
                     let mut guard = state.inner.lock().expect("state lock");
@@ -2593,12 +2598,14 @@ fn validate_port_not_leased_by_other_device(
         if lease.expires_at <= Instant::now() || lease.device_id == device_id {
             continue;
         }
-        let Some(other_port) = guard
-            .devices
-            .get(&lease.device_id)
-            .and_then(|device| device.digital_target.as_ref())
-            .and_then(|target| target.port_path.as_deref())
-        else {
+        let other_port = lease.port_path.clone().or_else(|| {
+            guard
+                .devices
+                .get(&lease.device_id)
+                .and_then(|device| device.digital_target.as_ref())
+                .and_then(|target| target.port_path.clone())
+        });
+        let Some(other_port) = other_port.as_deref() else {
             continue;
         };
         if canonical_port_key(other_port) == port_key {
@@ -2653,6 +2660,19 @@ fn update_device_identity(
         .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
     device.identity = Some(identity);
     apply_artifact_match(device, selected_artifact.as_ref());
+    Ok(())
+}
+
+fn update_device_identity_for_lease_probe(
+    state: &AppState,
+    device_id: &str,
+    port_path: &str,
+    identity: Value,
+) -> Result<(), HttpError> {
+    if let Err(error) = update_device_identity(state, device_id, identity) {
+        stop_serial_owner(state, port_path);
+        return Err(error);
+    }
     Ok(())
 }
 
@@ -4232,6 +4252,57 @@ mod tests {
             guard.devices.get("mock-loadlynx-devd").unwrap().connection,
             ConnectionState::Disconnected
         );
+    }
+
+    #[tokio::test]
+    async fn lease_conflict_uses_removed_device_port_snapshot() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.devices.remove("mock-loadlynx-devd");
+            guard.leases.insert(
+                "removed-device-lease".to_string(),
+                WebLease {
+                    lease_id: "removed-device-lease".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: None,
+                    port_path: Some("mock://esp32s3".to_string()),
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+        }
+
+        let err =
+            validate_port_not_leased_by_other_device(&state, "other-device", "mock://esp32s3")
+                .unwrap_err();
+        assert_eq!(err.0.code, "device_port_in_use");
+    }
+
+    #[tokio::test]
+    async fn prelease_identity_conflict_stops_serial_owner() {
+        let state = AppState::new(PathBuf::from("."));
+        let port_path = "/dev/cu.usbmodem-prelease-conflict";
+        let sender = serial_owner_sender(&state, port_path).expect("serial owner");
+        drop(sender);
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let mut other = guard.devices.get("mock-loadlynx-devd").unwrap().clone();
+            other.id = "other-device".to_string();
+            other.identity = Some(json!({"device_id": "firmware-device-1"}));
+            guard.devices.insert(other.id.clone(), other);
+        }
+
+        let err = update_device_identity_for_lease_probe(
+            &state,
+            "mock-loadlynx-devd",
+            port_path,
+            json!({"device_id": "firmware-device-1"}),
+        )
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "device_identity_conflict");
+        let registry = state.serial.lock().expect("serial registry lock");
+        assert!(!registry.owners.contains_key(&canonical_port_key(port_path)));
     }
 
     #[tokio::test]
