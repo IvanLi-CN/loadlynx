@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   buildReleaseComment,
   bumpVersion,
+  releaseMergeCommitSha,
   resolveExplicitTag,
   resolveVersion,
   validateLabels,
@@ -112,6 +113,11 @@ assert.deepEqual(resolveExplicitTag("v0.1.1", { baseVersion: "0.1.0" }), {
   prerelease: false,
   should_release: true,
 });
+assert.equal(
+  releaseMergeCommitSha({ merge_commit_sha: "source-pr-merge" }, "workflow-head"),
+  "source-pr-merge",
+);
+assert.equal(releaseMergeCommitSha({}, "workflow-head"), "workflow-head");
 
 const comment = buildReleaseComment(
   {
