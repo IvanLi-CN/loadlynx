@@ -1254,7 +1254,16 @@ async fn request_usb_identity(
     let mut last_error = None;
     for attempt in 0..2 {
         let (request_id, probe) =
-            serial_owner_jsonl_request(state, device_id, port_path, "get_identity", None).await?;
+            match serial_owner_jsonl_request(state, device_id, port_path, "get_identity", None)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) if error.0.retryable && attempt == 0 => {
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
         let response = serial_response_for_request(&probe, &request_id)
             .or_else(|| infer_serial_response_from_text(&probe, &request_id));
 

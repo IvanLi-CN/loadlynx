@@ -316,9 +316,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .await;
                         let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
                         heartbeat.abort();
+                        let status = status?;
                         let _ =
                             remember_connected_usb(&hardware_id, &resolved.device, &resolved.devd);
-                        status?
+                        status
                     }
                     ResolvedHardware::Http { url } => {
                         let status = client
@@ -363,9 +364,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .await;
                 let _ = release_cli_lease(&client, &cli.devd, &lease.lease_id).await;
                 heartbeat.abort();
+                let status = status?;
                 let id = generated_usb_hardware_id(&device);
                 let _ = remember_connected_usb(&id, &device, &cli.devd);
-                status?
+                status
             } else {
                 return Err("status requires --hardware, --device, or --url".into());
             }
