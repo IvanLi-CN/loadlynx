@@ -378,26 +378,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             dry_run,
         } => {
             let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
-            let lease = create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
-            let heartbeat =
-                spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-                Ok(client
-                    .post(api_url(
-                        &resolved.devd,
-                        &format!("/api/v1/devices/{}/flash", resolved.device),
-                    )?)
-                    .json(&json!({"target": target.kind(), "artifact_id": artifact, "lease_id": lease.lease_id, "dry_run": dry_run}))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Value>()
-                    .await?)
-            }
-            .await;
-            let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
-            heartbeat.abort();
-            result?
+            post_usb_operation_with_optional_lease(
+                &client,
+                &resolved,
+                &format!("/api/v1/devices/{}/flash", resolved.device),
+                json!({"target": target.kind(), "artifact_id": artifact, "dry_run": dry_run}),
+                dry_run,
+            )
+            .await?
         }
         Command::Reset {
             target,
@@ -406,26 +394,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             dry_run,
         } => {
             let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
-            let lease = create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
-            let heartbeat =
-                spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-            let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-                Ok(client
-                    .post(api_url(
-                        &resolved.devd,
-                        &format!("/api/v1/devices/{}/reset", resolved.device),
-                    )?)
-                    .json(&json!({"target": target.kind(), "lease_id": lease.lease_id, "dry_run": dry_run}))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Value>()
-                    .await?)
-            }
-            .await;
-            let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
-            heartbeat.abort();
-            result?
+            post_usb_operation_with_optional_lease(
+                &client,
+                &resolved,
+                &format!("/api/v1/devices/{}/reset", resolved.device),
+                json!({"target": target.kind(), "dry_run": dry_run}),
+                dry_run,
+            )
+            .await?
         }
         Command::Monitor {
             target: _,
@@ -553,6 +529,51 @@ fn spawn_cli_lease_heartbeat(
             }
         }
     })
+}
+
+async fn post_usb_operation_with_optional_lease(
+    client: &Client,
+    resolved: &ResolvedUsbHardware,
+    path: &str,
+    mut payload: Value,
+    dry_run: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let lease = if dry_run {
+        None
+    } else {
+        Some(create_cli_lease(client, &resolved.devd, &resolved.device).await?)
+    };
+    let heartbeat = lease.as_ref().map(|lease| {
+        spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone())
+    });
+    if let Some(lease) = lease.as_ref()
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "lease_id".to_string(),
+            Value::String(lease.lease_id.clone()),
+        );
+    }
+
+    let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+        Ok(client
+            .post(api_url(&resolved.devd, path)?)
+            .json(&payload)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?)
+    }
+    .await;
+
+    if let Some(lease) = lease.as_ref() {
+        let _ = release_cli_lease(client, &resolved.devd, &lease.lease_id).await;
+    }
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.abort();
+    }
+    result
 }
 
 async fn run_monitor(
@@ -1153,6 +1174,60 @@ fn hardware_registry_schema_version() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, extract::State, http::StatusCode, routing::post};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone, Default)]
+    struct TestHttpState {
+        lease_creates: Arc<AtomicUsize>,
+        operation_payloads: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn spawn_test_http(state: TestHttpState) -> String {
+        async fn create_lease(State(state): State<TestHttpState>) -> axum::Json<Value> {
+            state.lease_creates.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000}))
+        }
+
+        async fn heartbeat_lease() -> axum::Json<Value> {
+            axum::Json(json!({"ok": true}))
+        }
+
+        async fn release_lease() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+
+        async fn operation(
+            State(state): State<TestHttpState>,
+            axum::Json(payload): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            state
+                .operation_payloads
+                .lock()
+                .expect("operation payloads lock")
+                .push(payload.clone());
+            axum::Json(json!({"ok": true, "payload": payload}))
+        }
+
+        let app = Router::new()
+            .route("/api/v1/serial/lease", post(create_lease))
+            .route(
+                "/api/v1/serial/lease/{lease_id}",
+                post(heartbeat_lease).delete(release_lease),
+            )
+            .route("/api/v1/devices/{device}/flash", post(operation))
+            .route("/api/v1/devices/{device}/reset", post(operation))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
 
     #[test]
     fn usb_port_set_args_accept_port_only() {
@@ -1229,6 +1304,73 @@ mod tests {
             Command::Reset { dry_run, .. } => assert!(!dry_run),
             _ => panic!("expected reset command"),
         }
+    }
+
+    #[tokio::test]
+    async fn dry_run_usb_firmware_operation_does_not_create_cli_lease() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            device: "digital-1".to_string(),
+            devd,
+        };
+
+        post_usb_operation_with_optional_lease(
+            &Client::new(),
+            &resolved,
+            "/api/v1/devices/digital-1/flash",
+            json!({"target": TargetKind::DigitalEsp32s3, "dry_run": true}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 0);
+        let payloads = state
+            .operation_payloads
+            .lock()
+            .expect("operation payloads lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("dry_run").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(payloads[0].get("lease_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn real_usb_firmware_operation_creates_cli_lease() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            device: "digital-1".to_string(),
+            devd,
+        };
+
+        post_usb_operation_with_optional_lease(
+            &Client::new(),
+            &resolved,
+            "/api/v1/devices/digital-1/reset",
+            json!({"target": TargetKind::DigitalEsp32s3, "dry_run": false}),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 1);
+        let payloads = state
+            .operation_payloads
+            .lock()
+            .expect("operation payloads lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("dry_run").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            payloads[0].get("lease_id").and_then(Value::as_str),
+            Some("lease-1")
+        );
     }
 
     #[test]
