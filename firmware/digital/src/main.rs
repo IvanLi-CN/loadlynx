@@ -1380,7 +1380,7 @@ async fn handle_usb_jsonl_request(
             write_usb_set_pd_policy_response(out, request_id, line, control, telemetry, eeprom)
                 .await
         }
-        "set_output_enabled" => {
+        "set_output_enabled" | "set_cc_target" => {
             write_usb_set_output_enabled_response(out, request_id, line, control, calibration).await
         }
         _ => write_usb_error_response(out, request_id, "UNKNOWN_OP", "unsupported op"),

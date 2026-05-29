@@ -116,7 +116,7 @@ Compatibility endpoints (`/api/v1/identity`, `/api/v1/status`, `/api/v1/network`
 ESP32-S3 USB CDC uses LF-delimited JSON frames. The bridge protocol should align with:
 
 - `hello`: protocol, capabilities, identity.
-- `request`: `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`.
+- `request`: `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`, `set_cc_target`.
 - `response` / `error`: API-compatible envelope with `request_id`.
 - `status`: periodic or requested status snapshot.
 - `log`: structured firmware log.

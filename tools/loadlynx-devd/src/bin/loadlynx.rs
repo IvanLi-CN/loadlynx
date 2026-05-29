@@ -101,7 +101,7 @@ enum OutputCommand {
         #[arg(long)]
         hardware: Option<String>,
         #[arg(long = "target-i-ma")]
-        target_i_ma: Option<i32>,
+        target_i_ma: Option<u32>,
         #[arg(long)]
         enable: bool,
         #[arg(long)]
@@ -612,7 +612,7 @@ async fn select_device_artifact(
         .await?)
 }
 
-fn output_set_body(enable: bool, target_i_ma: Option<i32>) -> Value {
+fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
     let mut body = serde_json::Map::new();
     body.insert("enable".to_string(), json!(enable));
     if let Some(target_i_ma) = target_i_ma {
@@ -1741,6 +1741,19 @@ mod tests {
             }
             _ => panic!("expected output set command"),
         }
+
+        assert!(
+            Cli::try_parse_from([
+                "loadlynx",
+                "output",
+                "set",
+                "--hardware",
+                "usb-digital-1",
+                "--target-i-ma=-1",
+                "--enable",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

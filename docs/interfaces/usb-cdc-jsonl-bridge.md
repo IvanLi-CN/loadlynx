@@ -30,7 +30,7 @@ LoadLynx digital firmware and `loadlynx-devd` use LF-delimited JSON frames on th
 
 ### `request`
 
-Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, and `set_output_enabled`.
+Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`, and `set_cc_target`.
 
 ```json
 {
@@ -40,7 +40,7 @@ Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy
 }
 ```
 
-`set_output_enabled` accepts `enable`. When `target_i_ma` is present, firmware applies the active preset as CC mode with that current target before enabling or disabling output:
+`set_output_enabled` accepts `enable`. `set_cc_target` is an alias for the same firmware handler. When `target_i_ma` is present, firmware applies the active preset as CC mode with that current target before enabling or disabling output:
 
 ```json
 {

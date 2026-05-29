@@ -362,7 +362,7 @@ struct CompatQuery {
 #[derive(Debug, Deserialize)]
 struct CcRequest {
     enable: bool,
-    target_i_ma: Option<i32>,
+    target_i_ma: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
