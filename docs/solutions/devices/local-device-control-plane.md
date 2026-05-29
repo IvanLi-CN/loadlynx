@@ -35,6 +35,7 @@ Use a local-first control plane:
 - `scan` only discovers candidates; it never connects or picks a device.
 - The owner explicitly selects a candidate before `bind`, `connect`, `lease`, `flash` or `reset`.
 - USB/Web writes require a per-device lease with heartbeat and TTL cleanup.
+- Treat lease and physical serialization as separate layers: leases authorize clients and identify ownership, while a per-port owner or queue serializes the actual USB/probe operations.
 - CLI hardware-changing commands print target evidence before acting.
 - Firmware artifacts are selected through a catalog and verified by SHA-256 before flashing.
 - Runtime identity must match `build_id`, profile, features and target chip before log decode can be trusted.
@@ -48,6 +49,11 @@ Use a local-first control plane:
 - Keep `mcu-agentd` or vendor tools as backend executors where useful, but do not expose their raw selector mutation commands through a Web UI.
 - Do not persist browser leases in localStorage. A refresh should require a new lease.
 - Do not let compatibility endpoints return arbitrary data when multiple devices are active; require `device_id` or `lease_id`.
+- Do not expose lease IDs as ordinary user CLI parameters. CLI tools should create, heartbeat and release leases internally, keeping the user workflow stable while still preserving daemon-side authorization.
+- Do not open a USB CDC port per HTTP request once multiple clients can talk to the daemon. Keep one daemon-owned reader/writer per physical port, generate unique request IDs, and reject mismatched responses instead of treating the latest frame as success.
+- For firmware transports that mix binary logs and JSONL on one USB channel, response recovery must be operation-scoped. Recover only from payloads observed after the matching transmit frame and only when they have the expected operation shape.
+- Safe-control CLIs must expose both sides of a state transition. If a command can enable a load, it must also provide an explicit disable command; absence of an enable flag must not silently mean disable.
+- Flash/reset tools that need the OS serial port directly must temporarily close or pause the daemon serial owner and return explicit busy/in-progress errors to concurrent same-port commands.
 - Treat mDNS/DNS-SD as convenience discovery. Always keep manual IP/hostname entry and bounded scan fallback.
 - For dual-MCU devices, represent board targets explicitly instead of flattening them into one generic "serial device".
 - Keep firmware catalog generation outside the daemon. devd should verify manifests and hashes, not invent release metadata.

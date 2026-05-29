@@ -7,6 +7,7 @@ use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     env, fs, io,
     path::{Path, PathBuf},
     time::{SystemTime, UNIX_EPOCH},
@@ -49,8 +50,8 @@ enum Command {
         hardware: Option<String>,
         #[arg(long)]
         artifact: Option<String>,
-        #[arg(long)]
-        lease_id: Option<String>,
+        #[arg(long = "manifest-path")]
+        manifest_path: Option<String>,
         #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
     },
@@ -60,8 +61,6 @@ enum Command {
         device: Option<String>,
         #[arg(long)]
         hardware: Option<String>,
-        #[arg(long)]
-        lease_id: Option<String>,
         #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
     },
@@ -71,14 +70,18 @@ enum Command {
         device: Option<String>,
         #[arg(long)]
         hardware: Option<String>,
-        #[arg(long)]
-        lease_id: Option<String>,
         #[arg(long, default_value_t = 200)]
         tail: usize,
+        #[arg(long, value_enum, default_value_t = MonitorFormat::Human)]
+        format: MonitorFormat,
     },
     Output {
         #[command(subcommand)]
         command: OutputCommand,
+    },
+    Pd {
+        #[command(subcommand)]
+        command: PdCommand,
     },
     UsbPort {
         #[command(subcommand)]
@@ -97,10 +100,32 @@ enum OutputCommand {
         url: Option<String>,
         #[arg(long)]
         hardware: Option<String>,
-        #[arg(long)]
-        lease_id: Option<String>,
+        #[arg(long = "target-i-ma")]
+        target_i_ma: Option<u32>,
         #[arg(long)]
         enable: bool,
+        #[arg(long)]
+        disable: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum PdCommand {
+    Set {
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long, value_enum)]
+        mode: Option<PdModeArg>,
+        #[arg(long = "object-pos")]
+        object_pos: Option<u8>,
+        #[arg(long = "target-mv")]
+        target_mv: Option<u32>,
+        #[arg(long = "i-req-ma")]
+        i_req_ma: Option<u32>,
+        #[arg(long = "allow-extended-voltage")]
+        allow_extended_voltage: Option<bool>,
     },
 }
 
@@ -151,6 +176,18 @@ enum BoardTarget {
     Analog,
 }
 
+#[derive(Debug, Clone, ValueEnum)]
+enum MonitorFormat {
+    Human,
+    Jsonl,
+}
+
+#[derive(Debug, Clone, ValueEnum)]
+enum PdModeArg {
+    Fixed,
+    Pps,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum SavedTransport {
@@ -180,6 +217,12 @@ struct HardwareRegistry {
     schema_version: u8,
     #[serde(default)]
     hardware: Vec<SavedHardware>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CliLease {
+    lease_id: String,
+    heartbeat_interval_ms: u64,
 }
 
 impl Default for HardwareRegistry {
@@ -285,16 +328,31 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             if let Some(hardware_id) = hardware {
                 match resolve_saved_hardware(&hardware_id, &cli.devd)? {
                     ResolvedHardware::Usb(resolved) => {
-                        let status = client
-                            .get(api_url(
-                                &resolved.devd,
-                                &format!("/api/v1/devices/{}/status", resolved.device),
-                            )?)
-                            .send()
-                            .await?
-                            .error_for_status()?
-                            .json::<Value>()
-                            .await?;
+                        let lease =
+                            create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
+                        let heartbeat = spawn_cli_lease_heartbeat(
+                            client.clone(),
+                            resolved.devd.clone(),
+                            lease.clone(),
+                        );
+                        let mut url = api_url(&resolved.devd, "/api/v1/status")?;
+                        url.query_pairs_mut()
+                            .append_pair("device_id", &resolved.device)
+                            .append_pair("lease_id", &lease.lease_id);
+                        let status: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
+                            async {
+                                Ok(client
+                                    .get(url)
+                                    .send()
+                                    .await?
+                                    .error_for_status()?
+                                    .json::<Value>()
+                                    .await?)
+                            }
+                            .await;
+                        let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
+                        heartbeat.abort();
+                        let status = status?;
                         let _ =
                             remember_connected_usb(&hardware_id, &resolved.device, &resolved.devd);
                         status
@@ -323,16 +381,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let _ = remember_connected_http(&id, &url);
                 status
             } else if let Some(device) = device {
-                let status = client
-                    .get(api_url(
-                        &cli.devd,
-                        &format!("/api/v1/devices/{device}/status"),
-                    )?)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Value>()
-                    .await?;
+                let lease = create_cli_lease(&client, &cli.devd, &device).await?;
+                let heartbeat =
+                    spawn_cli_lease_heartbeat(client.clone(), cli.devd.clone(), lease.clone());
+                let mut url = api_url(&cli.devd, "/api/v1/status")?;
+                url.query_pairs_mut()
+                    .append_pair("device_id", &device)
+                    .append_pair("lease_id", &lease.lease_id);
+                let status: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+                    Ok(client
+                        .get(url)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<Value>()
+                        .await?)
+                }
+                .await;
+                let _ = release_cli_lease(&client, &cli.devd, &lease.lease_id).await;
+                heartbeat.abort();
+                let status = status?;
                 let id = generated_usb_hardware_id(&device);
                 let _ = remember_connected_usb(&id, &device, &cli.devd);
                 status
@@ -345,97 +413,398 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             device,
             hardware,
             artifact,
-            lease_id,
+            manifest_path,
             dry_run,
         } => {
             let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
-            client
-            .post(api_url(&resolved.devd, &format!("/api/v1/devices/{}/flash", resolved.device))?)
-            .json(
-                &json!({"target": target.kind(), "artifact_id": artifact, "lease_id": lease_id, "dry_run": dry_run}),
+            if manifest_path.is_some() {
+                select_device_artifact(&client, &resolved, manifest_path.clone(), artifact.clone())
+                    .await?;
+            }
+            post_usb_operation_with_optional_lease(
+                &client,
+                &resolved,
+                &format!("/api/v1/devices/{}/flash", resolved.device),
+                json!({"target": target.kind(), "artifact_id": artifact, "dry_run": dry_run}),
+                dry_run,
             )
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?
+            .await?
         }
         Command::Reset {
             target,
             device,
             hardware,
-            lease_id,
             dry_run,
         } => {
             let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
-            client
-                .post(api_url(
-                    &resolved.devd,
-                    &format!("/api/v1/devices/{}/reset", resolved.device),
-                )?)
-                .json(&json!({"target": target.kind(), "lease_id": lease_id, "dry_run": dry_run}))
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?
+            post_usb_operation_with_optional_lease(
+                &client,
+                &resolved,
+                &format!("/api/v1/devices/{}/reset", resolved.device),
+                json!({"target": target.kind(), "dry_run": dry_run}),
+                dry_run,
+            )
+            .await?
         }
         Command::Monitor {
             target: _,
             device,
             hardware,
-            lease_id,
             tail,
+            format,
         } => {
             let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
-            let mut url = api_url(
-                &resolved.devd,
-                &format!(
-                    "/api/v1/devices/{}/session?logs_limit={tail}&trace_limit={}",
-                    resolved.device,
-                    tail * 2
-                ),
-            )?;
-            if let Some(lease_id) = lease_id {
-                url.query_pairs_mut().append_pair("lease_id", &lease_id);
-            }
-            client
-                .get(url)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?
+            run_monitor(&client, resolved, tail, format).await?
         }
         Command::Output { command } => match command {
             OutputCommand::Set {
                 url,
                 hardware,
-                lease_id,
+                target_i_ma,
                 enable,
+                disable,
             } => {
-                let mut output_url = resolve_output_url(url, hardware, &cli.devd)?;
-                if let Some(lease_id) = lease_id {
-                    output_url
-                        .query_pairs_mut()
-                        .append_pair("lease_id", &lease_id);
+                let enable = resolve_output_enable(enable, disable)?;
+                ensure_one_output_selector(url.as_ref(), hardware.as_ref())?;
+                let body = output_set_body(enable, target_i_ma);
+                if let Some(hardware_id) = hardware {
+                    match resolve_saved_hardware(&hardware_id, &cli.devd)? {
+                        ResolvedHardware::Http { url } => {
+                            client
+                                .post(api_url(&url, "/api/v1/cc")?)
+                                .json(&body)
+                                .send()
+                                .await?
+                                .error_for_status()?
+                                .json::<Value>()
+                                .await?
+                        }
+                        ResolvedHardware::Usb(resolved) => {
+                            let lease =
+                                create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
+                            let heartbeat = spawn_cli_lease_heartbeat(
+                                client.clone(),
+                                resolved.devd.clone(),
+                                lease.clone(),
+                            );
+                            let mut output_url = api_url(&resolved.devd, "/api/v1/cc")?;
+                            output_url
+                                .query_pairs_mut()
+                                .append_pair("device_id", &resolved.device)
+                                .append_pair("lease_id", &lease.lease_id);
+                            let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
+                                async {
+                                    Ok(client
+                                        .post(output_url)
+                                        .json(&body)
+                                        .send()
+                                        .await?
+                                        .error_for_status()?
+                                        .json::<Value>()
+                                        .await?)
+                                }
+                                .await;
+                            let _ =
+                                release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
+                            heartbeat.abort();
+                            result?
+                        }
+                    }
+                } else if let Some(url) = url {
+                    client
+                        .post(api_url(&url, "/api/v1/cc")?)
+                        .json(&body)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<Value>()
+                        .await?
+                } else {
+                    return Err("output set requires --hardware or --url".into());
                 }
-                client
-                    .post(output_url)
-                    .json(&json!({"enable": enable}))
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Value>()
-                    .await?
+            }
+        },
+        Command::Pd { command } => match command {
+            PdCommand::Set {
+                device,
+                hardware,
+                mode,
+                object_pos,
+                target_mv,
+                i_req_ma,
+                allow_extended_voltage,
+            } => {
+                let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
+                let mut body = serde_json::Map::new();
+                if let Some(mode) = mode {
+                    body.insert(
+                        "mode".to_string(),
+                        Value::String(
+                            match mode {
+                                PdModeArg::Fixed => "fixed",
+                                PdModeArg::Pps => "pps",
+                            }
+                            .to_string(),
+                        ),
+                    );
+                }
+                if let Some(object_pos) = object_pos {
+                    body.insert("object_pos".to_string(), json!(object_pos));
+                }
+                if let Some(target_mv) = target_mv {
+                    body.insert("target_mv".to_string(), json!(target_mv));
+                }
+                if let Some(i_req_ma) = i_req_ma {
+                    body.insert("i_req_ma".to_string(), json!(i_req_ma));
+                }
+                if let Some(allow_extended_voltage) = allow_extended_voltage {
+                    body.insert(
+                        "allow_extended_voltage".to_string(),
+                        json!(allow_extended_voltage),
+                    );
+                }
+                let lease = create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
+                let heartbeat =
+                    spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+                let mut pd_url = api_url(&resolved.devd, "/api/v1/pd")?;
+                pd_url
+                    .query_pairs_mut()
+                    .append_pair("device_id", &resolved.device)
+                    .append_pair("lease_id", &lease.lease_id);
+                let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+                    Ok(client
+                        .post(pd_url)
+                        .json(&Value::Object(body))
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<Value>()
+                        .await?)
+                }
+                .await;
+                let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
+                heartbeat.abort();
+                result?
             }
         },
     };
 
-    if cli.json {
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+    println!("{}", serde_json::to_string_pretty(&payload)?);
+    Ok(())
+}
+
+async fn select_device_artifact(
+    client: &Client,
+    resolved: &ResolvedUsbHardware,
+    manifest_path: Option<String>,
+    artifact_id: Option<String>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(client
+        .post(api_url(
+            &resolved.devd,
+            &format!("/api/v1/devices/{}/artifact", resolved.device),
+        )?)
+        .json(&json!({"manifest_path": manifest_path, "artifact_id": artifact_id}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<Value>()
+        .await?)
+}
+
+fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
+    let mut body = serde_json::Map::new();
+    body.insert("enable".to_string(), json!(enable));
+    if let Some(target_i_ma) = target_i_ma {
+        body.insert("target_i_ma".to_string(), json!(target_i_ma));
+    }
+    Value::Object(body)
+}
+
+fn resolve_output_enable(
+    enable: bool,
+    disable: bool,
+) -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+    match (enable, disable) {
+        (true, false) => Ok(true),
+        (false, true) => Ok(false),
+        (true, true) => Err("output set accepts only one of --enable or --disable".into()),
+        (false, false) => Err("output set requires --enable or --disable".into()),
+    }
+}
+
+async fn create_cli_lease(
+    client: &Client,
+    devd: &str,
+    device: &str,
+) -> Result<CliLease, Box<dyn std::error::Error + Send + Sync>> {
+    Ok(client
+        .post(api_url(devd, "/api/v1/serial/lease")?)
+        .json(&json!({"device_id": device}))
+        .send()
+        .await?
+        .error_for_status()?
+        .json::<CliLease>()
+        .await?)
+}
+
+async fn release_cli_lease(
+    client: &Client,
+    devd: &str,
+    lease_id: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _ = client
+        .delete(api_url(devd, &format!("/api/v1/serial/lease/{lease_id}"))?)
+        .send()
+        .await?;
+    Ok(())
+}
+
+fn spawn_cli_lease_heartbeat(
+    client: Client,
+    devd: String,
+    lease: CliLease,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let interval_ms = (lease.heartbeat_interval_ms / 2).max(500);
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
+        loop {
+            interval.tick().await;
+            let Ok(url) = api_url(&devd, &format!("/api/v1/serial/lease/{}", lease.lease_id))
+            else {
+                break;
+            };
+            if client.post(url).send().await.is_err() {
+                break;
+            }
+        }
+    })
+}
+
+async fn post_usb_operation_with_optional_lease(
+    client: &Client,
+    resolved: &ResolvedUsbHardware,
+    path: &str,
+    mut payload: Value,
+    dry_run: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let lease = if dry_run {
+        None
     } else {
-        println!("{}", serde_json::to_string_pretty(&payload)?);
+        Some(create_cli_lease(client, &resolved.devd, &resolved.device).await?)
+    };
+    let heartbeat = lease.as_ref().map(|lease| {
+        spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone())
+    });
+    if let Some(lease) = lease.as_ref()
+        && let Some(object) = payload.as_object_mut()
+    {
+        object.insert(
+            "lease_id".to_string(),
+            Value::String(lease.lease_id.clone()),
+        );
+    }
+
+    let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+        Ok(client
+            .post(api_url(&resolved.devd, path)?)
+            .json(&payload)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?)
+    }
+    .await;
+
+    if let Some(lease) = lease.as_ref() {
+        let _ = release_cli_lease(client, &resolved.devd, &lease.lease_id).await;
+    }
+    if let Some(heartbeat) = heartbeat {
+        heartbeat.abort();
+    }
+    result
+}
+
+async fn run_monitor(
+    client: &Client,
+    resolved: ResolvedUsbHardware,
+    tail: usize,
+    format: MonitorFormat,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let lease = create_cli_lease(client, &resolved.devd, &resolved.device).await?;
+    let _heartbeat =
+        spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let mut seen = HashSet::new();
+    loop {
+        let mut url = api_url(
+            &resolved.devd,
+            &format!(
+                "/api/v1/devices/{}/session?logs_limit={tail}&trace_limit={}",
+                resolved.device,
+                tail * 2
+            ),
+        )?;
+        url.query_pairs_mut()
+            .append_pair("lease_id", &lease.lease_id);
+        let session = client
+            .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json::<Value>()
+            .await?;
+        print_session_delta(&session, &mut seen, &format)?;
+        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+    }
+}
+
+fn print_session_delta(
+    session: &Value,
+    seen: &mut HashSet<String>,
+    format: &MonitorFormat,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for kind in ["logs", "trace"] {
+        let Some(items) = session.get(kind).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            let id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| serde_json::to_string(item).unwrap_or_default());
+            if !seen.insert(format!("{kind}:{id}")) {
+                continue;
+            }
+            match format {
+                MonitorFormat::Jsonl => println!(
+                    "{}",
+                    serde_json::to_string(&json!({"kind": kind, "item": item}))?
+                ),
+                MonitorFormat::Human => {
+                    if kind == "logs" {
+                        println!(
+                            "{} [{}] {}: {}",
+                            item.get("timestamp").and_then(Value::as_str).unwrap_or("-"),
+                            item.get("level").and_then(Value::as_str).unwrap_or("info"),
+                            item.get("target").and_then(Value::as_str).unwrap_or("devd"),
+                            item.get("message").and_then(Value::as_str).unwrap_or("")
+                        );
+                    } else {
+                        println!(
+                            "{} [{}] {} {}",
+                            item.get("timestamp").and_then(Value::as_str).unwrap_or("-"),
+                            item.get("direction").and_then(Value::as_str).unwrap_or("?"),
+                            item.get("summary")
+                                .and_then(Value::as_str)
+                                .unwrap_or("frame"),
+                            serde_json::to_string(item.get("payload").unwrap_or(&Value::Null))?
+                        );
+                    }
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -662,31 +1031,6 @@ fn resolve_usb_target(
     }
 }
 
-fn resolve_output_url(
-    url: Option<String>,
-    hardware: Option<String>,
-    default_devd: &str,
-) -> Result<Url, Box<dyn std::error::Error + Send + Sync>> {
-    if url.is_some() && hardware.is_some() {
-        return Err("output set accepts only one of --hardware or --url".into());
-    }
-    if let Some(hardware_id) = hardware {
-        match resolve_saved_hardware(&hardware_id, default_devd)? {
-            ResolvedHardware::Http { url } => api_url(&url, "/api/v1/cc"),
-            ResolvedHardware::Usb(resolved) => {
-                let mut url = api_url(&resolved.devd, "/api/v1/cc")?;
-                url.query_pairs_mut()
-                    .append_pair("device_id", &resolved.device);
-                Ok(url)
-            }
-        }
-    } else if let Some(url) = url {
-        api_url(&url, "/api/v1/cc")
-    } else {
-        Err("output set requires --hardware or --url".into())
-    }
-}
-
 fn ensure_one_status_selector(
     url: Option<&String>,
     device: Option<&String>,
@@ -700,6 +1044,17 @@ fn ensure_one_status_selector(
         0 => Err("status requires --hardware, --device, or --url".into()),
         1 => Ok(()),
         _ => Err("status accepts only one of --hardware, --device, or --url".into()),
+    }
+}
+
+fn ensure_one_output_selector(
+    url: Option<&String>,
+    hardware: Option<&String>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match (url.is_some(), hardware.is_some()) {
+        (true, true) => Err("output set accepts only one of --hardware or --url".into()),
+        (false, false) => Err("output set requires --hardware or --url".into()),
+        _ => Ok(()),
     }
 }
 
@@ -969,6 +1324,60 @@ fn hardware_registry_schema_version() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::{Router, extract::State, http::StatusCode, routing::post};
+    use std::sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering},
+    };
+
+    #[derive(Clone, Default)]
+    struct TestHttpState {
+        lease_creates: Arc<AtomicUsize>,
+        operation_payloads: Arc<Mutex<Vec<Value>>>,
+    }
+
+    async fn spawn_test_http(state: TestHttpState) -> String {
+        async fn create_lease(State(state): State<TestHttpState>) -> axum::Json<Value> {
+            state.lease_creates.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000}))
+        }
+
+        async fn heartbeat_lease() -> axum::Json<Value> {
+            axum::Json(json!({"ok": true}))
+        }
+
+        async fn release_lease() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+
+        async fn operation(
+            State(state): State<TestHttpState>,
+            axum::Json(payload): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            state
+                .operation_payloads
+                .lock()
+                .expect("operation payloads lock")
+                .push(payload.clone());
+            axum::Json(json!({"ok": true, "payload": payload}))
+        }
+
+        let app = Router::new()
+            .route("/api/v1/serial/lease", post(create_lease))
+            .route(
+                "/api/v1/serial/lease/{lease_id}",
+                post(heartbeat_lease).delete(release_lease),
+            )
+            .route("/api/v1/devices/{device}/flash", post(operation))
+            .route("/api/v1/devices/{device}/reset", post(operation))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
 
     #[test]
     fn usb_port_set_args_accept_port_only() {
@@ -1047,21 +1456,101 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn dry_run_usb_firmware_operation_does_not_create_cli_lease() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            device: "digital-1".to_string(),
+            devd,
+        };
+
+        post_usb_operation_with_optional_lease(
+            &Client::new(),
+            &resolved,
+            "/api/v1/devices/digital-1/flash",
+            json!({"target": TargetKind::DigitalEsp32s3, "dry_run": true}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 0);
+        let payloads = state
+            .operation_payloads
+            .lock()
+            .expect("operation payloads lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("dry_run").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(payloads[0].get("lease_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn real_usb_firmware_operation_creates_cli_lease() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            device: "digital-1".to_string(),
+            devd,
+        };
+
+        post_usb_operation_with_optional_lease(
+            &Client::new(),
+            &resolved,
+            "/api/v1/devices/digital-1/reset",
+            json!({"target": TargetKind::DigitalEsp32s3, "dry_run": false}),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 1);
+        let payloads = state
+            .operation_payloads
+            .lock()
+            .expect("operation payloads lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("dry_run").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            payloads[0].get("lease_id").and_then(Value::as_str),
+            Some("lease-1")
+        );
+    }
+
     #[test]
-    fn monitor_accepts_lease_id() {
+    fn monitor_rejects_lease_id_and_accepts_format() {
+        assert!(
+            Cli::try_parse_from([
+                "loadlynx",
+                "monitor",
+                "--device",
+                "digital-1",
+                "--lease-id",
+                "lease-1",
+                "digital",
+            ])
+            .is_err()
+        );
+
         let cli = Cli::try_parse_from([
             "loadlynx",
             "monitor",
             "--device",
             "digital-1",
-            "--lease-id",
-            "lease-1",
+            "--format",
+            "jsonl",
             "digital",
         ])
         .unwrap();
         match cli.command {
-            Command::Monitor { lease_id, tail, .. } => {
-                assert_eq!(lease_id.as_deref(), Some("lease-1"));
+            Command::Monitor { format, tail, .. } => {
+                assert!(matches!(format, MonitorFormat::Jsonl));
                 assert_eq!(tail, 200);
             }
             _ => panic!("expected monitor command"),
@@ -1226,6 +1715,53 @@ mod tests {
             } => {}
             _ => panic!("expected hardware recent command"),
         }
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "output",
+            "set",
+            "--hardware",
+            "usb-digital-1",
+            "--disable",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Output {
+                command:
+                    OutputCommand::Set {
+                        hardware,
+                        enable,
+                        disable,
+                        ..
+                    },
+            } => {
+                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+                assert!(!enable);
+                assert!(disable);
+            }
+            _ => panic!("expected output set command"),
+        }
+
+        assert!(
+            Cli::try_parse_from([
+                "loadlynx",
+                "output",
+                "set",
+                "--hardware",
+                "usb-digital-1",
+                "--target-i-ma=-1",
+                "--enable",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn output_set_requires_exactly_one_enable_state() {
+        assert_eq!(resolve_output_enable(true, false).unwrap(), true);
+        assert_eq!(resolve_output_enable(false, true).unwrap(), false);
+        assert!(resolve_output_enable(true, true).is_err());
+        assert!(resolve_output_enable(false, false).is_err());
     }
 
     #[test]
@@ -1353,10 +1889,9 @@ mod tests {
         .unwrap_err();
         assert!(usb_err.to_string().contains("only one"));
 
-        let output_err = resolve_output_url(
-            Some("http://loadlynx.local".to_string()),
-            Some("bench".to_string()),
-            "http://127.0.0.1:30180",
+        let output_err = ensure_one_output_selector(
+            Some(&"http://loadlynx.local".to_string()),
+            Some(&"bench".to_string()),
         )
         .unwrap_err();
         assert!(output_err.to_string().contains("only one"));
