@@ -138,6 +138,7 @@ struct WebLease {
     lease_id: String,
     device_id: String,
     identity_device_id: Option<String>,
+    port_path: Option<String>,
     expires_at: Instant,
 }
 
@@ -917,7 +918,8 @@ async fn create_lease(
             .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
     }
     let _ = connect_device(State(state.clone()), Path(input.device_id.clone()), None).await?;
-    if let Some(port_path) = device_digital_port(&state, &input.device_id) {
+    let lease_port_path = device_digital_port(&state, &input.device_id);
+    if let Some(port_path) = lease_port_path.as_deref() {
         if !port_path.starts_with("mock://")
             && read_default_digital_usb_port(&state.repo_root)
                 .as_deref()
@@ -928,9 +930,9 @@ async fn create_lease(
                 "USB lease requires the selected port to match the approved default digital USB port",
             ));
         }
-        validate_port_not_leased_by_other_device(&state, &input.device_id, &port_path)?;
+        validate_port_not_leased_by_other_device(&state, &input.device_id, port_path)?;
         if is_default_or_scanned_usb_source(&state, &input.device_id) {
-            match request_usb_identity(&state, &input.device_id, &port_path).await {
+            match request_usb_identity(&state, &input.device_id, port_path).await {
                 Ok(identity) => update_device_identity(&state, &input.device_id, identity)?,
                 Err(error) if port_path.starts_with("mock://") => return Err(error),
                 Err(error) => {
@@ -966,6 +968,7 @@ async fn create_lease(
         lease_id: lease_id.clone(),
         device_id: input.device_id.clone(),
         identity_device_id,
+        port_path: lease_port_path,
         expires_at: Instant::now() + Duration::from_millis(WEB_LEASE_TTL_MS),
     };
     state
@@ -1777,7 +1780,10 @@ fn release_lease_inner(state: &AppState, lease_id: &str, reason: &str) -> bool {
     let Some(lease) = lease else {
         return false;
     };
-    let port_path = device_digital_port(state, &lease.device_id);
+    let port_path = lease
+        .port_path
+        .clone()
+        .or_else(|| device_digital_port(state, &lease.device_id));
     let should_disconnect = {
         let guard = state.inner.lock().expect("state lock");
         !guard
@@ -4158,6 +4164,7 @@ mod tests {
                     lease_id: "lease-1".to_string(),
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
+                    port_path: Some("mock://digital".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
             );
@@ -4167,6 +4174,7 @@ mod tests {
                     lease_id: "lease-2".to_string(),
                     device_id: "mock-loadlynx-devd-2".to_string(),
                     identity_device_id: None,
+                    port_path: Some("mock://digital-2".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
             );
@@ -4349,6 +4357,7 @@ mod tests {
                     lease_id: "expired".to_string(),
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
+                    port_path: Some("mock://digital".to_string()),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
             );
@@ -4361,6 +4370,33 @@ mod tests {
             guard.devices.get("mock-loadlynx-devd").unwrap().connection,
             ConnectionState::Disconnected
         );
+    }
+
+    #[tokio::test]
+    async fn expired_lease_stops_serial_owner_after_device_removed() {
+        let state = AppState::new(PathBuf::from("."));
+        let port_path = "mock://removed-device";
+        let sender = serial_owner_sender(&state, port_path);
+        drop(sender);
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.devices.remove("mock-loadlynx-devd");
+            guard.leases.insert(
+                "expired".to_string(),
+                WebLease {
+                    lease_id: "expired".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: None,
+                    port_path: Some(port_path.to_string()),
+                    expires_at: Instant::now() - Duration::from_secs(1),
+                },
+            );
+        }
+
+        cleanup_expired_leases(&state);
+
+        let registry = state.serial.lock().expect("serial registry lock");
+        assert!(!registry.owners.contains_key(&canonical_port_key(port_path)));
     }
 
     #[tokio::test]
