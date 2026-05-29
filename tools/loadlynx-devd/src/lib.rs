@@ -917,7 +917,6 @@ async fn create_lease(
             .get(&input.device_id)
             .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
     }
-    let _ = connect_device(State(state.clone()), Path(input.device_id.clone()), None).await?;
     let lease_port_path = device_digital_port(&state, &input.device_id);
     if let Some(port_path) = lease_port_path.as_deref() {
         if !port_path.starts_with("mock://")
@@ -952,6 +951,7 @@ async fn create_lease(
             }
         }
     }
+    let _ = connect_device(State(state.clone()), Path(input.device_id.clone()), None).await?;
 
     let lease_id = next_id();
     let identity_device_id = {
@@ -4182,6 +4182,43 @@ mod tests {
             let err = select_compat_device(&guard, None, None).unwrap_err();
             assert_eq!(err.0.code, "device_selection_required");
         }
+    }
+
+    #[tokio::test]
+    async fn failed_lease_validation_does_not_connect_device() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let mut other = guard.devices.get("mock-loadlynx-devd").unwrap().clone();
+            other.id = "other-device".to_string();
+            guard.devices.insert(other.id.clone(), other);
+            guard.leases.insert(
+                "other-lease".to_string(),
+                WebLease {
+                    lease_id: "other-lease".to_string(),
+                    device_id: "other-device".to_string(),
+                    identity_device_id: None,
+                    port_path: Some("mock://esp32s3".to_string()),
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+        }
+
+        let err = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "device_port_in_use");
+        let guard = state.inner.lock().expect("state lock");
+        assert_eq!(
+            guard.devices.get("mock-loadlynx-devd").unwrap().connection,
+            ConnectionState::Disconnected
+        );
     }
 
     #[tokio::test]
