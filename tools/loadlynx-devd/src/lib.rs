@@ -2720,24 +2720,21 @@ fn record_serial_protocol_probe(
                 );
             }
             for event in probe.frames {
+                let request_id = event.frame.get("request_id").and_then(Value::as_str);
                 if event.direction == "rx"
                     && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
-                    && event
-                        .frame
-                        .get("request_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| id == "devd-get-identity")
+                    && request_id
+                        .is_some_and(|id| serial_request_id_matches_op(id, "devd-get-identity"))
                     && let Some(data) = event.frame.get("data").cloned()
                 {
                     device.identity = Some(data);
                     apply_artifact_match(device, selected_artifact.as_ref());
                 } else if event.direction == "rx"
                     && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
-                    && event
-                        .frame
-                        .get("request_id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| id == "devd-get-pd" || id == "devd-set-pd-policy")
+                    && request_id.is_some_and(|id| {
+                        serial_request_id_matches_op(id, "devd-get-pd")
+                            || serial_request_id_matches_op(id, "devd-set-pd-policy")
+                    })
                     && let Some(data) = event.frame.get("data").cloned()
                 {
                     device.usb_pd_cache = Some(data);
@@ -3113,6 +3110,13 @@ fn serial_probe_has_mismatched_response(probe: &SerialProtocolProbe, request_id:
                 .and_then(Value::as_str)
                 .is_some_and(|id| id != request_id)
     })
+}
+
+fn serial_request_id_matches_op(request_id: &str, legacy_id: &str) -> bool {
+    request_id == legacy_id
+        || request_id
+            .strip_prefix(legacy_id)
+            .is_some_and(|suffix| suffix.starts_with('-'))
 }
 
 fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
@@ -4265,6 +4269,38 @@ mod tests {
             &probe,
             "wanted-request"
         ));
+    }
+
+    #[tokio::test]
+    async fn generated_pd_request_ids_refresh_pd_cache() {
+        let state = AppState::new(PathBuf::from("."));
+        record_serial_protocol_probe(
+            &state,
+            "mock-loadlynx-devd",
+            "mock://esp32s3",
+            "USB PD GET completed",
+            SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "type": "response",
+                        "request_id": "devd-get-pd-123456",
+                        "ok": true,
+                        "data": {"attached": true}
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            },
+        );
+
+        let guard = state.inner.lock().expect("state lock");
+        let cached = guard
+            .devices
+            .get("mock-loadlynx-devd")
+            .and_then(|device| device.usb_pd_cache.as_ref())
+            .unwrap();
+        assert_eq!(cached["attached"], true);
     }
 
     #[tokio::test]
