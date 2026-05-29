@@ -122,7 +122,7 @@ ESP32-S3 USB CDC uses LF-delimited JSON frames. The bridge protocol should align
 - `log`: structured firmware log.
 - `wifi_config`: `op=set|clear`, with PSK redacted from traces and never echoed.
 
-The daemon owns each USB CDC port through a per-port serial owner while any lease for that port is active. HTTP commands enqueue JSONL requests through that owner, devd generates a unique `request_id` per operation, and only matching responses may satisfy the request. Mismatched responses are trace evidence, not success. The owner continuously reads unsolicited monitor frames and publishes them through bounded session/event state.
+The daemon owns each USB CDC port through a per-port serial owner while any lease for that port is active. HTTP commands enqueue JSONL requests through that owner, devd generates a unique `request_id` per operation, and only matching responses may satisfy the request. Mismatched responses are trace evidence, not success. The owner continuously reads unsolicited monitor frames and publishes them through bounded session/event state. Serial open or I/O failures must be retryable per command; a transient failure must not poison the owner until the lease is released.
 
 Flash/reset operations that need vendor tools such as `espflash --port` must pause and close the per-port serial owner before running. During that exclusive window, JSONL status/control/PD requests for the same port must either wait behind the owner boundary or return a clear `operation_in_progress` / `device_busy` style error; they must never open the same serial port concurrently.
 

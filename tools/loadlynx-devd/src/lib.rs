@@ -2972,23 +2972,7 @@ fn serial_worker_loop(
     rx: std_mpsc::Receiver<SerialWorkerCommand>,
 ) {
     let port_key = canonical_port_key(&port_path);
-    let mut port = match serialport::new(&port_path, SERIAL_PROBE_BAUD)
-        .timeout(Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS))
-        .open()
-    {
-        Ok(port) => port,
-        Err(error) => {
-            while let Ok(command) = rx.recv() {
-                let _ = command.reply.send(Err(SerialWorkerError {
-                    code: "serial_open_failed",
-                    message: format!("{port_path}: {error}"),
-                    retryable: true,
-                }));
-            }
-            return;
-        }
-    };
-
+    let mut port = None;
     let mut idle_line_buf = Vec::new();
     let mut idle_frames = Vec::new();
     let mut idle_non_protocol_text = String::new();
@@ -2996,49 +2980,75 @@ fn serial_worker_loop(
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(command) => {
                 let request = command.request.clone();
-                let result = serial_jsonl_request_on_port(
-                    port.as_mut(),
+                if port.is_none() {
+                    match serialport::new(&port_path, SERIAL_PROBE_BAUD)
+                        .timeout(Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS))
+                        .open()
+                    {
+                        Ok(opened) => port = Some(opened),
+                        Err(error) => {
+                            let _ = command.reply.send(Err(SerialWorkerError {
+                                code: "serial_open_failed",
+                                message: format!("{port_path}: {error}"),
+                                retryable: true,
+                            }));
+                            continue;
+                        }
+                    }
+                }
+                let result = match serial_jsonl_request_on_port(
+                    port.as_mut().expect("serial port opened").as_mut(),
                     &request.request_id,
                     &request.op,
                     request.extra,
-                )
-                .map_err(|error| SerialWorkerError {
-                    code: "serial_request_failed",
-                    message: error.to_string(),
-                    retryable: true,
-                })
-                .and_then(|probe| {
-                    if serial_response_for_request(&probe, &request.request_id).is_some()
-                        || infer_serial_response_from_text(&probe, &request.request_id).is_some()
-                    {
-                        Ok(probe)
-                    } else {
-                        let code =
-                            if serial_probe_has_mismatched_response(&probe, &request.request_id) {
+                ) {
+                    Ok(probe) => {
+                        if serial_response_for_request(&probe, &request.request_id).is_some()
+                            || infer_serial_response_from_text(&probe, &request.request_id)
+                                .is_some()
+                        {
+                            Ok(probe)
+                        } else {
+                            let code = if serial_probe_has_mismatched_response(
+                                &probe,
+                                &request.request_id,
+                            ) {
                                 "serial_response_mismatch"
                             } else {
                                 "serial_response_timeout"
                             };
-                        record_serial_protocol_probe(
-                            &state,
-                            &request.device_id,
-                            &request.port_path,
-                            "USB request completed without matching response",
-                            probe,
-                        );
+                            record_serial_protocol_probe(
+                                &state,
+                                &request.device_id,
+                                &request.port_path,
+                                "USB request completed without matching response",
+                                probe,
+                            );
+                            Err(SerialWorkerError {
+                                code,
+                                message: format!(
+                                    "USB request {} did not receive a matching response",
+                                    request.request_id
+                                ),
+                                retryable: true,
+                            })
+                        }
+                    }
+                    Err(error) => {
+                        port = None;
                         Err(SerialWorkerError {
-                            code,
-                            message: format!(
-                                "USB request {} did not receive a matching response",
-                                request.request_id
-                            ),
+                            code: "serial_request_failed",
+                            message: error.to_string(),
                             retryable: true,
                         })
                     }
-                });
+                };
                 let _ = command.reply.send(result);
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                let Some(port) = port.as_mut() else {
+                    continue;
+                };
                 idle_frames.clear();
                 let mut idle_non_protocol_bytes = 0usize;
                 idle_non_protocol_text.clear();
