@@ -1063,7 +1063,7 @@ async fn serial_owner_jsonl_request(
         extra,
     };
     let (tx, rx) = oneshot::channel();
-    let sender = serial_owner_sender(state, port_path);
+    let sender = serial_owner_sender(state, port_path)?;
     sender
         .try_send(SerialWorkerCommand {
             request: command,
@@ -1114,11 +1114,17 @@ async fn serial_owner_jsonl_request(
 fn serial_owner_sender(
     state: &AppState,
     port_path: &str,
-) -> std_mpsc::SyncSender<SerialWorkerCommand> {
+) -> Result<std_mpsc::SyncSender<SerialWorkerCommand>, HttpError> {
     let port_key = canonical_port_key(port_path);
     let mut registry = state.serial.lock().expect("serial registry lock");
+    if let Some(reason) = registry.exclusive_ports.get(&port_key) {
+        return Err(HttpError::conflict(
+            "operation_in_progress",
+            format!("USB serial port is reserved for {reason}"),
+        ));
+    }
     if let Some(owner) = registry.owners.get(&port_key) {
-        return owner.tx.clone();
+        return Ok(owner.tx.clone());
     }
 
     let (tx, rx) = std_mpsc::sync_channel(SERIAL_COMMAND_QUEUE_LIMIT);
@@ -1141,7 +1147,7 @@ fn serial_owner_sender(
             join,
         },
     );
-    tx
+    Ok(tx)
 }
 
 fn stop_serial_owner(state: &AppState, port_path: &str) {
@@ -4420,7 +4426,7 @@ mod tests {
     async fn expired_lease_stops_serial_owner_after_device_removed() {
         let state = AppState::new(PathBuf::from("."));
         let port_path = "mock://removed-device";
-        let sender = serial_owner_sender(&state, port_path);
+        let sender = serial_owner_sender(&state, port_path).expect("serial owner");
         drop(sender);
         {
             let mut guard = state.inner.lock().expect("state lock");
@@ -4444,10 +4450,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn serial_owner_sender_rejects_exclusive_reservation() {
+        let state = AppState::new(PathBuf::from("."));
+        let port_path = "mock://exclusive-race";
+        let _exclusive =
+            reserve_serial_exclusive(&state, port_path, "digital firmware flash").unwrap();
+
+        match serial_owner_sender(&state, port_path) {
+            Ok(_) => panic!("exclusive reservation should reject serial owner creation"),
+            Err(error) => {
+                assert_eq!(error.0.code, "operation_in_progress");
+                assert_eq!(error.1, StatusCode::CONFLICT);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn releasing_one_removed_device_lease_keeps_owner_for_other_port_lease() {
         let state = AppState::new(PathBuf::from("."));
         let port_path = "mock://shared-removed-device";
-        let sender = serial_owner_sender(&state, port_path);
+        let sender = serial_owner_sender(&state, port_path).expect("serial owner");
         drop(sender);
         {
             let mut guard = state.inner.lock().expect("state lock");
