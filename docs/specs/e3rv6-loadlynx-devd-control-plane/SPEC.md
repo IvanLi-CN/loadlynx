@@ -71,7 +71,7 @@ LoadLynx devd 的顶层设备记录应允许把同一实体的多个连接面合
 - `analog_target`: STM32G431 candidate，包含 probe selector、probe serial、chip、artifact target、firmware identity 或 defmt ELF provenance。
 - `lan_endpoint`: `.local` hostname 或 IP base URL。
 - `connection_marks`: `lan`, `usb`, `digital_flash`, `analog_flash`, `uart_link`。
-- `lease`: 当前 USB/devd 独占控制租约。
+- `lease`: devd/Web/CLI 内部授权凭证；同一 device 可有多个有效 lease，但同一物理 USB port 在同一时刻只能归属一个已确认 device。
 
 ### devd HTTP API
 
@@ -97,7 +97,7 @@ LoadLynx devd 的顶层设备记录应允许把同一实体的多个连接面合
 - `GET /api/v1/serial/session`
 - `GET /api/v1/serial/events`
 
-Compatibility endpoints (`/api/v1/identity`, `/api/v1/status`, `/api/v1/network`) may exist only when a unique active lease or explicit `device_id/lease_id` selects the device; otherwise they return `device_selection_required`.
+Compatibility endpoints (`/api/v1/identity`, `/api/v1/status`, `/api/v1/network`) may exist only when an explicit `device_id/lease_id` or an unambiguous active lease selects the device; otherwise they return `device_selection_required`. User-facing CLI commands do not expose lease IDs; the CLI creates, heartbeats and releases devd leases internally.
 
 ### mDNS / LAN discovery
 
@@ -122,7 +122,9 @@ ESP32-S3 USB CDC uses LF-delimited JSON frames. The bridge protocol should align
 - `log`: structured firmware log.
 - `wifi_config`: `op=set|clear`, with PSK redacted from traces and never echoed.
 
-The daemon may use the same CDC channel for monitor and command frames, but must serialize writes through one owner and bounded request timeouts.
+The daemon owns each USB CDC port through a per-port serial owner while any lease for that port is active. HTTP commands enqueue JSONL requests through that owner, devd generates a unique `request_id` per operation, and only matching responses may satisfy the request. Mismatched responses are trace evidence, not success. The owner continuously reads unsolicited monitor frames and publishes them through bounded session/event state.
+
+Flash/reset operations that need vendor tools such as `espflash --port` must pause and close the per-port serial owner before running. During that exclusive window, JSONL status/control/PD requests for the same port must either wait behind the owner boundary or return a clear `operation_in_progress` / `device_busy` style error; they must never open the same serial port concurrently.
 
 ### 固件烧录
 
