@@ -3202,7 +3202,7 @@ fn serial_request_id_matches_op(request_id: &str, legacy_id: &str) -> bool {
 
 fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
     let text = &probe.non_protocol_text;
-    if request_id.starts_with("devd-output-")
+    if is_output_control_request_id(request_id)
         && text.contains(request_id)
         && text.contains("\"ok\":true")
     {
@@ -3214,6 +3214,11 @@ fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str
         }));
     }
     None
+}
+
+fn is_output_control_request_id(request_id: &str) -> bool {
+    request_id.starts_with("devd-output-")
+        || serial_request_id_matches_op(request_id, "devd-set-output-enabled")
 }
 
 fn sanitize_trace_text(text: &str) -> String {
@@ -4076,6 +4081,25 @@ mod tests {
             response.get("recovered_from_text").and_then(Value::as_bool),
             Some(true)
         );
+    }
+
+    #[test]
+    fn serial_response_inference_accepts_generated_output_ids() {
+        let request_id = "devd-set-output-enabled-123456";
+        let probe = SerialProtocolProbe {
+            frames: Vec::new(),
+            non_protocol_bytes: 96,
+            non_protocol_text: format!(
+                "noise {{\"type\":\"response\",\"request_id\":\"{request_id}\",\"ok\":true,"
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        assert_eq!(
+            response.get("request_id").and_then(Value::as_str),
+            Some(request_id)
+        );
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
