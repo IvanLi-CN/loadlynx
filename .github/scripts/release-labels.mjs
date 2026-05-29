@@ -152,6 +152,19 @@ export function resolveVersion(intent, { baseVersion, runNumber, sha, now }) {
   throw new Error(`Unsupported release channel: ${intent.channel}`);
 }
 
+export function resolveExplicitTag(releaseTag, { baseVersion } = {}) {
+  const tag = releaseTag.trim();
+  if (!tag) throw new Error("Explicit release tag cannot be empty");
+  const version = tag.startsWith("v") ? tag.slice(1) : tag;
+  return {
+    base_version: baseVersion ?? latestStableVersion(),
+    version,
+    tag,
+    prerelease: version.includes("-") || tag.startsWith("dev-"),
+    should_release: true,
+  };
+}
+
 function formatTimestamp(date) {
   const pad = (value) => `${value}`.padStart(2, "0");
   return `${date.getUTCFullYear()}${pad(date.getUTCMonth() + 1)}${pad(
@@ -292,12 +305,15 @@ async function resolveCommand(args) {
   const event = eventPath ? JSON.parse(readFileSync(eventPath, "utf8")) : {};
   const sha = args.sha ?? process.env.GITHUB_SHA;
   const runNumber = args["run-number"] ?? process.env.GITHUB_RUN_NUMBER ?? "0";
+  const releaseTag = args["release-tag"] ?? event.inputs?.release_tag ?? null;
   if (!sha) throw new Error("A commit sha is required");
 
   const prNumber = args["pr-number"] || event.inputs?.pr_number || null;
   const pull = await findPullRequestForSha(sha, prNumber);
   const intent = validateLabels(pull.labels ?? [], policy);
-  const version = resolveVersion(intent, { runNumber, sha });
+  const version = releaseTag
+    ? resolveExplicitTag(releaseTag)
+    : resolveVersion(intent, { runNumber, sha });
   const snapshot = {
     pull_request: pull.number,
     pull_request_url: pull.html_url,
