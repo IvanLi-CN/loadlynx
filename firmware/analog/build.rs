@@ -35,9 +35,13 @@ fn main() {
     }
 
     let pkg_name = env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
-    let pkg_ver = env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "0.0.0".to_string());
+    let pkg_ver = env::var("LOADLYNX_RELEASE_VERSION")
+        .or_else(|_| env::var("LOADLYNX_PROJECT_VERSION"))
+        .or_else(|_| env::var("CARGO_PKG_VERSION"))
+        .unwrap_or_else(|_| "0.0.0".to_string());
     let profile = env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
-    let git_info = git_describe().unwrap_or_else(|| "git unknown".to_string());
+    let git_info = env::var("LOADLYNX_RELEASE_TAG")
+        .unwrap_or_else(|_| git_describe().unwrap_or_else(|| "git unknown".to_string()));
     let src_hash = source_digest()
         .map(|h| format!("src 0x{h:016x}"))
         .unwrap_or_else(|| "src unknown".to_string());
@@ -52,6 +56,7 @@ fn main() {
 
     // Make the version string available to firmware code.
     println!("cargo:rustc-env=LOADLYNX_FW_VERSION={}", version_string);
+    println!("cargo:rustc-env=LOADLYNX_PACKAGE_VERSION={}", pkg_ver);
     println!("cargo:rustc-env=LOADLYNX_FW_PROFILE={}", profile);
     println!("cargo:rustc-env=LOADLYNX_FW_SRC_DIGEST={}", src_hash);
     if let Ok(target) = env::var("TARGET") {
@@ -157,7 +162,9 @@ fn git_describe() -> Option<String> {
     let output = Command::new("git")
         .arg("-C")
         .arg(&repo_root)
-        .args(["describe", "--tags", "--dirty", "--always"])
+        .args([
+            "describe", "--tags", "--match", "v[0-9]*", "--dirty", "--always",
+        ])
         .output()
         .ok()?;
 

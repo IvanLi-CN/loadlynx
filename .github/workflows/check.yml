@@ -11,6 +11,10 @@ on:
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
+      - 'package.json'
+      - '.github/release-label-policy.json'
+      - '.github/quality-gates.json'
+      - '.github/scripts/**'
       - '.github/workflows/**'
   pull_request:
     branches: [ main ]
@@ -22,6 +26,10 @@ on:
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
+      - 'package.json'
+      - '.github/release-label-policy.json'
+      - '.github/quality-gates.json'
+      - '.github/scripts/**'
       - '.github/workflows/**'
 
 jobs:
@@ -40,6 +48,9 @@ jobs:
           toolchain: 1.90
           components: rustfmt, clippy, rust-src, llvm-tools-preview
           targets: thumbv7em-none-eabihf
+
+      - name: Test release label tooling
+        run: node .github/scripts/release-labels.test.mjs
 
       - name: Cache cargo registry and target
         uses: actions/cache@v4
