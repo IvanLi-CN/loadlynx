@@ -129,7 +129,7 @@ struct SerialExclusiveGuard {
 
 impl Drop for SerialExclusiveGuard {
     fn drop(&mut self) {
-        clear_serial_exclusive(&self.state, &self.port_path);
+        clear_serial_exclusive_and_resume_owner(&self.state, &self.port_path);
     }
 }
 
@@ -1209,6 +1209,13 @@ fn clear_serial_exclusive(state: &AppState, port_path: &str) {
         .expect("serial registry lock")
         .exclusive_ports
         .remove(&port_key);
+}
+
+fn clear_serial_exclusive_and_resume_owner(state: &AppState, port_path: &str) {
+    clear_serial_exclusive(state, port_path);
+    if has_active_lease_for_port(state, port_path) {
+        let _ = serial_owner_sender(state, port_path);
+    }
 }
 
 fn reserve_serial_exclusive(
@@ -3045,6 +3052,7 @@ fn serial_worker_loop(
 ) {
     let port_key = canonical_port_key(&port_path);
     let mut port = None;
+    let mut last_idle_open_attempt = None;
     let mut idle_line_buf = Vec::new();
     let mut idle_frames = Vec::new();
     let mut idle_non_protocol_text = String::new();
@@ -3053,10 +3061,7 @@ fn serial_worker_loop(
             Ok(command) => {
                 let request = command.request.clone();
                 if port.is_none() {
-                    match serialport::new(&port_path, SERIAL_PROBE_BAUD)
-                        .timeout(Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS))
-                        .open()
-                    {
+                    match open_serial_port(&port_path) {
                         Ok(opened) => port = Some(opened),
                         Err(error) => {
                             let _ = command.reply.send(Err(SerialWorkerError {
@@ -3118,6 +3123,17 @@ fn serial_worker_loop(
                 let _ = command.reply.send(result);
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
+                if port.is_none()
+                    && !port_path.starts_with("mock://")
+                    && last_idle_open_attempt.is_none_or(|attempt: Instant| {
+                        attempt.elapsed() >= Duration::from_millis(500)
+                    })
+                {
+                    last_idle_open_attempt = Some(Instant::now());
+                    if let Ok(opened) = open_serial_port(&port_path) {
+                        port = Some(opened);
+                    }
+                }
                 let Some(port) = port.as_mut() else {
                     continue;
                 };
@@ -3164,6 +3180,12 @@ fn serial_worker_loop(
     {
         registry.owners.remove(&port_key);
     }
+}
+
+fn open_serial_port(port_path: &str) -> io::Result<Box<dyn serialport::SerialPort>> {
+    Ok(serialport::new(port_path, SERIAL_PROBE_BAUD)
+        .timeout(Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS))
+        .open()?)
 }
 
 fn serial_response_for_request(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
@@ -4567,6 +4589,37 @@ mod tests {
                 assert_eq!(error.1, StatusCode::CONFLICT);
             }
         }
+    }
+
+    #[tokio::test]
+    async fn exclusive_release_restarts_owner_for_active_port_lease() {
+        let state = AppState::new(PathBuf::from("."));
+        let port_path = "mock://exclusive-resume";
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.leases.insert(
+                "lease-1".to_string(),
+                WebLease {
+                    lease_id: "lease-1".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: None,
+                    port_path: Some(port_path.to_string()),
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+        }
+        let sender = serial_owner_sender(&state, port_path).expect("serial owner");
+        drop(sender);
+
+        {
+            let _exclusive =
+                reserve_serial_exclusive(&state, port_path, "digital firmware flash").unwrap();
+            let registry = state.serial.lock().expect("serial registry lock");
+            assert!(!registry.owners.contains_key(&canonical_port_key(port_path)));
+        }
+
+        let registry = state.serial.lock().expect("serial registry lock");
+        assert!(registry.owners.contains_key(&canonical_port_key(port_path)));
     }
 
     #[tokio::test]
