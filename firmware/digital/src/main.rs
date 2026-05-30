@@ -6,6 +6,8 @@
 #[cfg(feature = "net_http")]
 extern crate alloc;
 
+#[cfg(feature = "net_http")]
+use alloc::string::String;
 use core::fmt::Write as _;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use core::{convert::Infallible, ptr, slice};
@@ -114,6 +116,8 @@ const RGB_STATUS_DUTY_MAX: u16 = 8192;
 const SCREEN_POWER_STATE_ACTIVE: u8 = 0;
 const SCREEN_POWER_STATE_DIM: u8 = 1;
 const SCREEN_POWER_STATE_OFF: u8 = 2;
+const USB_JSONL_FRAME_CAPACITY: usize = 4096;
+type UsbJsonLine = heapless::String<USB_JSONL_FRAME_CAPACITY>;
 
 static LAST_USER_ACTIVITY_MS: AtomicU32 = AtomicU32::new(0);
 static SCREEN_POWER_STATE: AtomicU8 = AtomicU8::new(SCREEN_POWER_STATE_ACTIVE);
@@ -342,7 +346,7 @@ pub type I2c0Bus = i2c0::I2c0Bus;
 pub type EepromMutex = Mutex<CriticalSectionRawMutex, eeprom::SharedM24c64>;
 static EEPROM: StaticCell<EepromMutex> = StaticCell::new();
 
-use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
+use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind, ProfileSource};
 
 #[derive(Clone, Debug)]
 pub struct CalibrationState {
@@ -659,7 +663,7 @@ fn recent_enable_block_abbrev(now_ms: u32) -> Option<&'static str> {
     }
 }
 
-fn write_json_string_escaped(buf: &mut heapless::String<2048>, s: &str) {
+fn write_json_string_escaped<const N: usize>(buf: &mut heapless::String<N>, s: &str) {
     for ch in s.chars() {
         match ch {
             '"' => buf.push_str("\\\"").ok(),
@@ -689,6 +693,46 @@ fn json_string_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
             escaped = true;
         } else if ch == '"' {
             return Some(&rest[..idx]);
+        }
+    }
+    None
+}
+
+#[cfg(feature = "net_http")]
+fn json_string_decoded_value(line: &str, key: &str) -> Option<String> {
+    let idx = line.find(key)?;
+    let colon = line[idx..].find(':')?;
+    let rest = line[idx + colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let mut chars = rest[1..].chars();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return Some(out),
+            '\\' => {
+                let escaped = chars.next()?;
+                match escaped {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    '/' => out.push('/'),
+                    'b' => out.push('\u{0008}'),
+                    'f' => out.push('\u{000c}'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let mut code = 0_u32;
+                        for _ in 0..4 {
+                            code = (code << 4) | chars.next()?.to_digit(16)?;
+                        }
+                        out.push(core::char::from_u32(code)?);
+                    }
+                    _ => return None,
+                }
+            }
+            _ => out.push(ch),
         }
     }
     None
@@ -755,17 +799,14 @@ fn usb_find_pps_pdo(status: &PdStatus, object_pos: u8) -> Option<loadlynx_protoc
         .map(|(_idx, pdo)| *pdo)
 }
 
-async fn usb_cdc_write_line(
-    tx: &mut UsbSerialJtagTx<'static, Async>,
-    line: &heapless::String<2048>,
-) {
+async fn usb_cdc_write_line(tx: &mut UsbSerialJtagTx<'static, Async>, line: &UsbJsonLine) {
     let _ = tx.write_all(line.as_bytes()).await;
     let _ = tx.write_all(b"\n").await;
     let _ = tx.flush().await;
 }
 
 fn write_usb_error_response(
-    out: &mut heapless::String<2048>,
+    out: &mut UsbJsonLine,
     request_id: Option<&str>,
     code: &str,
     message: &str,
@@ -784,7 +825,124 @@ fn write_usb_error_response(
     out.push_str("\"}}").ok();
 }
 
-async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_id: Option<&str>) {
+#[cfg(feature = "net_http")]
+fn write_usb_net_body_response(
+    out: &mut UsbJsonLine,
+    request_id: Option<&str>,
+    result: Result<(), &'static str>,
+    body: &str,
+    fallback_code: &str,
+    fallback_message: &str,
+) {
+    if result.is_err() {
+        let code = json_string_value(body, "\"code\"").unwrap_or(fallback_code);
+        let message = json_string_value(body, "\"message\"").unwrap_or(fallback_message);
+        write_usb_error_response(out, request_id, code, message);
+        return;
+    }
+
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":").ok();
+    if body.len() > out.capacity().saturating_sub(out.len() + 1) {
+        write_usb_error_response(
+            out,
+            request_id,
+            "RESPONSE_TOO_LARGE",
+            "USB response body exceeds single-frame capacity",
+        );
+        return;
+    }
+    out.push_str(body).ok();
+    out.push('}').ok();
+}
+
+#[cfg(feature = "net_http")]
+fn write_usb_net_ack_response(out: &mut UsbJsonLine, request_id: Option<&str>) {
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{\"ok\":true}}").ok();
+}
+
+#[cfg(feature = "net_http")]
+fn write_usb_compact_current_curve(out: &mut UsbJsonLine, points: &[calfmt::CalPoint]) {
+    out.push('[').ok();
+    for (idx, point) in points.iter().enumerate() {
+        if idx != 0 {
+            out.push(',').ok();
+        }
+        let _ = core::write!(
+            out,
+            "[{},{},{}]",
+            point.raw_100uv,
+            point.raw_dac_code,
+            point.meas_physical
+        );
+    }
+    out.push(']').ok();
+}
+
+#[cfg(feature = "net_http")]
+fn write_usb_compact_voltage_curve(out: &mut UsbJsonLine, points: &[calfmt::CalPoint]) {
+    out.push('[').ok();
+    for (idx, point) in points.iter().enumerate() {
+        if idx != 0 {
+            out.push(',').ok();
+        }
+        let _ = core::write!(out, "[{},{}]", point.raw_100uv, point.meas_physical);
+    }
+    out.push(']').ok();
+}
+
+#[cfg(feature = "net_http")]
+async fn write_usb_calibration_profile_response(
+    out: &mut UsbJsonLine,
+    request_id: Option<&str>,
+    calibration: &'static CalibrationMutex,
+) {
+    let guard = calibration.lock().await;
+    let profile = &guard.profile;
+
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{\"compact\":\"cal_profile_v1\",\"a\":[\"")
+        .ok();
+    match profile.source {
+        ProfileSource::FactoryDefault => out.push_str("factory-default").ok(),
+        ProfileSource::UserCalibrated => out.push_str("user-calibrated").ok(),
+    };
+    let _ = core::write!(
+        out,
+        "\",{},{}],\"c1\":",
+        profile.fmt_version,
+        profile.hw_rev
+    );
+    write_usb_compact_current_curve(out, &profile.current_ch1);
+    out.push_str(",\"c2\":").ok();
+    write_usb_compact_current_curve(out, &profile.current_ch2);
+    out.push_str(",\"vl\":").ok();
+    write_usb_compact_voltage_curve(out, &profile.v_local);
+    out.push_str(",\"vr\":").ok();
+    write_usb_compact_voltage_curve(out, &profile.v_remote);
+    out.push_str("}}").ok();
+}
+
+async fn write_usb_identity_response(out: &mut UsbJsonLine, request_id: Option<&str>) {
     out.clear();
     out.push_str("{\"type\":\"response\"").ok();
     if let Some(id) = request_id {
@@ -810,11 +968,11 @@ async fn write_usb_identity_response(out: &mut heapless::String<2048>, request_i
         out,
         option_env!("LOADLYNX_FW_SRC_DIGEST").unwrap_or("src unknown"),
     );
-    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\"]}}").ok();
+    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\",\"get_control\",\"set_control\",\"get_presets\",\"set_preset\",\"apply_preset\",\"get_calibration_profile\",\"calibration_apply\",\"calibration_commit\",\"calibration_reset\",\"calibration_mode\",\"get_wifi_status\",\"set_wifi_config\",\"clear_wifi_config\",\"soft_reset\",\"get_diagnostics\"]}}").ok();
 }
 
 async fn write_usb_status_response(
-    out: &mut heapless::String<2048>,
+    out: &mut UsbJsonLine,
     request_id: Option<&str>,
     control: &'static ControlMutex,
     calibration: &'static CalibrationMutex,
@@ -896,7 +1054,7 @@ async fn write_usb_status_response(
 }
 
 async fn write_usb_pd_response(
-    out: &mut heapless::String<2048>,
+    out: &mut UsbJsonLine,
     request_id: Option<&str>,
     control: &'static ControlMutex,
     telemetry: &'static TelemetryMutex,
@@ -1021,7 +1179,7 @@ async fn write_usb_pd_response(
 }
 
 async fn write_usb_set_pd_policy_response(
-    out: &mut heapless::String<2048>,
+    out: &mut UsbJsonLine,
     request_id: Option<&str>,
     line: &str,
     control: &'static ControlMutex,
@@ -1162,7 +1320,7 @@ async fn write_usb_set_pd_policy_response(
 }
 
 async fn write_usb_set_output_enabled_response(
-    out: &mut heapless::String<2048>,
+    out: &mut UsbJsonLine,
     request_id: Option<&str>,
     line: &str,
     control: &'static ControlMutex,
@@ -1356,13 +1514,427 @@ async fn write_usb_set_output_enabled_response(
     }
 }
 
-async fn handle_usb_jsonl_request(
-    line: &str,
-    out: &mut heapless::String<2048>,
+#[cfg(feature = "net_http")]
+async fn write_usb_control_response(
+    out: &mut UsbJsonLine,
+    request_id: Option<&str>,
+    line: Option<&str>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    let mut body = String::new();
+    let result = if let Some(line) = line {
+        net::handle_control_update(line, &mut body, control, calibration, telemetry).await
+    } else {
+        net::render_control_view_json(&mut body, control, calibration, telemetry).await
+    };
+    write_usb_net_body_response(
+        out,
+        request_id,
+        result,
+        &body,
+        "CONTROL_FAILED",
+        "control request failed",
+    );
+}
+
+#[cfg(feature = "net_http")]
+async fn write_usb_presets_response(
+    out: &mut UsbJsonLine,
+    request_id: Option<&str>,
+    line: Option<&str>,
     control: &'static ControlMutex,
     calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
     eeprom: &'static EepromMutex,
+) {
+    let mut body = String::new();
+    let result = match line {
+        None => net::render_presets_json(&mut body, control).await,
+        Some(line) if line.contains("\"preset_id\"") && !line.contains("\"mode\"") => {
+            net::handle_presets_apply(line, &mut body, control, calibration, telemetry).await
+        }
+        Some(line) => net::handle_presets_update(line, &mut body, control, eeprom).await,
+    };
+    write_usb_net_body_response(
+        out,
+        request_id,
+        result,
+        &body,
+        "PRESET_FAILED",
+        "preset request failed",
+    );
+}
+
+#[cfg(feature = "net_http")]
+async fn write_usb_calibration_response(
+    out: &mut UsbJsonLine,
+    request_id: Option<&str>,
+    op: &str,
+    line: Option<&str>,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    eeprom: &'static EepromMutex,
+) {
+    let mut body = String::new();
+    match op {
+        "get_calibration_profile" => {
+            write_usb_calibration_profile_response(out, request_id, calibration).await;
+        }
+        "calibration_apply" => {
+            match net::handle_calibration_apply(line.unwrap_or("{}"), &mut body, calibration).await
+            {
+                Ok(kind) => {
+                    if enqueue_cal_uart(CalUartCommand::SendCurve(kind)).is_err() {
+                        write_usb_error_response(
+                            out,
+                            request_id,
+                            "UNAVAILABLE",
+                            "calibration UART queue is full",
+                        );
+                        return;
+                    }
+                    write_usb_net_body_response(
+                        out,
+                        request_id,
+                        Ok(()),
+                        &body,
+                        "CALIBRATION_FAILED",
+                        "calibration apply failed",
+                    );
+                }
+                Err(err) => write_usb_net_body_response(
+                    out,
+                    request_id,
+                    Err(err),
+                    &body,
+                    "CALIBRATION_FAILED",
+                    "calibration apply failed",
+                ),
+            }
+        }
+        "calibration_commit" => {
+            match net::handle_calibration_commit(
+                line.unwrap_or("{}"),
+                &mut body,
+                calibration,
+                eeprom,
+            )
+            .await
+            {
+                Ok(kind) => {
+                    if enqueue_cal_uart(CalUartCommand::SendCurve(kind)).is_err() {
+                        write_usb_error_response(
+                            out,
+                            request_id,
+                            "UNAVAILABLE",
+                            "calibration UART queue is full",
+                        );
+                        return;
+                    }
+                    write_usb_net_body_response(
+                        out,
+                        request_id,
+                        Ok(()),
+                        &body,
+                        "CALIBRATION_FAILED",
+                        "calibration commit failed",
+                    );
+                }
+                Err(err) => write_usb_net_body_response(
+                    out,
+                    request_id,
+                    Err(err),
+                    &body,
+                    "CALIBRATION_FAILED",
+                    "calibration commit failed",
+                ),
+            }
+        }
+        "calibration_reset" => {
+            match net::handle_calibration_reset(
+                line.unwrap_or("{}"),
+                &mut body,
+                calibration,
+                eeprom,
+            )
+            .await
+            {
+                Ok(kind) => {
+                    let queued = match kind {
+                        Some(kind) => enqueue_cal_uart(CalUartCommand::SendCurve(kind)),
+                        None => enqueue_cal_uart(CalUartCommand::SendAllCurves),
+                    };
+                    if queued.is_err() {
+                        write_usb_error_response(
+                            out,
+                            request_id,
+                            "UNAVAILABLE",
+                            "calibration UART queue is full",
+                        );
+                        return;
+                    }
+                    write_usb_net_body_response(
+                        out,
+                        request_id,
+                        Ok(()),
+                        &body,
+                        "CALIBRATION_FAILED",
+                        "calibration reset failed",
+                    );
+                }
+                Err(err) => write_usb_net_body_response(
+                    out,
+                    request_id,
+                    Err(err),
+                    &body,
+                    "CALIBRATION_FAILED",
+                    "calibration reset failed",
+                ),
+            }
+        }
+        "calibration_mode" => {
+            match net::parse_calibration_mode_request(line.unwrap_or("{}"), &mut body) {
+                Ok(kind) => {
+                    if enqueue_cal_uart(CalUartCommand::SetMode(kind)).is_err() {
+                        write_usb_error_response(
+                            out,
+                            request_id,
+                            "UNAVAILABLE",
+                            "calibration UART queue is full",
+                        );
+                        return;
+                    }
+                    net::apply_calibration_mode(kind, calibration, control).await;
+                    write_usb_net_ack_response(out, request_id);
+                }
+                Err(err) => {
+                    write_usb_net_body_response(
+                        out,
+                        request_id,
+                        Err(err),
+                        &body,
+                        "CALIBRATION_FAILED",
+                        "calibration mode failed",
+                    );
+                }
+            }
+        }
+        _ => write_usb_error_response(
+            out,
+            request_id,
+            "UNSUPPORTED_OPERATION",
+            "unsupported calibration op",
+        ),
+    }
+}
+
+#[cfg(feature = "net_http")]
+fn write_usb_soft_reset_response(out: &mut UsbJsonLine, request_id: Option<&str>, line: &str) {
+    let mut body = String::new();
+    let result = net::handle_soft_reset_http(line, &mut body);
+    write_usb_net_body_response(
+        out,
+        request_id,
+        result,
+        &body,
+        "SOFT_RESET_FAILED",
+        "soft reset failed",
+    );
+}
+
+#[cfg(feature = "net_http")]
+async fn write_usb_wifi_response(
+    out: &mut UsbJsonLine,
+    request_id: Option<&str>,
+    op: &str,
+    line: Option<&str>,
+    eeprom: &'static EepromMutex,
+    wifi_state: &'static net::WifiStateMutex,
+) {
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    match op {
+        "get_wifi_status" => {
+            let user_ssid = {
+                let mut guard = eeprom.lock().await;
+                guard.read_wifi_blob().await.ok().and_then(|blob| {
+                    eeprom::decode_wifi_blob(&blob).map(|parts| String::from(parts.ssid))
+                })
+            };
+            let status = { *wifi_state.lock().await };
+            out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
+            write_json_string_escaped(out, user_ssid.as_deref().unwrap_or(WIFI_SSID));
+            out.push_str("\",\"source\":\"").ok();
+            out.push_str(if user_ssid.is_some() {
+                "user"
+            } else {
+                "factory"
+            })
+            .ok();
+            write_usb_wifi_status_tail(out, status);
+        }
+        "set_wifi_config" => {
+            let Some(line) = line else {
+                out.push_str(",\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"message\":\"missing WiFi request\"}}").ok();
+                return;
+            };
+            let Some(ssid) = json_string_decoded_value(line, "\"ssid\"") else {
+                out.push_str(",\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"message\":\"missing ssid\"}}").ok();
+                return;
+            };
+            let Some(psk) = json_string_decoded_value(line, "\"psk\"") else {
+                out.push_str(",\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"message\":\"missing psk\"}}").ok();
+                return;
+            };
+            let blob = match eeprom::encode_wifi_blob(&ssid, &psk) {
+                Ok(blob) => blob,
+                Err(message) => {
+                    out.push_str(
+                        ",\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"message\":\"",
+                    )
+                    .ok();
+                    write_json_string_escaped(out, message);
+                    out.push_str("\"}}").ok();
+                    return;
+                }
+            };
+            if eeprom.lock().await.write_wifi_blob(&blob).await.is_err() {
+                out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNAVAILABLE\",\"message\":\"EEPROM write failed\"}}").ok();
+                return;
+            }
+            mark_wifi_reconfigure_pending(wifi_state).await;
+            if json_bool_value(line, "\"wait\"").unwrap_or(false) {
+                wait_for_wifi_connected(wifi_state).await;
+            }
+            let status = { *wifi_state.lock().await };
+            out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
+            write_json_string_escaped(out, &ssid);
+            out.push_str("\",\"source\":\"user").ok();
+            write_usb_wifi_status_tail(out, status);
+        }
+        "clear_wifi_config" => {
+            if eeprom.lock().await.clear_wifi_blob().await.is_err() {
+                out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNAVAILABLE\",\"message\":\"EEPROM clear failed\"}}").ok();
+                return;
+            }
+            mark_wifi_reconfigure_pending(wifi_state).await;
+            let status = { *wifi_state.lock().await };
+            out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
+            write_json_string_escaped(out, WIFI_SSID);
+            out.push_str("\",\"source\":\"factory").ok();
+            write_usb_wifi_status_tail(out, status);
+        }
+        _ => {
+            out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNSUPPORTED_OPERATION\",\"message\":\"unsupported WiFi op\"}}")
+                .ok();
+        }
+    }
+}
+
+#[cfg(feature = "net_http")]
+fn write_usb_wifi_status_tail(out: &mut UsbJsonLine, status: net::WifiState) {
+    out.push_str("\",\"state\":\"").ok();
+    out.push_str(wifi_state_name(status.state)).ok();
+    out.push_str("\",\"ip\":").ok();
+    if let Some(ip) = status.ipv4 {
+        let _ = core::write!(
+            out,
+            "\"{}.{}.{}.{}\"",
+            ip.octets()[0],
+            ip.octets()[1],
+            ip.octets()[2],
+            ip.octets()[3]
+        );
+    } else {
+        out.push_str("null").ok();
+    }
+    out.push_str(",\"last_error\":").ok();
+    if let Some(error) = status.last_error {
+        out.push('"').ok();
+        out.push_str(wifi_error_name(error)).ok();
+        out.push('"').ok();
+    } else {
+        out.push_str("null").ok();
+    }
+    out.push_str("}}").ok();
+}
+
+#[cfg(feature = "net_http")]
+fn wifi_state_name(state: net::WifiConnectionState) -> &'static str {
+    match state {
+        net::WifiConnectionState::Idle => "idle",
+        net::WifiConnectionState::Connecting => "connecting",
+        net::WifiConnectionState::Connected => "connected",
+        net::WifiConnectionState::Error => "error",
+    }
+}
+
+#[cfg(feature = "net_http")]
+fn wifi_error_name(error: net::WifiErrorKind) -> &'static str {
+    match error {
+        net::WifiErrorKind::BadStaticConfig => "bad_static_config",
+        net::WifiErrorKind::ConnectFailed => "connect_failed",
+        net::WifiErrorKind::DhcpTimeout => "dhcp_timeout",
+        net::WifiErrorKind::LinkLost => "link_lost",
+    }
+}
+
+#[cfg(feature = "net_http")]
+async fn mark_wifi_reconfigure_pending(wifi_state: &'static net::WifiStateMutex) {
+    let mut status = wifi_state.lock().await;
+    status.state = net::WifiConnectionState::Connecting;
+    status.ipv4 = None;
+    status.gateway = None;
+    status.last_error = None;
+}
+
+#[cfg(feature = "net_http")]
+async fn wait_for_wifi_connected(wifi_state: &'static net::WifiStateMutex) {
+    let start = now_ms32();
+    while now_ms32().wrapping_sub(start) < 30_000 {
+        let status = { *wifi_state.lock().await };
+        if matches!(status.state, net::WifiConnectionState::Connected) && status.ipv4.is_some() {
+            break;
+        }
+        cooperative_delay_ms(250).await;
+    }
+}
+
+#[cfg(feature = "net_http")]
+async fn write_usb_diagnostics_response(
+    out: &mut UsbJsonLine,
+    request_id: Option<&str>,
+    eeprom: &'static EepromMutex,
+    wifi_state: &'static net::WifiStateMutex,
+    telemetry: &'static TelemetryMutex,
+) {
+    let mut body = String::new();
+    let result = net::render_diagnostics_json(&mut body, eeprom, wifi_state, telemetry).await;
+    write_usb_net_body_response(
+        out,
+        request_id,
+        result,
+        &body,
+        "DIAGNOSTICS_FAILED",
+        "diagnostics export failed",
+    );
+}
+
+async fn handle_usb_jsonl_request(
+    line: &str,
+    out: &mut UsbJsonLine,
+    control: &'static ControlMutex,
+    calibration: &'static CalibrationMutex,
+    telemetry: &'static TelemetryMutex,
+    eeprom: &'static EepromMutex,
+    #[cfg(feature = "net_http")] wifi_state: &'static net::WifiStateMutex,
 ) {
     let request_id = json_string_value(line, "\"request_id\"");
     let Some(op) = json_string_value(line, "\"op\"") else {
@@ -1383,7 +1955,82 @@ async fn handle_usb_jsonl_request(
         "set_output_enabled" | "set_cc_target" => {
             write_usb_set_output_enabled_response(out, request_id, line, control, calibration).await
         }
-        _ => write_usb_error_response(out, request_id, "UNKNOWN_OP", "unsupported op"),
+        #[cfg(feature = "net_http")]
+        "get_control" => {
+            write_usb_control_response(out, request_id, None, control, calibration, telemetry).await
+        }
+        #[cfg(feature = "net_http")]
+        "set_control" => {
+            write_usb_control_response(out, request_id, Some(line), control, calibration, telemetry)
+                .await
+        }
+        #[cfg(feature = "net_http")]
+        "get_presets" => {
+            write_usb_presets_response(
+                out,
+                request_id,
+                None,
+                control,
+                calibration,
+                telemetry,
+                eeprom,
+            )
+            .await
+        }
+        #[cfg(feature = "net_http")]
+        "set_preset" => {
+            write_usb_presets_response(
+                out,
+                request_id,
+                Some(line),
+                control,
+                calibration,
+                telemetry,
+                eeprom,
+            )
+            .await
+        }
+        #[cfg(feature = "net_http")]
+        "apply_preset" => {
+            write_usb_presets_response(
+                out,
+                request_id,
+                Some(line),
+                control,
+                calibration,
+                telemetry,
+                eeprom,
+            )
+            .await
+        }
+        #[cfg(feature = "net_http")]
+        "get_calibration_profile"
+        | "calibration_apply"
+        | "calibration_commit"
+        | "calibration_reset"
+        | "calibration_mode" => {
+            write_usb_calibration_response(
+                out,
+                request_id,
+                op,
+                Some(line),
+                control,
+                calibration,
+                eeprom,
+            )
+            .await
+        }
+        #[cfg(feature = "net_http")]
+        "get_wifi_status" | "set_wifi_config" | "clear_wifi_config" => {
+            write_usb_wifi_response(out, request_id, op, Some(line), eeprom, wifi_state).await
+        }
+        #[cfg(feature = "net_http")]
+        "soft_reset" => write_usb_soft_reset_response(out, request_id, line),
+        #[cfg(feature = "net_http")]
+        "get_diagnostics" => {
+            write_usb_diagnostics_response(out, request_id, eeprom, wifi_state, telemetry).await
+        }
+        _ => write_usb_error_response(out, request_id, "UNSUPPORTED_OPERATION", "unsupported op"),
     }
 }
 
@@ -1395,17 +2042,22 @@ async fn usb_cdc_jsonl_task(
     calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
     eeprom: &'static EepromMutex,
+    #[cfg(feature = "net_http")] wifi_state: &'static net::WifiStateMutex,
 ) {
     info!("USB CDC JSONL task starting (protocol=loadlynx.cdc.v1)");
-    let mut out = heapless::String::<2048>::new();
+    let mut out = UsbJsonLine::new();
     out.push_str("{\"type\":\"hello\",\"protocol\":\"loadlynx.cdc.v1\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"firmware_version\":\"").ok();
     write_json_string_escaped(&mut out, FW_VERSION);
-    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\"]}")
+    out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\"")
         .ok();
+    #[cfg(feature = "net_http")]
+    out.push_str(",\"get_control\",\"set_control\",\"get_presets\",\"set_preset\",\"apply_preset\",\"get_calibration_profile\",\"calibration_apply\",\"calibration_commit\",\"calibration_reset\",\"calibration_mode\",\"get_wifi_status\",\"set_wifi_config\",\"clear_wifi_config\",\"soft_reset\",\"get_diagnostics\"")
+        .ok();
+    out.push_str("]}").ok();
     usb_cdc_write_line(&mut tx, &out).await;
 
     let mut read_buf = [0_u8; 64];
-    let mut line_buf = [0_u8; 512];
+    let mut line_buf = [0_u8; 4096];
     let mut line_len = 0usize;
 
     loop {
@@ -1434,6 +2086,8 @@ async fn usb_cdc_jsonl_task(
                             calibration,
                             telemetry,
                             eeprom,
+                            #[cfg(feature = "net_http")]
+                            wifi_state,
                         )
                         .await;
                         usb_cdc_write_line(&mut tx, &out).await;
@@ -7562,6 +8216,9 @@ async fn main(spawner: Spawner) {
         exec.start(Priority::Priority3)
     };
 
+    #[cfg(feature = "net_http")]
+    let wifi_state = net::init_wifi_state();
+
     info!("spawning ticker task");
     spawner.spawn(ticker()).expect("ticker spawn");
     info!("spawning diag task");
@@ -7575,6 +8232,8 @@ async fn main(spawner: Spawner) {
             calibration,
             telemetry,
             eeprom,
+            #[cfg(feature = "net_http")]
+            wifi_state,
         ))
         .expect("usb_cdc_jsonl_task spawn");
 
@@ -7702,7 +8361,6 @@ async fn main(spawner: Spawner) {
     // on Wi‑Fi availability.
     #[cfg(feature = "net_http")]
     {
-        let wifi_state = net::init_wifi_state();
         info!("spawning Wi-Fi + HTTP net tasks");
         net::spawn_wifi_and_http(
             &spawner,

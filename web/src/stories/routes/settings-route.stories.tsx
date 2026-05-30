@@ -41,3 +41,30 @@ export const SoftResetDialog: Story = {
     });
   },
 };
+
+export const WifiAndDiagnostics: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await waitFor(() => {
+      canvas.getByText("WiFi");
+      canvas.getByRole("button", { name: "Export Diagnostics" });
+    });
+
+    await userEvent.type(canvas.getByPlaceholderText("SSID"), "BenchNet");
+    await userEvent.type(canvas.getByPlaceholderText("PSK"), "not-shown");
+    await userEvent.click(canvas.getByRole("button", { name: "Save WiFi" }));
+    await userEvent.click(
+      canvas.getByRole("button", { name: "Export Diagnostics" }),
+    );
+
+    await waitFor(() => {
+      const diagnostics = canvas.getByText(/schema_version/, {
+        selector: "pre",
+      });
+      if (!diagnostics.textContent?.includes('"ssid": "BenchNet"')) {
+        throw new Error("Expected diagnostics export to include saved SSID");
+      }
+    });
+  },
+};

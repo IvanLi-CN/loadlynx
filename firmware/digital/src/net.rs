@@ -18,7 +18,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::{peripherals::WIFI, rng::Rng};
 use esp_radio::{
     Controller as RadioController, init as radio_init,
-    wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice, WifiEvent},
+    wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice},
 };
 use heapless::{String as HString, Vec};
 use static_cell::StaticCell;
@@ -36,7 +36,7 @@ use crate::{
     ENCODER_VALUE, EepromMutex, FAST_STATUS_OK_COUNT, FW_VERSION, HELLO_SEEN, LAST_GOOD_FRAME_MS,
     LIMIT_PROFILE_DEFAULT, LINK_UP, LOAD_SWITCH_ENABLED, STATE_FLAG_REMOTE_ACTIVE, TARGET_I_MAX_MA,
     TARGET_I_MIN_MA, TelemetryMutex, WIFI_DNS, WIFI_GATEWAY, WIFI_HOSTNAME, WIFI_NETMASK, WIFI_PSK,
-    WIFI_SSID, WIFI_STATIC_IP, bump_control_rev, control, enqueue_cal_uart, mdns, now_ms32,
+    WIFI_SSID, WIFI_STATIC_IP, bump_control_rev, control, eeprom, enqueue_cal_uart, mdns, now_ms32,
     timestamp_ms, ui::AnalogState,
 };
 
@@ -71,6 +71,18 @@ pub struct WifiState {
     pub is_static: bool,
     pub last_error: Option<WifiErrorKind>,
     pub mac: Option<[u8; 6]>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WifiCredentialSource {
+    Factory,
+    User,
+}
+
+struct WifiCredentials {
+    ssid: String,
+    psk: String,
+    source: WifiCredentialSource,
 }
 
 impl WifiState {
@@ -274,6 +286,7 @@ pub fn spawn_wifi_and_http(
             wifi_state,
             is_static,
             wifi_mac,
+            eeprom,
         ))
         .expect("wifi_task spawn");
 
@@ -324,54 +337,68 @@ async fn wifi_task(
     state: &'static WifiStateMutex,
     is_static_ip: bool,
     mac: [u8; 6],
+    eeprom: &'static EepromMutex,
 ) {
     info!(
         "Wi-Fi task starting (ssid=\"{}\", hostname={:?}, static_ip={})",
         WIFI_SSID, WIFI_HOSTNAME, is_static_ip,
     );
 
-    let ssid = String::from(WIFI_SSID);
-    let password = String::from(WIFI_PSK);
-
     loop {
+        let credentials = read_wifi_credentials(eeprom).await;
+        let source = match credentials.source {
+            WifiCredentialSource::Factory => "factory",
+            WifiCredentialSource::User => "user",
+        };
         {
             let mut guard = state.lock().await;
             guard.state = WifiConnectionState::Connecting;
+            guard.ipv4 = None;
+            guard.gateway = None;
             guard.last_error = None;
         }
 
         let client_config = ModeConfig::Client(
             ClientConfig::default()
-                .with_ssid(ssid.clone())
-                .with_password(password.clone()),
+                .with_ssid(credentials.ssid.clone())
+                .with_password(credentials.psk.clone()),
         );
 
-        if !matches!(controller.is_started(), Ok(true)) {
-            if let Err(err) = controller.set_config(&client_config) {
-                warn!("Wi-Fi set_config error: {:?}", err);
-                {
-                    let mut guard = state.lock().await;
-                    guard.state = WifiConnectionState::Error;
-                    guard.last_error = Some(WifiErrorKind::ConnectFailed);
-                }
-                Timer::after(Duration::from_secs(10)).await;
-                continue;
-            }
-
-            info!("Starting Wi-Fi STA");
-            if let Err(err) = controller.start_async().await {
-                warn!("Wi-Fi start_async error: {:?}", err);
-                {
-                    let mut guard = state.lock().await;
-                    guard.state = WifiConnectionState::Error;
-                    guard.last_error = Some(WifiErrorKind::ConnectFailed);
-                }
-                Timer::after(Duration::from_secs(10)).await;
-                continue;
+        if matches!(controller.is_started(), Ok(true)) {
+            let _ = controller.disconnect_async().await;
+            if let Err(err) = controller.stop_async().await {
+                warn!("Wi-Fi stop_async before reconfigure error: {:?}", err);
             }
         }
 
-        info!("Connecting to Wi-Fi SSID=\"{}\"", WIFI_SSID);
+        if let Err(err) = controller.set_config(&client_config) {
+            warn!("Wi-Fi set_config error: {:?}", err);
+            {
+                let mut guard = state.lock().await;
+                guard.state = WifiConnectionState::Error;
+                guard.last_error = Some(WifiErrorKind::ConnectFailed);
+            }
+            Timer::after(Duration::from_secs(10)).await;
+            continue;
+        }
+
+        info!("Starting Wi-Fi STA");
+        if let Err(err) = controller.start_async().await {
+            warn!("Wi-Fi start_async error: {:?}", err);
+            {
+                let mut guard = state.lock().await;
+                guard.state = WifiConnectionState::Error;
+                guard.last_error = Some(WifiErrorKind::ConnectFailed);
+            }
+            Timer::after(Duration::from_secs(10)).await;
+            continue;
+        }
+
+        info!(
+            "Connecting to Wi-Fi SSID=\"{}\" (source={})",
+            credentials.ssid.as_str(),
+            source
+        );
         match controller.connect_async().await {
             Ok(()) => {
                 info!("Wi-Fi connect_async returned Ok; waiting for IPv4 config");
@@ -414,15 +441,28 @@ async fn wifi_task(
                     }
                 }
 
-                // Wait for disconnect; then loop to reconnect.
-                controller.wait_for_event(WifiEvent::StaDisconnected).await;
-                warn!("Wi-Fi STA disconnected; will retry");
-                {
-                    let mut guard = state.lock().await;
-                    guard.state = WifiConnectionState::Error;
-                    guard.last_error = Some(WifiErrorKind::LinkLost);
+                loop {
+                    Timer::after(Duration::from_secs(2)).await;
+                    if !matches!(controller.is_connected(), Ok(true)) {
+                        warn!("Wi-Fi STA disconnected; will retry");
+                        {
+                            let mut guard = state.lock().await;
+                            guard.state = WifiConnectionState::Error;
+                            guard.last_error = Some(WifiErrorKind::LinkLost);
+                        }
+                        break;
+                    }
+
+                    let next = read_wifi_credentials(eeprom).await;
+                    if next.source != credentials.source
+                        || next.ssid != credentials.ssid
+                        || next.psk != credentials.psk
+                    {
+                        info!("Wi-Fi credentials changed; reconnecting");
+                        let _ = controller.disconnect_async().await;
+                        break;
+                    }
                 }
-                Timer::after(Duration::from_secs(5)).await;
             }
             Err(err) => {
                 warn!("Wi-Fi connect_async error: {:?}", err);
@@ -437,6 +477,30 @@ async fn wifi_task(
 
         // Small cooperative delay between retries.
         Timer::after(Duration::from_millis(100)).await;
+    }
+}
+
+async fn read_wifi_credentials(eeprom: &'static EepromMutex) -> WifiCredentials {
+    let user = {
+        let mut guard = eeprom.lock().await;
+        guard.read_wifi_blob().await.ok().and_then(|blob| {
+            eeprom::decode_wifi_blob(&blob)
+                .map(|parts| (String::from(parts.ssid), String::from(parts.psk)))
+        })
+    };
+
+    if let Some((ssid, psk)) = user {
+        WifiCredentials {
+            ssid,
+            psk,
+            source: WifiCredentialSource::User,
+        }
+    } else {
+        WifiCredentials {
+            ssid: String::from(WIFI_SSID),
+            psk: String::from(WIFI_PSK),
+            source: WifiCredentialSource::Factory,
+        }
     }
 }
 
@@ -980,6 +1044,30 @@ async fn handle_http_connection(
                 }
             }
         }
+        ("GET", "/api/v1/wifi") => {
+            match render_wifi_status_json(&mut body, eeprom, wifi_state).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
+            }
+        }
+        ("POST", "/api/v1/wifi") => {
+            match handle_wifi_set_http(body_str, &mut body, eeprom, wifi_state).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
+            }
+        }
+        ("DELETE", "/api/v1/wifi") => {
+            match handle_wifi_clear_http(&mut body, eeprom, wifi_state).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
+            }
+        }
         ("POST", "/api/v1/soft-reset") => match handle_soft_reset_http(body_str, &mut body) {
             Ok(()) => {
                 write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
@@ -988,6 +1076,14 @@ async fn handle_http_connection(
                 write_http_response(socket, version, status, &body, cors_origin).await?;
             }
         },
+        ("GET", "/api/v1/diagnostics") | ("GET", "/api/v1/diagnostics/export") => {
+            match render_diagnostics_json(&mut body, eeprom, wifi_state, telemetry).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
+            }
+        }
         ("GET", _) => {
             write_error_body(&mut body, "UNSUPPORTED_OPERATION", "not found", false, None);
             write_http_response(socket, version, "404 Not Found", &body, cors_origin).await?;
@@ -996,7 +1092,7 @@ async fn handle_http_connection(
             write_error_body(
                 &mut body,
                 "INVALID_REQUEST",
-                "only GET, PUT, and POST are supported",
+                "only GET, PUT, POST, and DELETE are supported",
                 false,
                 None,
             );
@@ -1043,6 +1139,237 @@ fn write_error_body(
     buf.push_str("}}");
 }
 
+fn parse_json_string_value(body: &str, key: &str) -> Option<String> {
+    let idx = body.find(key)?;
+    let colon = body[idx..].find(':')?;
+    let rest = body[idx + colon + 1..].trim_start();
+    if !rest.starts_with('"') {
+        return None;
+    }
+    let mut chars = rest[1..].chars();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '"' => return Some(out),
+            '\\' => {
+                let escaped = chars.next()?;
+                match escaped {
+                    '"' => out.push('"'),
+                    '\\' => out.push('\\'),
+                    '/' => out.push('/'),
+                    'b' => out.push('\u{0008}'),
+                    'f' => out.push('\u{000c}'),
+                    'n' => out.push('\n'),
+                    'r' => out.push('\r'),
+                    't' => out.push('\t'),
+                    'u' => {
+                        let mut code = 0_u32;
+                        for _ in 0..4 {
+                            code = (code << 4) | chars.next()?.to_digit(16)?;
+                        }
+                        out.push(core::char::from_u32(code)?);
+                    }
+                    _ => return None,
+                }
+            }
+            _ => out.push(ch),
+        }
+    }
+    None
+}
+
+fn parse_json_bool_value(body: &str, key: &str) -> Option<bool> {
+    let idx = body.find(key)?;
+    let colon = body[idx..].find(':')?;
+    let rest = body[idx + colon + 1..].trim_start();
+    if rest.starts_with("true") {
+        Some(true)
+    } else if rest.starts_with("false") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn wifi_state_name(state: WifiConnectionState) -> &'static str {
+    match state {
+        WifiConnectionState::Idle => "idle",
+        WifiConnectionState::Connecting => "connecting",
+        WifiConnectionState::Connected => "connected",
+        WifiConnectionState::Error => "error",
+    }
+}
+
+fn wifi_error_name(error: WifiErrorKind) -> &'static str {
+    match error {
+        WifiErrorKind::BadStaticConfig => "bad_static_config",
+        WifiErrorKind::ConnectFailed => "connect_failed",
+        WifiErrorKind::DhcpTimeout => "dhcp_timeout",
+        WifiErrorKind::LinkLost => "link_lost",
+    }
+}
+
+async fn read_wifi_status_identity(eeprom: &'static EepromMutex) -> (String, &'static str) {
+    let user =
+        {
+            let mut guard = eeprom.lock().await;
+            guard.read_wifi_blob().await.ok().and_then(|blob| {
+                eeprom::decode_wifi_blob(&blob).map(|parts| String::from(parts.ssid))
+            })
+        };
+    match user {
+        Some(ssid) => (ssid, "user"),
+        None => (String::from(WIFI_SSID), "factory"),
+    }
+}
+
+fn append_wifi_status_fields(buf: &mut String, wifi: WifiState) {
+    buf.push_str(",\"state\":\"");
+    buf.push_str(wifi_state_name(wifi.state));
+    buf.push_str("\",\"ip\":");
+    if let Some(ip) = wifi.ipv4 {
+        let octets = ip.octets();
+        let _ = core::write!(
+            buf,
+            "\"{}.{}.{}.{}\"",
+            octets[0],
+            octets[1],
+            octets[2],
+            octets[3]
+        );
+    } else {
+        buf.push_str("null");
+    }
+    buf.push_str(",\"last_error\":");
+    if let Some(error) = wifi.last_error {
+        buf.push('"');
+        buf.push_str(wifi_error_name(error));
+        buf.push('"');
+    } else {
+        buf.push_str("null");
+    }
+    buf.push('}');
+}
+
+pub(crate) async fn render_wifi_status_json(
+    buf: &mut String,
+    eeprom: &'static EepromMutex,
+    wifi_state: &'static WifiStateMutex,
+) -> Result<(), &'static str> {
+    let (ssid, source) = read_wifi_status_identity(eeprom).await;
+    let wifi = { *wifi_state.lock().await };
+    buf.clear();
+    buf.push_str("{\"ssid\":\"");
+    write_json_string_escaped(buf, &ssid);
+    buf.push_str("\",\"source\":\"");
+    buf.push_str(source);
+    buf.push('"');
+    append_wifi_status_fields(buf, wifi);
+    Ok(())
+}
+
+async fn mark_wifi_reconfigure_pending(wifi_state: &'static WifiStateMutex) {
+    let mut status = wifi_state.lock().await;
+    status.state = WifiConnectionState::Connecting;
+    status.ipv4 = None;
+    status.gateway = None;
+    status.last_error = None;
+}
+
+async fn wait_for_wifi_connected(wifi_state: &'static WifiStateMutex) {
+    let start = now_ms32();
+    while now_ms32().wrapping_sub(start) < 30_000 {
+        let status = { *wifi_state.lock().await };
+        if matches!(status.state, WifiConnectionState::Connected) && status.ipv4.is_some() {
+            break;
+        }
+        Timer::after(Duration::from_millis(250)).await;
+    }
+}
+
+pub(crate) async fn handle_wifi_set_http(
+    body_in: &str,
+    body_out: &mut String,
+    eeprom: &'static EepromMutex,
+    wifi_state: &'static WifiStateMutex,
+) -> Result<(), &'static str> {
+    let ssid = parse_json_string_value(body_in, "\"ssid\"").ok_or_else(|| {
+        write_error_body(body_out, "INVALID_REQUEST", "missing ssid", false, None);
+        "400 Bad Request"
+    })?;
+    let psk = parse_json_string_value(body_in, "\"psk\"").ok_or_else(|| {
+        write_error_body(body_out, "INVALID_REQUEST", "missing psk", false, None);
+        "400 Bad Request"
+    })?;
+    let blob = match eeprom::encode_wifi_blob(&ssid, &psk) {
+        Ok(blob) => blob,
+        Err(message) => {
+            write_error_body(body_out, "INVALID_REQUEST", message, false, None);
+            return Err("400 Bad Request");
+        }
+    };
+    if eeprom.lock().await.write_wifi_blob(&blob).await.is_err() {
+        write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
+        return Err("503 Service Unavailable");
+    }
+    mark_wifi_reconfigure_pending(wifi_state).await;
+    if parse_json_bool_value(body_in, "\"wait\"").unwrap_or(false) {
+        wait_for_wifi_connected(wifi_state).await;
+    }
+    render_wifi_status_json(body_out, eeprom, wifi_state).await
+}
+
+pub(crate) async fn handle_wifi_clear_http(
+    body_out: &mut String,
+    eeprom: &'static EepromMutex,
+    wifi_state: &'static WifiStateMutex,
+) -> Result<(), &'static str> {
+    if eeprom.lock().await.clear_wifi_blob().await.is_err() {
+        write_error_body(body_out, "UNAVAILABLE", "EEPROM clear failed", true, None);
+        return Err("503 Service Unavailable");
+    }
+    mark_wifi_reconfigure_pending(wifi_state).await;
+    render_wifi_status_json(body_out, eeprom, wifi_state).await
+}
+
+pub(crate) async fn render_diagnostics_json(
+    buf: &mut String,
+    eeprom: &'static EepromMutex,
+    wifi_state: &'static WifiStateMutex,
+    telemetry: &'static TelemetryMutex,
+) -> Result<(), &'static str> {
+    let (ssid, source) = read_wifi_status_identity(eeprom).await;
+    let wifi = { *wifi_state.lock().await };
+    let status = telemetry.lock().await.last_status;
+    buf.clear();
+    buf.push_str("{\"schema_version\":1,\"redaction\":{\"psk\":true},\"firmware_version\":\"");
+    write_json_string_escaped(buf, FW_VERSION);
+    buf.push_str("\",\"wifi\":{\"ssid\":\"");
+    write_json_string_escaped(buf, &ssid);
+    buf.push_str("\",\"source\":\"");
+    buf.push_str(source);
+    buf.push_str("\",\"psk\":\"<redacted>\"");
+    append_wifi_status_fields(buf, wifi);
+    buf.push_str(",\"link_up\":");
+    buf.push_str(if LINK_UP.load(Ordering::Relaxed) {
+        "true"
+    } else {
+        "false"
+    });
+    if let Some(status) = status {
+        let _ = core::write!(
+            buf,
+            ",\"last_status\":{{\"uptime_ms\":{},\"fault_flags\":{}}}",
+            status.uptime_ms,
+            status.fault_flags
+        );
+    } else {
+        buf.push_str(",\"last_status\":null");
+    }
+    buf.push('}');
+    Ok(())
+}
+
 async fn socket_write_all(
     socket: &mut TcpSocket<'_>,
     mut buf: &[u8],
@@ -1066,7 +1393,7 @@ async fn write_http_response(
 ) -> Result<(), embassy_net::tcp::Error> {
     // Minimal CORS support to allow the LoadLynx web console (running on a
     // separate origin during development) to access the HTTP API.
-    const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
+    const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, DELETE, OPTIONS";
     const CORS_ALLOW_HEADERS: &str = "Content-Type";
     const CORS_ALLOW_PRIVATE_NETWORK: &str = "true";
 
@@ -1108,7 +1435,7 @@ async fn write_sse_response_head(
     socket: &mut TcpSocket<'_>,
     cors_origin: Option<&str>,
 ) -> Result<(), embassy_net::tcp::Error> {
-    const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, OPTIONS";
+    const CORS_ALLOW_METHODS: &str = "GET, PUT, POST, DELETE, OPTIONS";
     const CORS_ALLOW_HEADERS: &str = "Content-Type";
     const CORS_ALLOW_PRIVATE_NETWORK: &str = "true";
 
@@ -1625,7 +1952,7 @@ fn write_preset_json(buf: &mut String, preset: &control::Preset) {
     buf.push('}');
 }
 
-async fn render_presets_json(
+pub(crate) async fn render_presets_json(
     buf: &mut String,
     control: &'static ControlMutex,
 ) -> Result<(), &'static str> {
@@ -1647,7 +1974,7 @@ async fn render_presets_json(
     Ok(())
 }
 
-async fn render_control_view_json(
+pub(crate) async fn render_control_view_json(
     buf: &mut String,
     control: &'static ControlMutex,
     calibration: &'static CalibrationMutex,
@@ -1781,7 +2108,7 @@ fn parse_preset_json(body: &str) -> Result<control::Preset, &'static str> {
     })
 }
 
-async fn handle_presets_update(
+pub(crate) async fn handle_presets_update(
     body_in: &str,
     body_out: &mut String,
     control: &'static ControlMutex,
@@ -1911,7 +2238,7 @@ fn parse_presets_apply_json(body: &str) -> Result<PresetsApplyRequest, &'static 
     })
 }
 
-async fn handle_presets_apply(
+pub(crate) async fn handle_presets_apply(
     body_in: &str,
     body_out: &mut String,
     control: &'static ControlMutex,
@@ -2046,7 +2373,7 @@ async fn ensure_output_enable_allowed(
     Ok(())
 }
 
-async fn handle_control_update(
+pub(crate) async fn handle_control_update(
     body_in: &str,
     body_out: &mut String,
     control: &'static ControlMutex,
@@ -3201,7 +3528,10 @@ fn parse_soft_reset_json(body: &str) -> Result<SoftResetRequest<'_>, &'static st
     Ok(SoftResetRequest { reason_str, reason })
 }
 
-fn handle_soft_reset_http(body_in: &str, body_out: &mut String) -> Result<(), &'static str> {
+pub(crate) fn handle_soft_reset_http(
+    body_in: &str,
+    body_out: &mut String,
+) -> Result<(), &'static str> {
     let parsed = match parse_soft_reset_json(body_in) {
         Ok(v) => v,
         Err(msg) => {
@@ -3304,7 +3634,7 @@ fn ensure_calibration_api_available(body_out: &mut String) -> Result<(), &'stati
     }
 }
 
-async fn render_calibration_profile_json(
+pub(crate) async fn render_calibration_profile_json(
     body_out: &mut String,
     calibration: &'static CalibrationMutex,
 ) -> Result<(), &'static str> {
@@ -3843,7 +4173,7 @@ fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 24
     Ok(cleaned)
 }
 
-async fn handle_calibration_apply(
+pub(crate) async fn handle_calibration_apply(
     body_in: &str,
     body_out: &mut String,
     calibration: &'static CalibrationMutex,
@@ -3883,7 +4213,7 @@ async fn handle_calibration_apply(
     Ok(kind)
 }
 
-async fn handle_calibration_commit(
+pub(crate) async fn handle_calibration_commit(
     body_in: &str,
     body_out: &mut String,
     calibration: &'static CalibrationMutex,
@@ -3949,7 +4279,7 @@ fn profile_equals_factory(profile: &calfmt::ActiveProfile) -> bool {
         && profile.v_remote == factory.v_remote
 }
 
-async fn handle_calibration_reset(
+pub(crate) async fn handle_calibration_reset(
     body_in: &str,
     body_out: &mut String,
     calibration: &'static CalibrationMutex,
@@ -4072,7 +4402,7 @@ async fn handle_calibration_reset(
     Ok(Some(kind))
 }
 
-fn parse_calibration_mode_request(
+pub(crate) fn parse_calibration_mode_request(
     body_in: &str,
     body_out: &mut String,
 ) -> Result<CalKind, &'static str> {

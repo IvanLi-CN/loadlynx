@@ -15,3 +15,15 @@ The USB CDC bridge moved from per-request serial opens to lease-scoped per-port 
 Review convergence kept two safety-compatible legacy behaviors intact: PD GET falls back to the cached PD view only for missing or mismatched serial responses, and real USB lease creation refuses to touch hardware unless the selected port matches the approved `.esp32-port` default.
 
 Real CLI HIL verification exposed that owner-facing commands must cover the full safe-control lifecycle, not just enable. The CLI now includes PD writes, CC current targets and explicit output disable, while devd handles USB Serial/JTAG log-noise fragmentation without treating stale or mismatched request IDs as success.
+
+## Control Plane Completion
+
+The bridge contract was expanded from identity/status/PD/output operations to the full owner-facing control surface: control, presets, calibration, WiFi status/config requests, soft reset and diagnostics. The accepted model keeps USB as a compact dedicated protocol while devd maps Web/CLI/LAN-compatible HTTP calls to firmware ops. Firmware remains the final authority for validation and safety, and devd only prevalidates selection, lease ownership, request matching and sensitive-field redaction.
+
+Calibration profile reads use a compact firmware response instead of the verbose HTTP shape on USB. This keeps full 24-point curve profiles inside the single JSONL frame budget while preserving the public HTTP/Web shape through devd expansion.
+
+Lease semantics were clarified: multiple clients may hold leases for the same device/port, ordinary JSONL writes are queued through the per-port owner, and flash/reset are exclusive windows that fail same-port JSONL work fast instead of letting it wait behind long vendor-tool operations.
+
+Real completion HIL showed that ESP32-S3 USB Serial/JTAG log noise can corrupt not only status/output-control responses but also identity, control, presets, compact calibration profile and WiFi status responses. The implementation now keeps a larger non-protocol buffer and performs operation-scoped recovery from post-transmit frames or text fragments. Diagnostics already returned a complete matched response. Preset list recovery requires the full five-preset set: devd retries and merges recovered fragments, and reports an incomplete retryable response instead of returning a partial list as success.
+
+Final preset-list HIL showed a repeatable USB Serial/JTAG failure mode where the list response yielded M2-M5 as standalone preset fragments while M1 was dropped by log interleaving. The daemon now keeps the completeness gate, accepts only real preset-shaped fragments, and may use a real `get_control` preset response with bounded retries to fill the active preset. This preserves correctness because partial lists remain errors unless the daemon proves all five preset records from device responses.

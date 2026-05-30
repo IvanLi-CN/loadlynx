@@ -41,6 +41,8 @@ Use a local-first control plane:
 - Runtime identity must match `build_id`, profile, features and target chip before log decode can be trusted.
 - LAN records and USB records merge by `identity.device_id`, not by URL, port path or display name.
 - Sensitive frame fields such as WiFi PSK are redacted at trace ingestion, before logs leave the daemon.
+- Keep device-local transports compact and purpose-built. When USB/serial frame budgets are tight, firmware may return a compact operation-specific payload while the daemon expands it back to the public HTTP/Web shape for CLI and browser callers.
+- Separate local physical-access writes from LAN writes in the user interface. LAN credential writes should require an explicit unsafe-network confirmation or flag, while USB/devd writes can rely on lease and selected-port evidence.
 - Web evidence should come from mock-first Storybook canvas/docs states so localhost hardware daemons are not required for UI review.
 
 ## Guardrails / Reuse Notes
@@ -52,8 +54,12 @@ Use a local-first control plane:
 - Do not expose lease IDs as ordinary user CLI parameters. CLI tools should create, heartbeat and release leases internally, keeping the user workflow stable while still preserving daemon-side authorization.
 - Do not open a USB CDC port per HTTP request once multiple clients can talk to the daemon. Keep one daemon-owned reader/writer per physical port, generate unique request IDs, and reject mismatched responses instead of treating the latest frame as success.
 - For firmware transports that mix binary logs and JSONL on one USB channel, response recovery must be operation-scoped. Recover only from payloads observed after the matching transmit frame and only when they have the expected operation shape.
+- Preserve enough non-protocol text for one noisy command window. Some valid responses may be too corrupted to parse as JSON but still contain operation-specific compact payloads, such as calibration curves or WiFi state; recover those conservatively and mark them as recovered instead of silently synthesizing missing fields.
+- For list-style responses recovered from noisy serial frames, require a completeness gate before returning success. Merge only records that have the requested operation shape, and use a separate real device response to fill gaps only when that response proves the missing record; otherwise return an explicit incomplete-response error.
 - Safe-control CLIs must expose both sides of a state transition. If a command can enable a load, it must also provide an explicit disable command; absence of an enable flag must not silently mean disable.
 - Flash/reset tools that need the OS serial port directly must temporarily close or pause the daemon serial owner and return explicit busy/in-progress errors to concurrent same-port commands.
+- Do not fake unsupported compatibility endpoints. If firmware does not expose an operation on the current build, return a clear unsupported-operation error rather than advertising the operation or synthesizing success in the daemon.
+- Long-running firmware-side waits need matching daemon-side serial timeouts for that operation only. Keep ordinary request timeouts short, then widen timeout windows for explicit wait semantics such as WiFi connection waits.
 - Treat mDNS/DNS-SD as convenience discovery. Always keep manual IP/hostname entry and bounded scan fallback.
 - For dual-MCU devices, represent board targets explicitly instead of flattening them into one generic "serial device".
 - Keep firmware catalog generation outside the daemon. devd should verify manifests and hashes, not invent release metadata.

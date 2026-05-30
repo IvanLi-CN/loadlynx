@@ -19,6 +19,8 @@ import type {
   PdView,
   Preset,
   PresetId,
+  WifiSetRequest,
+  WifiStatus,
 } from "./types.ts";
 
 const TAB_ID =
@@ -60,7 +62,7 @@ function makeApiUrl(baseUrl: string, path: string): URL {
   return url;
 }
 
-function isDevdCompatBaseUrl(baseUrl: string): boolean {
+export function isDevdCompatBaseUrl(baseUrl: string): boolean {
   if (!baseUrl || isMockBaseUrl(baseUrl)) {
     return false;
   }
@@ -260,6 +262,7 @@ interface MockDeviceState {
   uv_latched: boolean;
   calibrationMode: CalibrationModeRequest["kind"];
   calibration: MockCalibrationState;
+  wifi: WifiStatus;
 }
 
 interface MockCalibrationState {
@@ -616,6 +619,13 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     ram: structuredClone(factoryProfile),
     eeprom: null,
   };
+  const wifi: WifiStatus = {
+    ssid: "LoadLynx Lab",
+    source: "factory",
+    state: "connected",
+    ip: "192.0.2.10",
+    last_error: null,
+  };
 
   const state: MockDeviceState = {
     identity,
@@ -628,6 +638,7 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     uv_latched: false,
     calibrationMode: "off",
     calibration,
+    wifi,
   };
 
   if (baseUrl.toLowerCase().includes("calibration-output-applied")) {
@@ -832,32 +843,6 @@ function mockMakeControlView(state: MockDeviceState): ControlView {
     uv_latched: state.uv_latched,
     preset: structuredClone(mockGetActivePreset(state)),
   };
-}
-
-function makeDevdControlView(outputEnabled = false): ControlView {
-  const preset = createInitialPresets()[0];
-  if (!preset) {
-    throw new Error("default preset missing");
-  }
-  return {
-    active_preset_id: 1,
-    output_enabled: outputEnabled,
-    uv_latched: false,
-    preset: structuredClone(preset),
-  };
-}
-
-function getDevdResponseOutputEnabled(
-  payload: unknown,
-  fallback: boolean,
-): boolean {
-  const response = (payload as { response?: unknown } | null)?.response as
-    | { data?: unknown }
-    | undefined;
-  const data = response?.data as { output_enabled?: unknown } | undefined;
-  return typeof data?.output_enabled === "boolean"
-    ? data.output_enabled
-    : fallback;
 }
 
 function mockRequireControlReady(state: MockDeviceState): void {
@@ -1625,9 +1610,6 @@ export async function getPresets(baseUrl: string): Promise<Preset[]> {
     const payload = await mockGetPresets(baseUrl);
     return payload.presets;
   }
-  if (isDevdCompatBaseUrl(baseUrl)) {
-    return structuredClone(createInitialPresets());
-  }
   const payload = await httpJsonQueued<{ presets: Preset[] }>(
     baseUrl,
     "/api/v1/presets",
@@ -1641,15 +1623,6 @@ export async function updatePreset(
 ): Promise<Preset> {
   if (isMockBaseUrl(baseUrl)) {
     return mockUpdatePreset(baseUrl, payload);
-  }
-  if (isDevdCompatBaseUrl(baseUrl)) {
-    throw new HttpApiError({
-      status: 409,
-      code: "UNSUPPORTED_OPERATION",
-      message: "Preset writes are not available through the devd USB bridge",
-      retryable: false,
-      details: null,
-    });
   }
 
   const body = JSON.stringify(payload);
@@ -1671,16 +1644,6 @@ export async function applyPreset(
   if (isMockBaseUrl(baseUrl)) {
     return mockApplyPreset(baseUrl, preset_id);
   }
-  if (isDevdCompatBaseUrl(baseUrl)) {
-    void preset_id;
-    throw new HttpApiError({
-      status: 409,
-      code: "UNSUPPORTED_OPERATION",
-      message: "Preset applies are not available through the devd USB bridge",
-      retryable: false,
-      details: null,
-    });
-  }
 
   const body = JSON.stringify({ preset_id });
 
@@ -1697,9 +1660,6 @@ export async function getControl(baseUrl: string): Promise<ControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetControl(baseUrl);
   }
-  if (isDevdCompatBaseUrl(baseUrl)) {
-    return makeDevdControlView(false);
-  }
   return httpJsonQueued<ControlView>(baseUrl, "/api/v1/control");
 }
 
@@ -1709,18 +1669,6 @@ export async function updateControl(
 ): Promise<ControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockUpdateControl(baseUrl, payload);
-  }
-  if (isDevdCompatBaseUrl(baseUrl)) {
-    const response = await httpJsonQueued<unknown>(baseUrl, "/api/v1/cc", {
-      method: "POST",
-      body: JSON.stringify({ enable: payload.output_enabled }),
-      headers: {
-        "Content-Type": "application/json",
-      },
-    });
-    return makeDevdControlView(
-      getDevdResponseOutputEnabled(response, payload.output_enabled),
-    );
   }
 
   const body = JSON.stringify(payload);
@@ -1900,18 +1848,6 @@ export async function postCalibrationMode(
   if (isMockBaseUrl(baseUrl)) {
     return mockPostCalibrationMode(baseUrl, payload);
   }
-  if (isDevdCompatBaseUrl(baseUrl)) {
-    if (payload.kind === "off") {
-      return;
-    }
-    throw new HttpApiError({
-      status: 409,
-      code: "UNSUPPORTED_OPERATION",
-      message: "Calibration mode is not available through the devd USB bridge",
-      retryable: false,
-      details: null,
-    });
-  }
   const body = JSON.stringify(payload);
   return httpJsonQueued<void>(baseUrl, "/api/v1/calibration/mode", {
     method: "POST",
@@ -1920,6 +1856,78 @@ export async function postCalibrationMode(
       "Content-Type": "text/plain",
     },
   });
+}
+
+export async function getWifiStatus(baseUrl: string): Promise<WifiStatus> {
+  if (isMockBaseUrl(baseUrl)) {
+    return structuredClone(getOrCreateMockDevice(baseUrl).wifi);
+  }
+  return httpJsonQueued<WifiStatus>(baseUrl, "/api/v1/wifi");
+}
+
+export async function postWifiConfig(
+  baseUrl: string,
+  payload: WifiSetRequest,
+): Promise<WifiStatus> {
+  if (isMockBaseUrl(baseUrl)) {
+    const state = getOrCreateMockDevice(baseUrl);
+    state.wifi = {
+      ssid: payload.ssid,
+      source: "user",
+      state: payload.wait ? "connected" : "configured",
+      ip: payload.wait ? "192.0.2.11" : null,
+      last_error: null,
+    };
+    return structuredClone(state.wifi);
+  }
+  const response = await httpJsonQueued<WifiStatus | { wifi: WifiStatus }>(
+    baseUrl,
+    "/api/v1/wifi",
+    {
+      method: "POST",
+      body: JSON.stringify(payload),
+      headers: {
+        "Content-Type": "application/json",
+      },
+    },
+  );
+  return "wifi" in response ? response.wifi : response;
+}
+
+export async function deleteWifiConfig(baseUrl: string): Promise<WifiStatus> {
+  if (isMockBaseUrl(baseUrl)) {
+    const state = getOrCreateMockDevice(baseUrl);
+    state.wifi = {
+      ssid: "LoadLynx Lab",
+      source: "factory",
+      state: "configured",
+      ip: null,
+      last_error: null,
+    };
+    return structuredClone(state.wifi);
+  }
+  const response = await httpJsonQueued<WifiStatus | { wifi: WifiStatus }>(
+    baseUrl,
+    "/api/v1/wifi",
+    {
+      method: "DELETE",
+    },
+  );
+  return "wifi" in response ? response.wifi : response;
+}
+
+export async function exportDiagnostics(baseUrl: string): Promise<unknown> {
+  if (isMockBaseUrl(baseUrl)) {
+    const state = getOrCreateMockDevice(baseUrl);
+    return {
+      schema_version: 1,
+      redaction: { psk: true },
+      device: { id: baseUrl, transport: "mock" },
+      wifi: state.wifi,
+      events: [],
+    };
+  }
+  return httpJsonQueued<unknown>(baseUrl, "/api/v1/diagnostics/export");
 }
 
 // Mock Implementation Extensions (Calibration)

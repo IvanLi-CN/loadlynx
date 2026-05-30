@@ -51,7 +51,7 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - MUST: `loadlynx-devd serve` 不接收固定设备端口；设备必须通过 `scan -> user selects -> bind/connect/lease` 流程进入控制。
 - MUST: `POST /api/v1/devices/scan` 返回 ESP32-S3 serial candidates、STM32 probe candidates、LAN discovered devices、mock devices，并保留完整候选信息。
 - MUST: 多个候选存在时 Web 和 CLI 均不得自动选择第一个、最近、已连接或已识别设备。
-- MUST: USB CDC 写入、WiFi 配网、safe settings、flash/reset/monitor 等需要占用 USB 的操作必须持有有效 per-device lease 或明确的 CLI exclusive session。
+- MUST: USB CDC 写入、WiFi 配网、safe settings、flash/reset/monitor 等需要占用 USB 的操作必须持有有效 per-device lease 或明确的 CLI exclusive session。同一 device/port 可以有多个有效 lease；普通 JSONL 写操作进入 per-port bounded FIFO 串行执行。
 - MUST: 固件烧录前校验 artifact 文件 SHA-256，并用 firmware identity 匹配 `build_id`、profile、features、target chip 和 defmt metadata。
 - MUST: ESP32-S3 烧录与 STM32G431 烧录目标分离；同一设备记录可包含 `digital_target` 与 `analog_target`。
 - MUST: Web 页面能通过 LAN 只读 API 使用 mDNS `.local`、DNS-SD 结果或用户手工 URL 连接设备。
@@ -116,17 +116,18 @@ Compatibility endpoints (`/api/v1/identity`, `/api/v1/status`, `/api/v1/network`
 ESP32-S3 USB CDC uses LF-delimited JSON frames. The bridge protocol should align with:
 
 - `hello`: protocol, capabilities, identity.
-- `request`: `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`, `set_cc_target`.
+- `request`: `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`, `set_cc_target`, `get_control`, `set_control`, `get_presets`, `set_preset`, `apply_preset`, `get_calibration_profile`, `calibration_apply`, `calibration_commit`, `calibration_reset`, `calibration_mode`, `get_wifi_status`, `set_wifi_config`, `clear_wifi_config`, `soft_reset`, `get_diagnostics`.
 - `response` / `error`: API-compatible envelope with `request_id`.
 - `status`: periodic or requested status snapshot.
 - `log`: structured firmware log.
-- `wifi_config`: `op=set|clear`, with PSK redacted from traces and never echoed.
+- WiFi config operations are compact request ops, not full HTTP-over-USB. User PSKs are never echoed and devd recursively redacts `psk`, `password`, `passphrase`, `secret` and `token` fields from traces/diagnostics.
+- Calibration profile reads may use a compact USB response (`cal_profile_v1`) so maximum-size valid calibration curves fit in one JSONL frame. devd must expand that compact response into the HTTP/Web calibration profile shape before returning it to CLI or Web callers.
 
 The daemon owns each USB CDC port through a per-port serial owner while any lease for that port is active. HTTP commands enqueue JSONL requests through that owner, devd generates a unique `request_id` per operation, and only matching responses may satisfy the request. Mismatched responses are trace evidence, not success. The owner continuously reads unsolicited monitor frames and publishes them through bounded session/event state. Serial open or I/O failures must be retryable per command; a transient failure must not poison the owner until the lease is released.
 
 Status and output-control response recovery may compensate for ESP32-S3 USB Serial/JTAG log noise only inside the same queued command window. A recovered success must be derived from frames after the matching transmit frame and must have the operation-specific payload shape; unrelated response IDs or stale monitor frames are not valid command responses.
 
-Flash/reset operations that need vendor tools such as `espflash --port` must pause and close the per-port serial owner before running. During that exclusive window, JSONL status/control/PD requests for the same port must either wait behind the owner boundary or return a clear `operation_in_progress` / `device_busy` style error; they must never open the same serial port concurrently.
+Flash/reset operations that need vendor tools such as `espflash --port` must pause and close the per-port serial owner before running. During that exclusive window, JSONL status/control/PD requests for the same port must fail fast with a clear `operation_in_progress` / `device_busy` style error; they must never open the same serial port concurrently or wait behind a long flash/reset operation.
 
 ### 固件烧录
 
@@ -160,6 +161,15 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx pd set --device <id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
 - `loadlynx output set --hardware <id> --enable --target-i-ma <ma>`
 - `loadlynx output set --hardware <id> --disable`
+- `loadlynx wifi show|set|clear --hardware <id>`
+- `loadlynx control get --hardware <id>`
+- `loadlynx control set --hardware <id> --enable|--disable`
+- `loadlynx preset list|set|apply --hardware <id>`
+- `loadlynx calibration profile|mode|apply|commit|reset --hardware <id>`
+- `loadlynx soft-reset --hardware <id> --reason manual`
+- `loadlynx diagnostics export --hardware <id>`
+
+LAN WiFi writes require the explicit `--allow-insecure-lan-wifi` CLI flag. USB/devd WiFi writes do not require that LAN safety override because they are local physical access operations.
 
 CLI must print target evidence before hardware-changing operations: device id, transport, port/probe, artifact id, SHA-256 and dry-run/real mode.
 
@@ -174,7 +184,8 @@ CLI must print target evidence before hardware-changing operations: device id, t
 ## 验收标准
 
 - Given devd has two ESP32-S3 USB serial candidates, When Web opens Connect, Then it lists both and does not create a lease until the user selects one.
-- Given devd has one active USB lease, When another page requests the same device, Then devd returns `device_lease_conflict`.
+- Given devd has one active USB lease, When another page requests the same device, Then devd may create another lease for the same device and all ordinary JSONL writes are serialized through the per-port queue.
+- Given flash/reset owns the port exclusively, When another client requests JSONL work for the same port, Then devd returns `operation_in_progress` or `device_busy` without opening the port.
 - Given no heartbeat arrives for the lease TTL, When cleanup runs, Then devd disconnects the USB session and releases the port within the configured bound.
 - Given a digital artifact with mismatched `build_id`, When selecting it for a connected digital target, Then log decode remains `unverified` and real flash requires explicit target confirmation.
 - Given an analog artifact is selected for a digital target, When flash is requested, Then devd returns a non-retryable target mismatch error.
@@ -182,7 +193,7 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Given CLI receives `--dry-run`, When `flash analog` is called, Then it verifies artifact hashes and target resolution but does not invoke probe-rs/espflash.
 - Given CLI sets a USB target to 12V PD and enables a 2A CC load, When `status` is read through devd, Then the response shows the PD contract, CC target, output enabled state and measured current without direct CLI serial access.
 - Given CLI disables output, When `status` is read through devd, Then output enabled and analog enable are false and measured current is near zero.
-- Given a USB CDC `wifi_config` frame contains PSK, When session traces are fetched, Then PSK is redacted.
+- Given a USB CDC `set_wifi_config` request contains PSK, When session traces or diagnostics are fetched, Then PSK is redacted.
 - Given Storybook exists, Web UI changes for Connect/Firmware/USB session must have stable stories and visual evidence before merge.
 
 ## Visual Evidence
@@ -210,6 +221,18 @@ CLI must print target evidence before hardware-changing operations: device id, t
   evidence_note: verifies the Firmware route can submit a devd dry-run flash request and render target evidence plus USB session logs/traces.
 
 ![devd Firmware dry-run evidence](./assets/devd-firmware-dry-run.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Settings/WifiAndDiagnostics`
+  state: devd-backed WiFi settings and diagnostics export controls
+  capture_scope: browser-viewport
+  requested_viewport: `1280x900`
+  viewport_strategy: playwright-headless
+  target_program: mock-only
+  sensitive_exclusion: mock PSK only; diagnostics output remains redacted
+  evidence_note: verifies the Settings route renders WiFi status, accepts user WiFi input through the API layer, and renders a diagnostics export without exposing PSK.
+
+![Settings WiFi diagnostics evidence](./assets/settings-wifi-diagnostics.png)
 
 ## 实现前置条件
 

@@ -7,7 +7,7 @@ LoadLynx digital firmware and `loadlynx-devd` use LF-delimited JSON frames on th
 - Encoding: UTF-8 JSON object followed by `\n`.
 - Protocol identifier: `loadlynx.cdc.v1`.
 - Each host request includes `request_id`; every `response` or `error` echoes it.
-- `wifi_config.psk` and equivalent secret fields are redacted before traces leave devd.
+- `psk` and equivalent secret fields are redacted before traces or diagnostics leave devd.
 
 ## Frames
 
@@ -24,13 +24,35 @@ LoadLynx digital firmware and `loadlynx-devd` use LF-delimited JSON frames on th
       "features": ["net_http", "mdns_dns_sd", "usb_cdc_jsonl"]
     }
   },
-  "capabilities": ["get_identity", "get_status", "get_pd", "set_pd_policy", "set_output_enabled", "set_cc_target"]
+  "capabilities": [
+    "get_identity",
+    "get_status",
+    "get_pd",
+    "set_pd_policy",
+    "set_output_enabled",
+    "set_cc_target",
+    "get_control",
+    "set_control",
+    "get_presets",
+    "set_preset",
+    "apply_preset",
+    "get_calibration_profile",
+    "calibration_apply",
+    "calibration_commit",
+    "calibration_reset",
+    "calibration_mode",
+    "get_wifi_status",
+    "set_wifi_config",
+    "clear_wifi_config",
+    "soft_reset",
+    "get_diagnostics"
+  ]
 }
 ```
 
 ### `request`
 
-Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`, and `set_cc_target`.
+Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy`, `set_output_enabled`, `set_cc_target`, `get_control`, `set_control`, `get_presets`, `set_preset`, `apply_preset`, `get_calibration_profile`, `calibration_apply`, `calibration_commit`, `calibration_reset`, `calibration_mode`, `get_wifi_status`, `set_wifi_config`, `clear_wifi_config`, `soft_reset` and `get_diagnostics`.
 
 ```json
 {
@@ -51,6 +73,8 @@ Supported `op` values are `get_identity`, `get_status`, `get_pd`, `set_pd_policy
   "target_i_ma": 2000
 }
 ```
+
+Control, preset and calibration ops reuse the HTTP/Web JSON payload shapes from `docs/interfaces/network-http-api.md`, but remain compact JSONL requests rather than full HTTP requests over USB. The `get_calibration_profile` firmware response may use the compact `cal_profile_v1` data shape (`a`, `c1`, `c2`, `vl`, `vr` arrays); devd expands it back to the HTTP/Web profile shape before serving CLI or Web callers. WiFi config ops use `ssid`, `psk` and optional `wait`; responses and diagnostics must never echo PSK.
 
 ### `response`
 

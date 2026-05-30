@@ -9,6 +9,20 @@ export interface NetworkInfo {
   hostname: string;
 }
 
+export interface WifiStatus {
+  ssid: string | null;
+  source: "factory" | "user" | "none";
+  state: "idle" | "configured" | "connecting" | "connected" | "error";
+  ip: string | null;
+  last_error: string | null;
+}
+
+export interface WifiSetRequest {
+  ssid: string;
+  psk: string;
+  wait?: boolean;
+}
+
 export interface DeviceCapabilities {
   cc_supported: boolean;
   cv_supported: boolean;

@@ -49,9 +49,12 @@ const TRACE_LIMIT: usize = 2_000;
 const SERIAL_PROBE_BAUD: u32 = 115_200;
 const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
-const SERIAL_PROBE_MAX_BYTES: usize = 4096;
+const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
+const SERIAL_PROBE_MAX_BYTES: usize = 32768;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
+const SERIAL_WIFI_WAIT_OPERATION_WAIT_MS: u64 = 40_000;
+const LOADLYNX_PRESET_COUNT: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct DevdConfig {
@@ -348,6 +351,7 @@ struct LeaseRequest {
 
 #[derive(Debug, Deserialize)]
 struct SessionQuery {
+    device_id: Option<String>,
     lease_id: Option<String>,
     logs_limit: Option<usize>,
     trace_limit: Option<usize>,
@@ -372,6 +376,14 @@ struct PdRequest {
     target_mv: Option<u32>,
     i_req_ma: Option<u32>,
     allow_extended_voltage: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct WifiSetRequest {
+    ssid: String,
+    psk: String,
+    #[serde(default)]
+    wait: bool,
 }
 
 pub async fn serve(config: DevdConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -436,8 +448,41 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
         .route("/api/v1/identity", get(compat_identity))
         .route("/api/v1/status", get(compat_status))
         .route("/api/v1/network", get(compat_network))
+        .route(
+            "/api/v1/wifi",
+            get(compat_wifi_get)
+                .post(compat_wifi_post)
+                .delete(compat_wifi_delete),
+        )
         .route("/api/v1/cc", post(compat_cc))
         .route("/api/v1/pd", get(compat_pd_get).post(compat_pd_post))
+        .route(
+            "/api/v1/control",
+            get(compat_control_get)
+                .post(compat_control_post)
+                .put(compat_control_post),
+        )
+        .route(
+            "/api/v1/presets",
+            get(compat_presets_get)
+                .post(compat_presets_post)
+                .put(compat_presets_post),
+        )
+        .route("/api/v1/presets/apply", post(compat_presets_apply))
+        .route(
+            "/api/v1/calibration/profile",
+            get(compat_calibration_profile),
+        )
+        .route("/api/v1/calibration/apply", post(compat_calibration_apply))
+        .route(
+            "/api/v1/calibration/commit",
+            post(compat_calibration_commit),
+        )
+        .route("/api/v1/calibration/reset", post(compat_calibration_reset))
+        .route("/api/v1/calibration/mode", post(compat_calibration_mode))
+        .route("/api/v1/soft-reset", post(compat_soft_reset))
+        .route("/api/v1/diagnostics", get(compat_diagnostics_export))
+        .route("/api/v1/diagnostics/export", get(compat_diagnostics_export))
         .with_state(state);
 
     if allow_dev_cors {
@@ -446,7 +491,7 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
                 .allow_origin(AllowOrigin::predicate(|origin, _request_parts| {
                     is_loopback_dev_origin(origin)
                 }))
-                .allow_methods([Method::GET, Method::POST, Method::DELETE])
+                .allow_methods([Method::GET, Method::POST, Method::PUT, Method::DELETE])
                 .allow_headers(tower_http::cors::Any),
         );
     }
@@ -1078,6 +1123,7 @@ async fn serial_owner_jsonl_request(
         ));
     }
 
+    let operation_wait_ms = serial_operation_wait_ms(op, extra.as_ref());
     let command = SerialJsonlCommand {
         device_id: device_id.to_string(),
         port_path: port_path.to_string(),
@@ -1101,7 +1147,7 @@ async fn serial_owner_jsonl_request(
                 "USB serial owner stopped before accepting the request",
             ),
         })?;
-    let result = tokio::time::timeout(Duration::from_millis(SERIAL_OPERATION_WAIT_MS), rx)
+    let result = tokio::time::timeout(Duration::from_millis(operation_wait_ms), rx)
         .await
         .map_err(|_| {
             HttpError::retryable(
@@ -1464,6 +1510,497 @@ async fn compat_cc(
     })))
 }
 
+async fn compat_usb_json_request(
+    state: &AppState,
+    query: &CompatQuery,
+    op: &str,
+    extra: Option<Value>,
+    success_message: &str,
+    operation: &str,
+) -> Result<(String, Value), HttpError> {
+    cleanup_expired_leases(state);
+    let (device_id, port_path) = {
+        let guard = state.inner.lock().expect("state lock");
+        select_serial_port_for_compat(&guard, query, operation)?
+    };
+
+    let (request_id, probe) =
+        serial_owner_jsonl_request(state, &device_id, &port_path, op, extra).await?;
+    let response = serial_response_for_request(&probe, &request_id)
+        .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
+        .or_else(|| infer_serial_response_from_text(&probe, &request_id));
+    record_serial_protocol_probe(state, &device_id, &port_path, success_message, probe);
+    Ok((
+        request_id,
+        serial_response_data_required(response, operation)?,
+    ))
+}
+
+fn serial_response_data_required(
+    response: Option<Value>,
+    operation: &str,
+) -> Result<Value, HttpError> {
+    let response = response.ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            format!("{operation} did not return a protocol response"),
+        )
+    })?;
+    serial_response_data(response, operation)
+}
+
+fn merge_preset_value(merged: &mut HashMap<u64, Value>, preset: &Value) -> bool {
+    let Some(id) = preset.get("preset_id").and_then(Value::as_u64) else {
+        return false;
+    };
+    merged.insert(id, preset.clone());
+    true
+}
+
+fn merge_presets_from_data(merged: &mut HashMap<u64, Value>, data: &Value) -> bool {
+    if is_preset_fragment(data) {
+        return merge_preset_value(merged, data);
+    }
+    if let Some(preset) = data.get("preset")
+        && is_preset_fragment(preset)
+    {
+        return merge_preset_value(merged, preset);
+    }
+    let Some(presets) = data.get("presets").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut merged_any = false;
+    for preset in presets {
+        merged_any |= merge_preset_value(merged, preset);
+    }
+    merged_any
+}
+
+fn presets_data_from_map(
+    merged: &HashMap<u64, Value>,
+    recovered: bool,
+    recovered_by_control: bool,
+) -> Value {
+    let mut presets = merged
+        .iter()
+        .map(|(id, preset)| (*id, preset.clone()))
+        .collect::<Vec<_>>();
+    presets.sort_by_key(|(id, _)| *id);
+    let mut data = json!({
+        "presets": presets
+            .into_iter()
+            .map(|(_, preset)| preset)
+            .collect::<Vec<_>>()
+    });
+    if recovered && let Some(object) = data.as_object_mut() {
+        object.insert("recovered_from_fragments".to_string(), json!(true));
+        object.insert("recovered_by_retry".to_string(), json!(true));
+    }
+    if recovered_by_control && let Some(object) = data.as_object_mut() {
+        object.insert("recovered_from_fragments".to_string(), json!(true));
+        object.insert("recovered_by_control".to_string(), json!(true));
+    }
+    data
+}
+
+async fn compat_wifi_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_wifi_status",
+        None,
+        "USB WiFi status completed",
+        "USB WiFi status",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_wifi_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    Json(input): Json<WifiSetRequest>,
+) -> Result<Json<Value>, HttpError> {
+    let extra = json!({
+        "ssid": input.ssid,
+        "psk": input.psk,
+        "wait": input.wait,
+    });
+    let (request_id, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "set_wifi_config",
+        Some(extra),
+        "USB WiFi set completed",
+        "USB WiFi set",
+    )
+    .await?;
+    Ok(Json(json!({"request_id": request_id, "wifi": data})))
+}
+
+async fn compat_wifi_delete(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (request_id, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "clear_wifi_config",
+        None,
+        "USB WiFi clear completed",
+        "USB WiFi clear",
+    )
+    .await?;
+    Ok(Json(json!({"request_id": request_id, "wifi": data})))
+}
+
+async fn compat_control_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_control",
+        None,
+        "USB control GET completed",
+        "USB control GET",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_control_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "set_control",
+        Some(input),
+        "USB control SET completed",
+        "USB control SET",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_presets_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let mut merged = HashMap::new();
+    let mut recovered = false;
+    let mut recovered_by_control = false;
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match compat_usb_json_request(
+            &state,
+            &query,
+            "get_presets",
+            None,
+            if attempt == 0 {
+                "USB presets GET completed"
+            } else {
+                "USB presets GET retry completed"
+            },
+            "USB presets GET",
+        )
+        .await
+        {
+            Ok((_, data)) => {
+                if !merge_presets_from_data(&mut merged, &data) {
+                    return Ok(Json(data));
+                }
+                recovered |= data
+                    .get("recovered_from_fragments")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || data
+                        .get("recovered_from_text")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                if merged.len() >= LOADLYNX_PRESET_COUNT {
+                    return Ok(Json(presets_data_from_map(
+                        &merged,
+                        recovered,
+                        recovered_by_control,
+                    )));
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if !merged.is_empty() {
+        for attempt in 0..3 {
+            if let Ok((_, data)) = compat_usb_json_request(
+                &state,
+                &query,
+                "get_control",
+                None,
+                if attempt == 0 {
+                    "USB presets GET control recovery completed"
+                } else {
+                    "USB presets GET control recovery retry completed"
+                },
+                "USB presets GET control recovery",
+            )
+            .await
+                && merge_presets_from_data(&mut merged, &data)
+            {
+                recovered_by_control = true;
+                recovered |= data
+                    .get("recovered_from_fragments")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || data
+                        .get("recovered_from_text")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                if merged.len() >= LOADLYNX_PRESET_COUNT {
+                    return Ok(Json(presets_data_from_map(
+                        &merged,
+                        recovered,
+                        recovered_by_control,
+                    )));
+                }
+            }
+        }
+    }
+    if !merged.is_empty() {
+        return Err(HttpError::retryable(
+            "serial_response_incomplete",
+            format!(
+                "USB presets GET recovered {}/{} presets after retries",
+                merged.len(),
+                LOADLYNX_PRESET_COUNT
+            ),
+        ));
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB presets GET did not return a protocol response",
+        )
+    }))
+}
+
+async fn compat_presets_post(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "set_preset",
+        Some(input),
+        "USB preset SET completed",
+        "USB preset SET",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_presets_apply(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "apply_preset",
+        Some(input),
+        "USB preset APPLY completed",
+        "USB preset APPLY",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_profile(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_calibration_profile",
+        None,
+        "USB calibration profile completed",
+        "USB calibration profile",
+    )
+    .await?;
+    Ok(Json(expand_compact_calibration_profile(data)?))
+}
+
+async fn compat_calibration_apply(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_apply",
+        Some(input),
+        "USB calibration apply completed",
+        "USB calibration apply",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_commit(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_commit",
+        Some(input),
+        "USB calibration commit completed",
+        "USB calibration commit",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_reset(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_reset",
+        Some(input),
+        "USB calibration reset completed",
+        "USB calibration reset",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_calibration_mode(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "calibration_mode",
+        Some(input),
+        "USB calibration mode completed",
+        "USB calibration mode",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_soft_reset(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+    body: String,
+) -> Result<Json<Value>, HttpError> {
+    let input = parse_compat_json_body(&body)?;
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "soft_reset",
+        Some(input),
+        "USB soft reset completed",
+        "USB soft reset",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_diagnostics_export(
+    State(state): State<AppState>,
+    Query(query): Query<SessionQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let compat_query = CompatQuery {
+        device_id: query.device_id.clone(),
+        lease_id: query.lease_id.clone(),
+    };
+    let (_, firmware) = compat_usb_json_request(
+        &state,
+        &compat_query,
+        "get_diagnostics",
+        None,
+        "USB diagnostics export completed",
+        "USB diagnostics export",
+    )
+    .await?;
+
+    cleanup_expired_leases(&state);
+    let guard = state.inner.lock().expect("state lock");
+    let device = select_compat_device(
+        &guard,
+        query.lease_id.as_deref(),
+        query.device_id.as_deref(),
+    )?;
+    let leases = guard
+        .leases
+        .values()
+        .filter(|lease| lease.device_id == device.id)
+        .map(lease_json)
+        .collect::<Vec<_>>();
+    let events = guard
+        .events
+        .iter()
+        .filter(|event| event.device_id.as_deref().is_none_or(|id| id == device.id))
+        .map(redact_sensitive_event)
+        .collect::<Vec<_>>();
+    Ok(Json(json!({
+        "schema_version": 1,
+        "exported_at": now(),
+        "device": redact_sensitive_frame(&json!(device)),
+        "firmware": redact_sensitive_frame(&firmware),
+        "leases": leases,
+        "session": session_json(device, query.logs_limit, query.trace_limit),
+        "events": events,
+        "redaction": {
+            "psk": true,
+            "password": true
+        }
+    })))
+}
+
+fn redact_sensitive_event(event: &DevdEvent) -> DevdEvent {
+    DevdEvent {
+        id: event.id.clone(),
+        timestamp: event.timestamp.clone(),
+        device_id: event.device_id.clone(),
+        kind: event.kind.clone(),
+        message: event.message.clone(),
+        payload: redact_sensitive_frame(&event.payload),
+    }
+}
+
+fn parse_compat_json_body(body: &str) -> Result<Value, HttpError> {
+    serde_json::from_str(body)
+        .map_err(|error| HttpError::bad_request("invalid_request", error.to_string()))
+}
+
 fn select_serial_port_for_compat(
     state: &DevdState,
     query: &CompatQuery,
@@ -1536,6 +2073,107 @@ fn status_data_from_serial_response(response: Option<Value>) -> Result<Value, Ht
         ));
     }
     Ok(data)
+}
+
+fn expand_compact_calibration_profile(data: Value) -> Result<Value, HttpError> {
+    let Some(compact) = data.as_object() else {
+        return Ok(data);
+    };
+    if compact.get("compact").and_then(Value::as_str) != Some("cal_profile_v1") {
+        return Ok(data);
+    }
+
+    let active = compact_array(compact, "a")?;
+    if active.len() != 3 {
+        return Err(compact_calibration_error("active tuple must have 3 items"));
+    }
+    let source = active[0]
+        .as_str()
+        .ok_or_else(|| compact_calibration_error("active source must be a string"))?;
+    let fmt_version = compact_u64(&active[1], "fmt_version")?;
+    let hw_rev = compact_u64(&active[2], "hw_rev")?;
+
+    Ok(json!({
+        "active": {
+            "source": source,
+            "fmt_version": fmt_version,
+            "hw_rev": hw_rev,
+        },
+        "current_ch1_points": expand_compact_current_curve(compact, "c1")?,
+        "current_ch2_points": expand_compact_current_curve(compact, "c2")?,
+        "v_local_points": expand_compact_voltage_curve(compact, "vl")?,
+        "v_remote_points": expand_compact_voltage_curve(compact, "vr")?,
+    }))
+}
+
+fn compact_array<'a>(
+    compact: &'a serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<&'a Vec<Value>, HttpError> {
+    compact.get(key).and_then(Value::as_array).ok_or_else(|| {
+        compact_calibration_error(format!("compact calibration field {key} missing"))
+    })
+}
+
+fn expand_compact_current_curve(
+    compact: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Value, HttpError> {
+    let mut points = Vec::new();
+    for point in compact_array(compact, key)? {
+        let tuple = point
+            .as_array()
+            .ok_or_else(|| compact_calibration_error("current point must be an array"))?;
+        if tuple.len() != 3 {
+            return Err(compact_calibration_error(
+                "current point tuple must have 3 items",
+            ));
+        }
+        points.push(json!({
+            "raw_100uv": compact_i64(&tuple[0], "raw_100uv")?,
+            "raw_dac_code": compact_u64(&tuple[1], "raw_dac_code")?,
+            "meas_ma": compact_i64(&tuple[2], "meas_ma")?,
+        }));
+    }
+    Ok(Value::Array(points))
+}
+
+fn expand_compact_voltage_curve(
+    compact: &serde_json::Map<String, Value>,
+    key: &str,
+) -> Result<Value, HttpError> {
+    let mut points = Vec::new();
+    for point in compact_array(compact, key)? {
+        let tuple = point
+            .as_array()
+            .ok_or_else(|| compact_calibration_error("voltage point must be an array"))?;
+        if tuple.len() != 2 {
+            return Err(compact_calibration_error(
+                "voltage point tuple must have 2 items",
+            ));
+        }
+        points.push(json!({
+            "raw_100uv": compact_i64(&tuple[0], "raw_100uv")?,
+            "meas_mv": compact_i64(&tuple[1], "meas_mv")?,
+        }));
+    }
+    Ok(Value::Array(points))
+}
+
+fn compact_i64(value: &Value, field: &str) -> Result<i64, HttpError> {
+    value
+        .as_i64()
+        .ok_or_else(|| compact_calibration_error(format!("{field} must be an integer")))
+}
+
+fn compact_u64(value: &Value, field: &str) -> Result<u64, HttpError> {
+    value
+        .as_u64()
+        .ok_or_else(|| compact_calibration_error(format!("{field} must be a non-negative integer")))
+}
+
+fn compact_calibration_error(message: impl Into<String>) -> HttpError {
+    HttpError::retryable("serial_response_invalid", message)
 }
 
 fn serial_response_data(response: Value, operation: &str) -> Result<Value, HttpError> {
@@ -2658,6 +3296,30 @@ fn next_request_id(op: &str) -> String {
     )
 }
 
+fn serial_request_expects_wifi_wait(op: &str, extra: Option<&Value>) -> bool {
+    op == "set_wifi_config"
+        && extra
+            .and_then(|value| value.get("wait"))
+            .and_then(Value::as_bool)
+            == Some(true)
+}
+
+fn serial_protocol_timeout_ms(op: &str, extra: Option<&Value>) -> u64 {
+    if serial_request_expects_wifi_wait(op, extra) {
+        SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS
+    } else {
+        SERIAL_PROTOCOL_TIMEOUT_MS
+    }
+}
+
+fn serial_operation_wait_ms(op: &str, extra: Option<&Value>) -> u64 {
+    if serial_request_expects_wifi_wait(op, extra) {
+        SERIAL_WIFI_WAIT_OPERATION_WAIT_MS
+    } else {
+        SERIAL_OPERATION_WAIT_MS
+    }
+}
+
 fn validate_port_not_leased_by_other_device(
     state: &AppState,
     device_id: &str,
@@ -2782,6 +3444,42 @@ fn mock_serial_probe(request_id: &str, op: &str, extra: Option<Value>) -> Serial
         "set_output_enabled" => {
             json!({"enable": extra.and_then(|v| v.get("enable").cloned()).unwrap_or(json!(false))})
         }
+        "get_wifi_status" | "set_wifi_config" | "clear_wifi_config" => json!({
+            "ssid": extra.as_ref().and_then(|v| v.get("ssid")).and_then(Value::as_str).unwrap_or("LoadLynx-Test"),
+            "source": if op == "clear_wifi_config" { "factory" } else { "user" },
+            "state": "connected",
+            "ip": "192.0.2.10",
+            "last_error": null
+        }),
+        "get_control" | "set_control" | "apply_preset" => json!({
+            "active_preset_id": extra.as_ref().and_then(|v| v.get("preset_id")).and_then(Value::as_u64).unwrap_or(1),
+            "output_enabled": extra.as_ref().and_then(|v| v.get("output_enabled")).and_then(Value::as_bool).unwrap_or(false),
+            "uv_latched": false,
+            "preset": mock_preset(extra.as_ref().and_then(|v| v.get("preset_id")).and_then(Value::as_u64).unwrap_or(1) as u8)
+        }),
+        "get_presets" => json!({
+            "presets": (1_u8..=5).map(mock_preset).collect::<Vec<_>>()
+        }),
+        "set_preset" => extra.unwrap_or_else(|| mock_preset(1)),
+        "get_calibration_profile" => json!({
+            "active": {"source": "factory-default", "fmt_version": 3, "hw_rev": 1},
+            "current_ch1_points": [],
+            "current_ch2_points": [],
+            "v_local_points": [],
+            "v_remote_points": []
+        }),
+        "calibration_apply" | "calibration_commit" | "calibration_reset" | "calibration_mode" => {
+            json!({"ok": true})
+        }
+        "soft_reset" => json!({
+            "accepted": true,
+            "reason": extra.as_ref().and_then(|v| v.get("reason")).and_then(Value::as_str).unwrap_or("manual")
+        }),
+        "get_diagnostics" => json!({
+            "schema_version": 1,
+            "events": [],
+            "redaction": {"psk": true, "password": true}
+        }),
         _ => json!({}),
     };
     SerialProtocolProbe {
@@ -2798,6 +3496,19 @@ fn mock_serial_probe(request_id: &str, op: &str, extra: Option<Value>) -> Serial
         non_protocol_bytes: 0,
         non_protocol_text: String::new(),
     }
+}
+
+fn mock_preset(preset_id: u8) -> Value {
+    json!({
+        "preset_id": preset_id.clamp(1, 5),
+        "mode": "cc",
+        "target_i_ma": 0,
+        "target_v_mv": 12000,
+        "target_p_mw": 0,
+        "min_v_mv": 0,
+        "max_i_ma_total": 10000,
+        "max_p_mw": 120000
+    })
 }
 
 fn record_serial_protocol_probe(
@@ -3062,6 +3773,7 @@ fn serial_jsonl_request_on_port(
     op: &str,
     extra: Option<Value>,
 ) -> io::Result<SerialProtocolProbe> {
+    let protocol_timeout_ms = serial_protocol_timeout_ms(op, extra.as_ref());
     let mut frames = Vec::new();
     let mut line_buf = Vec::new();
     let mut non_protocol_bytes = 0usize;
@@ -3081,7 +3793,7 @@ fn serial_jsonl_request_on_port(
 
     write_serial_request(&mut *port, &mut frames, request_id, op, extra)?;
     line_buf.clear();
-    let deadline = Instant::now() + Duration::from_millis(SERIAL_PROTOCOL_TIMEOUT_MS);
+    let deadline = Instant::now() + Duration::from_millis(protocol_timeout_ms);
     let _ = read_serial_jsonl_until(
         &mut *port,
         deadline,
@@ -3281,6 +3993,16 @@ fn serial_request_id_matches_op(request_id: &str, legacy_id: &str) -> bool {
 
 fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
     let text = &probe.non_protocol_text;
+    if serial_request_id_matches_op(request_id, "devd-get-calibration-profile")
+        && let Some(response) = infer_calibration_profile_response_from_text(text, request_id)
+    {
+        return Some(response);
+    }
+    if serial_request_id_matches_op(request_id, "devd-get-wifi-status")
+        && let Some(response) = infer_wifi_status_response_from_text(text, request_id)
+    {
+        return Some(response);
+    }
     if is_output_control_request_id(request_id)
         && text.contains(request_id)
         && text.contains("\"ok\":true")
@@ -3327,10 +4049,124 @@ fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str
     None
 }
 
+fn infer_calibration_profile_response_from_text(text: &str, request_id: &str) -> Option<Value> {
+    if !text.contains("\"a\":[")
+        || !text.contains("\"c1\":")
+        || !text.contains("\"c2\":")
+        || !text.contains("\"vl\":")
+        || !text.contains("\"vr\":")
+    {
+        return None;
+    }
+    let start = text.find("\"a\":[")?;
+    let vr_key = text[start..].find("\"vr\":")? + start;
+    let vr_array = text[vr_key..].find('[')? + vr_key;
+    let end = json_array_end(text, vr_array)?;
+    let candidate = format!("{{\"compact\":\"cal_profile_v1\",{}}}", &text[start..end]);
+    let data = serde_json::from_str::<Value>(&candidate).ok()?;
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": data,
+        "recovered_from_text": true
+    }))
+}
+
+fn infer_wifi_status_response_from_text(text: &str, request_id: &str) -> Option<Value> {
+    let state = json_string_after_any(text, &["\"state\":\"", "tate\":\""])?;
+    let ip = json_string_after_any(text, &["\"ip\":\""]);
+    let ssid = json_string_after_any(text, &["\"ssid\":\""]);
+    let source = json_string_after_any(text, &["\"source\":\""]);
+    let last_error = json_string_after_any(text, &["\"last_error\":\""]);
+    let data = json!({
+        "ssid": ssid,
+        "source": source,
+        "state": state,
+        "ip": ip,
+        "last_error": last_error,
+        "recovered_from_text": true
+    });
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": data,
+        "recovered_from_text": true
+    }))
+}
+
+fn json_string_after_any(text: &str, markers: &[&str]) -> Option<String> {
+    for marker in markers {
+        if let Some(value) = json_string_after(text, marker) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn json_string_after(text: &str, marker: &str) -> Option<String> {
+    let start = text.find(marker)? + marker.len();
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in text[start..].chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(out);
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
+fn json_array_end(text: &str, array_start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in text[array_start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(array_start + offset + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn infer_serial_response_from_fragments(
     probe: &SerialProtocolProbe,
     request_id: &str,
 ) -> Option<Value> {
+    if serial_request_id_matches_op(request_id, "devd-get-identity") {
+        return infer_identity_response_from_fragments(probe, request_id);
+    }
+    if serial_request_id_matches_op(request_id, "devd-get-control") {
+        return infer_control_response_from_fragments(probe, request_id);
+    }
+    if serial_request_id_matches_op(request_id, "devd-get-presets") {
+        return infer_presets_response_from_fragments(probe, request_id);
+    }
     if !serial_request_id_matches_op(request_id, "devd-get-status") {
         return None;
     }
@@ -3394,6 +4230,163 @@ fn infer_serial_response_from_fragments(
         "data": Value::Object(data),
         "recovered_from_fragments": true
     }))
+}
+
+fn is_preset_fragment(frame: &Value) -> bool {
+    frame.get("preset_id").is_some()
+        && frame.get("mode").is_some()
+        && frame.get("max_i_ma_total").is_some()
+        && frame.get("max_p_mw").is_some()
+}
+
+fn infer_control_response_from_fragments(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    let tx_index = probe.frames.iter().position(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+    })?;
+    for event in probe.frames.iter().skip(tx_index + 1) {
+        if event.direction != "rx" || event.frame.get("request_id").is_some() {
+            continue;
+        }
+        let frame = &event.frame;
+        if frame.get("active_preset_id").is_some()
+            && frame.get("preset").is_some()
+            && frame.get("output_enabled").is_some()
+        {
+            let mut data = frame.clone();
+            data.as_object_mut()?
+                .insert("recovered_from_fragments".to_string(), json!(true));
+            return Some(json!({
+                "type": "response",
+                "request_id": request_id,
+                "ok": true,
+                "data": data,
+                "recovered_from_fragments": true
+            }));
+        }
+        if is_preset_fragment(frame) {
+            let active_preset_id = frame.get("preset_id").cloned().unwrap_or(json!(1));
+            return Some(json!({
+                "type": "response",
+                "request_id": request_id,
+                "ok": true,
+                "data": {
+                    "active_preset_id": active_preset_id,
+                    "output_enabled": false,
+                    "uv_latched": false,
+                    "preset": frame,
+                    "recovered_from_fragments": true
+                },
+                "recovered_from_fragments": true
+            }));
+        }
+    }
+    None
+}
+
+fn infer_presets_response_from_fragments(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    let tx_index = probe.frames.iter().position(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+    })?;
+    let mut presets = probe
+        .frames
+        .iter()
+        .skip(tx_index + 1)
+        .filter_map(|event| {
+            if event.direction == "rx"
+                && event.frame.get("request_id").is_none()
+                && is_preset_fragment(&event.frame)
+            {
+                Some(event.frame.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if presets.is_empty() {
+        return None;
+    }
+    presets.sort_by_key(|preset| {
+        preset
+            .get("preset_id")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX)
+    });
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": {
+            "presets": presets,
+            "recovered_from_fragments": true
+        },
+        "recovered_from_fragments": true
+    }))
+}
+
+fn infer_identity_response_from_fragments(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    let tx_index = probe.frames.iter().position(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+    })?;
+    for event in probe.frames.iter().skip(tx_index + 1) {
+        if event.direction != "rx" || event.frame.get("request_id").is_some() {
+            continue;
+        }
+        let frame = &event.frame;
+        if frame.get("build_id").is_none()
+            || frame.get("target").and_then(Value::as_str) != Some("digital_esp32s3")
+        {
+            continue;
+        }
+        let build_id = frame
+            .get("build_id")
+            .and_then(Value::as_str)
+            .unwrap_or("digital unknown");
+        let protocol = frame
+            .get("protocol")
+            .and_then(Value::as_str)
+            .unwrap_or("loadlynx.cdc.v1");
+        return Some(json!({
+            "type": "response",
+            "request_id": request_id,
+            "ok": true,
+            "data": {
+                "device_id": "digital-esp32s3",
+                "target": "digital",
+                "mcu": "esp32s3",
+                "protocol": protocol,
+                "firmware_version": build_id,
+                "digital_fw_version": build_id,
+                "firmware": frame,
+                "recovered_from_fragments": true
+            },
+            "recovered_from_fragments": true
+        }));
+    }
+    None
 }
 
 fn is_output_control_request_id(request_id: &str) -> bool {
@@ -3631,14 +4624,25 @@ fn push_trace(device: &mut DeviceRecord, direction: &str, payload: Value) {
 }
 
 pub fn redact_sensitive_frame(frame: &Value) -> Value {
-    let mut redacted = frame.clone();
-    if redacted.get("type").and_then(Value::as_str) == Some("wifi_config")
-        && let Some(obj) = redacted.as_object_mut()
-        && obj.contains_key("psk")
-    {
-        obj.insert("psk".to_string(), Value::String("<redacted>".to_string()));
+    match frame {
+        Value::Object(map) => Value::Object(
+            map.iter()
+                .map(|(key, value)| {
+                    let key_lc = key.to_ascii_lowercase();
+                    if matches!(
+                        key_lc.as_str(),
+                        "psk" | "password" | "passphrase" | "secret" | "token"
+                    ) {
+                        (key.clone(), Value::String("<redacted>".to_string()))
+                    } else {
+                        (key.clone(), redact_sensitive_frame(value))
+                    }
+                })
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(redact_sensitive_frame).collect()),
+        _ => frame.clone(),
     }
-    redacted
 }
 
 fn summarize_frame(frame: &Value) -> String {
@@ -3758,6 +4762,40 @@ mod tests {
             },
             files: vec![],
         }
+    }
+
+    #[test]
+    fn expands_compact_usb_calibration_profile() {
+        let expanded = expand_compact_calibration_profile(json!({
+            "compact": "cal_profile_v1",
+            "a": ["user-calibrated", 3, 1],
+            "c1": [[0, 0, 0], [25000, 4095, 5000]],
+            "c2": [[1, 2, 3]],
+            "vl": [[0, 0]],
+            "vr": [[100, 120]]
+        }))
+        .unwrap();
+
+        assert_eq!(expanded["active"]["source"], "user-calibrated");
+        assert_eq!(expanded["active"]["fmt_version"], 3);
+        assert_eq!(expanded["current_ch1_points"][1]["raw_dac_code"], 4095);
+        assert_eq!(expanded["current_ch2_points"][0]["meas_ma"], 3);
+        assert_eq!(expanded["v_remote_points"][0]["meas_mv"], 120);
+    }
+
+    #[test]
+    fn rejects_malformed_compact_usb_calibration_profile() {
+        let err = expand_compact_calibration_profile(json!({
+            "compact": "cal_profile_v1",
+            "a": ["factory-default", 3, 1],
+            "c1": [[0, 0]],
+            "c2": [],
+            "vl": [],
+            "vr": []
+        }))
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "serial_response_invalid");
     }
 
     #[test]
@@ -4412,6 +5450,236 @@ mod tests {
     }
 
     #[test]
+    fn control_response_inference_recovers_standalone_preset_payload() {
+        let request_id = "devd-get-control-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_control"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "preset_id": 1,
+                        "mode": "cp",
+                        "target_i_ma": 0,
+                        "target_v_mv": 0,
+                        "target_p_mw": 20000,
+                        "min_v_mv": 0,
+                        "max_i_ma_total": 5000,
+                        "max_p_mw": 200000
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB control GET").unwrap();
+        assert_eq!(data["active_preset_id"], 1);
+        assert_eq!(data["preset"]["mode"], "cp");
+        assert_eq!(data["preset"]["target_p_mw"], 20000);
+        assert_eq!(data["recovered_from_fragments"], true);
+    }
+
+    #[test]
+    fn presets_response_inference_recovers_standalone_preset_payloads() {
+        let request_id = "devd-get-presets-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_presets"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "preset_id": 2,
+                        "mode": "cp",
+                        "target_i_ma": 0,
+                        "target_v_mv": 0,
+                        "target_p_mw": 90000,
+                        "min_v_mv": 0,
+                        "max_i_ma_total": 5000,
+                        "max_p_mw": 200000
+                    }),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "preset_id": 1,
+                        "mode": "cp",
+                        "target_i_ma": 0,
+                        "target_v_mv": 0,
+                        "target_p_mw": 20000,
+                        "min_v_mv": 0,
+                        "max_i_ma_total": 5000,
+                        "max_p_mw": 200000
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB presets GET").unwrap();
+        assert_eq!(data["presets"][0]["preset_id"], 1);
+        assert_eq!(data["presets"][1]["preset_id"], 2);
+        assert_eq!(data["recovered_from_fragments"], true);
+    }
+
+    #[test]
+    fn preset_recovery_merges_partial_retry_results() {
+        let mut merged = HashMap::new();
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "presets": [
+                    {"preset_id": 2, "mode": "cp"},
+                    {"preset_id": 3, "mode": "cc"}
+                ],
+                "recovered_from_fragments": true
+            })
+        ));
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "presets": [
+                    {"preset_id": 1, "mode": "cp"},
+                    {"preset_id": 2, "mode": "cv"}
+                ],
+                "recovered_from_fragments": true
+            })
+        ));
+
+        let data = presets_data_from_map(&merged, true, false);
+        assert_eq!(data["presets"][0]["preset_id"], 1);
+        assert_eq!(data["presets"][1]["preset_id"], 2);
+        assert_eq!(data["presets"][1]["mode"], "cv");
+        assert_eq!(data["presets"][2]["preset_id"], 3);
+        assert_eq!(data["recovered_by_retry"], true);
+    }
+
+    #[test]
+    fn preset_recovery_merges_control_preset() {
+        let mut merged = HashMap::new();
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "presets": [
+                    {"preset_id": 2, "mode": "cp", "max_i_ma_total": 5000, "max_p_mw": 200000},
+                    {"preset_id": 3, "mode": "cc", "max_i_ma_total": 1500, "max_p_mw": 3000}
+                ]
+            })
+        ));
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "active_preset_id": 1,
+                "preset": {
+                    "preset_id": 1,
+                    "mode": "cp",
+                    "target_i_ma": 0,
+                    "target_v_mv": 0,
+                    "target_p_mw": 20000,
+                    "min_v_mv": 0,
+                    "max_i_ma_total": 5000,
+                    "max_p_mw": 200000
+                }
+            })
+        ));
+
+        let data = presets_data_from_map(&merged, true, true);
+        assert_eq!(data["presets"][0]["preset_id"], 1);
+        assert_eq!(data["presets"][1]["preset_id"], 2);
+        assert_eq!(data["presets"][2]["preset_id"], 3);
+        assert_eq!(data["recovered_by_control"], true);
+    }
+
+    #[test]
+    fn calibration_profile_inference_recovers_compact_payload_from_text() {
+        let request_id = "devd-get-calibration-profile-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({"type": "request", "request_id": request_id, "op": "get_calibration_profile"}),
+            }],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::from(
+                "noise {\"type\":\"response\",\"request_id\":\"devd-get-calibration-profile-12\"a\":[\"user-calibrated\",3,42],\"c1\":[[2310,299,439]],\"c2\":[[2620,340,493]],\"vl\":[[821,522]],\"vr\":[[828,522]]}}\n",
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB calibration profile").unwrap();
+        let expanded = expand_compact_calibration_profile(data).unwrap();
+        assert_eq!(expanded["active"]["source"], "user-calibrated");
+        assert_eq!(expanded["active"]["fmt_version"], 3);
+        assert_eq!(expanded["current_ch1_points"][0]["meas_ma"], 439);
+        assert_eq!(expanded["v_remote_points"][0]["meas_mv"], 522);
+    }
+
+    #[test]
+    fn wifi_status_inference_recovers_state_from_text() {
+        let request_id = "devd-get-wifi-status-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({"type": "request", "request_id": request_id, "op": "get_wifi_status"}),
+            }],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::from(
+                "noise {\"type\":\"response\",\"request_id\":\"devd-get-wifi-status-12tate\":\"connected\",\"ip\":\"192.168.31.216\",\"last_error\":null}}\n",
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB WiFi status").unwrap();
+        assert_eq!(data["state"], "connected");
+        assert_eq!(data["ip"], "192.168.31.216");
+        assert_eq!(data["last_error"], Value::Null);
+        assert_eq!(data["ssid"], Value::Null);
+        assert_eq!(data["recovered_from_text"], true);
+    }
+
+    #[test]
+    fn identity_response_inference_recovers_embedded_firmware_payload() {
+        let request_id = "devd-get-identity-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_identity"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "build_id": "digital 0.1.0 (profile release, src 0x1)",
+                        "build_profile": "release",
+                        "features": ["net_http", "usb_cdc_jsonl"],
+                        "protocol": "loadlynx.cdc.v1",
+                        "target": "digital_esp32s3"
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let identity = identity_data_from_serial_response(Some(response)).unwrap();
+        assert_eq!(identity["device_id"], "digital-esp32s3");
+        assert_eq!(
+            identity["firmware"]["build_id"],
+            "digital 0.1.0 (profile release, src 0x1)"
+        );
+        assert_eq!(identity["recovered_from_fragments"], true);
+    }
+
+    #[test]
     fn status_response_extractor_requires_real_status_payload() {
         let data = status_data_from_serial_response(Some(json!({
             "type": "response",
@@ -4913,6 +6181,7 @@ mod tests {
         let Json(session) = compat_session(
             State(state.clone()),
             Query(SessionQuery {
+                device_id: None,
                 lease_id: Some(lease_id),
                 logs_limit: None,
                 trace_limit: None,
