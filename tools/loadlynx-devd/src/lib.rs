@@ -54,6 +54,7 @@ const SERIAL_PROBE_MAX_BYTES: usize = 32768;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
 const SERIAL_WIFI_WAIT_OPERATION_WAIT_MS: u64 = 40_000;
+const LOADLYNX_PRESET_COUNT: usize = 5;
 
 #[derive(Debug, Clone)]
 pub struct DevdConfig {
@@ -1548,6 +1549,37 @@ fn serial_response_data_required(
     serial_response_data(response, operation)
 }
 
+fn merge_presets_from_data(merged: &mut HashMap<u64, Value>, data: &Value) -> bool {
+    let Some(presets) = data.get("presets").and_then(Value::as_array) else {
+        return false;
+    };
+    for preset in presets {
+        if let Some(id) = preset.get("preset_id").and_then(Value::as_u64) {
+            merged.insert(id, preset.clone());
+        }
+    }
+    true
+}
+
+fn presets_data_from_map(merged: &HashMap<u64, Value>, recovered: bool) -> Value {
+    let mut presets = merged
+        .iter()
+        .map(|(id, preset)| (*id, preset.clone()))
+        .collect::<Vec<_>>();
+    presets.sort_by_key(|(id, _)| *id);
+    let mut data = json!({
+        "presets": presets
+            .into_iter()
+            .map(|(_, preset)| preset)
+            .collect::<Vec<_>>()
+    });
+    if recovered && let Some(object) = data.as_object_mut() {
+        object.insert("recovered_from_fragments".to_string(), json!(true));
+        object.insert("recovered_by_retry".to_string(), json!(true));
+    }
+    data
+}
+
 async fn compat_wifi_get(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
@@ -1640,16 +1672,59 @@ async fn compat_presets_get(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    let (_, data) = compat_usb_json_request(
-        &state,
-        &query,
-        "get_presets",
-        None,
-        "USB presets GET completed",
-        "USB presets GET",
-    )
-    .await?;
-    Ok(Json(data))
+    let mut merged = HashMap::new();
+    let mut recovered = false;
+    let mut last_error = None;
+    for attempt in 0..3 {
+        match compat_usb_json_request(
+            &state,
+            &query,
+            "get_presets",
+            None,
+            if attempt == 0 {
+                "USB presets GET completed"
+            } else {
+                "USB presets GET retry completed"
+            },
+            "USB presets GET",
+        )
+        .await
+        {
+            Ok((_, data)) => {
+                if !merge_presets_from_data(&mut merged, &data) {
+                    return Ok(Json(data));
+                }
+                recovered |= data
+                    .get("recovered_from_fragments")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || data
+                        .get("recovered_from_text")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                if merged.len() >= LOADLYNX_PRESET_COUNT {
+                    return Ok(Json(presets_data_from_map(&merged, recovered)));
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if !merged.is_empty() {
+        return Err(HttpError::retryable(
+            "serial_response_incomplete",
+            format!(
+                "USB presets GET recovered {}/{} presets after retries",
+                merged.len(),
+                LOADLYNX_PRESET_COUNT
+            ),
+        ));
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB presets GET did not return a protocol response",
+        )
+    }))
 }
 
 async fn compat_presets_post(
@@ -5390,6 +5465,38 @@ mod tests {
         assert_eq!(data["presets"][0]["preset_id"], 1);
         assert_eq!(data["presets"][1]["preset_id"], 2);
         assert_eq!(data["recovered_from_fragments"], true);
+    }
+
+    #[test]
+    fn preset_recovery_merges_partial_retry_results() {
+        let mut merged = HashMap::new();
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "presets": [
+                    {"preset_id": 2, "mode": "cp"},
+                    {"preset_id": 3, "mode": "cc"}
+                ],
+                "recovered_from_fragments": true
+            })
+        ));
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "presets": [
+                    {"preset_id": 1, "mode": "cp"},
+                    {"preset_id": 2, "mode": "cv"}
+                ],
+                "recovered_from_fragments": true
+            })
+        ));
+
+        let data = presets_data_from_map(&merged, true);
+        assert_eq!(data["presets"][0]["preset_id"], 1);
+        assert_eq!(data["presets"][1]["preset_id"], 2);
+        assert_eq!(data["presets"][1]["mode"], "cv");
+        assert_eq!(data["presets"][2]["preset_id"], 3);
+        assert_eq!(data["recovered_by_retry"], true);
     }
 
     #[test]
