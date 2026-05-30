@@ -1549,19 +1549,38 @@ fn serial_response_data_required(
     serial_response_data(response, operation)
 }
 
-fn merge_presets_from_data(merged: &mut HashMap<u64, Value>, data: &Value) -> bool {
-    let Some(presets) = data.get("presets").and_then(Value::as_array) else {
+fn merge_preset_value(merged: &mut HashMap<u64, Value>, preset: &Value) -> bool {
+    let Some(id) = preset.get("preset_id").and_then(Value::as_u64) else {
         return false;
     };
-    for preset in presets {
-        if let Some(id) = preset.get("preset_id").and_then(Value::as_u64) {
-            merged.insert(id, preset.clone());
-        }
-    }
+    merged.insert(id, preset.clone());
     true
 }
 
-fn presets_data_from_map(merged: &HashMap<u64, Value>, recovered: bool) -> Value {
+fn merge_presets_from_data(merged: &mut HashMap<u64, Value>, data: &Value) -> bool {
+    if is_preset_fragment(data) {
+        return merge_preset_value(merged, data);
+    }
+    if let Some(preset) = data.get("preset")
+        && is_preset_fragment(preset)
+    {
+        return merge_preset_value(merged, preset);
+    }
+    let Some(presets) = data.get("presets").and_then(Value::as_array) else {
+        return false;
+    };
+    let mut merged_any = false;
+    for preset in presets {
+        merged_any |= merge_preset_value(merged, preset);
+    }
+    merged_any
+}
+
+fn presets_data_from_map(
+    merged: &HashMap<u64, Value>,
+    recovered: bool,
+    recovered_by_control: bool,
+) -> Value {
     let mut presets = merged
         .iter()
         .map(|(id, preset)| (*id, preset.clone()))
@@ -1576,6 +1595,10 @@ fn presets_data_from_map(merged: &HashMap<u64, Value>, recovered: bool) -> Value
     if recovered && let Some(object) = data.as_object_mut() {
         object.insert("recovered_from_fragments".to_string(), json!(true));
         object.insert("recovered_by_retry".to_string(), json!(true));
+    }
+    if recovered_by_control && let Some(object) = data.as_object_mut() {
+        object.insert("recovered_from_fragments".to_string(), json!(true));
+        object.insert("recovered_by_control".to_string(), json!(true));
     }
     data
 }
@@ -1674,6 +1697,7 @@ async fn compat_presets_get(
 ) -> Result<Json<Value>, HttpError> {
     let mut merged = HashMap::new();
     let mut recovered = false;
+    let mut recovered_by_control = false;
     let mut last_error = None;
     for attempt in 0..3 {
         match compat_usb_json_request(
@@ -1703,10 +1727,50 @@ async fn compat_presets_get(
                         .and_then(Value::as_bool)
                         .unwrap_or(false);
                 if merged.len() >= LOADLYNX_PRESET_COUNT {
-                    return Ok(Json(presets_data_from_map(&merged, recovered)));
+                    return Ok(Json(presets_data_from_map(
+                        &merged,
+                        recovered,
+                        recovered_by_control,
+                    )));
                 }
             }
             Err(error) => last_error = Some(error),
+        }
+    }
+    if !merged.is_empty() {
+        for attempt in 0..3 {
+            if let Ok((_, data)) = compat_usb_json_request(
+                &state,
+                &query,
+                "get_control",
+                None,
+                if attempt == 0 {
+                    "USB presets GET control recovery completed"
+                } else {
+                    "USB presets GET control recovery retry completed"
+                },
+                "USB presets GET control recovery",
+            )
+            .await
+                && merge_presets_from_data(&mut merged, &data)
+            {
+                recovered_by_control = true;
+                recovered |= data
+                    .get("recovered_from_fragments")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || data
+                        .get("recovered_from_text")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                if merged.len() >= LOADLYNX_PRESET_COUNT {
+                    return Ok(Json(presets_data_from_map(
+                        &merged,
+                        recovered,
+                        recovered_by_control,
+                    )));
+                }
+            }
         }
     }
     if !merged.is_empty() {
@@ -5491,12 +5555,48 @@ mod tests {
             })
         ));
 
-        let data = presets_data_from_map(&merged, true);
+        let data = presets_data_from_map(&merged, true, false);
         assert_eq!(data["presets"][0]["preset_id"], 1);
         assert_eq!(data["presets"][1]["preset_id"], 2);
         assert_eq!(data["presets"][1]["mode"], "cv");
         assert_eq!(data["presets"][2]["preset_id"], 3);
         assert_eq!(data["recovered_by_retry"], true);
+    }
+
+    #[test]
+    fn preset_recovery_merges_control_preset() {
+        let mut merged = HashMap::new();
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "presets": [
+                    {"preset_id": 2, "mode": "cp", "max_i_ma_total": 5000, "max_p_mw": 200000},
+                    {"preset_id": 3, "mode": "cc", "max_i_ma_total": 1500, "max_p_mw": 3000}
+                ]
+            })
+        ));
+        assert!(merge_presets_from_data(
+            &mut merged,
+            &json!({
+                "active_preset_id": 1,
+                "preset": {
+                    "preset_id": 1,
+                    "mode": "cp",
+                    "target_i_ma": 0,
+                    "target_v_mv": 0,
+                    "target_p_mw": 20000,
+                    "min_v_mv": 0,
+                    "max_i_ma_total": 5000,
+                    "max_p_mw": 200000
+                }
+            })
+        ));
+
+        let data = presets_data_from_map(&merged, true, true);
+        assert_eq!(data["presets"][0]["preset_id"], 1);
+        assert_eq!(data["presets"][1]["preset_id"], 2);
+        assert_eq!(data["presets"][2]["preset_id"], 3);
+        assert_eq!(data["recovered_by_control"], true);
     }
 
     #[test]
