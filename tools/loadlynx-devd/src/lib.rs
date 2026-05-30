@@ -50,7 +50,7 @@ const SERIAL_PROBE_BAUD: u32 = 115_200;
 const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
 const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
-const SERIAL_PROBE_MAX_BYTES: usize = 4096;
+const SERIAL_PROBE_MAX_BYTES: usize = 32768;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
 const SERIAL_WIFI_WAIT_OPERATION_WAIT_MS: u64 = 40_000;
@@ -3854,6 +3854,16 @@ fn serial_request_id_matches_op(request_id: &str, legacy_id: &str) -> bool {
 
 fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
     let text = &probe.non_protocol_text;
+    if serial_request_id_matches_op(request_id, "devd-get-calibration-profile")
+        && let Some(response) = infer_calibration_profile_response_from_text(text, request_id)
+    {
+        return Some(response);
+    }
+    if serial_request_id_matches_op(request_id, "devd-get-wifi-status")
+        && let Some(response) = infer_wifi_status_response_from_text(text, request_id)
+    {
+        return Some(response);
+    }
     if is_output_control_request_id(request_id)
         && text.contains(request_id)
         && text.contains("\"ok\":true")
@@ -3900,10 +3910,124 @@ fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str
     None
 }
 
+fn infer_calibration_profile_response_from_text(text: &str, request_id: &str) -> Option<Value> {
+    if !text.contains("\"a\":[")
+        || !text.contains("\"c1\":")
+        || !text.contains("\"c2\":")
+        || !text.contains("\"vl\":")
+        || !text.contains("\"vr\":")
+    {
+        return None;
+    }
+    let start = text.find("\"a\":[")?;
+    let vr_key = text[start..].find("\"vr\":")? + start;
+    let vr_array = text[vr_key..].find('[')? + vr_key;
+    let end = json_array_end(text, vr_array)?;
+    let candidate = format!("{{\"compact\":\"cal_profile_v1\",{}}}", &text[start..end]);
+    let data = serde_json::from_str::<Value>(&candidate).ok()?;
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": data,
+        "recovered_from_text": true
+    }))
+}
+
+fn infer_wifi_status_response_from_text(text: &str, request_id: &str) -> Option<Value> {
+    let state = json_string_after_any(text, &["\"state\":\"", "tate\":\""])?;
+    let ip = json_string_after_any(text, &["\"ip\":\""]);
+    let ssid = json_string_after_any(text, &["\"ssid\":\""]);
+    let source = json_string_after_any(text, &["\"source\":\""]);
+    let last_error = json_string_after_any(text, &["\"last_error\":\""]);
+    let data = json!({
+        "ssid": ssid,
+        "source": source,
+        "state": state,
+        "ip": ip,
+        "last_error": last_error,
+        "recovered_from_text": true
+    });
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": data,
+        "recovered_from_text": true
+    }))
+}
+
+fn json_string_after_any(text: &str, markers: &[&str]) -> Option<String> {
+    for marker in markers {
+        if let Some(value) = json_string_after(text, marker) {
+            return Some(value);
+        }
+    }
+    None
+}
+
+fn json_string_after(text: &str, marker: &str) -> Option<String> {
+    let start = text.find(marker)? + marker.len();
+    let mut out = String::new();
+    let mut escaped = false;
+    for ch in text[start..].chars() {
+        if escaped {
+            out.push(ch);
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '"' {
+            return Some(out);
+        } else {
+            out.push(ch);
+        }
+    }
+    None
+}
+
+fn json_array_end(text: &str, array_start: usize) -> Option<usize> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (offset, ch) in text[array_start..].char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => in_string = true,
+            '[' => depth += 1,
+            ']' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(array_start + offset + ch.len_utf8());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 fn infer_serial_response_from_fragments(
     probe: &SerialProtocolProbe,
     request_id: &str,
 ) -> Option<Value> {
+    if serial_request_id_matches_op(request_id, "devd-get-identity") {
+        return infer_identity_response_from_fragments(probe, request_id);
+    }
+    if serial_request_id_matches_op(request_id, "devd-get-control") {
+        return infer_control_response_from_fragments(probe, request_id);
+    }
+    if serial_request_id_matches_op(request_id, "devd-get-presets") {
+        return infer_presets_response_from_fragments(probe, request_id);
+    }
     if !serial_request_id_matches_op(request_id, "devd-get-status") {
         return None;
     }
@@ -3967,6 +4091,163 @@ fn infer_serial_response_from_fragments(
         "data": Value::Object(data),
         "recovered_from_fragments": true
     }))
+}
+
+fn is_preset_fragment(frame: &Value) -> bool {
+    frame.get("preset_id").is_some()
+        && frame.get("mode").is_some()
+        && frame.get("max_i_ma_total").is_some()
+        && frame.get("max_p_mw").is_some()
+}
+
+fn infer_control_response_from_fragments(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    let tx_index = probe.frames.iter().position(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+    })?;
+    for event in probe.frames.iter().skip(tx_index + 1) {
+        if event.direction != "rx" || event.frame.get("request_id").is_some() {
+            continue;
+        }
+        let frame = &event.frame;
+        if frame.get("active_preset_id").is_some()
+            && frame.get("preset").is_some()
+            && frame.get("output_enabled").is_some()
+        {
+            let mut data = frame.clone();
+            data.as_object_mut()?
+                .insert("recovered_from_fragments".to_string(), json!(true));
+            return Some(json!({
+                "type": "response",
+                "request_id": request_id,
+                "ok": true,
+                "data": data,
+                "recovered_from_fragments": true
+            }));
+        }
+        if is_preset_fragment(frame) {
+            let active_preset_id = frame.get("preset_id").cloned().unwrap_or(json!(1));
+            return Some(json!({
+                "type": "response",
+                "request_id": request_id,
+                "ok": true,
+                "data": {
+                    "active_preset_id": active_preset_id,
+                    "output_enabled": false,
+                    "uv_latched": false,
+                    "preset": frame,
+                    "recovered_from_fragments": true
+                },
+                "recovered_from_fragments": true
+            }));
+        }
+    }
+    None
+}
+
+fn infer_presets_response_from_fragments(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    let tx_index = probe.frames.iter().position(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+    })?;
+    let mut presets = probe
+        .frames
+        .iter()
+        .skip(tx_index + 1)
+        .filter_map(|event| {
+            if event.direction == "rx"
+                && event.frame.get("request_id").is_none()
+                && is_preset_fragment(&event.frame)
+            {
+                Some(event.frame.clone())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    if presets.is_empty() {
+        return None;
+    }
+    presets.sort_by_key(|preset| {
+        preset
+            .get("preset_id")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX)
+    });
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": {
+            "presets": presets,
+            "recovered_from_fragments": true
+        },
+        "recovered_from_fragments": true
+    }))
+}
+
+fn infer_identity_response_from_fragments(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    let tx_index = probe.frames.iter().position(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+    })?;
+    for event in probe.frames.iter().skip(tx_index + 1) {
+        if event.direction != "rx" || event.frame.get("request_id").is_some() {
+            continue;
+        }
+        let frame = &event.frame;
+        if frame.get("build_id").is_none()
+            || frame.get("target").and_then(Value::as_str) != Some("digital_esp32s3")
+        {
+            continue;
+        }
+        let build_id = frame
+            .get("build_id")
+            .and_then(Value::as_str)
+            .unwrap_or("digital unknown");
+        let protocol = frame
+            .get("protocol")
+            .and_then(Value::as_str)
+            .unwrap_or("loadlynx.cdc.v1");
+        return Some(json!({
+            "type": "response",
+            "request_id": request_id,
+            "ok": true,
+            "data": {
+                "device_id": "digital-esp32s3",
+                "target": "digital",
+                "mcu": "esp32s3",
+                "protocol": protocol,
+                "firmware_version": build_id,
+                "digital_fw_version": build_id,
+                "firmware": frame,
+                "recovered_from_fragments": true
+            },
+            "recovered_from_fragments": true
+        }));
+    }
+    None
 }
 
 fn is_output_control_request_id(request_id: &str) -> bool {
@@ -5027,6 +5308,168 @@ mod tests {
         assert_eq!(data["status"]["enable"], false);
         assert_eq!(data["control"]["output_enabled"], false);
         assert_eq!(data["recovered_from_fragments"], true);
+    }
+
+    #[test]
+    fn control_response_inference_recovers_standalone_preset_payload() {
+        let request_id = "devd-get-control-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_control"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "preset_id": 1,
+                        "mode": "cp",
+                        "target_i_ma": 0,
+                        "target_v_mv": 0,
+                        "target_p_mw": 20000,
+                        "min_v_mv": 0,
+                        "max_i_ma_total": 5000,
+                        "max_p_mw": 200000
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB control GET").unwrap();
+        assert_eq!(data["active_preset_id"], 1);
+        assert_eq!(data["preset"]["mode"], "cp");
+        assert_eq!(data["preset"]["target_p_mw"], 20000);
+        assert_eq!(data["recovered_from_fragments"], true);
+    }
+
+    #[test]
+    fn presets_response_inference_recovers_standalone_preset_payloads() {
+        let request_id = "devd-get-presets-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_presets"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "preset_id": 2,
+                        "mode": "cp",
+                        "target_i_ma": 0,
+                        "target_v_mv": 0,
+                        "target_p_mw": 90000,
+                        "min_v_mv": 0,
+                        "max_i_ma_total": 5000,
+                        "max_p_mw": 200000
+                    }),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "preset_id": 1,
+                        "mode": "cp",
+                        "target_i_ma": 0,
+                        "target_v_mv": 0,
+                        "target_p_mw": 20000,
+                        "min_v_mv": 0,
+                        "max_i_ma_total": 5000,
+                        "max_p_mw": 200000
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB presets GET").unwrap();
+        assert_eq!(data["presets"][0]["preset_id"], 1);
+        assert_eq!(data["presets"][1]["preset_id"], 2);
+        assert_eq!(data["recovered_from_fragments"], true);
+    }
+
+    #[test]
+    fn calibration_profile_inference_recovers_compact_payload_from_text() {
+        let request_id = "devd-get-calibration-profile-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({"type": "request", "request_id": request_id, "op": "get_calibration_profile"}),
+            }],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::from(
+                "noise {\"type\":\"response\",\"request_id\":\"devd-get-calibration-profile-12\"a\":[\"user-calibrated\",3,42],\"c1\":[[2310,299,439]],\"c2\":[[2620,340,493]],\"vl\":[[821,522]],\"vr\":[[828,522]]}}\n",
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB calibration profile").unwrap();
+        let expanded = expand_compact_calibration_profile(data).unwrap();
+        assert_eq!(expanded["active"]["source"], "user-calibrated");
+        assert_eq!(expanded["active"]["fmt_version"], 3);
+        assert_eq!(expanded["current_ch1_points"][0]["meas_ma"], 439);
+        assert_eq!(expanded["v_remote_points"][0]["meas_mv"], 522);
+    }
+
+    #[test]
+    fn wifi_status_inference_recovers_state_from_text() {
+        let request_id = "devd-get-wifi-status-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({"type": "request", "request_id": request_id, "op": "get_wifi_status"}),
+            }],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::from(
+                "noise {\"type\":\"response\",\"request_id\":\"devd-get-wifi-status-12tate\":\"connected\",\"ip\":\"192.168.31.216\",\"last_error\":null}}\n",
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB WiFi status").unwrap();
+        assert_eq!(data["state"], "connected");
+        assert_eq!(data["ip"], "192.168.31.216");
+        assert_eq!(data["last_error"], Value::Null);
+        assert_eq!(data["ssid"], Value::Null);
+        assert_eq!(data["recovered_from_text"], true);
+    }
+
+    #[test]
+    fn identity_response_inference_recovers_embedded_firmware_payload() {
+        let request_id = "devd-get-identity-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_identity"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "build_id": "digital 0.1.0 (profile release, src 0x1)",
+                        "build_profile": "release",
+                        "features": ["net_http", "usb_cdc_jsonl"],
+                        "protocol": "loadlynx.cdc.v1",
+                        "target": "digital_esp32s3"
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let identity = identity_data_from_serial_response(Some(response)).unwrap();
+        assert_eq!(identity["device_id"], "digital-esp32s3");
+        assert_eq!(
+            identity["firmware"]["build_id"],
+            "digital 0.1.0 (profile release, src 0x1)"
+        );
+        assert_eq!(identity["recovered_from_fragments"], true);
     }
 
     #[test]

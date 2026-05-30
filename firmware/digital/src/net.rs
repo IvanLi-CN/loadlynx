@@ -1142,7 +1142,7 @@ fn write_error_body(
 fn parse_json_string_value(body: &str, key: &str) -> Option<String> {
     let idx = body.find(key)?;
     let colon = body[idx..].find(':')?;
-    let mut rest = body[idx + colon + 1..].trim_start();
+    let rest = body[idx + colon + 1..].trim_start();
     if !rest.starts_with('"') {
         return None;
     }

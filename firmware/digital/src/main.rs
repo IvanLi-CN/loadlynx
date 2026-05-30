@@ -702,7 +702,7 @@ fn json_string_value<'a>(line: &'a str, key: &str) -> Option<&'a str> {
 fn json_string_decoded_value(line: &str, key: &str) -> Option<String> {
     let idx = line.find(key)?;
     let colon = line[idx..].find(':')?;
-    let mut rest = line[idx + colon + 1..].trim_start();
+    let rest = line[idx + colon + 1..].trim_start();
     if !rest.starts_with('"') {
         return None;
     }
@@ -1764,20 +1764,20 @@ async fn write_usb_wifi_response(
         "get_wifi_status" => {
             let user_ssid = {
                 let mut guard = eeprom.lock().await;
-                guard
-                    .read_wifi_blob()
-                    .await
-                    .ok()
-                    .and_then(|blob| {
-                        eeprom::decode_wifi_blob(&blob).map(|parts| String::from(parts.ssid))
-                    })
+                guard.read_wifi_blob().await.ok().and_then(|blob| {
+                    eeprom::decode_wifi_blob(&blob).map(|parts| String::from(parts.ssid))
+                })
             };
             let status = { *wifi_state.lock().await };
             out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
             write_json_string_escaped(out, user_ssid.as_deref().unwrap_or(WIFI_SSID));
             out.push_str("\",\"source\":\"").ok();
-            out.push_str(if user_ssid.is_some() { "user" } else { "factory" })
-                .ok();
+            out.push_str(if user_ssid.is_some() {
+                "user"
+            } else {
+                "factory"
+            })
+            .ok();
             write_usb_wifi_status_tail(out, status);
         }
         "set_wifi_config" => {
@@ -1796,8 +1796,10 @@ async fn write_usb_wifi_response(
             let blob = match eeprom::encode_wifi_blob(&ssid, &psk) {
                 Ok(blob) => blob,
                 Err(message) => {
-                    out.push_str(",\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"message\":\"")
-                        .ok();
+                    out.push_str(
+                        ",\"ok\":false,\"error\":{\"code\":\"INVALID_REQUEST\",\"message\":\"",
+                    )
+                    .ok();
                     write_json_string_escaped(out, message);
                     out.push_str("\"}}").ok();
                     return;
@@ -1829,9 +1831,10 @@ async fn write_usb_wifi_response(
             out.push_str("\",\"source\":\"factory").ok();
             write_usb_wifi_status_tail(out, status);
         }
-        _ => out
-            .push_str(",\"ok\":false,\"error\":{\"code\":\"UNSUPPORTED_OPERATION\",\"message\":\"unsupported WiFi op\"}}")
-            .ok(),
+        _ => {
+            out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNSUPPORTED_OPERATION\",\"message\":\"unsupported WiFi op\"}}")
+                .ok();
+        }
     }
 }
 
