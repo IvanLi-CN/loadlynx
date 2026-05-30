@@ -59,8 +59,12 @@ export const WifiAndDiagnostics: Story = {
     );
 
     await waitFor(() => {
-      canvas.getByText(/schema_version/);
-      canvas.getByText(/BenchNet/);
+      const diagnostics = canvas.getByText(/schema_version/, {
+        selector: "pre",
+      });
+      if (!diagnostics.textContent?.includes('"ssid": "BenchNet"')) {
+        throw new Error("Expected diagnostics export to include saved SSID");
+      }
     });
   },
 };
