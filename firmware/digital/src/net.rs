@@ -2189,8 +2189,8 @@ pub(crate) async fn handle_presets_update(
     }
     preset = preset.clamp();
 
-    let (idx, next_saved, persist_needed) = {
-        let guard = control.lock().await;
+    let updated = {
+        let mut guard = control.lock().await;
         let idx = (preset.preset_id - 1) as usize;
         if idx >= control::PRESET_COUNT {
             write_error_body(
@@ -2203,33 +2203,45 @@ pub(crate) async fn handle_presets_update(
             return Err("422 Unprocessable Entity");
         }
 
-        // Persist presets blob to EEPROM (saved snapshot is the persisted baseline).
-        let mut next_saved = guard.saved;
-        let persist_needed = next_saved[idx] != preset;
-        next_saved[idx] = preset;
-        (idx, next_saved, persist_needed)
-    };
-
-    if persist_needed {
-        let blob = control::encode_presets_blob(&next_saved);
-        let write_ok = {
-            let mut ep = eeprom.lock().await;
-            ep.write_presets_blob(&blob).await.is_ok()
-        };
-        if !write_ok {
-            write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
-            return Err("503 Service Unavailable");
-        }
-    }
-
-    let updated = {
-        let mut guard = control.lock().await;
+        let old_presets = guard.presets;
+        let old_saved = guard.saved;
+        let old_dirty = guard.dirty;
+        let old_output = guard.output_enabled;
+        let old_calibration_override = guard.calibration_cc_override;
+        let old_calibration_restore_output = guard.calibration_restore_output_enabled();
         let prev_mode = guard.presets[idx].mode;
         guard.presets[idx] = preset;
         // ApplyPreset and any mode change MUST force output OFF (if this affects the active preset).
         if guard.active_preset_id == preset.preset_id && prev_mode != preset.mode {
             guard.force_output_off();
         }
+
+        // Persist presets blob to EEPROM (saved snapshot is the persisted baseline).
+        let mut next_saved = guard.saved;
+        let persist_needed = next_saved[idx] != preset;
+        next_saved[idx] = preset;
+
+        if persist_needed {
+            let blob = control::encode_presets_blob(&next_saved);
+            let write_ok = {
+                let mut ep = eeprom.lock().await;
+                ep.write_presets_blob(&blob).await.is_ok()
+            };
+            if !write_ok {
+                // Roll back in-RAM state on persistence failure.
+                guard.presets = old_presets;
+                guard.saved = old_saved;
+                guard.dirty = old_dirty;
+                guard.restore_calibration_output_state(
+                    old_output,
+                    old_calibration_override,
+                    old_calibration_restore_output,
+                );
+                write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
+                return Err("503 Service Unavailable");
+            }
+        }
+
         guard.saved = next_saved;
         guard.dirty[idx] = false;
         bump_control_rev();
