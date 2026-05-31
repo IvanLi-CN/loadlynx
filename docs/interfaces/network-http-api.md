@@ -133,6 +133,33 @@ interface UsbBridgeIdentity {
 }
 ```
 
+### 2.1.2 WiFi status
+
+`GET /api/v1/wifi` returns WiFi status only and does not include PSK:
+
+```ts
+interface WifiStatus {
+  ssid: string | null;
+  source: "factory" | "user" | "none";
+  state: "idle" | "configured" | "connecting" | "connected" | "error";
+  ip: string | null;
+  last_error: string | null;
+}
+```
+
+`GET /api/v1/wifi/credentials` is the explicit backup/export path and returns plaintext credentials:
+
+```ts
+interface WifiCredentials {
+  ssid: string;
+  psk: string;
+  source: "factory" | "user";
+}
+```
+
+Backup files that include `settings.wifi` are sensitive user artifacts. Diagnostics, status, traces and logs must continue to omit or redact PSK.
+Browser requests to this endpoint are accepted only from local UI origins; non-browser LAN clients do not send `Origin` and may still use the endpoint for explicit backup export.
+
 ### 2.2 模拟板状态枚举
 
 HTTP API 暴露的 `analog_state` 与数字板内部 `AnalogState` 枚举对应（`firmware/digital/src/ui/mod.rs`）：

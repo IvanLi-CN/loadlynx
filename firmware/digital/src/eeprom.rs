@@ -1,5 +1,5 @@
 use core::str;
-use embassy_futures::yield_now;
+use embassy_time::{Duration, Timer};
 use embedded_hal_async::i2c::I2c as EhI2c;
 use heapless::Vec;
 
@@ -273,10 +273,7 @@ impl SharedM24c64 {
                     if crate::now_ms32().wrapping_sub(start) >= POLL_TIMEOUT_MS {
                         return Err(EepromError::Timeout);
                     }
-                    // Cooperative short delay.
-                    for _ in 0..200 {
-                        yield_now().await;
-                    }
+                    Timer::after(Duration::from_millis(1)).await;
                 }
             }
         }

@@ -1,5 +1,7 @@
 import { CALIBRATION_MAX_POINTS } from "../calibration/validation.ts";
 import type {
+  BackupRestoreResult,
+  BackupSectionKey,
   CalibrationApplyRequest,
   CalibrationCommitRequest,
   CalibrationModeRequest,
@@ -15,10 +17,12 @@ import type {
   FastStatusJson,
   FastStatusView,
   Identity,
+  LoadLynxBackup,
   PdUpdateRequest,
   PdView,
   Preset,
   PresetId,
+  WifiCredentials,
   WifiSetRequest,
   WifiStatus,
 } from "./types.ts";
@@ -74,6 +78,10 @@ export function isDevdCompatBaseUrl(baseUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function supportsBackupWifiCredentials(baseUrl: string): boolean {
+  return Boolean(baseUrl);
 }
 
 function isStorybookRuntime(): boolean {
@@ -263,6 +271,7 @@ interface MockDeviceState {
   calibrationMode: CalibrationModeRequest["kind"];
   calibration: MockCalibrationState;
   wifi: WifiStatus;
+  wifiPsk: string;
 }
 
 interface MockCalibrationState {
@@ -639,6 +648,7 @@ function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     calibrationMode: "off",
     calibration,
     wifi,
+    wifiPsk: "factory-mock-psk",
   };
 
   if (baseUrl.toLowerCase().includes("calibration-output-applied")) {
@@ -1029,6 +1039,18 @@ async function mockUpdateControl(
   payload: { output_enabled: boolean },
 ): Promise<ControlView> {
   const state = getOrCreateMockDevice(baseUrl);
+  if (
+    baseUrl.toLowerCase().includes("restore-safety-blocked") &&
+    payload.output_enabled === false
+  ) {
+    throw new HttpApiError({
+      status: 409,
+      code: "SAFETY_BLOCKED",
+      message: "mock output disable refused",
+      retryable: true,
+      details: null,
+    });
+  }
 
   const nextOutputEnabled = Boolean(payload.output_enabled);
   const prevOutputEnabled = state.output_enabled;
@@ -1750,6 +1772,32 @@ function mapCalibrationProfileWireToUi(
   };
 }
 
+function mapCalibrationProfileUiToWire(
+  profile: CalibrationProfile,
+): CalibrationProfileWire {
+  return {
+    active: profile.active,
+    v_local_points: profile.v_local_points.map((point) => ({
+      raw_100uv: point.raw,
+      meas_mv: point.mv,
+    })),
+    v_remote_points: profile.v_remote_points.map((point) => ({
+      raw_100uv: point.raw,
+      meas_mv: point.mv,
+    })),
+    current_ch1_points: profile.current_ch1_points.map((point) => ({
+      raw_100uv: point.raw,
+      raw_dac_code: point.dac_code,
+      meas_ma: Math.floor((point.ua + 500) / 1000),
+    })),
+    current_ch2_points: profile.current_ch2_points.map((point) => ({
+      raw_100uv: point.raw,
+      raw_dac_code: point.dac_code,
+      meas_ma: Math.floor((point.ua + 500) / 1000),
+    })),
+  };
+}
+
 function mapCalibrationWriteRequestToWire(
   payload: CalibrationApplyRequest,
 ): CalibrationWriteRequestWire {
@@ -1865,6 +1913,20 @@ export async function getWifiStatus(baseUrl: string): Promise<WifiStatus> {
   return httpJsonQueued<WifiStatus>(baseUrl, "/api/v1/wifi");
 }
 
+export async function getWifiCredentials(
+  baseUrl: string,
+): Promise<WifiCredentials> {
+  if (isMockBaseUrl(baseUrl)) {
+    const state = getOrCreateMockDevice(baseUrl);
+    return {
+      ssid: state.wifi.ssid ?? "",
+      psk: state.wifiPsk,
+      source: state.wifi.source === "user" ? "user" : "factory",
+    };
+  }
+  return httpJsonQueued<WifiCredentials>(baseUrl, "/api/v1/wifi/credentials");
+}
+
 export async function postWifiConfig(
   baseUrl: string,
   payload: WifiSetRequest,
@@ -1878,6 +1940,7 @@ export async function postWifiConfig(
       ip: payload.wait ? "192.0.2.11" : null,
       last_error: null,
     };
+    state.wifiPsk = payload.psk;
     return structuredClone(state.wifi);
   }
   const response = await httpJsonQueued<WifiStatus | { wifi: WifiStatus }>(
@@ -1904,6 +1967,7 @@ export async function deleteWifiConfig(baseUrl: string): Promise<WifiStatus> {
       ip: null,
       last_error: null,
     };
+    state.wifiPsk = "factory-mock-psk";
     return structuredClone(state.wifi);
   }
   const response = await httpJsonQueued<WifiStatus | { wifi: WifiStatus }>(
@@ -1914,6 +1978,320 @@ export async function deleteWifiConfig(baseUrl: string): Promise<WifiStatus> {
     },
   );
   return "wifi" in response ? response.wifi : response;
+}
+
+export const BACKUP_SECTION_KEYS: BackupSectionKey[] = [
+  "presets",
+  "calibration",
+  "settings.wifi",
+  "settings.pd",
+];
+
+export function getSupportedBackupSections(
+  backup: LoadLynxBackup | null,
+): BackupSectionKey[] {
+  if (!backup?.sections) {
+    return [];
+  }
+  const sections: BackupSectionKey[] = [];
+  if (backup.sections.presets) sections.push("presets");
+  if (backup.sections.calibration) sections.push("calibration");
+  if (backup.sections.settings?.wifi) sections.push("settings.wifi");
+  if (backup.sections.settings?.pd) sections.push("settings.pd");
+  return sections;
+}
+
+export function getBackupUnknownWarnings(
+  backup: LoadLynxBackup | null,
+): string[] {
+  if (!backup?.sections) {
+    return [];
+  }
+  const warnings: string[] = [];
+  for (const key of Object.keys(backup.sections)) {
+    if (key !== "presets" && key !== "calibration" && key !== "settings") {
+      warnings.push(`Unknown section ignored: ${key}`);
+    }
+  }
+  for (const key of Object.keys(backup.sections.settings ?? {})) {
+    if (key !== "wifi" && key !== "pd") {
+      warnings.push(`Unknown section ignored: settings.${key}`);
+    }
+  }
+  return warnings;
+}
+
+export function validateBackupEnvelope(value: unknown): LoadLynxBackup {
+  if (!value || typeof value !== "object") {
+    throw new Error("Backup JSON must be an object.");
+  }
+  const backup = value as LoadLynxBackup;
+  if (backup.kind !== "loadlynx.backup") {
+    throw new Error("Backup kind must be loadlynx.backup.");
+  }
+  if (backup.schema_version !== 1) {
+    throw new Error("Unsupported backup schema_version.");
+  }
+  if (!backup.sections || typeof backup.sections !== "object") {
+    throw new Error("Backup sections must be an object.");
+  }
+  return backup;
+}
+
+export async function exportDeviceBackup(
+  baseUrl: string,
+  selected: BackupSectionKey[],
+): Promise<LoadLynxBackup> {
+  const sections: LoadLynxBackup["sections"] = {};
+
+  if (selected.includes("presets")) {
+    const [presets, control] = await Promise.all([
+      getPresets(baseUrl),
+      getControl(baseUrl),
+    ]);
+    sections.presets = {
+      presets,
+      active_preset_id: control.active_preset_id,
+    };
+  }
+
+  if (selected.includes("calibration")) {
+    sections.calibration = mapCalibrationProfileUiToWire(
+      await getCalibrationProfile(baseUrl),
+    );
+  }
+
+  const settings: NonNullable<LoadLynxBackup["sections"]["settings"]> = {};
+  if (selected.includes("settings.wifi")) {
+    settings.wifi = await getWifiCredentials(baseUrl);
+  }
+  if (selected.includes("settings.pd")) {
+    const pd = await getPd(baseUrl);
+    if (!pd) {
+      throw new Error("USB-PD settings are not available on this device.");
+    }
+    settings.pd = {
+      saved: pd.saved,
+      allow_extended_voltage: pd.allow_extended_voltage ?? false,
+    };
+  }
+  if (Object.keys(settings).length > 0) {
+    sections.settings = settings;
+  }
+
+  return {
+    kind: "loadlynx.backup",
+    schema_version: 1,
+    created_at: new Date().toISOString(),
+    selected_sections: selected,
+    sections,
+  };
+}
+
+export async function restoreDeviceBackup(
+  baseUrl: string,
+  backup: LoadLynxBackup,
+  selected: BackupSectionKey[],
+): Promise<BackupRestoreResult> {
+  validateBackupEnvelope(backup);
+  const warnings = getBackupUnknownWarnings(backup);
+  let control: ControlView;
+  try {
+    control = await updateControl(baseUrl, { output_enabled: false });
+  } catch (error) {
+    throw new HttpApiError({
+      status: 409,
+      code: "SAFETY_BLOCKED",
+      message: `Output disable failed: ${formatUnknownError(error)}`,
+      retryable: true,
+      details: null,
+    });
+  }
+  if (control.output_enabled !== false) {
+    throw new HttpApiError({
+      status: 409,
+      code: "SAFETY_BLOCKED",
+      message: "Output disable was not confirmed.",
+      retryable: true,
+      details: control,
+    });
+  }
+
+  const restored: BackupRestoreResult["restored"] = [];
+  const run = async (section: BackupSectionKey, fn: () => Promise<void>) => {
+    try {
+      await fn();
+      restored.push({ section, ok: true });
+    } catch (error) {
+      restored.push({
+        section,
+        ok: false,
+        message: formatUnknownError(error),
+      });
+    }
+  };
+
+  if (selected.includes("presets") && backup.sections.presets) {
+    await run("presets", async () => {
+      const currentPresets = await getPresets(baseUrl);
+      for (const preset of backup.sections.presets?.presets ?? []) {
+        const current = currentPresets.find(
+          (candidate) => candidate.preset_id === preset.preset_id,
+        );
+        if (current && presetsEqual(current, preset)) {
+          continue;
+        }
+        await updatePreset(baseUrl, preset);
+      }
+    });
+  }
+
+  const calibrationBackup = backup.sections.calibration;
+  if (selected.includes("calibration") && calibrationBackup) {
+    await run("calibration", async () => {
+      await restoreCalibrationBackup(baseUrl, calibrationBackup);
+    });
+  }
+
+  const pdBackup = backup.sections.settings?.pd;
+  if (selected.includes("settings.pd") && pdBackup) {
+    await run("settings.pd", async () => {
+      await restorePdBackup(baseUrl, pdBackup);
+    });
+  }
+
+  const wifiBackup = backup.sections.settings?.wifi;
+  if (selected.includes("settings.wifi") && wifiBackup) {
+    await run("settings.wifi", async () => {
+      await restoreWifiBackup(baseUrl, wifiBackup);
+    });
+  }
+
+  return {
+    ok: restored.every((entry) => entry.ok),
+    safety: { output_disabled: true },
+    restored,
+    warnings,
+  };
+}
+
+async function restoreWifiBackup(
+  baseUrl: string,
+  wifi: NonNullable<
+    NonNullable<LoadLynxBackup["sections"]["settings"]>["wifi"]
+  >,
+): Promise<void> {
+  try {
+    const readback = await getWifiCredentials(baseUrl);
+    if (
+      readback.ssid === wifi.ssid &&
+      readback.psk === wifi.psk &&
+      readback.source === wifi.source
+    ) {
+      return;
+    }
+  } catch {
+    // Continue with the write path; credential readback may be unavailable on older firmware.
+  }
+  try {
+    if (wifi.source === "factory") {
+      await deleteWifiConfig(baseUrl);
+    } else {
+      await postWifiConfig(baseUrl, {
+        ssid: wifi.ssid,
+        psk: wifi.psk,
+        wait: false,
+      });
+    }
+  } catch (error) {
+    try {
+      const readback = await getWifiCredentials(baseUrl);
+      if (
+        readback.ssid === wifi.ssid &&
+        readback.psk === wifi.psk &&
+        readback.source === wifi.source
+      ) {
+        return;
+      }
+    } catch {
+      // Preserve the original write error.
+    }
+    throw error;
+  }
+}
+
+async function restoreCalibrationBackup(
+  baseUrl: string,
+  profile: CalibrationProfileWire,
+): Promise<void> {
+  const allEmpty =
+    profile.current_ch1_points.length === 0 &&
+    profile.current_ch2_points.length === 0 &&
+    profile.v_local_points.length === 0 &&
+    profile.v_remote_points.length === 0;
+  if (allEmpty || profile.active.source === "factory-default") {
+    await postCalibrationReset(baseUrl, { kind: "all" });
+    return;
+  }
+
+  const ui = mapCalibrationProfileWireToUi(profile);
+  const curves = [
+    { kind: "current_ch1" as const, points: ui.current_ch1_points },
+    { kind: "current_ch2" as const, points: ui.current_ch2_points },
+    { kind: "v_local" as const, points: ui.v_local_points },
+    { kind: "v_remote" as const, points: ui.v_remote_points },
+  ];
+  for (const curve of curves) {
+    if (curve.points.length === 0) {
+      await postCalibrationReset(baseUrl, { kind: curve.kind });
+    } else {
+      await postCalibrationCommit(baseUrl, curve);
+    }
+  }
+}
+
+async function restorePdBackup(
+  baseUrl: string,
+  pd: NonNullable<NonNullable<LoadLynxBackup["sections"]["settings"]>["pd"]>,
+): Promise<void> {
+  const allow_extended_voltage = pd.allow_extended_voltage;
+  if (pd.saved.mode === "fixed") {
+    await postPd(baseUrl, {
+      mode: "fixed",
+      object_pos: pd.saved.fixed_object_pos,
+      target_mv: pd.saved.target_mv,
+      i_req_ma: pd.saved.i_req_ma,
+      allow_extended_voltage,
+    });
+  } else {
+    await postPd(baseUrl, {
+      mode: "pps",
+      object_pos: pd.saved.pps_object_pos,
+      target_mv: pd.saved.pps_target_mv ?? pd.saved.target_mv,
+      i_req_ma: pd.saved.i_req_ma,
+      allow_extended_voltage,
+    });
+  }
+}
+
+function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function presetsEqual(a: Preset, b: Preset): boolean {
+  return (
+    a.preset_id === b.preset_id &&
+    a.mode === b.mode &&
+    a.target_p_mw === b.target_p_mw &&
+    a.target_i_ma === b.target_i_ma &&
+    a.target_v_mv === b.target_v_mv &&
+    a.min_v_mv === b.min_v_mv &&
+    a.max_i_ma_total === b.max_i_ma_total &&
+    a.max_p_mw === b.max_p_mw
+  );
 }
 
 export async function exportDiagnostics(baseUrl: string): Promise<unknown> {

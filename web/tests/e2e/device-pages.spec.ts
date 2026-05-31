@@ -88,4 +88,45 @@ test.describe("Device Pages", () => {
     await expect(successAlert).toBeVisible();
     await expect(successAlert).toContainText(/Soft reset/i);
   });
+
+  test("should preview and restore backup sections from Settings", async ({
+    page,
+  }) => {
+    await page.click("text=Settings");
+
+    await expect(page.url()).toContain("/settings");
+    await expect(page.getByText("Backup & Restore")).toBeVisible();
+
+    const backup = {
+      kind: "loadlynx.backup",
+      schema_version: 1,
+      created_at: "2026-05-31T00:00:00Z",
+      sections: {
+        settings: {
+          wifi: {
+            ssid: "BenchNet",
+            psk: "not-shown",
+            source: "user",
+          },
+          sound: {
+            volume: 2,
+          },
+        },
+      },
+    };
+
+    await page.getByLabel("Import backup file").setInputFiles({
+      name: "loadlynx-backup.json",
+      mimeType: "application/json",
+      buffer: Buffer.from(JSON.stringify(backup)),
+    });
+
+    await expect(page.getByText("loadlynx-backup.json")).toBeVisible();
+    await expect(
+      page.getByText(/Unknown section ignored: settings.sound/),
+    ).toBeVisible();
+
+    await page.getByRole("button", { name: "Restore Selected" }).click();
+    await expect(page.getByText("WiFi OK")).toBeVisible();
+  });
 });

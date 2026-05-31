@@ -454,6 +454,7 @@ fn router(state: AppState, web_root: Option<PathBuf>, allow_dev_cors: bool) -> R
                 .post(compat_wifi_post)
                 .delete(compat_wifi_delete),
         )
+        .route("/api/v1/wifi/credentials", get(compat_wifi_credentials_get))
         .route("/api/v1/cc", post(compat_cc))
         .route("/api/v1/pd", get(compat_pd_get).post(compat_pd_post))
         .route(
@@ -1614,6 +1615,22 @@ async fn compat_wifi_get(
         None,
         "USB WiFi status completed",
         "USB WiFi status",
+    )
+    .await?;
+    Ok(Json(data))
+}
+
+async fn compat_wifi_credentials_get(
+    State(state): State<AppState>,
+    Query(query): Query<CompatQuery>,
+) -> Result<Json<Value>, HttpError> {
+    let (_, data) = compat_usb_json_request(
+        &state,
+        &query,
+        "get_wifi_credentials",
+        None,
+        "USB WiFi credentials completed",
+        "USB WiFi credentials",
     )
     .await?;
     Ok(Json(data))
@@ -3444,6 +3461,11 @@ fn mock_serial_probe(request_id: &str, op: &str, extra: Option<Value>) -> Serial
         "set_output_enabled" => {
             json!({"enable": extra.and_then(|v| v.get("enable").cloned()).unwrap_or(json!(false))})
         }
+        "get_wifi_credentials" => json!({
+            "ssid": "LoadLynx-Test",
+            "psk": "mock-loadlynx-psk",
+            "source": "user"
+        }),
         "get_wifi_status" | "set_wifi_config" | "clear_wifi_config" => json!({
             "ssid": extra.as_ref().and_then(|v| v.get("ssid")).and_then(Value::as_str).unwrap_or("LoadLynx-Test"),
             "source": if op == "clear_wifi_config" { "factory" } else { "user" },
