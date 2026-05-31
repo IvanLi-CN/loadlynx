@@ -647,19 +647,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 select_device_artifact(&client, &resolved, manifest_path.clone(), artifact.clone())
                     .await?;
             }
-            client
-                .post(api_url(
-                    &resolved.devd,
-                    &format!("/api/v1/devices/{}/flash", resolved.device),
-                )?)
-                .json(
-                    &json!({"target": target.kind(), "artifact_id": artifact, "dry_run": dry_run}),
-                )
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?
+            post_usb_operation_with_optional_lease(
+                &client,
+                &resolved,
+                &format!("/api/v1/devices/{}/flash", resolved.device),
+                json!({"target": target.kind(), "artifact_id": artifact, "dry_run": dry_run}),
+                dry_run || matches!(target, BoardTarget::Digital),
+            )
+            .await?
         }
         Command::Reset {
             target,
@@ -668,17 +663,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             dry_run,
         } => {
             let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
-            client
-                .post(api_url(
-                    &resolved.devd,
-                    &format!("/api/v1/devices/{}/reset", resolved.device),
-                )?)
-                .json(&json!({"target": target.kind(), "dry_run": dry_run}))
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?
+            post_usb_operation_with_optional_lease(
+                &client,
+                &resolved,
+                &format!("/api/v1/devices/{}/reset", resolved.device),
+                json!({"target": target.kind(), "dry_run": dry_run}),
+                dry_run || matches!(target, BoardTarget::Digital),
+            )
+            .await?
         }
         Command::Monitor {
             target: _,
@@ -2505,7 +2497,6 @@ fn spawn_cli_lease_heartbeat(
     })
 }
 
-#[cfg(test)]
 async fn post_usb_operation_with_optional_lease(
     client: &Client,
     resolved: &ResolvedUsbHardware,
