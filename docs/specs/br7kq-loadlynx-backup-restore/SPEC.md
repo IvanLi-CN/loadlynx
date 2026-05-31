@@ -112,6 +112,7 @@ Device Settings route MUST include a Backup & Restore card:
 ## API / Firmware
 
 - USB/devd and LAN HTTP MUST expose a minimal WiFi credential read operation for explicit backup export.
+- LAN HTTP credential reads MUST reject non-local browser origins so arbitrary websites cannot read PSK through permissive CORS.
 - The existing WiFi status endpoint and diagnostics export MUST continue to omit PSK.
 - USB/devd traces MUST continue to redact sensitive keys such as `psk`.
 - Backup/restore aggregation belongs in CLI/Web/devd client code, not firmware.

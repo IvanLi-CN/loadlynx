@@ -158,6 +158,7 @@ interface WifiCredentials {
 ```
 
 Backup files that include `settings.wifi` are sensitive user artifacts. Diagnostics, status, traces and logs must continue to omit or redact PSK.
+Browser requests to this endpoint are accepted only from local UI origins; non-browser LAN clients do not send `Origin` and may still use the endpoint for explicit backup export.
 
 ### 2.2 模拟板状态枚举
 

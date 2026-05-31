@@ -1053,11 +1053,24 @@ async fn handle_http_connection(
             }
         }
         ("GET", "/api/v1/wifi/credentials") => {
-            match render_wifi_credentials_json(&mut body, eeprom).await {
-                Ok(()) => {
-                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+            if cors_origin.is_some_and(|origin| !is_local_browser_origin(origin)) {
+                write_error_body(
+                    &mut body,
+                    "FORBIDDEN",
+                    "WiFi credential backup reads require local UI origin or non-browser client",
+                    false,
+                    None,
+                );
+                write_http_response(socket, version, "403 Forbidden", &body, cors_origin).await?;
+            } else {
+                match render_wifi_credentials_json(&mut body, eeprom).await {
+                    Ok(()) => {
+                        write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                    }
+                    Err(err) => {
+                        write_http_response(socket, version, err, &body, cors_origin).await?
+                    }
                 }
-                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
         ("POST", "/api/v1/wifi") => {
@@ -1124,6 +1137,22 @@ fn write_json_string_escaped(buf: &mut String, s: &str) {
             c => buf.push(c),
         }
     }
+}
+
+fn is_local_browser_origin(origin: &str) -> bool {
+    let Some(rest) = origin
+        .strip_prefix("http://")
+        .or_else(|| origin.strip_prefix("https://"))
+    else {
+        return false;
+    };
+    let host_port = rest.split('/').next().unwrap_or(rest);
+    let host = if let Some(rest) = host_port.strip_prefix('[') {
+        rest.split(']').next().unwrap_or(rest)
+    } else {
+        host_port.split(':').next().unwrap_or(host_port)
+    };
+    matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
 fn write_error_body(
