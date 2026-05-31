@@ -1924,15 +1924,6 @@ export async function getWifiCredentials(
       source: state.wifi.source === "user" ? "user" : "factory",
     };
   }
-  if (!isDevdCompatBaseUrl(baseUrl)) {
-    throw new HttpApiError({
-      status: 400,
-      code: "UNSUPPORTED_OPERATION",
-      message: "WiFi credential export requires the local USB/devd path.",
-      retryable: false,
-      details: null,
-    });
-  }
   return httpJsonQueued<WifiCredentials>(baseUrl, "/api/v1/wifi/credentials");
 }
 
