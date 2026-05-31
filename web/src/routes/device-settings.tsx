@@ -67,6 +67,7 @@ export function DeviceSettingsRoute() {
   >(null);
   const [confirmBackupRestoreOpen, setConfirmBackupRestoreOpen] =
     useState(false);
+  const [confirmBackupExportOpen, setConfirmBackupExportOpen] = useState(false);
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPsk, setWifiPsk] = useState("");
   const [backupExportSelection, setBackupExportSelection] =
@@ -242,6 +243,9 @@ export function DeviceSettingsRoute() {
   const backupWifiLanConfirmationRequired =
     wifiLanConfirmationRequired &&
     backupRestoreSelection.includes("settings.wifi");
+  const backupWifiExportLanConfirmationRequired =
+    wifiLanConfirmationRequired &&
+    effectiveBackupExportSelection.includes("settings.wifi");
 
   const handleSoftReset = () => {
     if (!baseUrl) {
@@ -272,6 +276,14 @@ export function DeviceSettingsRoute() {
       return;
     }
     backupRestoreMutation.mutate();
+  };
+
+  const handleBackupExport = () => {
+    if (backupWifiExportLanConfirmationRequired) {
+      setConfirmBackupExportOpen(true);
+      return;
+    }
+    backupExportMutation.mutate();
   };
 
   const handleBackupFile = async (file: File | null) => {
@@ -337,6 +349,23 @@ export function DeviceSettingsRoute() {
           } else if (action === "save") {
             wifiMutation.mutate();
           }
+        }}
+      />
+      <ConfirmDialog
+        open={confirmBackupExportOpen}
+        title="Export WiFi Backup"
+        body="This export will read WiFi credentials over the LAN connection."
+        details={[
+          "The downloaded backup file contains plaintext PSK.",
+          "Use the local USB/devd path when available.",
+          "Status, diagnostics and traces still redact PSK.",
+        ]}
+        confirmLabel="Export Backup"
+        confirmDisabled={backupExportMutation.isPending || !baseUrl}
+        onCancel={() => setConfirmBackupExportOpen(false)}
+        onConfirm={() => {
+          setConfirmBackupExportOpen(false);
+          backupExportMutation.mutate();
         }}
       />
       <ConfirmDialog
@@ -515,7 +544,7 @@ export function DeviceSettingsRoute() {
                       effectiveBackupExportSelection.length === 0 ||
                       backupExportMutation.isPending
                     }
-                    onClick={() => backupExportMutation.mutate()}
+                    onClick={handleBackupExport}
                   >
                     Export Backup
                   </button>

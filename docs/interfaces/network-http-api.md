@@ -147,7 +147,17 @@ interface WifiStatus {
 }
 ```
 
-Plaintext WiFi credential export is intentionally not exposed through the unauthenticated LAN HTTP API. Owner-initiated backup export reads `{ ssid, psk, source }` only through the local USB/devd path documented in `usb-cdc-jsonl-bridge.md`. Backup files that include `settings.wifi` are sensitive user artifacts. Diagnostics, status, traces and logs must continue to omit or redact PSK.
+`GET /api/v1/wifi/credentials` is the explicit backup/export path and returns plaintext credentials:
+
+```ts
+interface WifiCredentials {
+  ssid: string;
+  psk: string;
+  source: "factory" | "user";
+}
+```
+
+Backup files that include `settings.wifi` are sensitive user artifacts. Diagnostics, status, traces and logs must continue to omit or redact PSK.
 
 ### 2.2 模拟板状态枚举
 

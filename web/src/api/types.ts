@@ -320,6 +320,7 @@ export type PdUpdateRequest =
   | {
       mode: "fixed";
       object_pos: number;
+      target_mv?: number;
       i_req_ma: number;
       allow_extended_voltage?: boolean;
     }

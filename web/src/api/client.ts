@@ -81,7 +81,7 @@ export function isDevdCompatBaseUrl(baseUrl: string): boolean {
 }
 
 export function supportsBackupWifiCredentials(baseUrl: string): boolean {
-  return isMockBaseUrl(baseUrl) || isDevdCompatBaseUrl(baseUrl);
+  return Boolean(baseUrl);
 }
 
 function isStorybookRuntime(): boolean {
