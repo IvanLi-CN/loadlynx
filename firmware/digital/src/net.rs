@@ -3283,6 +3283,41 @@ async fn handle_pd_update(
                         );
                         return Err("422 Unprocessable Entity");
                     }
+                } else {
+                    if !((control::PdConfig::MIN_AUGMENTED_TARGET_MV
+                        ..=control::PdConfig::MAX_PPS_TARGET_MV)
+                        .contains(&target_mv))
+                    {
+                        let details = format!(
+                            r#"{{"target_mv":{},"min_mv":{},"max_mv":{},"object_pos":{}}}"#,
+                            target_mv,
+                            control::PdConfig::MIN_AUGMENTED_TARGET_MV,
+                            control::PdConfig::MAX_PPS_TARGET_MV,
+                            object_pos
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "target_mv out of PPS restore range",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    if i_req_ma > TARGET_I_MAX_MA as u32 {
+                        let details = format!(
+                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                            i_req_ma, TARGET_I_MAX_MA, object_pos
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "i_req_ma exceeds offline PPS restore limit",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
                 }
                 cfg.pps_object_pos = object_pos;
                 cfg.target_mv = target_mv;

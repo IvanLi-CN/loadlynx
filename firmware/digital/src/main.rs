@@ -1306,6 +1306,18 @@ async fn write_usb_set_pd_policy_response(
                     );
                     return;
                 }
+            } else if !(control::PdConfig::MIN_AUGMENTED_TARGET_MV
+                ..=control::PdConfig::MAX_PPS_TARGET_MV)
+                .contains(&target_mv)
+                || i_req_ma > TARGET_I_MAX_MA as u32
+            {
+                write_usb_error_response(
+                    out,
+                    request_id,
+                    "LIMIT_VIOLATION",
+                    "offline PPS restore values exceed limits",
+                );
+                return;
             }
             cfg.pps_object_pos = object_pos;
             cfg.target_mv = target_mv;

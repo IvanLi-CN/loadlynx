@@ -819,9 +819,7 @@ async fn flash_device(
     }
     {
         let guard = state.inner.lock().expect("state lock");
-        if input.lease_id.is_some() || !matches!(target, TargetKind::DigitalEsp32s3) {
-            ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
-        }
+        ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
         let device = guard
             .devices
             .get(&id)
@@ -870,9 +868,7 @@ async fn reset_device(
     }
     {
         let guard = state.inner.lock().expect("state lock");
-        if input.lease_id.is_some() || !matches!(target, TargetKind::DigitalEsp32s3) {
-            ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
-        }
+        ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
         let device = guard
             .devices
             .get(&id)
