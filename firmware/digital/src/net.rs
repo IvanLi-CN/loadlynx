@@ -3224,17 +3224,35 @@ async fn handle_pd_update(
                         );
                         "409 Conflict"
                     })?;
-                    if target_mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                    if !(control::PdConfig::MIN_AUGMENTED_TARGET_MV
+                        ..=control::MAX_SUPPORTED_FIXED_TARGET_MV)
+                        .contains(&target_mv)
+                    {
                         let details = format!(
-                            r#"{{"object_pos":{},"target_mv":{},"max_supported_fixed_mv":{}}}"#,
+                            r#"{{"object_pos":{},"target_mv":{},"min_mv":{},"max_supported_fixed_mv":{}}}"#,
                             object_pos,
                             target_mv,
+                            control::PdConfig::MIN_AUGMENTED_TARGET_MV,
                             control::MAX_SUPPORTED_FIXED_TARGET_MV
                         );
                         write_error_body(
                             body_out,
                             "LIMIT_VIOLATION",
                             "selected fixed PDO exceeds supported voltage range",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    if i_req_ma > TARGET_I_MAX_MA as u32 {
+                        let details = format!(
+                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                            i_req_ma, TARGET_I_MAX_MA, object_pos
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "i_req_ma exceeds offline fixed restore limit",
                             false,
                             Some(&details),
                         );
