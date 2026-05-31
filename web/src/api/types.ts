@@ -17,6 +17,12 @@ export interface WifiStatus {
   last_error: string | null;
 }
 
+export interface WifiCredentials {
+  ssid: string;
+  psk: string;
+  source: "factory" | "user";
+}
+
 export interface WifiSetRequest {
   ssid: string;
   psk: string;
@@ -325,3 +331,50 @@ export type PdUpdateRequest =
       allow_extended_voltage?: boolean;
     }
   | { allow_extended_voltage: boolean };
+
+export type BackupSectionKey =
+  | "presets"
+  | "calibration"
+  | "settings.wifi"
+  | "settings.pd";
+
+export interface BackupPresetsSection {
+  presets: Preset[];
+  active_preset_id?: PresetId;
+}
+
+export interface BackupPdSection {
+  saved: PdSavedConfig;
+  allow_extended_voltage: boolean;
+}
+
+export interface LoadLynxBackup {
+  kind: "loadlynx.backup";
+  schema_version: 1;
+  created_at: string;
+  selected_sections?: BackupSectionKey[];
+  sections: {
+    presets?: BackupPresetsSection;
+    calibration?: CalibrationProfileWire;
+    settings?: {
+      wifi?: WifiCredentials;
+      pd?: BackupPdSection;
+      [key: string]: unknown;
+    };
+    [key: string]: unknown;
+  };
+  warnings?: unknown[];
+}
+
+export interface BackupRestoreSectionResult {
+  section: BackupSectionKey;
+  ok: boolean;
+  message?: string;
+}
+
+export interface BackupRestoreResult {
+  ok: boolean;
+  safety: { output_disabled: boolean };
+  restored: BackupRestoreSectionResult[];
+  warnings: string[];
+}

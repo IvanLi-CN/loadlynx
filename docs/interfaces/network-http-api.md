@@ -133,6 +133,22 @@ interface UsbBridgeIdentity {
 }
 ```
 
+### 2.1.2 WiFi status
+
+`GET /api/v1/wifi` returns WiFi status only and does not include PSK:
+
+```ts
+interface WifiStatus {
+  ssid: string | null;
+  source: "factory" | "user" | "none";
+  state: "idle" | "configured" | "connecting" | "connected" | "error";
+  ip: string | null;
+  last_error: string | null;
+}
+```
+
+Plaintext WiFi credential export is intentionally not exposed through the unauthenticated LAN HTTP API. Owner-initiated backup export reads `{ ssid, psk, source }` only through the local USB/devd path documented in `usb-cdc-jsonl-bridge.md`. Backup files that include `settings.wifi` are sensitive user artifacts. Diagnostics, status, traces and logs must continue to omit or redact PSK.
+
 ### 2.2 模拟板状态枚举
 
 HTTP API 暴露的 `analog_state` 与数字板内部 `AnalogState` 枚举对应（`firmware/digital/src/ui/mod.rs`）：

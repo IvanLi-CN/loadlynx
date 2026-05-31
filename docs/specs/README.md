@@ -61,3 +61,4 @@
 | w4cpd | Dashboard 扩展电压开关与 PD 设置入口重构 | 已完成 | active | `w4cpd-dashboard-extended-voltage-toggle/SPEC.md` | `w4cpd-dashboard-extended-voltage-toggle/IMPLEMENTATION.md` | 2026-03-10 | PR #70；实现已完成；HIL 可选 |
 | wh4s9 | Calibration 页面模式同步与状态链路稳定化 | 已完成 | active | `wh4s9-calibration-mode-sync-stability/SPEC.md` | `wh4s9-calibration-mode-sync-stability/IMPLEMENTATION.md` | 2026-04-16 | 本地校准页稳定性修复、Storybook/E2E 回归与视觉证据已完成 |
 | y4sf4 | Digital Display PSRAM/DMA Pipeline | 已完成 | active | `y4sf4-display-psram-dma-pipeline/SPEC.md` | `y4sf4-display-psram-dma-pipeline/IMPLEMENTATION.md` | 2026-03-19 | PR #71；PSRAM 专用 framebuffer arena、多缓冲 present、真实 present-FPS、细粒度 dirty rect、pending 背压 |
+| br7kq | LoadLynx Backup & Restore | 已完成 | active | `br7kq-loadlynx-backup-restore/SPEC.md` | `br7kq-loadlynx-backup-restore/IMPLEMENTATION.md` | 2026-05-31 | CLI/Web JSON backup restore；恢复前强制关闭负载；WiFi PSK 明文备份 |

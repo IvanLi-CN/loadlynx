@@ -968,7 +968,7 @@ async fn write_usb_identity_response(out: &mut UsbJsonLine, request_id: Option<&
         out,
         option_env!("LOADLYNX_FW_SRC_DIGEST").unwrap_or("src unknown"),
     );
-    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\",\"get_control\",\"set_control\",\"get_presets\",\"set_preset\",\"apply_preset\",\"get_calibration_profile\",\"calibration_apply\",\"calibration_commit\",\"calibration_reset\",\"calibration_mode\",\"get_wifi_status\",\"set_wifi_config\",\"clear_wifi_config\",\"soft_reset\",\"get_diagnostics\"]}}").ok();
+    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\",\"get_control\",\"set_control\",\"get_presets\",\"set_preset\",\"apply_preset\",\"get_calibration_profile\",\"calibration_apply\",\"calibration_commit\",\"calibration_reset\",\"calibration_mode\",\"get_wifi_status\",\"get_wifi_credentials\",\"set_wifi_config\",\"clear_wifi_config\",\"soft_reset\",\"get_diagnostics\"]}}").ok();
 }
 
 async fn write_usb_status_response(
@@ -1220,13 +1220,12 @@ async fn write_usb_set_pd_policy_response(
         return;
     }
 
-    let status = match telemetry.lock().await.last_pd_status.clone() {
-        Some(status) if status.attached => status,
-        _ => {
-            write_usb_error_response(out, request_id, "NOT_ATTACHED", "PD status unavailable");
-            return;
-        }
-    };
+    let status = telemetry
+        .lock()
+        .await
+        .last_pd_status
+        .clone()
+        .filter(|status| status.attached);
 
     let mut ctrl = control.lock().await;
     let mut cfg = ctrl.pd_saved;
@@ -1234,37 +1233,51 @@ async fn write_usb_set_pd_policy_response(
     cfg.i_req_ma = i_req_ma;
     match mode {
         control::PdMode::Fixed => {
-            let Some(pdo) = usb_find_fixed_pdo(&status, object_pos) else {
-                write_usb_error_response(
-                    out,
-                    request_id,
-                    "LIMIT_VIOLATION",
-                    "selected PDO not present",
-                );
-                return;
+            let target_mv = if let Some(status) = status.as_ref() {
+                let Some(pdo) = usb_find_fixed_pdo(status, object_pos) else {
+                    write_usb_error_response(
+                        out,
+                        request_id,
+                        "LIMIT_VIOLATION",
+                        "selected PDO not present",
+                    );
+                    return;
+                };
+                if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV || i_req_ma > pdo.max_ma {
+                    write_usb_error_response(
+                        out,
+                        request_id,
+                        "LIMIT_VIOLATION",
+                        "selected PDO exceeds limits",
+                    );
+                    return;
+                }
+                pdo.mv
+            } else {
+                let Some(target_mv) = json_u32_value(line, "\"target_mv\"") else {
+                    write_usb_error_response(
+                        out,
+                        request_id,
+                        "NOT_ATTACHED",
+                        "target_mv is required when PD is detached",
+                    );
+                    return;
+                };
+                if target_mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                    write_usb_error_response(
+                        out,
+                        request_id,
+                        "LIMIT_VIOLATION",
+                        "selected fixed voltage exceeds limits",
+                    );
+                    return;
+                }
+                target_mv
             };
-            if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV || i_req_ma > pdo.max_ma {
-                write_usb_error_response(
-                    out,
-                    request_id,
-                    "LIMIT_VIOLATION",
-                    "selected PDO exceeds limits",
-                );
-                return;
-            }
             cfg.fixed_object_pos = object_pos;
-            cfg.target_mv = pdo.mv;
+            cfg.target_mv = target_mv;
         }
         control::PdMode::Pps => {
-            let Some(apdo) = usb_find_pps_pdo(&status, object_pos) else {
-                write_usb_error_response(
-                    out,
-                    request_id,
-                    "LIMIT_VIOLATION",
-                    "selected APDO not present",
-                );
-                return;
-            };
             let Some(target_mv) = json_u32_value(line, "\"target_mv\"") else {
                 write_usb_error_response(
                     out,
@@ -1274,14 +1287,25 @@ async fn write_usb_set_pd_policy_response(
                 );
                 return;
             };
-            if target_mv < apdo.min_mv || target_mv > apdo.max_mv || i_req_ma > apdo.max_ma {
-                write_usb_error_response(
-                    out,
-                    request_id,
-                    "LIMIT_VIOLATION",
-                    "selected APDO exceeds limits",
-                );
-                return;
+            if let Some(status) = status.as_ref() {
+                let Some(apdo) = usb_find_pps_pdo(status, object_pos) else {
+                    write_usb_error_response(
+                        out,
+                        request_id,
+                        "LIMIT_VIOLATION",
+                        "selected APDO not present",
+                    );
+                    return;
+                };
+                if target_mv < apdo.min_mv || target_mv > apdo.max_mv || i_req_ma > apdo.max_ma {
+                    write_usb_error_response(
+                        out,
+                        request_id,
+                        "LIMIT_VIOLATION",
+                        "selected APDO exceeds limits",
+                    );
+                    return;
+                }
             }
             cfg.pps_object_pos = object_pos;
             cfg.target_mv = target_mv;
@@ -1761,6 +1785,29 @@ async fn write_usb_wifi_response(
         out.push('"').ok();
     }
     match op {
+        "get_wifi_credentials" => {
+            let blob = {
+                let mut guard = eeprom.lock().await;
+                guard.read_wifi_blob().await
+            };
+            let Ok(blob) = blob else {
+                out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNAVAILABLE\",\"message\":\"EEPROM read failed\"}}").ok();
+                return;
+            };
+            let credentials = eeprom::decode_wifi_blob(&blob)
+                .map(|parts| (String::from(parts.ssid), String::from(parts.psk)));
+            let (ssid, psk, source) = match credentials {
+                Some((ssid, psk)) => (ssid, psk, "user"),
+                None => (String::from(WIFI_SSID), String::from(WIFI_PSK), "factory"),
+            };
+            out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
+            write_json_string_escaped(out, &ssid);
+            out.push_str("\",\"psk\":\"").ok();
+            write_json_string_escaped(out, &psk);
+            out.push_str("\",\"source\":\"").ok();
+            out.push_str(source).ok();
+            out.push_str("\"}}").ok();
+        }
         "get_wifi_status" => {
             let user_ssid = {
                 let mut guard = eeprom.lock().await;
@@ -2021,7 +2068,7 @@ async fn handle_usb_jsonl_request(
             .await
         }
         #[cfg(feature = "net_http")]
-        "get_wifi_status" | "set_wifi_config" | "clear_wifi_config" => {
+        "get_wifi_status" | "get_wifi_credentials" | "set_wifi_config" | "clear_wifi_config" => {
             write_usb_wifi_response(out, request_id, op, Some(line), eeprom, wifi_state).await
         }
         #[cfg(feature = "net_http")]
@@ -2051,7 +2098,7 @@ async fn usb_cdc_jsonl_task(
     out.push_str("\",\"features\":[\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\"")
         .ok();
     #[cfg(feature = "net_http")]
-    out.push_str(",\"get_control\",\"set_control\",\"get_presets\",\"set_preset\",\"apply_preset\",\"get_calibration_profile\",\"calibration_apply\",\"calibration_commit\",\"calibration_reset\",\"calibration_mode\",\"get_wifi_status\",\"set_wifi_config\",\"clear_wifi_config\",\"soft_reset\",\"get_diagnostics\"")
+    out.push_str(",\"get_control\",\"set_control\",\"get_presets\",\"set_preset\",\"apply_preset\",\"get_calibration_profile\",\"calibration_apply\",\"calibration_commit\",\"calibration_reset\",\"calibration_mode\",\"get_wifi_status\",\"get_wifi_credentials\",\"set_wifi_config\",\"clear_wifi_config\",\"soft_reset\",\"get_diagnostics\"")
         .ok();
     out.push_str("]}").ok();
     usb_cdc_write_line(&mut tx, &out).await;
@@ -5606,6 +5653,9 @@ async fn save_editing_preset_to_eeprom(control: &ControlMutex, eeprom: &EepromMu
             return false;
         }
         let mut to_write = guard.saved;
+        if to_write[idx] == guard.presets[idx] {
+            return true;
+        }
         to_write[idx] = guard.presets[idx];
         (preset_id, control::encode_presets_blob(&to_write))
     };

@@ -1052,6 +1052,14 @@ async fn handle_http_connection(
                 Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
             }
         }
+        ("GET", "/api/v1/wifi/credentials") => {
+            match render_wifi_credentials_json(&mut body, eeprom).await {
+                Ok(()) => {
+                    write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
+                }
+                Err(err) => write_http_response(socket, version, err, &body, cors_origin).await?,
+            }
+        }
         ("POST", "/api/v1/wifi") => {
             match handle_wifi_set_http(body_str, &mut body, eeprom, wifi_state).await {
                 Ok(()) => {
@@ -1265,6 +1273,26 @@ pub(crate) async fn render_wifi_status_json(
     buf.push_str(source);
     buf.push('"');
     append_wifi_status_fields(buf, wifi);
+    Ok(())
+}
+
+pub(crate) async fn render_wifi_credentials_json(
+    buf: &mut String,
+    eeprom: &'static EepromMutex,
+) -> Result<(), &'static str> {
+    let credentials = read_wifi_credentials(eeprom).await;
+    let source = match credentials.source {
+        WifiCredentialSource::Factory => "factory",
+        WifiCredentialSource::User => "user",
+    };
+    buf.clear();
+    buf.push_str("{\"ssid\":\"");
+    write_json_string_escaped(buf, &credentials.ssid);
+    buf.push_str("\",\"psk\":\"");
+    write_json_string_escaped(buf, &credentials.psk);
+    buf.push_str("\",\"source\":\"");
+    buf.push_str(source);
+    buf.push_str("\"}");
     Ok(())
 }
 
@@ -2161,8 +2189,8 @@ pub(crate) async fn handle_presets_update(
     }
     preset = preset.clamp();
 
-    let updated = {
-        let mut guard = control.lock().await;
+    let (idx, next_saved, persist_needed) = {
+        let guard = control.lock().await;
         let idx = (preset.preset_id - 1) as usize;
         if idx >= control::PRESET_COUNT {
             write_error_body(
@@ -2175,44 +2203,33 @@ pub(crate) async fn handle_presets_update(
             return Err("422 Unprocessable Entity");
         }
 
-        let old_presets = guard.presets;
-        let old_saved = guard.saved;
-        let old_dirty = guard.dirty;
-        let old_output = guard.output_enabled;
-        let old_calibration_override = guard.calibration_cc_override;
-        let old_calibration_restore_output = guard.calibration_restore_output_enabled();
-
-        let prev_mode = guard.presets[idx].mode;
-        guard.presets[idx] = preset;
-
-        // ApplyPreset and any mode change MUST force output OFF (if this affects the active preset).
-        if guard.active_preset_id == preset.preset_id && prev_mode != preset.mode {
-            guard.force_output_off();
-        }
-
         // Persist presets blob to EEPROM (saved snapshot is the persisted baseline).
         let mut next_saved = guard.saved;
+        let persist_needed = next_saved[idx] != preset;
         next_saved[idx] = preset;
+        (idx, next_saved, persist_needed)
+    };
+
+    if persist_needed {
         let blob = control::encode_presets_blob(&next_saved);
         let write_ok = {
             let mut ep = eeprom.lock().await;
             ep.write_presets_blob(&blob).await.is_ok()
         };
-
         if !write_ok {
-            // Roll back in-RAM state on persistence failure.
-            guard.presets = old_presets;
-            guard.saved = old_saved;
-            guard.dirty = old_dirty;
-            guard.restore_calibration_output_state(
-                old_output,
-                old_calibration_override,
-                old_calibration_restore_output,
-            );
             write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
             return Err("503 Service Unavailable");
         }
+    }
 
+    let updated = {
+        let mut guard = control.lock().await;
+        let prev_mode = guard.presets[idx].mode;
+        guard.presets[idx] = preset;
+        // ApplyPreset and any mode change MUST force output OFF (if this affects the active preset).
+        if guard.active_preset_id == preset.preset_id && prev_mode != preset.mode {
+            guard.force_output_off();
+        }
         guard.saved = next_saved;
         guard.dirty[idx] = false;
         bump_control_rev();
@@ -3050,29 +3067,18 @@ async fn handle_pd_update(
     }
 
     let status = if updates_saved_cfg {
-        let status = {
-            let guard = telemetry.lock().await;
-            guard.last_pd_status.clone()
-        }
-        .ok_or_else(|| {
-            write_error_body(
-                body_out,
-                "NOT_ATTACHED",
-                "PD status unavailable; refusing apply",
-                true,
-                None,
-            );
-            "409 Conflict"
-        })?;
-
-        Some(status)
+        let guard = telemetry.lock().await;
+        guard
+            .last_pd_status
+            .clone()
+            .filter(|status| status.attached)
     } else {
         None
     };
 
     // Serialize PD updates under the control lock so UI + HTTP cannot race and stomp the EEPROM
     // blob with stale snapshots.
-    let mut ctrl = control_mutex.lock().await;
+    let ctrl = control_mutex.lock().await;
     let mut cfg = ctrl.pd_saved;
     let mut allow_extended_voltage = ctrl.allow_extended_voltage;
     let prev_cfg = cfg;
@@ -3146,19 +3152,71 @@ async fn handle_pd_update(
             return Err("422 Unprocessable Entity");
         }
 
-        let status = status
-            .as_ref()
-            .expect("status required when updating saved PD fields");
         cfg.mode = mode;
         cfg.i_req_ma = i_req_ma;
         match mode {
             control::PdMode::Fixed => {
-                if let Some(pdo) = find_live_fixed_pdo(status, object_pos) {
-                    if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                if let Some(status) = status.as_ref() {
+                    if let Some(pdo) = find_live_fixed_pdo(status, object_pos) {
+                        if pdo.mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
+                            let details = format!(
+                                r#"{{"object_pos":{},"target_mv":{},"max_supported_fixed_mv":{}}}"#,
+                                object_pos,
+                                pdo.mv,
+                                control::MAX_SUPPORTED_FIXED_TARGET_MV
+                            );
+                            write_error_body(
+                                body_out,
+                                "LIMIT_VIOLATION",
+                                "selected fixed PDO exceeds supported voltage range",
+                                false,
+                                Some(&details),
+                            );
+                            return Err("422 Unprocessable Entity");
+                        }
+                        if i_req_ma > pdo.max_ma {
+                            let details = format!(
+                                r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                                i_req_ma, pdo.max_ma, object_pos
+                            );
+                            write_error_body(
+                                body_out,
+                                "LIMIT_VIOLATION",
+                                "i_req_ma exceeds PDO Imax",
+                                false,
+                                Some(&details),
+                            );
+                            return Err("422 Unprocessable Entity");
+                        }
+                        cfg.fixed_object_pos = object_pos;
+                        cfg.target_mv = pdo.mv;
+                    } else {
+                        let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "selected PDO not present in capabilities",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                } else {
+                    let target_mv = parsed.target_mv.ok_or_else(|| {
+                        write_error_body(
+                            body_out,
+                            "NOT_ATTACHED",
+                            "target_mv is required when PD is detached",
+                            true,
+                            None,
+                        );
+                        "409 Conflict"
+                    })?;
+                    if target_mv > control::MAX_SUPPORTED_FIXED_TARGET_MV {
                         let details = format!(
                             r#"{{"object_pos":{},"target_mv":{},"max_supported_fixed_mv":{}}}"#,
                             object_pos,
-                            pdo.mv,
+                            target_mv,
                             control::MAX_SUPPORTED_FIXED_TARGET_MV
                         );
                         write_error_body(
@@ -3170,46 +3228,11 @@ async fn handle_pd_update(
                         );
                         return Err("422 Unprocessable Entity");
                     }
-                    if i_req_ma > pdo.max_ma {
-                        let details = format!(
-                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                            i_req_ma, pdo.max_ma, object_pos
-                        );
-                        write_error_body(
-                            body_out,
-                            "LIMIT_VIOLATION",
-                            "i_req_ma exceeds PDO Imax",
-                            false,
-                            Some(&details),
-                        );
-                        return Err("422 Unprocessable Entity");
-                    }
                     cfg.fixed_object_pos = object_pos;
-                    cfg.target_mv = pdo.mv;
-                } else {
-                    let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "selected PDO not present in capabilities",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
+                    cfg.target_mv = target_mv;
                 }
             }
             control::PdMode::Pps => {
-                let Some(apdo) = find_live_pps_pdo(status, object_pos) else {
-                    let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "selected APDO not present in capabilities",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
-                };
                 let target_mv = parsed.target_mv.ok_or_else(|| {
                     write_error_body(
                         body_out,
@@ -3220,33 +3243,46 @@ async fn handle_pd_update(
                     );
                     "400 Bad Request"
                 })?;
-                if target_mv < apdo.min_mv || target_mv > apdo.max_mv {
-                    let details = format!(
-                        r#"{{"target_mv":{},"min_mv":{},"max_mv":{},"object_pos":{}}}"#,
-                        target_mv, apdo.min_mv, apdo.max_mv, object_pos
-                    );
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "target_mv out of APDO range",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
-                }
-                if i_req_ma > apdo.max_ma {
-                    let details = format!(
-                        r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
-                        i_req_ma, apdo.max_ma, object_pos
-                    );
-                    write_error_body(
-                        body_out,
-                        "LIMIT_VIOLATION",
-                        "i_req_ma exceeds APDO Imax",
-                        false,
-                        Some(&details),
-                    );
-                    return Err("422 Unprocessable Entity");
+                if let Some(status) = status.as_ref() {
+                    let Some(apdo) = find_live_pps_pdo(status, object_pos) else {
+                        let details = format!(r#"{{"object_pos":{}}}"#, object_pos);
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "selected APDO not present in capabilities",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    };
+                    if target_mv < apdo.min_mv || target_mv > apdo.max_mv {
+                        let details = format!(
+                            r#"{{"target_mv":{},"min_mv":{},"max_mv":{},"object_pos":{}}}"#,
+                            target_mv, apdo.min_mv, apdo.max_mv, object_pos
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "target_mv out of APDO range",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
+                    if i_req_ma > apdo.max_ma {
+                        let details = format!(
+                            r#"{{"i_req_ma":{},"max_ma":{},"object_pos":{}}}"#,
+                            i_req_ma, apdo.max_ma, object_pos
+                        );
+                        write_error_body(
+                            body_out,
+                            "LIMIT_VIOLATION",
+                            "i_req_ma exceeds APDO Imax",
+                            false,
+                            Some(&details),
+                        );
+                        return Err("422 Unprocessable Entity");
+                    }
                 }
                 cfg.pps_object_pos = object_pos;
                 cfg.target_mv = target_mv;
@@ -3263,6 +3299,7 @@ async fn handle_pd_update(
     let changed = saved_changed || allow_extended_voltage != prev_allow_extended_voltage;
     if changed {
         let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
+        drop(ctrl);
         let res = {
             let mut ep = eeprom.lock().await;
             ep.write_pd_blob(&blob).await
@@ -3274,14 +3311,17 @@ async fn handle_pd_update(
             return Err("503 Service Unavailable");
         }
 
+        let mut ctrl = control_mutex.lock().await;
         ctrl.pd_saved = cfg;
         ctrl.allow_extended_voltage = allow_extended_voltage;
         if saved_changed && ctrl.ui_view == crate::control::UiView::PdSettings {
             ctrl.pd_draft = cfg;
         }
         bump_control_rev();
+        drop(ctrl);
+    } else {
+        drop(ctrl);
     }
-    drop(ctrl);
 
     if !allow_extended_voltage {
         crate::clear_pd_extended_voltage_failure();
@@ -4246,6 +4286,13 @@ pub(crate) async fn handle_calibration_commit(
 
     let (prev, blob) = {
         let mut guard = calibration.lock().await;
+        if guard.profile.source == ProfileSource::UserCalibrated
+            && guard.profile.points_for(kind) == points.as_slice()
+        {
+            body_out.clear();
+            body_out.push_str(r#"{"ok":true}"#);
+            return Ok(kind);
+        }
         let prev = guard.profile.clone();
         *guard.profile.points_for_mut(kind) = points;
         guard.profile.source = ProfileSource::UserCalibrated;

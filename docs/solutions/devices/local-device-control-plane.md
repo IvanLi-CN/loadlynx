@@ -44,6 +44,7 @@ Use a local-first control plane:
 - Keep device-local transports compact and purpose-built. When USB/serial frame budgets are tight, firmware may return a compact operation-specific payload while the daemon expands it back to the public HTTP/Web shape for CLI and browser callers.
 - Separate local physical-access writes from LAN writes in the user interface. LAN credential writes should require an explicit unsafe-network confirmation or flag, while USB/devd writes can rely on lease and selected-port evidence.
 - Web evidence should come from mock-first Storybook canvas/docs states so localhost hardware daemons are not required for UI review.
+- If an owner-facing backup/export workflow explicitly needs secrets, expose that as a narrow read operation with a sensitive artifact contract. Keep ordinary status, diagnostics, traces and logs redacted; do not broaden generic observability paths just to make backups convenient.
 
 ## Guardrails / Reuse Notes
 
