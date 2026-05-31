@@ -652,7 +652,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 &resolved,
                 &format!("/api/v1/devices/{}/flash", resolved.device),
                 json!({"target": target.kind(), "artifact_id": artifact, "dry_run": dry_run}),
-                dry_run || matches!(target, BoardTarget::Digital),
+                dry_run,
             )
             .await?
         }
@@ -668,7 +668,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 &resolved,
                 &format!("/api/v1/devices/{}/reset", resolved.device),
                 json!({"target": target.kind(), "dry_run": dry_run}),
-                dry_run || matches!(target, BoardTarget::Digital),
+                dry_run,
             )
             .await?
         }

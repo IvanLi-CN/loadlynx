@@ -3090,7 +3090,7 @@ async fn handle_pd_update(
 
     // Serialize PD updates under the control lock so UI + HTTP cannot race and stomp the EEPROM
     // blob with stale snapshots.
-    let ctrl = control_mutex.lock().await;
+    let mut ctrl = control_mutex.lock().await;
     let mut cfg = ctrl.pd_saved;
     let mut allow_extended_voltage = ctrl.allow_extended_voltage;
     let prev_cfg = cfg;
@@ -3346,7 +3346,6 @@ async fn handle_pd_update(
     let changed = saved_changed || allow_extended_voltage != prev_allow_extended_voltage;
     if changed {
         let blob = control::encode_pd_blob(&cfg, allow_extended_voltage);
-        drop(ctrl);
         let res = {
             let mut ep = eeprom.lock().await;
             ep.write_pd_blob(&blob).await
@@ -3358,7 +3357,6 @@ async fn handle_pd_update(
             return Err("503 Service Unavailable");
         }
 
-        let mut ctrl = control_mutex.lock().await;
         ctrl.pd_saved = cfg;
         ctrl.allow_extended_voltage = allow_extended_voltage;
         if saved_changed && ctrl.ui_view == crate::control::UiView::PdSettings {
