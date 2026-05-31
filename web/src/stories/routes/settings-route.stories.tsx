@@ -62,7 +62,7 @@ export const WifiAndDiagnostics: Story = {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
-      canvas.getByText("WiFi");
+      canvas.getByRole("heading", { name: "WiFi" });
       canvas.getByRole("button", { name: "Export Diagnostics" });
     });
 
