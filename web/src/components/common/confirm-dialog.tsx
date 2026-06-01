@@ -26,8 +26,8 @@ export function ConfirmDialog({
   if (!open) return null;
 
   return (
-    <div className="modal modal-open" role="dialog" aria-modal="true">
-      <div className="modal-box">
+    <div className="ll-modal" role="dialog" aria-modal="true">
+      <div className="ll-modal-box">
         <h3 className="font-bold text-lg">{title}</h3>
         <p className="py-3 text-sm">{body}</p>
         {details.length > 0 && (
@@ -38,13 +38,13 @@ export function ConfirmDialog({
           </ul>
         )}
 
-        <div className="modal-action">
-          <button type="button" className="btn" onClick={onCancel}>
+        <div className="ll-modal-action">
+          <button type="button" className="ll-button" onClick={onCancel}>
             {cancelLabel}
           </button>
           <button
             type="button"
-            className={`btn ${destructive ? "btn-error" : "btn-primary"}`}
+            className={`ll-button ${destructive ? "ll-button-danger" : "ll-button-primary"}`}
             disabled={confirmDisabled}
             onClick={onConfirm}
           >
@@ -54,7 +54,7 @@ export function ConfirmDialog({
       </div>
       <button
         type="button"
-        className="modal-backdrop"
+        className="ll-modal-backdrop"
         aria-label="Close"
         onClick={onCancel}
       />

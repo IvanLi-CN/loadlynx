@@ -1,3 +1,5 @@
+import { readStoredDemoMode } from "../lib/demo-mode.ts";
+
 export interface StoredDevice {
   id: string;
   name: string;
@@ -11,10 +13,28 @@ export interface StoredDevice {
 }
 
 const STORAGE_KEY = "loadlynx.devices";
+const DEMO_STORAGE_KEY = "loadlynx.demo.devices";
+
+export const DEMO_DEVICES: StoredDevice[] = [
+  {
+    id: "mock-001",
+    name: "Demo Device #1",
+    baseUrl: "mock://demo-1",
+  },
+  {
+    id: "mock-002",
+    name: "Demo Device #2",
+    baseUrl: "mock://demo-2",
+  },
+];
 
 export interface DeviceStore {
   getDevices(): StoredDevice[];
   setDevices(devices: StoredDevice[]): void;
+}
+
+function isDemoDevice(device: StoredDevice): boolean {
+  return device.baseUrl.trim().toLowerCase().startsWith("mock://");
 }
 
 function sanitizeDevices(input: unknown): StoredDevice[] {
@@ -102,5 +122,50 @@ export class MemoryDeviceStore implements DeviceStore {
 
   setDevices(devices: StoredDevice[]): void {
     this.#devices = [...devices];
+  }
+}
+
+export class DemoAwareDeviceStore implements DeviceStore {
+  readonly #storage: Storage;
+  readonly #realStore: DeviceStore;
+  readonly #demoStore: DeviceStore;
+
+  constructor(storage: Storage) {
+    this.#storage = storage;
+    this.#realStore = new LocalStorageDeviceStore(storage, STORAGE_KEY);
+    this.#demoStore = new LocalStorageDeviceStore(storage, DEMO_STORAGE_KEY);
+  }
+
+  getDevices(): StoredDevice[] {
+    const store = this.#getActiveStore();
+    const devices = store.getDevices();
+
+    if (store === this.#demoStore) {
+      const demoDevices = devices.filter(isDemoDevice);
+      if (demoDevices.length !== devices.length) {
+        store.setDevices(demoDevices);
+      }
+      if (demoDevices.length > 0) {
+        return demoDevices;
+      }
+
+      store.setDevices(DEMO_DEVICES);
+      return [...DEMO_DEVICES];
+    }
+
+    return devices;
+  }
+
+  setDevices(devices: StoredDevice[]): void {
+    const store = this.#getActiveStore();
+    store.setDevices(
+      store === this.#demoStore ? devices.filter(isDemoDevice) : devices,
+    );
+  }
+
+  #getActiveStore(): DeviceStore {
+    return readStoredDemoMode(this.#storage) === true
+      ? this.#demoStore
+      : this.#realStore;
   }
 }

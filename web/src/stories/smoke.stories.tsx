@@ -10,39 +10,39 @@ function Smoke() {
             Tailwind 4 + DaisyUI should render with the app&apos;s dark styling.
           </p>
         </div>
-        <span className="badge badge-outline">storybook</span>
+        <span className="ll-badge ll-badge-outline">storybook</span>
       </div>
 
-      <div className="card bg-base-200 shadow">
-        <div className="card-body">
-          <h2 className="card-title">Controls</h2>
+      <div className="ll-panel bg-base-200 shadow">
+        <div className="ll-panel-body">
+          <h2 className="ll-panel-title">Controls</h2>
           <p className="text-sm opacity-70">
             Buttons should use DaisyUI tokens from <code>src/index.css</code>.
           </p>
           <div className="flex flex-wrap gap-2">
-            <button className="btn btn-primary" type="button">
+            <button className="ll-button ll-button-primary" type="button">
               Primary
             </button>
-            <button className="btn btn-ghost" type="button">
+            <button className="ll-button ll-button-ghost" type="button">
               Ghost
             </button>
-            <button className="btn btn-outline" type="button">
+            <button className="ll-button ll-button-outline" type="button">
               Outline
             </button>
           </div>
         </div>
       </div>
 
-      <div className="stats stats-vertical bg-base-200 shadow sm:stats-horizontal">
-        <div className="stat">
-          <div className="stat-title">Viewport</div>
-          <div className="stat-value text-primary">Ready</div>
-          <div className="stat-desc">Use the toolbar presets</div>
+      <div className="ll-stats ll-stats-vertical bg-base-200 shadow sm:ll-stats-horizontal">
+        <div className="ll-stat">
+          <div className="ll-stat-title">Viewport</div>
+          <div className="ll-stat-value text-primary">Ready</div>
+          <div className="ll-stat-desc">Use the toolbar presets</div>
         </div>
-        <div className="stat">
-          <div className="stat-title">Theme</div>
-          <div className="stat-value">Dark</div>
-          <div className="stat-desc">data-theme=&quot;dark&quot;</div>
+        <div className="ll-stat">
+          <div className="ll-stat-title">Theme</div>
+          <div className="ll-stat-value">Dark</div>
+          <div className="ll-stat-desc">data-theme=&quot;dark&quot;</div>
         </div>
       </div>
     </div>

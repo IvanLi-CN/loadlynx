@@ -73,7 +73,7 @@ export function ThermalPanel({
         </div>
       </div>
 
-      <div className="mt-4 rounded-xl border border-slate-400/10 bg-black/20 p-2">
+      <div className="mt-4 border-t border-slate-400/10 pt-4">
         <Sparkline
           points={trend?.points ?? []}
           min={trend?.min ?? 0}

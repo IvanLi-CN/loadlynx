@@ -26,7 +26,7 @@ test.describe("Device Pages", () => {
 
   test("should navigate to Status page and show content", async ({ page }) => {
     // Click on "Status" in sidebar
-    await page.click("text=Status");
+    await page.click("role=link[name=状态]");
 
     await expect(page.url()).toContain("/status");
     await expect(page.locator("h2")).toContainText("Device Status");
@@ -43,7 +43,7 @@ test.describe("Device Pages", () => {
   test("should open PD settings from Status page secondary entry", async ({
     page,
   }) => {
-    await page.click("text=Status");
+    await page.click("role=link[name=状态]");
     await expect(page.url()).toContain("/status");
 
     const openPdBtn = page.getByRole("link", { name: "Open PD settings" });
@@ -62,7 +62,7 @@ test.describe("Device Pages", () => {
     page,
   }) => {
     // Click on "Settings" in sidebar
-    await page.click("text=Settings");
+    await page.click("role=link[name=设置]");
 
     await expect(page.url()).toContain("/settings");
     await expect(page.locator("h2")).toContainText("Device Settings");
@@ -84,7 +84,7 @@ test.describe("Device Pages", () => {
     await expect(confirmDialog).toContainText(/Soft Reset/i);
     await confirmDialog.getByRole("button", { name: "Soft Reset" }).click();
 
-    const successAlert = page.locator(".alert-success");
+    const successAlert = page.locator(".ll-alert-success");
     await expect(successAlert).toBeVisible();
     await expect(successAlert).toContainText(/Soft reset/i);
   });
@@ -92,7 +92,7 @@ test.describe("Device Pages", () => {
   test("should preview and restore backup sections from Settings", async ({
     page,
   }) => {
-    await page.click("text=Settings");
+    await page.click("role=link[name=设置]");
 
     await expect(page.url()).toContain("/settings");
     await expect(page.getByText("Backup & Restore")).toBeVisible();

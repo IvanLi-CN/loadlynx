@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="768" viewBox="0 0 1024 768" role="img" aria-label="Calibration cyberpunk data lab probe">
+  <rect width="1024" height="768" fill="#050713"/>
+  <path d="M0 64H1024M0 128H1024M0 192H1024M0 256H1024M0 320H1024M0 384H1024M0 448H1024M0 512H1024M0 576H1024M0 640H1024M0 704H1024" stroke="#ff2fb3" stroke-opacity=".05"/>
+  <rect x="24" y="24" width="976" height="84" rx="12" fill="#07111c" stroke="#00e5ff" stroke-opacity=".38"/>
+  <text x="52" y="74" fill="#d8fbff" font-family="system-ui" font-size="28" font-weight="800">校准数据实验台</text>
+  <rect x="24" y="136" width="268" height="584" rx="12" fill="#070d18" stroke="#00e5ff" stroke-opacity=".32"/>
+  <rect x="324" y="136" width="676" height="584" rx="12" fill="#090f1b" stroke="#ff2fb3" stroke-opacity=".28"/>
+  <text x="52" y="184" fill="#7cf7ff" font-family="ui-monospace, monospace" font-size="14">MODE SYNC</text>
+  <rect x="52" y="224" width="212" height="46" rx="8" fill="#061823" stroke="#00e5ff" stroke-opacity=".55"/>
+  <rect x="52" y="292" width="212" height="46" rx="8" fill="#1b1505" stroke="#ffd166" stroke-opacity=".55"/>
+  <text x="356" y="184" fill="#ff8bd7" font-family="ui-monospace, monospace" font-size="14">POINT TABLE</text>
+  <g stroke="#00e5ff" stroke-opacity=".22">
+    <path d="M356 226H964M356 284H964M356 342H964M356 400H964M356 458H964M356 516H964M356 574H964M356 632H964"/>
+    <path d="M512 226V690M700 226V690M844 226V690"/>
+  </g>
+  <text x="380" y="262" fill="#d8fbff" font-family="ui-monospace, monospace" font-size="18">RAW</text>
+  <text x="546" y="262" fill="#d8fbff" font-family="ui-monospace, monospace" font-size="18">MEASURED</text>
+  <text x="734" y="262" fill="#d8fbff" font-family="ui-monospace, monospace" font-size="18">DELTA</text>
+</svg>

@@ -51,7 +51,7 @@ test.describe("Manual Soft Reset (HIL)", () => {
     await confirmDialog.getByRole("button", { name: "Soft Reset" }).click();
 
     // Expect a success alert mentioning soft reset was requested.
-    const successAlert = page.locator(".alert-success");
+    const successAlert = page.locator(".ll-alert-success");
     await expect(successAlert).toBeVisible();
     await expect(successAlert).toContainText(/Soft reset requested/i);
   });

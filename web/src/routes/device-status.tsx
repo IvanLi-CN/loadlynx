@@ -192,7 +192,7 @@ export function DeviceStatusRoute() {
 
       return {
         badge: attached ? "ATTACHED" : "DETACHED",
-        badgeClass: attached ? "badge-success" : "badge-ghost",
+        badgeClass: attached ? "ll-badge-success" : "ll-badge-ghost",
         contract,
         fixedText,
         ppsText,
@@ -210,7 +210,7 @@ export function DeviceStatusRoute() {
     ) {
       return {
         badge: "UNSUPPORTED",
-        badgeClass: "badge-warning",
+        badgeClass: "ll-badge-warning",
         contract: "—",
         fixedText: "Fixed: —",
         ppsText: "PPS: —",
@@ -229,7 +229,7 @@ export function DeviceStatusRoute() {
         code === "ANALOG_NOT_READY";
       return {
         badge: isTransient ? "PENDING" : "ERROR",
-        badgeClass: isTransient ? "badge-warning" : "badge-error",
+        badgeClass: isTransient ? "ll-badge-warning" : "ll-badge-error",
         contract: "—",
         fixedText: "Fixed: —",
         ppsText: "PPS: —",
@@ -240,7 +240,7 @@ export function DeviceStatusRoute() {
 
     return {
       badge: "LOADING",
-      badgeClass: "badge-ghost",
+      badgeClass: "ll-badge-ghost",
       contract: "...",
       fixedText: "...",
       ppsText: "...",
@@ -307,7 +307,7 @@ export function DeviceStatusRoute() {
       {topError ? (
         <section
           aria-label="HTTP error"
-          className="alert alert-error shadow-lg rounded-lg"
+          className="ll-alert ll-alert-error shadow-lg rounded-lg"
         >
           <svg
             xmlns="http://www.w3.org/2000/svg"
@@ -341,9 +341,9 @@ export function DeviceStatusRoute() {
 
       <div className="grid gap-6 md:grid-cols-2">
         {/* Card 1: Overview */}
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-6">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+        <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+          <div className="ll-panel-body p-6">
+            <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
               Overview
             </h3>
             <div className="grid grid-cols-2 gap-4 text-sm">
@@ -390,9 +390,9 @@ export function DeviceStatusRoute() {
         </div>
 
         {/* Card 2: Temperature & Faults */}
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-6">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+        <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+          <div className="ll-panel-body p-6">
+            <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
               Temperature & Faults
             </h3>
 
@@ -430,7 +430,10 @@ export function DeviceStatusRoute() {
                   {status?.fault_flags_decoded &&
                   status.fault_flags_decoded.length > 0 ? (
                     status.fault_flags_decoded.map((fault) => (
-                      <div key={fault} className="badge badge-error gap-1">
+                      <div
+                        key={fault}
+                        className="ll-badge ll-badge-error gap-1"
+                      >
                         <svg
                           xmlns="http://www.w3.org/2000/svg"
                           fill="none"
@@ -450,7 +453,7 @@ export function DeviceStatusRoute() {
                       </div>
                     ))
                   ) : (
-                    <div className="badge badge-ghost text-base-content/60">
+                    <div className="ll-badge ll-badge-ghost text-base-content/60">
                       No active faults
                     </div>
                   )}
@@ -462,20 +465,20 @@ export function DeviceStatusRoute() {
       </div>
 
       {/* PD summary card with secondary entry */}
-      <div className="card bg-base-100 shadow-sm border border-base-200">
-        <div className="card-body p-6">
+      <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+        <div className="ll-panel-body p-6">
           <div className="flex flex-wrap items-center gap-3">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 h-auto min-h-0">
+            <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 h-auto min-h-0">
               USB‑PD
             </h3>
-            <div className={`badge ${pdSummary.badgeClass}`}>
+            <div className={`ll-badge ${pdSummary.badgeClass}`}>
               {pdSummary.badge}
             </div>
             <div className="ml-auto">
               <Link
                 to="/$deviceId/pd"
                 params={{ deviceId }}
-                className="btn btn-sm btn-outline"
+                className="ll-button ll-button-sm ll-button-outline"
               >
                 Open PD settings
               </Link>
@@ -503,7 +506,7 @@ export function DeviceStatusRoute() {
           </div>
 
           {pdInlineError ? (
-            <div className="mt-4 alert alert-warning shadow-sm text-xs sm:text-sm">
+            <div className="mt-4 ll-alert ll-alert-warning shadow-sm text-xs sm:text-sm">
               <span className="font-bold">PD: {pdInlineError.summary}</span>
             </div>
           ) : null}
@@ -511,17 +514,16 @@ export function DeviceStatusRoute() {
       </div>
 
       {/* Aux Card: Raw JSON */}
-      <div className="collapse collapse-arrow border border-base-200 bg-base-100 rounded-box">
-        <input type="checkbox" />
-        <div className="collapse-title text-sm font-medium text-base-content/70">
+      <details className="ll-disclosure border border-base-200 bg-base-100 rounded-lg">
+        <summary className="ll-disclosure-title text-sm font-medium text-base-content/70">
           Raw Status JSON
-        </div>
-        <div className="collapse-content">
+        </summary>
+        <div className="ll-disclosure-content">
           <pre className="text-xs bg-base-200 p-4 rounded overflow-x-auto">
             {status ? JSON.stringify(status.raw, null, 2) : "No data"}
           </pre>
         </div>
-      </div>
+      </details>
     </PageContainer>
   );
 }

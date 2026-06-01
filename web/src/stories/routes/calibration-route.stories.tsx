@@ -56,7 +56,7 @@ function seedCurrentCh2Draft(deviceId: string, baseUrl: string) {
 
 function findCalModeBadge(canvasElement: HTMLElement): HTMLElement | null {
   return (
-    Array.from(canvasElement.querySelectorAll<HTMLElement>(".badge")).find(
+    Array.from(canvasElement.querySelectorAll<HTMLElement>(".ll-badge")).find(
       (element) => element.textContent?.includes("cal_mode:"),
     ) ?? null
   );
@@ -67,10 +67,10 @@ function findCalibrationStat(
   title: string,
 ): HTMLElement | null {
   const matches = Array.from(
-    canvasElement.querySelectorAll<HTMLElement>(".stat"),
+    canvasElement.querySelectorAll<HTMLElement>(".ll-stat"),
   ).filter(
     (element) =>
-      element.querySelector(".stat-title")?.textContent?.trim() === title,
+      element.querySelector(".ll-stat-title")?.textContent?.trim() === title,
   );
   return matches.at(-1) ?? null;
 }
@@ -115,7 +115,7 @@ export const Default: Story = {
     await userEvent.click(currentCh1Tab);
 
     await canvas.findByText("电流单位");
-    if (!(currentCh1Tab as HTMLElement).classList.contains("tab-active")) {
+    if (!(currentCh1Tab as HTMLElement).classList.contains("ll-tab-active")) {
       throw new Error('Expected "电流通道1" tab to be active after click');
     }
   },
@@ -135,7 +135,7 @@ export const OutputControlApplied: Story = {
       const currentStat = findCalibrationStat(canvasElement, "Active Current");
       const dacStat = findCalibrationStat(canvasElement, "DAC Code");
       if (!modeBadge || !currentStat || !dacStat) {
-        throw new Error("Expected calibration current stats to be rendered");
+        throw new Error("Expected calibration current ll-stats to be rendered");
       }
       if (!(modeBadge.textContent?.includes("current_ch1") ?? false)) {
         throw new Error('Expected "cal_mode: current_ch1" badge on load');
@@ -162,7 +162,7 @@ export const RestoresStoredCurrentTab: Story = {
     await canvas.findByRole("heading", { name: "Calibration" });
 
     const currentCh2Tab = canvas.getByRole("tab", { name: "电流通道2" });
-    if (!(currentCh2Tab as HTMLElement).classList.contains("tab-active")) {
+    if (!(currentCh2Tab as HTMLElement).classList.contains("ll-tab-active")) {
       throw new Error('Expected stored "电流通道2" tab to be active on load');
     }
 

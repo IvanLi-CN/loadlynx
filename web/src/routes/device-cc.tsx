@@ -1727,7 +1727,7 @@ export function MainDisplayCanvas({
   ]);
 
   return (
-    <div className="card w-full max-w-[640px] aspect-[4/3] rounded-2xl bg-[#05070D] shadow-2xl overflow-hidden border border-[#1f2937]">
+    <div className="ll-panel w-full max-w-[640px] aspect-[4/3] rounded-2xl bg-[#05070D] shadow-2xl overflow-hidden border border-[#1f2937]">
       <canvas
         ref={canvasRef}
         width={320}

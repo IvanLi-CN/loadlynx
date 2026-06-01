@@ -3,6 +3,7 @@ import type { Preview } from "@storybook/react-vite";
 import { INITIAL_VIEWPORTS } from "storybook/viewport";
 
 import "../src/index.css";
+import { i18next } from "../src/i18n/index.ts";
 import { BreakpointRulerOverlay } from "../src/stories/devtools/BreakpointRulerOverlay";
 
 globalThis.__LOADLYNX_STORYBOOK__ = true;
@@ -24,9 +25,14 @@ const LOADLYNX_VIEWPORTS = {
     type: "desktop",
   },
   loadlynxBp768: {
-    name: "LoadLynx / Breakpoint (768)",
-    styles: { width: "768px", height: "800px" },
+    name: "LoadLynx / Tablet (768x1024)",
+    styles: { width: "768px", height: "1024px" },
     type: "tablet",
+  },
+  loadlynxDesktopWide: {
+    name: "LoadLynx / Desktop (1440x900)",
+    styles: { width: "1440px", height: "900px" },
+    type: "desktop",
   },
   loadlynxBp1024: {
     name: "LoadLynx / Breakpoint (1024)",
@@ -37,6 +43,13 @@ const LOADLYNX_VIEWPORTS = {
 
 const withDarkTheme: Decorator = (Story, context) => {
   document.documentElement.setAttribute("data-theme", "dark");
+  const locale =
+    typeof context.globals.loadlynxLocale === "string"
+      ? context.globals.loadlynxLocale
+      : "zh-CN";
+  if (i18next.language !== locale) {
+    void i18next.changeLanguage(locale);
+  }
   document.body.classList.add(
     "bg-base-100",
     "text-base-content",
@@ -66,9 +79,21 @@ const preview: Preview = {
         ],
       },
     },
+    loadlynxLocale: {
+      description: "LoadLynx UI locale",
+      defaultValue: "zh-CN",
+      toolbar: {
+        title: "Locale",
+        items: [
+          { value: "zh-CN", title: "中文" },
+          { value: "en", title: "English" },
+        ],
+      },
+    },
   },
   initialGlobals: {
     loadlynxShowBreakpointCard: false,
+    loadlynxLocale: "zh-CN",
   },
   decorators: [withDarkTheme],
   parameters: {

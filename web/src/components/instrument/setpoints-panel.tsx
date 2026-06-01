@@ -11,7 +11,7 @@ export function SetpointsPanel({ setpoints }: SetpointsPanelProps) {
   return (
     <section aria-label="Setpoints" className="instrument-card p-5">
       <div className="instrument-label">Setpoints</div>
-      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
+      <div className="mt-4 grid grid-cols-1 gap-x-6 gap-y-0 sm:grid-cols-2">
         {setpoints.map((row) => {
           const rawReadback = row.readback ?? "Read: —";
           const readbackValue = rawReadback.startsWith("Read:")
@@ -19,17 +19,16 @@ export function SetpointsPanel({ setpoints }: SetpointsPanelProps) {
             : rawReadback;
 
           return (
-            <div
-              key={row.label}
-              className={[
-                "rounded-xl border px-4 py-3",
-                row.active
-                  ? "border-[rgba(111,234,249,0.22)] bg-[rgba(111,234,249,0.08)]"
-                  : "border-slate-400/10 bg-black/20",
-              ].join(" ")}
-            >
-              <div className="text-[10px] tracking-[0.14em] uppercase text-slate-200/50">
-                {row.label}
+            <div key={row.label} className="border-t border-slate-400/10 py-3">
+              <div className="flex items-center justify-between gap-3">
+                <div className="text-[10px] tracking-[0.14em] uppercase text-slate-200/50">
+                  {row.label}
+                </div>
+                {row.active ? (
+                  <span className="text-[10px] font-semibold tracking-[0.14em] text-cyan-200 uppercase">
+                    Active
+                  </span>
+                ) : null}
               </div>
               <div className="mt-2 text-sm font-semibold text-slate-100">
                 {row.value}

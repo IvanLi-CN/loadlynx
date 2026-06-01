@@ -1,8 +1,7 @@
-import { Icon, type IconProps } from "@iconify/react";
-import type { IconifyIcon } from "@iconify/types";
+import type { LucideIcon, LucideProps } from "lucide-react";
 
-export type AppIconProps = Omit<IconProps, "icon" | "width" | "height"> & {
-  icon: IconifyIcon;
+export type AppIconProps = Omit<LucideProps, "ref"> & {
+  icon: LucideIcon;
   size?: number | string;
 };
 
@@ -12,19 +11,8 @@ export function AppIcon({
   className,
   ...props
 }: AppIconProps) {
-  if (typeof icon === "string") {
-    throw new Error("AppIcon requires a local Iconify icon data object.");
-  }
-
+  const Icon = icon;
   const mergedClassName = ["inline-block", className].filter(Boolean).join(" ");
 
-  return (
-    <Icon
-      icon={icon}
-      width={size}
-      height={size}
-      className={mergedClassName}
-      {...props}
-    />
-  );
+  return <Icon size={size} className={mergedClassName} {...props} />;
 }

@@ -17,12 +17,9 @@ export function LimitsPanel({ limits }: LimitsPanelProps) {
   return (
     <section aria-label="Limits" className="instrument-card p-5">
       <div className="instrument-label">Limits</div>
-      <div className="mt-4 grid grid-cols-2 gap-3">
+      <div className="mt-4 grid grid-cols-2 gap-x-6 gap-y-0">
         {limits.map((row) => (
-          <div
-            key={row.label}
-            className="rounded-xl border border-slate-400/10 bg-black/20 px-4 py-3"
-          >
+          <div key={row.label} className="border-t border-slate-400/10 py-3">
             <div className="text-[10px] tracking-[0.14em] uppercase text-slate-200/50">
               {row.label}
             </div>

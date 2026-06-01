@@ -6,14 +6,28 @@ import {
   isMockBaseUrl,
 } from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
+import { resolveDemoMode } from "../lib/demo-mode.ts";
 import type { StoredDevice } from "./device-store.ts";
 import { useDeviceStore } from "./store-context.tsx";
 
+function getActiveDemoMode(): boolean {
+  return typeof window !== "undefined"
+    ? resolveDemoMode(window.location, window.localStorage)
+    : false;
+}
+
+function getDevicesQueryKey(isDemoMode: boolean) {
+  return ["devices", isDemoMode ? "demo" : "real"] as const;
+}
+
 export function useDevicesQuery() {
   const store = useDeviceStore();
+  const isDemoMode = getActiveDemoMode();
   return useQuery({
-    queryKey: ["devices"],
-    queryFn: async () => store.getDevices(),
+    queryKey: getDevicesQueryKey(isDemoMode),
+    queryFn: async () => {
+      return store.getDevices();
+    },
   });
 }
 
@@ -53,6 +67,8 @@ export function useAddDeviceMutation() {
   // available when ENABLE_MOCK is true.
   const store = useDeviceStore();
   const queryClient = useQueryClient();
+  const isDemoMode = getActiveDemoMode();
+  const queryKey = getDevicesQueryKey(isDemoMode);
 
   return useMutation({
     mutationFn: async () => {
@@ -74,7 +90,7 @@ export function useAddDeviceMutation() {
       return next;
     },
     onSuccess: (next) => {
-      queryClient.setQueryData<StoredDevice[]>(["devices"], next);
+      queryClient.setQueryData<StoredDevice[]>(queryKey, next);
     },
   });
 }
@@ -89,6 +105,8 @@ export interface AddRealDeviceInput {
 export function useAddRealDeviceMutation() {
   const store = useDeviceStore();
   const queryClient = useQueryClient();
+  const isDemoMode = getActiveDemoMode();
+  const queryKey = getDevicesQueryKey(isDemoMode);
 
   return useMutation({
     mutationFn: async (input: AddRealDeviceInput) => {
@@ -106,7 +124,7 @@ export function useAddRealDeviceMutation() {
       return next;
     },
     onSuccess: (next) => {
-      queryClient.setQueryData<StoredDevice[]>(["devices"], next);
+      queryClient.setQueryData<StoredDevice[]>(queryKey, next);
     },
   });
 }

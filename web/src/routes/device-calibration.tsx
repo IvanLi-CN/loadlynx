@@ -1644,13 +1644,13 @@ function DeviceCalibrationPage({
     <PageContainer variant="full" className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
         <h2 className="text-2xl font-bold">Calibration</h2>
-        <div className="badge badge-neutral gap-2">
+        <div className="ll-badge ll-badge-neutral gap-2">
           {isOffline ? "OFFLINE / FAULT" : "ONLINE"}
         </div>
       </div>
 
-      <div className="card bg-base-100 shadow-xl border border-base-200">
-        <div className="card-body gap-3">
+      <div className="ll-panel bg-base-100 shadow-xl border border-base-200">
+        <div className="ll-panel-body gap-3">
           <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
             <div className="text-sm space-y-1">
               <div>
@@ -1702,7 +1702,7 @@ function DeviceCalibrationPage({
 
             <div className="flex flex-wrap items-center gap-2">
               <div
-                className={`badge ${statusMatchesActiveTab ? "badge-success" : "badge-warning"}`}
+                className={`ll-badge ${statusMatchesActiveTab ? "ll-badge-success" : "ll-badge-warning"}`}
                 title={`device=${formatDeviceCalKind(deviceCalKind)} expected=${formatDeviceCalKind(expectedCalKind)}`}
               >
                 cal_mode: {formatDeviceCalKind(deviceCalKind)}
@@ -1710,7 +1710,7 @@ function DeviceCalibrationPage({
               {deviceCalKind !== expectedCalKind && !isOffline ? (
                 <button
                   type="button"
-                  className="btn btn-xs btn-ghost"
+                  className="ll-button ll-button-xs ll-button-ghost"
                   onClick={() => {
                     void ensureActiveTabCalMode("Sync");
                   }}
@@ -1720,41 +1720,49 @@ function DeviceCalibrationPage({
               ) : null}
 
               {draftEmpty ? (
-                <div className="badge badge-neutral">Draft: none</div>
+                <div className="ll-badge ll-badge-neutral">Draft: none</div>
               ) : (
-                <div className="badge badge-warning">Draft: needs sync</div>
+                <div className="ll-badge ll-badge-warning">
+                  Draft: needs sync
+                </div>
               )}
 
               {profileQuery.data ? (
                 deviceUsingDefaults ? (
-                  <div className="badge badge-success">Device: defaults</div>
+                  <div className="ll-badge ll-badge-success">
+                    Device: defaults
+                  </div>
                 ) : (
-                  <div className="badge badge-info">
+                  <div className="ll-badge ll-badge-info">
                     Device: user-calibrated
                   </div>
                 )
               ) : (
-                <div className="badge badge-neutral">Device: --</div>
+                <div className="ll-badge ll-badge-neutral">Device: --</div>
               )}
 
               {draftIssues.length > 0 ? (
-                <div className="badge badge-error">
+                <div className="ll-badge ll-badge-error">
                   Draft issues ({draftIssues.length})
                 </div>
               ) : !draftEmpty ? (
-                <div className="badge badge-success">Draft OK</div>
+                <div className="ll-badge ll-badge-success">Draft OK</div>
               ) : null}
 
               {!previewProfile ? (
-                <div className="badge badge-neutral">Preview: device</div>
+                <div className="ll-badge ll-badge-neutral">Preview: device</div>
               ) : previewMatchesDraft ? (
-                <div className="badge badge-neutral">Preview up to date</div>
+                <div className="ll-badge ll-badge-neutral">
+                  Preview up to date
+                </div>
               ) : (
-                <div className="badge badge-warning">Preview out of date</div>
+                <div className="ll-badge ll-badge-warning">
+                  Preview out of date
+                </div>
               )}
 
               {previewAppliedAt ? (
-                <div className="badge badge-ghost">
+                <div className="ll-badge ll-badge-ghost">
                   Preview applied {formatLocalTimestamp(previewAppliedAt)}
                 </div>
               ) : null}
@@ -1762,7 +1770,7 @@ function DeviceCalibrationPage({
           </div>
 
           {importError && (
-            <div role="alert" className="alert alert-error text-sm py-2">
+            <div role="alert" className="ll-alert ll-alert-error text-sm py-2">
               <div className="flex flex-col gap-2">
                 <div className="font-bold">{importError}</div>
                 {importIssues && importIssues.length > 0 && (
@@ -1780,7 +1788,7 @@ function DeviceCalibrationPage({
           )}
 
           {!isOffline && !statusMatchesActiveTab ? (
-            <output className="alert alert-info text-sm py-2">
+            <output className="ll-alert ll-alert-info text-sm py-2">
               <span>
                 正在同步校准模式：等待设备切换到{" "}
                 <span className="font-mono">
@@ -1794,11 +1802,11 @@ function DeviceCalibrationPage({
         </div>
       </div>
 
-      <div role="tablist" className="tabs tabs-boxed mt-4">
+      <div role="tablist" className="ll-tabs mt-4">
         <button
           type="button"
           role="tab"
-          className={`tab ${activeTab === "voltage" ? "tab-active" : ""}`}
+          className={`ll-tab ${activeTab === "voltage" ? "ll-tab-active" : ""}`}
           onClick={() => setActiveTab("voltage")}
         >
           电压
@@ -1806,7 +1814,7 @@ function DeviceCalibrationPage({
         <button
           type="button"
           role="tab"
-          className={`tab ${activeTab === "current_ch1" ? "tab-active" : ""}`}
+          className={`ll-tab ${activeTab === "current_ch1" ? "ll-tab-active" : ""}`}
           onClick={() => setActiveTab("current_ch1")}
         >
           电流通道1
@@ -1814,7 +1822,7 @@ function DeviceCalibrationPage({
         <button
           type="button"
           role="tab"
-          className={`tab ${activeTab === "current_ch2" ? "tab-active" : ""}`}
+          className={`ll-tab ${activeTab === "current_ch2" ? "ll-tab-active" : ""}`}
           onClick={() => setActiveTab("current_ch2")}
         >
           电流通道2
@@ -1905,7 +1913,7 @@ function DeviceCalibrationPage({
       {(infoToasts.length > 0 || undoToasts.length > 0) && (
         <div className="toast toast-end toast-bottom z-50">
           {infoToasts.map((toast) => (
-            <div key={toast.id} className="alert alert-success text-sm">
+            <div key={toast.id} className="ll-alert ll-alert-success text-sm">
               <div className="flex items-center justify-between gap-3 w-full">
                 <div className="flex-1">{toast.message}</div>
               </div>
@@ -1917,13 +1925,13 @@ function DeviceCalibrationPage({
               Math.ceil((toast.expiresAt - undoNow) / 1000),
             );
             return (
-              <div key={toast.id} className="alert alert-info text-sm">
+              <div key={toast.id} className="ll-alert ll-alert-info text-sm">
                 <div className="flex items-center justify-between gap-3 w-full">
                   <div className="flex-1">{toast.message}</div>
                   <div className="flex items-center gap-2">
                     <button
                       type="button"
-                      className="btn btn-xs btn-outline"
+                      className="ll-button ll-button-xs ll-button-outline"
                       onClick={() => undoToast(toast)}
                     >
                       Undo
@@ -2289,11 +2297,11 @@ function VoltageCalibration({
 
   return (
     <>
-      <div role="tablist" className="tabs tabs-boxed">
+      <div role="tablist" className="ll-tabs">
         <button
           type="button"
           role="tab"
-          className={`tab ${viewTab === "draft" ? "tab-active" : ""}`}
+          className={`ll-tab ${viewTab === "draft" ? "ll-tab-active" : ""}`}
           onClick={() => setViewTab("draft")}
         >
           本地草稿
@@ -2301,7 +2309,7 @@ function VoltageCalibration({
         <button
           type="button"
           role="tab"
-          className={`tab ${viewTab === "device" ? "tab-active" : ""}`}
+          className={`ll-tab ${viewTab === "device" ? "ll-tab-active" : ""}`}
           onClick={() => setViewTab("device")}
         >
           设备数据
@@ -2309,10 +2317,10 @@ function VoltageCalibration({
       </div>
 
       {viewTab === "draft" ? (
-        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
-          <div className="card-body gap-4">
+        <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
+          <div className="ll-panel-body gap-4">
             <div className="flex items-start justify-between gap-3">
-              <h3 className="card-title flex flex-col items-start leading-tight">
+              <h3 className="ll-panel-title flex flex-col items-start leading-tight">
                 <span>本地草稿</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Web
@@ -2320,18 +2328,18 @@ function VoltageCalibration({
               </h3>
             </div>
 
-            <div className="card bg-base-200/40 border border-base-200">
-              <div className="card-body py-4 gap-3">
+            <div className="ll-panel bg-base-200/40 border border-base-200">
+              <div className="ll-panel-body py-4 gap-3">
                 <div className="flex items-start justify-between gap-3">
                   <h4 className="font-bold text-sm">仅本地（不读写设备）</h4>
-                  <div className="badge badge-neutral whitespace-nowrap shrink-0">
+                  <div className="ll-badge ll-badge-neutral whitespace-nowrap shrink-0">
                     不读写设备
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={() => {
                       const vLocal = validateAndNormalizeVoltagePoints(
                         "v_local",
@@ -2377,7 +2385,7 @@ function VoltageCalibration({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={() => setConfirmKind("reset_draft")}
                     disabled={isDraftEmpty(draftProfile)}
                   >
@@ -2385,7 +2393,7 @@ function VoltageCalibration({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={onExportDraft}
                     disabled={isDraftEmpty(draftProfile)}
                     title={
@@ -2398,7 +2406,7 @@ function VoltageCalibration({
                   </button>
                   <label
                     htmlFor={`calibration-import-${deviceId}-voltage`}
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                   >
                     Import
                   </label>
@@ -2417,15 +2425,15 @@ function VoltageCalibration({
               </div>
             </div>
 
-            <div className="card bg-base-200/40 border border-base-200">
-              <div className="card-body py-4 gap-3">
+            <div className="ll-panel bg-base-200/40 border border-base-200">
+              <div className="ll-panel-body py-4 gap-3">
                 <div className="flex items-start justify-between gap-3">
                   <h4 className="font-bold text-sm">硬件 I/O</h4>
                   <div className="flex items-center gap-2">
-                    <div className="badge badge-info whitespace-nowrap">
+                    <div className="ll-badge ll-badge-info whitespace-nowrap">
                       读设备
                     </div>
-                    <div className="badge badge-warning whitespace-nowrap">
+                    <div className="ll-badge ll-badge-warning whitespace-nowrap">
                       写设备
                     </div>
                   </div>
@@ -2434,7 +2442,7 @@ function VoltageCalibration({
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={onReadDeviceToDraft}
                     disabled={isOffline || readDeviceToDraftPending}
                     title={
@@ -2449,7 +2457,7 @@ function VoltageCalibration({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={() => applyToDeviceMutation.mutate()}
                     disabled={
                       !canWriteToDevice || applyToDeviceMutation.isPending
@@ -2459,7 +2467,7 @@ function VoltageCalibration({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm btn-secondary"
+                    className="ll-button ll-button-sm ll-button-secondary"
                     onClick={() => commitToDeviceMutation.mutate()}
                     disabled={
                       !canWriteToDevice || commitToDeviceMutation.isPending
@@ -2474,14 +2482,14 @@ function VoltageCalibration({
             <div className="divider my-0"></div>
 
             <div className="flex items-end gap-4">
-              <label className="form-control w-full max-w-xs">
-                <div className="label">
-                  <span className="label-text">Measured Voltage (V)</span>
+              <label className="ll-form-control w-full max-w-xs">
+                <div className="ll-label-row">
+                  <span className="ll-label-text">Measured Voltage (V)</span>
                 </div>
                 <input
                   type="number"
                   step="0.000001"
-                  className="input input-bordered"
+                  className="ll-input"
                   value={inputV}
                   onChange={(event) => setInputV(event.target.value)}
                   disabled={isOffline}
@@ -2489,7 +2497,7 @@ function VoltageCalibration({
               </label>
               <button
                 type="button"
-                className="btn btn-primary"
+                className="ll-button ll-button-primary"
                 onClick={handleCapture}
                 disabled={isOffline}
               >
@@ -2499,7 +2507,10 @@ function VoltageCalibration({
 
             {draftVoltageIssues.length > 0 &&
               (draftLocalPoints.length > 0 || draftRemotePoints.length > 0) && (
-                <div role="alert" className="alert alert-warning text-sm py-2">
+                <div
+                  role="alert"
+                  className="ll-alert ll-alert-warning text-sm py-2"
+                >
                   <span>
                     Draft validation:{" "}
                     <span className="font-bold">
@@ -2512,50 +2523,50 @@ function VoltageCalibration({
                 </div>
               )}
 
-            <div className="stats shadow">
-              <div className="stat">
-                <div className="stat-title">Local Voltage (Active)</div>
-                <div className="stat-value text-lg">
+            <div className="ll-stats shadow">
+              <div className="ll-stat">
+                <div className="ll-stat-title">Local Voltage (Active)</div>
+                <div className="ll-stat-value text-lg">
                   {formatMvAsV(status?.raw.v_local_mv ?? 0)} V
                 </div>
-                <div className="stat-desc">
+                <div className="ll-stat-desc">
                   Raw: {status?.raw.raw_v_nr_100uv ?? "--"}
                 </div>
               </div>
-              <div className="stat">
-                <div className="stat-title">Local Preview</div>
-                <div className="stat-value text-lg text-primary">
+              <div className="ll-stat">
+                <div className="ll-stat-title">Local Preview</div>
+                <div className="ll-stat-value text-lg text-primary">
                   {previewLocalMv == null
                     ? "--"
                     : `${previewLocalMv.div(1000).toFixed(3)} V`}
                 </div>
-                <div className="stat-desc">Uses applied preview</div>
+                <div className="ll-stat-desc">Uses applied preview</div>
               </div>
             </div>
 
-            <div className="stats shadow">
-              <div className="stat">
-                <div className="stat-title">Remote Voltage (Active)</div>
-                <div className="stat-value text-lg">
+            <div className="ll-stats shadow">
+              <div className="ll-stat">
+                <div className="ll-stat-title">Remote Voltage (Active)</div>
+                <div className="ll-stat-value text-lg">
                   {formatMvAsV(status?.raw.v_remote_mv ?? 0)} V
                 </div>
-                <div className="stat-desc">
+                <div className="ll-stat-desc">
                   Raw: {status?.raw.raw_v_rmt_100uv ?? "--"}
                 </div>
               </div>
-              <div className="stat">
-                <div className="stat-title">Remote Preview</div>
-                <div className="stat-value text-lg text-primary">
+              <div className="ll-stat">
+                <div className="ll-stat-title">Remote Preview</div>
+                <div className="ll-stat-value text-lg text-primary">
                   {previewRemoteMv == null
                     ? "--"
                     : `${previewRemoteMv.div(1000).toFixed(3)} V`}
                 </div>
-                <div className="stat-desc">Uses applied preview</div>
+                <div className="ll-stat-desc">Uses applied preview</div>
               </div>
             </div>
 
             <div className="overflow-x-auto max-h-64">
-              <table className="table table-xs table-pin-rows">
+              <table className="ll-table ll-table-xs">
                 <thead>
                   <tr>
                     <th>Value (mV)</th>
@@ -2582,7 +2593,7 @@ function VoltageCalibration({
                       <td className="text-right">
                         <button
                           type="button"
-                          className="btn btn-ghost btn-xs text-error"
+                          className="ll-button ll-button-ghost ll-button-xs text-error"
                           onClick={() => handleDeleteDraftRow(row.index)}
                           disabled={isOffline}
                         >
@@ -2607,18 +2618,20 @@ function VoltageCalibration({
           </div>
         </div>
       ) : (
-        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
-          <div className="card-body gap-4">
+        <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
+          <div className="ll-panel-body gap-4">
             <div className="flex items-start justify-between gap-3">
-              <h3 className="card-title flex flex-col items-start leading-tight">
+              <h3 className="ll-panel-title flex flex-col items-start leading-tight">
                 <span>设备数据</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Hardware
                 </span>
               </h3>
               <div className="flex items-center gap-2">
-                <div className="badge badge-info whitespace-nowrap">读设备</div>
-                <div className="badge badge-warning whitespace-nowrap">
+                <div className="ll-badge ll-badge-info whitespace-nowrap">
+                  读设备
+                </div>
+                <div className="ll-badge ll-badge-warning whitespace-nowrap">
                   写设备
                 </div>
               </div>
@@ -2627,7 +2640,7 @@ function VoltageCalibration({
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                className="btn btn-sm btn-outline"
+                className="ll-button ll-button-sm ll-button-outline"
                 onClick={() => readMutation.mutate()}
                 disabled={readMutation.isPending}
               >
@@ -2635,7 +2648,7 @@ function VoltageCalibration({
               </button>
               <button
                 type="button"
-                className="btn btn-sm btn-error"
+                className="ll-button ll-button-sm ll-button-danger"
                 onClick={() => setConfirmKind("reset_device_voltage")}
                 disabled={isOffline || resetDeviceVoltageMutation.isPending}
               >
@@ -2651,7 +2664,7 @@ function VoltageCalibration({
                 : "Device profile (read-only)"}
             </h4>
             <div className="overflow-x-auto max-h-64">
-              <table className="table table-xs table-pin-rows">
+              <table className="ll-table ll-table-xs">
                 <thead>
                   <tr>
                     <th>Value (mV)</th>
@@ -3228,11 +3241,11 @@ function CurrentCalibration({
 
   return (
     <>
-      <div role="tablist" className="tabs tabs-boxed mt-4">
+      <div role="tablist" className="ll-tabs mt-4">
         <button
           type="button"
           role="tab"
-          className={`tab ${viewTab === "draft" ? "tab-active" : ""}`}
+          className={`ll-tab ${viewTab === "draft" ? "ll-tab-active" : ""}`}
           onClick={() => setViewTab("draft")}
         >
           本地草稿
@@ -3240,7 +3253,7 @@ function CurrentCalibration({
         <button
           type="button"
           role="tab"
-          className={`tab ${viewTab === "device" ? "tab-active" : ""}`}
+          className={`ll-tab ${viewTab === "device" ? "ll-tab-active" : ""}`}
           onClick={() => setViewTab("device")}
         >
           设备数据
@@ -3248,10 +3261,10 @@ function CurrentCalibration({
       </div>
 
       {viewTab === "draft" ? (
-        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
-          <div className="card-body gap-4">
+        <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
+          <div className="ll-panel-body gap-4">
             <div className="flex items-start justify-between gap-3">
-              <h3 className="card-title flex flex-col items-start leading-tight">
+              <h3 className="ll-panel-title flex flex-col items-start leading-tight">
                 <span>本地草稿</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Web
@@ -3259,18 +3272,18 @@ function CurrentCalibration({
               </h3>
             </div>
 
-            <div className="card bg-base-200/40 border border-base-200">
-              <div className="card-body py-4 gap-3">
+            <div className="ll-panel bg-base-200/40 border border-base-200">
+              <div className="ll-panel-body py-4 gap-3">
                 <div className="flex items-start justify-between gap-3">
                   <h4 className="font-bold text-sm">仅本地（不读写设备）</h4>
-                  <div className="badge badge-neutral whitespace-nowrap shrink-0">
+                  <div className="ll-badge ll-badge-neutral whitespace-nowrap shrink-0">
                     不读写设备
                   </div>
                 </div>
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={() => {
                       const vLocal = validateAndNormalizeVoltagePoints(
                         "v_local",
@@ -3316,7 +3329,7 @@ function CurrentCalibration({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={() => setConfirmKind("reset_draft")}
                     disabled={isDraftEmpty(draftProfile)}
                   >
@@ -3325,7 +3338,7 @@ function CurrentCalibration({
                   {curve === "current_ch2" && (
                     <button
                       type="button"
-                      className="btn btn-sm btn-outline"
+                      className="ll-button ll-button-sm ll-button-outline"
                       onClick={handleCopyCh1ToCh2}
                       disabled={copyCh1SourcePoints.length === 0}
                       title={
@@ -3341,7 +3354,7 @@ function CurrentCalibration({
                   )}
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={onExportDraft}
                     disabled={isDraftEmpty(draftProfile)}
                     title={
@@ -3354,7 +3367,7 @@ function CurrentCalibration({
                   </button>
                   <label
                     htmlFor={`calibration-import-${deviceId}-current`}
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                   >
                     Import
                   </label>
@@ -3373,15 +3386,15 @@ function CurrentCalibration({
               </div>
             </div>
 
-            <div className="card bg-base-200/40 border border-base-200">
-              <div className="card-body py-4 gap-3">
+            <div className="ll-panel bg-base-200/40 border border-base-200">
+              <div className="ll-panel-body py-4 gap-3">
                 <div className="flex items-start justify-between gap-3">
                   <h4 className="font-bold text-sm">硬件 I/O</h4>
                   <div className="flex items-center gap-2">
-                    <div className="badge badge-info whitespace-nowrap">
+                    <div className="ll-badge ll-badge-info whitespace-nowrap">
                       读设备
                     </div>
-                    <div className="badge badge-warning whitespace-nowrap">
+                    <div className="ll-badge ll-badge-warning whitespace-nowrap">
                       写设备
                     </div>
                   </div>
@@ -3390,7 +3403,7 @@ function CurrentCalibration({
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={onReadDeviceToDraft}
                     disabled={isOffline || readDeviceToDraftPending}
                     title={
@@ -3405,7 +3418,7 @@ function CurrentCalibration({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm btn-outline"
+                    className="ll-button ll-button-sm ll-button-outline"
                     onClick={() => applyToDeviceMutation.mutate()}
                     disabled={
                       !canWriteToDevice || applyToDeviceMutation.isPending
@@ -3415,7 +3428,7 @@ function CurrentCalibration({
                   </button>
                   <button
                     type="button"
-                    className="btn btn-sm btn-secondary"
+                    className="ll-button ll-button-sm ll-button-secondary"
                     onClick={() => commitToDeviceMutation.mutate()}
                     disabled={
                       !canWriteToDevice || commitToDeviceMutation.isPending
@@ -3425,62 +3438,62 @@ function CurrentCalibration({
                   </button>
                 </div>
 
-                <div className="card bg-base-200/40 border border-base-200">
-                  <div className="card-body py-4 gap-3">
+                <div className="ll-panel bg-base-200/40 border border-base-200">
+                  <div className="ll-panel-body py-4 gap-3">
                     <h4 className="font-bold text-sm">Output control (CC)</h4>
                     <div className="flex gap-2 flex-wrap">
                       <button
                         type="button"
-                        className="btn btn-xs"
+                        className="ll-button ll-button-xs"
                         onClick={() => setTargetIMa("500")}
                       >
                         0.5A
                       </button>
                       <button
                         type="button"
-                        className="btn btn-xs"
+                        className="ll-button ll-button-xs"
                         onClick={() => setTargetIMa("1000")}
                       >
                         1A
                       </button>
                       <button
                         type="button"
-                        className="btn btn-xs"
+                        className="ll-button ll-button-xs"
                         onClick={() => setTargetIMa("2000")}
                       >
                         2A
                       </button>
                       <button
                         type="button"
-                        className="btn btn-xs"
+                        className="ll-button ll-button-xs"
                         onClick={() => setTargetIMa("3000")}
                       >
                         3A
                       </button>
                       <button
                         type="button"
-                        className="btn btn-xs"
+                        className="ll-button ll-button-xs"
                         onClick={() => setTargetIMa("4000")}
                       >
                         4A
                       </button>
                       <button
                         type="button"
-                        className="btn btn-xs"
+                        className="ll-button ll-button-xs"
                         onClick={() => setTargetIMa("5000")}
                       >
                         5A
                       </button>
                       <input
                         type="number"
-                        className="input input-sm input-bordered w-28"
+                        className="ll-input ll-input-sm w-28"
                         value={targetIMa}
                         onChange={(event) => setTargetIMa(event.target.value)}
                         disabled={isOffline}
                       />
                       <button
                         type="button"
-                        className="btn btn-sm btn-primary"
+                        className="ll-button ll-button-sm ll-button-primary"
                         disabled={isOffline}
                         onClick={handleSetOutput}
                       >
@@ -3496,10 +3509,10 @@ function CurrentCalibration({
 
             <div className="flex items-center justify-between gap-3">
               <div className="text-sm font-bold">电流单位</div>
-              <div className="join">
+              <div className="ll-join">
                 <button
                   type="button"
-                  className={`btn btn-sm join-item ${inputUnit === "A" ? "btn-active" : ""}`}
+                  className={`ll-button ll-button-sm ll-join-item ${inputUnit === "A" ? "ll-button-active" : ""}`}
                   onClick={() => handleUnitChange("A")}
                   disabled={isOffline}
                 >
@@ -3507,7 +3520,7 @@ function CurrentCalibration({
                 </button>
                 <button
                   type="button"
-                  className={`btn btn-sm join-item ${inputUnit === "mA" ? "btn-active" : ""}`}
+                  className={`ll-button ll-button-sm ll-join-item ${inputUnit === "mA" ? "ll-button-active" : ""}`}
                   onClick={() => handleUnitChange("mA")}
                   disabled={isOffline}
                 >
@@ -3516,23 +3529,23 @@ function CurrentCalibration({
               </div>
             </div>
 
-            <details className="collapse collapse-arrow bg-base-200/40 border border-base-200">
-              <summary className="collapse-title text-sm font-bold">
+            <details className="ll-disclosure bg-base-200/40 border border-base-200">
+              <summary className="ll-disclosure-title text-sm font-bold">
                 高级选项
               </summary>
-              <div className="collapse-content">
-                <label className="form-control w-full max-w-lg">
-                  <div className="label">
-                    <span className="label-text">
+              <div className="ll-disclosure-content">
+                <label className="ll-form-control w-full max-w-lg">
+                  <div className="ll-label-row">
+                    <span className="ll-label-text">
                       基础电流扣除 ({channelDisplay}) ({inputUnit})
                     </span>
                   </div>
-                  <div className="join w-full">
+                  <div className="ll-join w-full">
                     <input
                       type="number"
                       step={inputUnitStep}
                       min="0"
-                      className="input input-sm input-bordered join-item w-full"
+                      className="ll-input ll-input-sm ll-join-item w-full"
                       value={baselineInput}
                       onChange={(event) =>
                         setBaselineInputForCurve(event.target.value)
@@ -3546,7 +3559,7 @@ function CurrentCalibration({
                     />
                     <button
                       type="button"
-                      className="btn btn-sm btn-outline join-item"
+                      className="ll-button ll-button-sm ll-button-outline ll-join-item"
                       onClick={() => {
                         setBaselineUaByCurve((prev) => ({
                           ...prev,
@@ -3560,8 +3573,8 @@ function CurrentCalibration({
                       Clear
                     </button>
                   </div>
-                  <div className="label">
-                    <span className="label-text-alt text-base-content/70">
+                  <div className="ll-label-row">
+                    <span className="ll-label-text-alt text-base-content/70">
                       Capture 会保存：Meter -
                       Baseline（用于扣除转接器/夹具等恒定消耗）。同步到设备时会四舍五入到
                       1mA。
@@ -3571,17 +3584,17 @@ function CurrentCalibration({
               </div>
             </details>
 
-            <label className="form-control w-full">
-              <div className="label">
-                <span className="label-text">
+            <label className="ll-form-control w-full">
+              <div className="ll-label-row">
+                <span className="ll-label-text">
                   Meter Reading ({channelDisplay}) ({inputUnit})
                 </span>
               </div>
-              <div className="join">
+              <div className="ll-join">
                 <input
                   type="number"
                   step={inputUnitStep}
-                  className="input input-bordered join-item w-full"
+                  className="ll-input ll-join-item w-full"
                   value={meterReading}
                   onChange={(event) => setMeterReading(event.target.value)}
                   onBlur={() => {
@@ -3595,7 +3608,7 @@ function CurrentCalibration({
                 />
                 <button
                   type="button"
-                  className="btn btn-secondary join-item"
+                  className="ll-button ll-button-secondary ll-join-item"
                   onClick={handleCapture}
                   disabled={isOffline}
                 >
@@ -3603,8 +3616,8 @@ function CurrentCalibration({
                 </button>
               </div>
               {meterAdjustedUa != null && baselineUa > 0 && (
-                <div className="label">
-                  <span className="label-text-alt text-base-content/70">
+                <div className="ll-label-row">
+                  <span className="ll-label-text-alt text-base-content/70">
                     Adjusted: {formatUaToUnit(meterAdjustedUa, inputUnit)}{" "}
                     {inputUnit}
                   </span>
@@ -3613,7 +3626,10 @@ function CurrentCalibration({
             </label>
 
             {currentDraft.issues.length > 0 && draftPoints.length > 0 && (
-              <div role="alert" className="alert alert-warning text-sm py-2">
+              <div
+                role="alert"
+                className="ll-alert ll-alert-warning text-sm py-2"
+              >
                 <span>
                   Draft validation:{" "}
                   <span className="font-bold">
@@ -3626,33 +3642,33 @@ function CurrentCalibration({
               </div>
             )}
 
-            <div className="stats shadow">
-              <div className="stat">
-                <div className="stat-title">Active Current</div>
-                <div className="stat-value text-lg">
+            <div className="ll-stats shadow">
+              <div className="ll-stat">
+                <div className="ll-stat-title">Active Current</div>
+                <div className="ll-stat-value text-lg">
                   {formatMaAsA(activeMa ?? 0)} A
                 </div>
-                <div className="stat-desc">
+                <div className="ll-stat-desc">
                   Raw: {status?.raw.raw_cur_100uv ?? "--"}
                 </div>
               </div>
-              <div className="stat">
-                <div className="stat-title">DAC Code</div>
-                <div className="stat-value text-lg font-mono">
+              <div className="ll-stat">
+                <div className="ll-stat-title">DAC Code</div>
+                <div className="ll-stat-value text-lg font-mono">
                   {status?.raw.raw_dac_code ?? "--"}
                 </div>
               </div>
-              <div className="stat">
-                <div className="stat-title">Preview Current</div>
-                <div className="stat-value text-lg text-primary">
+              <div className="ll-stat">
+                <div className="ll-stat-title">Preview Current</div>
+                <div className="ll-stat-value text-lg text-primary">
                   {previewUa == null ? "--" : `${formatUaAsA(previewUa)} A`}
                 </div>
-                <div className="stat-desc">Uses applied preview</div>
+                <div className="ll-stat-desc">Uses applied preview</div>
               </div>
             </div>
 
             <div className="overflow-x-auto max-h-64">
-              <table className="table table-xs table-pin-rows">
+              <table className="ll-table ll-table-xs">
                 <thead>
                   <tr>
                     <th>Raw</th>
@@ -3670,7 +3686,7 @@ function CurrentCalibration({
                       <td className="text-right">
                         <button
                           type="button"
-                          className="btn btn-ghost btn-xs text-error"
+                          className="ll-button ll-button-ghost ll-button-xs text-error"
                           onClick={() => handleDeleteSample(idx)}
                           disabled={isOffline}
                         >
@@ -3695,18 +3711,20 @@ function CurrentCalibration({
           </div>
         </div>
       ) : (
-        <div className="card bg-base-100 shadow-xl border border-base-200 mt-4">
-          <div className="card-body gap-4">
+        <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
+          <div className="ll-panel-body gap-4">
             <div className="flex items-start justify-between gap-3">
-              <h3 className="card-title flex flex-col items-start leading-tight">
+              <h3 className="ll-panel-title flex flex-col items-start leading-tight">
                 <span>设备数据</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Hardware
                 </span>
               </h3>
               <div className="flex items-center gap-2">
-                <div className="badge badge-info whitespace-nowrap">读设备</div>
-                <div className="badge badge-warning whitespace-nowrap">
+                <div className="ll-badge ll-badge-info whitespace-nowrap">
+                  读设备
+                </div>
+                <div className="ll-badge ll-badge-warning whitespace-nowrap">
                   写设备
                 </div>
               </div>
@@ -3715,7 +3733,7 @@ function CurrentCalibration({
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                className="btn btn-sm btn-outline"
+                className="ll-button ll-button-sm ll-button-outline"
                 onClick={() => readMutation.mutate()}
                 disabled={readMutation.isPending}
               >
@@ -3723,7 +3741,7 @@ function CurrentCalibration({
               </button>
               <button
                 type="button"
-                className="btn btn-sm btn-error"
+                className="ll-button ll-button-sm ll-button-danger"
                 onClick={() => setConfirmKind("reset_device_current")}
                 disabled={isOffline || resetDeviceCurrentMutation.isPending}
               >
@@ -3739,7 +3757,7 @@ function CurrentCalibration({
                 : "Device profile (read-only)"}
             </h4>
             <div className="overflow-x-auto max-h-64">
-              <table className="table table-xs table-pin-rows">
+              <table className="ll-table ll-table-xs">
                 <thead>
                   <tr>
                     <th>Raw</th>

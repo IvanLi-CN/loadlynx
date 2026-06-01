@@ -19,12 +19,16 @@ import {
   useDevicesQuery,
   useSubnetScanMutation,
 } from "../devices/hooks.ts";
+import { readStoredDemoMode } from "../lib/demo-mode.ts";
 
 export function DevicesRoute() {
   const queryClient = useQueryClient();
   const devicesQuery = useDevicesQuery();
   const addDeviceMutation = useAddDeviceMutation();
   const addRealDeviceMutation = useAddRealDeviceMutation();
+  const isDemoMode =
+    typeof window !== "undefined" &&
+    readStoredDemoMode(window.localStorage) === true;
 
   const [newDeviceName, setNewDeviceName] = useState("");
   const [newDeviceBaseUrl, setNewDeviceBaseUrl] = useState("");
@@ -52,6 +56,8 @@ export function DevicesRoute() {
   const [devdError, setDevdError] = useState<string | null>(null);
 
   const startScan = () => {
+    if (isDemoMode) return;
+
     setScanProgress({ scannedCount: 0, totalCount: 0, foundCount: 0 });
     setScanResults([]);
     setScanError(null);
@@ -85,11 +91,19 @@ export function DevicesRoute() {
         </p>
       </header>
 
-      <div className="card bg-base-100 shadow-sm border border-base-200">
-        <div className="card-body p-4">
+      <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+        <div className="ll-panel-body p-4">
           <form
             onSubmit={(event) => {
               event.preventDefault();
+
+              if (isDemoMode) {
+                setAddDeviceError(
+                  "Demo mode only uses built-in mock:// devices. Switch demo=false to add real devices.",
+                );
+                return;
+              }
+
               const name = newDeviceName.trim();
               const baseUrl = newDeviceBaseUrl.trim();
 
@@ -124,10 +138,16 @@ export function DevicesRoute() {
             }}
             className="flex flex-col gap-4"
           >
+            {isDemoMode ? (
+              <output className="ll-alert ll-alert-info text-sm">
+                Demo mode is mock-only. Real HTTP devices are disabled here, and
+                the device table is limited to mock:// entries.
+              </output>
+            ) : null}
             <div className="flex flex-wrap gap-4 items-end">
-              <label className="form-control flex-1 min-w-[200px]">
-                <div className="label pb-1">
-                  <span className="label-text">Device name</span>
+              <label className="ll-form-control flex-1 min-w-[200px]">
+                <div className="ll-label-row pb-1">
+                  <span className="ll-label-text">Device name</span>
                 </div>
                 <input
                   id="device-name"
@@ -136,12 +156,13 @@ export function DevicesRoute() {
                   value={newDeviceName}
                   onChange={(event) => setNewDeviceName(event.target.value)}
                   placeholder="My LoadLynx"
-                  className="input input-bordered w-full"
+                  disabled={isDemoMode}
+                  className="ll-input w-full"
                 />
               </label>
-              <label className="form-control flex-[2] min-w-[250px]">
-                <div className="label pb-1">
-                  <span className="label-text">Base URL</span>
+              <label className="ll-form-control flex-[2] min-w-[250px]">
+                <div className="ll-label-row pb-1">
+                  <span className="ll-label-text">Base URL</span>
                 </div>
                 <input
                   id="device-base-url"
@@ -150,22 +171,26 @@ export function DevicesRoute() {
                   value={newDeviceBaseUrl}
                   onChange={(event) => setNewDeviceBaseUrl(event.target.value)}
                   placeholder="http://loadlynx-a1b2c3.local"
-                  className="input input-bordered w-full"
+                  disabled={isDemoMode}
+                  className="ll-input w-full"
                 />
               </label>
               <button
                 type="submit"
-                disabled={isAddingReal}
-                className="btn btn-primary"
+                disabled={isAddingReal || isDemoMode}
+                className="ll-button ll-button-primary"
               >
                 {isAddingReal ? (
-                  <span className="loading loading-spinner loading-xs"></span>
+                  <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
                 ) : null}
                 {isAddingReal ? "Adding..." : "Add device"}
               </button>
             </div>
             {addDeviceError ? (
-              <div role="alert" className="alert alert-error text-sm py-2">
+              <div
+                role="alert"
+                className="ll-alert ll-alert-error text-sm py-2"
+              >
                 <svg
                   xmlns="http://www.w3.org/2000/svg"
                   className="stroke-current shrink-0 h-4 w-4"
@@ -198,11 +223,11 @@ export function DevicesRoute() {
         </div>
       </div>
 
-      <div className="card bg-base-100 shadow-sm border border-base-200">
-        <div className="card-body p-4 gap-4">
+      <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+        <div className="ll-panel-body p-4 gap-4">
           <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
             <div>
-              <h3 className="card-title text-base">Local devd bridge</h3>
+              <h3 className="ll-panel-title text-base">Local devd bridge</h3>
               <p className="text-xs text-base-content/60">
                 Discover USB/probe candidates through{" "}
                 <code className="code">{DEFAULT_DEVD_BASE_URL}</code>. A device
@@ -212,9 +237,10 @@ export function DevicesRoute() {
             </div>
             <button
               type="button"
-              className="btn btn-sm btn-outline"
-              disabled={devdScan.isPending}
+              className="ll-button ll-button-sm ll-button-outline"
+              disabled={isDemoMode || devdScan.isPending}
               onClick={() => {
+                if (isDemoMode) return;
                 setDevdError(null);
                 devdScan.mutate(undefined, {
                   onSuccess: (payload) => {
@@ -232,28 +258,28 @@ export function DevicesRoute() {
               }}
             >
               {devdScan.isPending ? (
-                <span className="loading loading-spinner loading-xs"></span>
+                <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
               ) : null}
               Scan devd
             </button>
           </div>
 
           {devdError ? (
-            <div role="alert" className="alert alert-error py-2 text-sm">
+            <div role="alert" className="ll-alert ll-alert-error py-2 text-sm">
               <span>{devdError}</span>
             </div>
           ) : null}
 
           {devdDevices.length > 0 ? (
             <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto] lg:items-end">
-              <label className="form-control">
-                <div className="label pb-1">
-                  <span className="label-text">devd candidate</span>
+              <label className="ll-form-control">
+                <div className="ll-label-row pb-1">
+                  <span className="ll-label-text">devd candidate</span>
                 </div>
                 <select
                   id="devd-candidate"
                   name="devd_candidate"
-                  className="select select-bordered select-sm w-full"
+                  className="ll-select ll-select-sm w-full"
                   value={selectedDevdDeviceId}
                   onChange={(event) =>
                     setSelectedDevdDeviceId(event.target.value)
@@ -268,9 +294,14 @@ export function DevicesRoute() {
               </label>
               <button
                 type="button"
-                className="btn btn-primary btn-sm"
-                disabled={!selectedDevdDeviceId || createDevdLease.isPending}
+                className="ll-button ll-button-primary ll-button-sm"
+                disabled={
+                  isDemoMode ||
+                  !selectedDevdDeviceId ||
+                  createDevdLease.isPending
+                }
                 onClick={() => {
+                  if (isDemoMode) return;
                   const candidate = devdDevices.find(
                     (device) => device.id === selectedDevdDeviceId,
                   );
@@ -316,7 +347,7 @@ export function DevicesRoute() {
                 }}
               >
                 {createDevdLease.isPending ? (
-                  <span className="loading loading-spinner loading-xs"></span>
+                  <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
                 ) : null}
                 Create USB lease
               </button>
@@ -330,7 +361,7 @@ export function DevicesRoute() {
 
           {devdDevices.length > 0 ? (
             <div className="overflow-x-auto">
-              <table className="table table-xs">
+              <table className="ll-table ll-table-xs">
                 <thead>
                   <tr>
                     <th>Candidate</th>
@@ -372,8 +403,12 @@ export function DevicesRoute() {
       <div className="flex justify-end">
         <button
           type="button"
-          onClick={() => setIsScanPanelOpen(!isScanPanelOpen)}
-          className="btn btn-sm btn-ghost"
+          onClick={() => {
+            if (isDemoMode) return;
+            setIsScanPanelOpen(!isScanPanelOpen);
+          }}
+          disabled={isDemoMode}
+          className="ll-button ll-button-sm ll-button-ghost"
         >
           {isScanPanelOpen ? "Hide Network Scanner" : "Scan current network..."}
         </button>
@@ -381,13 +416,13 @@ export function DevicesRoute() {
 
       {/* Scan Panel */}
       {isScanPanelOpen && (
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-4">
-            <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50">
+        <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+          <div className="ll-panel-body p-4">
+            <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50">
               LAN Scanner
             </h3>
 
-            <div className="alert alert-warning text-xs">
+            <div className="ll-alert ll-alert-warning text-xs">
               <svg
                 xmlns="http://www.w3.org/2000/svg"
                 className="stroke-current shrink-0 h-4 w-4"
@@ -412,9 +447,11 @@ export function DevicesRoute() {
             </div>
 
             <div className="flex flex-wrap gap-4 items-end mt-2">
-              <label className="form-control flex-1 min-w-[200px]">
-                <div className="label pb-1">
-                  <span className="label-text">Seed IP (Example Device)</span>
+              <label className="ll-form-control flex-1 min-w-[200px]">
+                <div className="ll-label-row pb-1">
+                  <span className="ll-label-text">
+                    Seed IP (Example Device)
+                  </span>
                 </div>
                 <input
                   id="lan-scan-seed-ip"
@@ -423,25 +460,25 @@ export function DevicesRoute() {
                   value={seedIp}
                   onChange={(e) => setSeedIp(e.target.value)}
                   placeholder="e.g. 192.168.1.100"
-                  disabled={isScanning}
-                  className="input input-bordered w-full input-sm"
+                  disabled={isDemoMode || isScanning}
+                  className="ll-input w-full ll-input-sm"
                 />
               </label>
               <button
                 type="button"
                 onClick={startScan}
-                disabled={isScanning || !seedIp}
-                className="btn btn-primary btn-sm"
+                disabled={isDemoMode || isScanning || !seedIp}
+                className="ll-button ll-button-primary ll-button-sm"
               >
                 {isScanning ? (
-                  <span className="loading loading-spinner loading-xs"></span>
+                  <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
                 ) : null}
                 {isScanning ? "Scanning..." : "Start scan"}
               </button>
               {isScanning && (
                 <button
                   type="button"
-                  className="btn btn-ghost btn-sm"
+                  className="ll-button ll-button-ghost ll-button-sm"
                   onClick={() => scanMutation.reset()}
                 >
                   Cancel
@@ -479,7 +516,7 @@ export function DevicesRoute() {
                   Discovered Devices ({scanResults.length})
                 </h4>
                 <div className="overflow-x-auto">
-                  <table className="table table-xs">
+                  <table className="ll-table ll-table-xs">
                     <thead>
                       <tr>
                         <th>Hostname</th>
@@ -497,7 +534,7 @@ export function DevicesRoute() {
                           <td>
                             <button
                               type="button"
-                              className="btn btn-xs btn-outline btn-primary"
+                              className="ll-button ll-button-xs ll-button-outline ll-button-primary"
                               onClick={() => {
                                 addRealDeviceMutation.mutate({
                                   name:
@@ -541,7 +578,7 @@ export function DevicesRoute() {
               });
             }}
             disabled={isMutating}
-            className="btn btn-secondary btn-sm"
+            className="ll-button ll-button-secondary ll-button-sm"
           >
             {isMutating ? "Adding device..." : "Add demo device"}
           </button>
@@ -552,8 +589,8 @@ export function DevicesRoute() {
         </div>
       ) : null}
 
-      <div className="card bg-base-100 shadow-sm border border-base-200">
-        <div className="card-body p-0 overflow-x-auto">
+      <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+        <div className="ll-panel-body p-0 overflow-x-auto">
           {devicesQuery.isLoading ? (
             <div className="p-8 text-center text-base-content/60">
               Loading devices...
@@ -574,7 +611,7 @@ export function DevicesRoute() {
                 </p>
                 <button
                   type="button"
-                  className="btn btn-secondary btn-sm"
+                  className="ll-button ll-button-secondary ll-button-sm"
                   onClick={() => {
                     addDeviceMutation.mutate(undefined, {
                       onSuccess: () => {
@@ -593,7 +630,7 @@ export function DevicesRoute() {
               </div>
             </div>
           ) : (
-            <table className="table table-zebra table-sm">
+            <table className="ll-table ll-table-sm">
               <thead className="bg-base-200">
                 <tr>
                   <th>Name</th>
@@ -625,15 +662,15 @@ function DeviceRow(props: { device: StoredDevice }) {
   const identity = identityQuery.data;
   const error: unknown = identityQuery.error;
 
-  let statusBadgeClass = "badge badge-ghost";
+  let statusBadgeClass = "ll-badge ll-badge-ghost";
   let statusLabel = "Checking...";
   let statusDetail: string | null = null;
 
   if (identityQuery.isLoading || identityQuery.isFetching) {
-    statusBadgeClass = "badge badge-ghost";
+    statusBadgeClass = "ll-badge ll-badge-ghost";
     statusLabel = "Checking...";
   } else if (identityQuery.isSuccess && identity) {
-    statusBadgeClass = "badge badge-success";
+    statusBadgeClass = "ll-badge ll-badge-success";
     statusLabel = "Online";
 
     const primaryHost = identity.hostname ?? identity.network?.hostname;
@@ -643,7 +680,7 @@ function DeviceRow(props: { device: StoredDevice }) {
       statusDetail = identity.network.ip;
     }
   } else if (identityQuery.isError) {
-    statusBadgeClass = "badge badge-error";
+    statusBadgeClass = "ll-badge ll-badge-error";
     statusLabel = "Offline";
 
     const formatSnippet = (message: string) =>
@@ -654,7 +691,7 @@ function DeviceRow(props: { device: StoredDevice }) {
       if (error.status === 0 && code === "NETWORK_ERROR") {
         statusDetail = "网络异常，已自动重试；如仍失败请检查设备 IP 或网络";
       } else if (error.status === 404 && code === "UNSUPPORTED_OPERATION") {
-        statusBadgeClass = "badge badge-warning";
+        statusBadgeClass = "ll-badge ll-badge-warning";
         statusLabel = "Online (HTTP)";
         statusDetail = "Unsupported API on current firmware";
       } else {
@@ -676,7 +713,10 @@ function DeviceRow(props: { device: StoredDevice }) {
         {device.connectionMarks?.length ? (
           <div className="mt-1 flex flex-wrap gap-1">
             {device.connectionMarks.map((mark) => (
-              <span key={mark} className="badge badge-xs badge-outline">
+              <span
+                key={mark}
+                className="ll-badge ll-badge-xs ll-badge-outline"
+              >
                 {mark}
               </span>
             ))}
@@ -686,7 +726,7 @@ function DeviceRow(props: { device: StoredDevice }) {
       <td>
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
-            <div className={`badge badge-sm gap-2 ${statusBadgeClass}`}>
+            <div className={`ll-badge ll-badge-sm gap-2 ${statusBadgeClass}`}>
               {statusLabel}
             </div>
             <button
@@ -695,7 +735,7 @@ function DeviceRow(props: { device: StoredDevice }) {
                 void identityQuery.refetch();
               }}
               disabled={identityQuery.isFetching}
-              className="btn btn-ghost btn-xs btn-circle"
+              className="ll-button ll-button-ghost ll-button-xs ll-button-circle"
               title="Test connectivity"
             >
               <svg
@@ -731,14 +771,14 @@ function DeviceRow(props: { device: StoredDevice }) {
         <Link
           to="/$deviceId/cc"
           params={{ deviceId: device.id }}
-          className="btn btn-sm btn-outline"
+          className="ll-button ll-button-sm ll-button-outline"
         >
           Open CC Control
         </Link>
         <Link
           to="/$deviceId/firmware"
           params={{ deviceId: device.id }}
-          className="btn btn-sm btn-ghost ml-2"
+          className="ll-button ll-button-sm ll-button-ghost ml-2"
         >
           Firmware
         </Link>

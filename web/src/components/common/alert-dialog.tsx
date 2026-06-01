@@ -18,8 +18,8 @@ export function AlertDialog({
   if (!open) return null;
 
   return (
-    <div className="modal modal-open" role="dialog" aria-modal="true">
-      <div className="modal-box">
+    <div className="ll-modal" role="dialog" aria-modal="true">
+      <div className="ll-modal-box">
         <h3 className="font-bold text-lg">{title}</h3>
         <p className="py-3 text-sm">{body}</p>
         {details.length > 0 && (
@@ -30,15 +30,19 @@ export function AlertDialog({
           </ul>
         )}
 
-        <div className="modal-action">
-          <button type="button" className="btn btn-primary" onClick={onClose}>
+        <div className="ll-modal-action">
+          <button
+            type="button"
+            className="ll-button ll-button-primary"
+            onClick={onClose}
+          >
             {closeLabel}
           </button>
         </div>
       </div>
       <button
         type="button"
-        className="modal-backdrop"
+        className="ll-modal-backdrop"
         aria-label="Close"
         onClick={onClose}
       />
