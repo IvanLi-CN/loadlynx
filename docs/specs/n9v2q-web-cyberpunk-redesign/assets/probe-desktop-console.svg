@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900" role="img" aria-label="Desktop cyberpunk bench console probe">
+  <defs>
+    <radialGradient id="r" cx=".55" cy=".15" r=".8"><stop stop-color="#11263b"/><stop offset=".55" stop-color="#070b18"/><stop offset="1" stop-color="#03050d"/></radialGradient>
+    <filter id="g"><feGaussianBlur stdDeviation="5" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="1440" height="900" fill="url(#r)"/>
+  <path d="M0 90H1440M0 180H1440M0 270H1440M0 360H1440M0 450H1440M0 540H1440M0 630H1440M0 720H1440M0 810H1440M180 0V900M360 0V900M540 0V900M720 0V900M900 0V900M1080 0V900M1260 0V900" stroke="#00e5ff" stroke-opacity=".055"/>
+  <rect x="28" y="24" width="250" height="852" rx="12" fill="#050b14" stroke="#00e5ff" stroke-opacity=".42"/>
+  <text x="54" y="74" fill="#d8fbff" font-family="ui-monospace, monospace" font-size="26" font-weight="800">LOADLYNX</text>
+  <rect x="54" y="126" width="170" height="44" rx="8" fill="#061823" stroke="#00e5ff" stroke-opacity=".55"/>
+  <rect x="54" y="194" width="170" height="44" rx="8" fill="#160a22" stroke="#ff2fb3" stroke-opacity=".48"/>
+  <rect x="54" y="262" width="170" height="44" rx="8" fill="#061823" stroke="#00e5ff" stroke-opacity=".32"/>
+  <rect x="312" y="24" width="1100" height="92" rx="12" fill="#07111c" stroke="#00e5ff" stroke-opacity=".4"/>
+  <text x="342" y="64" fill="#7cf7ff" font-family="ui-monospace, monospace" font-size="13">BENCH CONSOLE / LIVE DEVICE</text>
+  <text x="342" y="96" fill="#d8fbff" font-family="system-ui" font-size="30" font-weight="800">产品级霓虹：高信任读数，低眩光控制</text>
+  <rect x="312" y="146" width="650" height="520" rx="12" fill="#07101c" stroke="#00e5ff" stroke-opacity=".35"/>
+  <text x="350" y="204" fill="#7cf7ff" font-family="ui-monospace, monospace" font-size="14">MAIN READBACK</text>
+  <text x="350" y="318" fill="#aaffdd" font-family="system-ui" font-size="96" font-weight="900" filter="url(#g)">12.038 V</text>
+  <path d="M350 544C430 470 510 610 590 530S750 476 912 552" fill="none" stroke="#00e5ff" stroke-width="4" stroke-opacity=".8" filter="url(#g)"/>
+  <rect x="990" y="146" width="422" height="520" rx="12" fill="#080d18" stroke="#ff2fb3" stroke-opacity=".33"/>
+  <text x="1024" y="202" fill="#ff8bd7" font-family="ui-monospace, monospace" font-size="14">CONTROL STACK</text>
+  <rect x="1024" y="238" width="354" height="62" rx="9" fill="#061823" stroke="#00e5ff" stroke-opacity=".52"/>
+  <rect x="1024" y="326" width="354" height="62" rx="9" fill="#1d0920" stroke="#ff2fb3" stroke-opacity=".52"/>
+  <rect x="1024" y="414" width="354" height="62" rx="9" fill="#1b1505" stroke="#ffd166" stroke-opacity=".52"/>
+  <rect x="312" y="694" width="1100" height="182" rx="12" fill="#050b14" stroke="#00e5ff" stroke-opacity=".25"/>
+</svg>

@@ -14,7 +14,7 @@ function ConfirmDialogHarness(args: ConfirmDialogProps) {
     <div className="p-6">
       <button
         type="button"
-        className="btn btn-primary"
+        className="ll-button ll-button-primary"
         onClick={() => setOpen(true)}
       >
         Open
@@ -83,6 +83,40 @@ export const CancelCloses: Story = {
     await waitFor(() => {
       if (canvas.queryByRole("dialog")) {
         throw new Error("Expected dialog to close after clicking Cancel");
+      }
+    });
+  },
+};
+
+export const BackdropCancels: Story = {
+  play: async ({ canvasElement }) => {
+    cancelCalls = 0;
+    confirmCalls = 0;
+    const canvas = within(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: "Open" }));
+    canvas.getByRole("dialog");
+
+    const backdrop =
+      canvasElement.querySelector<HTMLButtonElement>(".ll-modal-backdrop");
+    if (!backdrop) {
+      throw new Error("Expected modal backdrop to be present");
+    }
+
+    await userEvent.click(backdrop);
+    if (cancelCalls !== 1) {
+      throw new Error(
+        `Expected onCancel to be called exactly once, got ${cancelCalls}`,
+      );
+    }
+    if (confirmCalls !== 0) {
+      throw new Error(
+        `Expected onConfirm to be called 0 times, got ${confirmCalls}`,
+      );
+    }
+    await waitFor(() => {
+      if (canvas.queryByRole("dialog")) {
+        throw new Error("Expected dialog to close after clicking backdrop");
       }
     });
   },

@@ -1,9 +1,10 @@
 import "./index.css";
+import "./i18n/index.ts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { LocalStorageDeviceStore } from "./devices/device-store.ts";
+import { DemoAwareDeviceStore } from "./devices/device-store.ts";
 import { DeviceStoreProvider } from "./devices/store-context.tsx";
 import { createAppRouter } from "./router.tsx";
 
@@ -15,7 +16,7 @@ if (!rootElement) {
 
 const queryClient = new QueryClient();
 const router = createAppRouter(queryClient);
-const deviceStore = new LocalStorageDeviceStore(window.localStorage);
+const deviceStore = new DemoAwareDeviceStore(window.localStorage);
 
 createRoot(rootElement).render(
   <StrictMode>

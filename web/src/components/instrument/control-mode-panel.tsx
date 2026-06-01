@@ -68,7 +68,7 @@ export function ControlModePanel({
         })}
       </div>
 
-      <div className="mt-4 rounded-xl border border-slate-400/10 bg-black/20 px-4 py-3">
+      <div className="mt-5 border-t border-slate-400/10 pt-4">
         <div className="flex items-center justify-between gap-4">
           <div className="min-w-0">
             <div className="text-[10px] tracking-[0.14em] uppercase text-slate-200/50">
@@ -114,7 +114,7 @@ export function ControlModePanel({
         </div>
 
         {showOutputReenableHint ? (
-          <div className="mt-3 rounded-lg border border-amber-400/20 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-200">
+          <div className="mt-3 border-t border-amber-400/20 pt-3 text-[11px] text-amber-200">
             Preset applied while output was enabled — please re‑enable Output.
           </div>
         ) : null}

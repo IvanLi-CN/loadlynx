@@ -11,7 +11,7 @@ function PageContainerStory(props: {
         variant={props.variant}
         className={[props.className].filter(Boolean).join(" ")}
       >
-        <div className="border border-dashed border-base-content/20 rounded-box p-4">
+        <div className="border border-dashed border-base-content/20 rounded-lg p-4">
           <div className="space-y-1">
             <h2 className="text-lg font-semibold">PageContainer</h2>
             <p className="text-sm text-base-content/70">
@@ -21,17 +21,17 @@ function PageContainerStory(props: {
           </div>
 
           <div className="grid gap-4 md:grid-cols-2 mt-6">
-            <div className="card bg-base-200 shadow">
-              <div className="card-body">
-                <h3 className="card-title text-base">Content block</h3>
+            <div className="ll-panel bg-base-200 shadow">
+              <div className="ll-panel-body">
+                <h3 className="ll-panel-title text-base">Content block</h3>
                 <p className="text-sm text-base-content/70">
                   This card helps visualize the container width and spacing.
                 </p>
               </div>
             </div>
-            <div className="card bg-base-200 shadow">
-              <div className="card-body">
-                <h3 className="card-title text-base">Second block</h3>
+            <div className="ll-panel bg-base-200 shadow">
+              <div className="ll-panel-body">
+                <h3 className="ll-panel-title text-base">Second block</h3>
                 <p className="text-sm text-base-content/70">
                   Default variant uses <code>max-w-7xl</code> and aligns to the
                   left by default.

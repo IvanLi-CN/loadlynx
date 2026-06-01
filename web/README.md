@@ -1,16 +1,51 @@
-# LoadLynx Web Console (Scaffold)
+# LoadLynx Web Console
 
 This `web/` directory hosts the LoadLynx network control web console. At this
-stage it only provides a minimal React + Vite + TypeScript shell aligned with
-the `paste-preset` project conventions.
+stage it provides the browser console for device discovery, CC control, status,
+USB-PD settings, firmware dry-runs, calibration and settings.
 
 ## Tech stack
 
 - React 19 + TypeScript + Vite 7
+- Tailwind CSS 4 with local OKLCH design tokens
+- Local shadcn-style `ll-*` component classes and primitives
+- Radix primitives for accessible component foundations
+- lucide-react for icons
+- i18next + react-i18next for `zh-CN` default UI and `en` fallback
+- TanStack Router + TanStack Query
+- Storybook for component/route evidence
 - Bun (>= 1.0) as runtime and package manager
 - Biome for linting/formatting
 - Playwright for end-to-end tests
 - Lefthook for local Git hooks
+
+The Web UI deliberately does not use daisyUI. Do not add `daisyui`, `@plugin "daisyui"` or daisyUI semantic classes such as `btn`, `card`, `input`, `select`, `badge`, `alert`, `table`, `menu`, `modal`, `tabs`, `mockup-code` or `loading`. Use local `ll-*` component classes or local primitives from `src/components/ui/`.
+
+## i18n
+
+- Default locale: `zh-CN`.
+- Fallback locale: `en`.
+- Users can switch language from the console top bar.
+- Keep domain terms in English when they are technical labels: CC, CV, CP, USB-PD, PPS, PDO, APDO, Firmware, dry-run, lease, devd, UART.
+
+## Demo mode
+
+The production app includes a pure frontend demo mode on the normal console routes. It does not read real hardware, devd, saved real-device state, or backend services while demo mode is active.
+
+Demo mode is remembered in `localStorage` under `loadlynx.demoMode`.
+Use `?demo=true` to enter and remember demo mode, or `?demo=false` to exit and remember the normal console mode.
+When the query parameter is absent, the app uses the remembered value.
+The query parameter is only a switch; after it is applied, the app removes it from the URL and keeps the normal route.
+
+Useful direct routes:
+
+- `/devices?demo=true`
+- `/mock-001/cc`
+- `/mock-001/status`
+- `/mock-001/pd`
+- `/mock-001/settings`
+- `/mock-001/firmware`
+- `/mock-001/calibration`
 
 ## Lockfile policy
 

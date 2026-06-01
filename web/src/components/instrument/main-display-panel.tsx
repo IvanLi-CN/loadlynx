@@ -26,7 +26,7 @@ export function MainDisplayPanel({
         <div>
           <div className="instrument-label">Main display</div>
           <div className="mt-2 flex items-baseline gap-3">
-            <div className="instrument-glow-green text-6xl font-bold tracking-tight">
+            <div className="instrument-glow-green text-4xl font-bold tracking-tight sm:text-6xl">
               <FixedNumber value={headline.value} digits={digits} />
             </div>
             <div className="text-sm font-semibold text-slate-200/70">
@@ -56,7 +56,7 @@ export function MainDisplayPanel({
         </div>
       </div>
 
-      <div className="mt-4 rounded-xl border border-slate-400/10 bg-black/20 p-2">
+      <div className="mt-4 border-t border-slate-400/10 pt-4">
         <Sparkline
           points={trend.points}
           min={trend.min}

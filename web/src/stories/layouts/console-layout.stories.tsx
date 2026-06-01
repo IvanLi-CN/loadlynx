@@ -24,10 +24,10 @@ function getInlineSidebar(canvasElement: HTMLElement): HTMLElement {
 
 function getStatusLabelSpan(canvasElement: HTMLElement): HTMLSpanElement {
   const canvas = within(canvasElement);
-  const statusLink = canvas.getByRole("link", { name: "Status" });
-  const label = within(statusLink).getByText("Status");
+  const statusLink = canvas.getByRole("link", { name: "状态" });
+  const label = within(statusLink).getByText("状态");
   if (!(label instanceof HTMLSpanElement)) {
-    throw new Error('Expected "Status" label to be a <span>');
+    throw new Error('Expected "状态" label to be a <span>');
   }
   return label;
 }
@@ -70,18 +70,18 @@ export const Large: Story = {
         const statusLabel = getStatusLabelSpan(canvasElement);
         assertDisplayIsNotNone(
           statusLabel,
-          'Expected "Status" label to be visible at Large',
+          'Expected "状态" label to be visible at Large',
         );
       },
       { timeout: 5000 },
     );
 
     const hamburger = canvasElement.querySelector<HTMLElement>(
-      'button[aria-label="Open navigation drawer"]',
+      'button[aria-label="打开导航抽屉"]',
     );
     if (!hamburger) {
       throw new Error(
-        'Expected hamburger button [aria-label="Open navigation drawer"] to exist',
+        'Expected hamburger button [aria-label="打开导航抽屉"] to exist',
       );
     }
     await waitFor(
@@ -116,14 +116,14 @@ export const Medium: Story = {
         const statusLabel = getStatusLabelSpan(canvasElement);
         assertDisplayIsNone(
           statusLabel,
-          'Expected "Status" label to be hidden (rail) at Medium by default',
+          'Expected "状态" label to be hidden (rail) at Medium by default',
         );
       },
       { timeout: 5000 },
     );
 
     const canvas = within(asideEl);
-    const expandButton = canvas.getByRole("button", { name: "Expand sidebar" });
+    const expandButton = canvas.getByRole("button", { name: "展开侧边栏" });
     await userEvent.click(expandButton);
 
     await waitFor(
@@ -131,7 +131,7 @@ export const Medium: Story = {
         const statusLabel = getStatusLabelSpan(canvasElement);
         assertDisplayIsNotNone(
           statusLabel,
-          'Expected "Status" label to be visible after expanding sidebar',
+          'Expected "状态" label to be visible after expanding sidebar',
         );
       },
       { timeout: 5000 },
@@ -139,10 +139,10 @@ export const Medium: Story = {
 
     await waitFor(
       () => {
-        within(asideEl).getByRole("button", { name: "Collapse sidebar" });
-        if (within(asideEl).queryByRole("button", { name: "Expand sidebar" })) {
+        within(asideEl).getByRole("button", { name: "收起侧边栏" });
+        if (within(asideEl).queryByRole("button", { name: "展开侧边栏" })) {
           throw new Error(
-            'Expected toggle aria-label to flip from "Expand sidebar" to "Collapse sidebar"',
+            'Expected toggle aria-label to flip from "展开侧边栏" to "收起侧边栏"',
           );
         }
       },
@@ -158,7 +158,7 @@ export const Small: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const hamburger = canvas.getByRole("button", {
-      name: "Open navigation drawer",
+      name: "打开导航抽屉",
     });
     await waitFor(
       () => {
@@ -173,13 +173,13 @@ export const Small: Story = {
     // Open drawer
     await userEvent.click(hamburger);
     await canvas.findByRole("dialog", {
-      name: "Navigation drawer",
+      name: "导航",
     });
 
     // Close drawer via Escape
     await userEvent.keyboard("{Escape}");
     await waitFor(() => {
-      if (canvas.queryByRole("dialog", { name: "Navigation drawer" })) {
+      if (canvas.queryByRole("dialog", { name: "导航" })) {
         throw new Error("Expected drawer to close after pressing Escape");
       }
     });
@@ -187,7 +187,7 @@ export const Small: Story = {
     // Re-open drawer and close via backdrop click
     await userEvent.click(hamburger);
     const dialog2 = await canvas.findByRole("dialog", {
-      name: "Navigation drawer",
+      name: "导航",
     });
     const drawerRoot = dialog2.parentElement;
     if (!drawerRoot) throw new Error("Expected drawer dialog to have a parent");
@@ -197,7 +197,7 @@ export const Small: Story = {
     if (!backdrop) throw new Error("Expected drawer backdrop to exist");
     await userEvent.click(backdrop);
     await waitFor(() => {
-      if (canvas.queryByRole("dialog", { name: "Navigation drawer" })) {
+      if (canvas.queryByRole("dialog", { name: "导航" })) {
         throw new Error("Expected drawer to close after clicking backdrop");
       }
     });
@@ -205,12 +205,12 @@ export const Small: Story = {
     // Re-open drawer and validate device switcher + switch device
     await userEvent.click(hamburger);
     const dialog3 = await canvas.findByRole("dialog", {
-      name: "Navigation drawer",
+      name: "导航",
     });
     const drawer = within(dialog3);
 
     const deviceSelect = drawer.getByRole("combobox", {
-      name: "Switch device",
+      name: "设备切换",
     });
     const deviceOptions = within(deviceSelect);
     deviceOptions.getByRole("option", { name: "Demo Device #1 (mock-001)" });
@@ -219,7 +219,7 @@ export const Small: Story = {
     await userEvent.selectOptions(deviceSelect, "mock-002");
 
     await waitFor(() => {
-      if (canvas.queryByRole("dialog", { name: "Navigation drawer" })) {
+      if (canvas.queryByRole("dialog", { name: "导航" })) {
         throw new Error("Expected drawer to close after switching device");
       }
     });
@@ -249,11 +249,11 @@ export const CalibrationLarge: Story = {
     );
 
     const hamburger = canvasElement.querySelector<HTMLElement>(
-      'button[aria-label="Open navigation drawer"]',
+      'button[aria-label="打开导航抽屉"]',
     );
     if (!hamburger) {
       throw new Error(
-        'Expected hamburger button [aria-label="Open navigation drawer"] to exist',
+        'Expected hamburger button [aria-label="打开导航抽屉"] to exist',
       );
     }
     await waitFor(

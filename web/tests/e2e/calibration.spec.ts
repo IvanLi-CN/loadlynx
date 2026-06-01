@@ -19,15 +19,15 @@ test.describe("Calibration UI", () => {
       "Calibration",
     );
     await expect(page.getByRole("tab", { name: "电压" })).toHaveClass(
-      /tab-active/,
+      /ll-tab-active/,
     );
 
     // Mock should be online.
-    await expect(page.locator(".badge.gap-2")).toHaveText("ONLINE");
+    await expect(page.locator(".ll-badge.gap-2")).toHaveText("ONLINE");
 
     // Wait for raw values to appear (voltage calibration mode).
-    const localStat = page.locator(".stat", { hasText: "Local Voltage" });
-    const remoteStat = page.locator(".stat", { hasText: "Remote Voltage" });
+    const localStat = page.locator(".ll-stat", { hasText: "Local Voltage" });
+    const remoteStat = page.locator(".ll-stat", { hasText: "Remote Voltage" });
     await expect(localStat.getByText("Raw:")).not.toContainText("--");
     await expect(remoteStat.getByText("Raw:")).not.toContainText("--");
 
@@ -51,7 +51,7 @@ test.describe("Calibration UI", () => {
     // Switch to current tab (CH1).
     await page.getByRole("tab", { name: "电流通道1" }).click();
     await expect(page.getByRole("tab", { name: "电流通道1" })).toHaveClass(
-      /tab-active/,
+      /ll-tab-active/,
     );
 
     // Set target current (1A) and enable output.
@@ -59,11 +59,13 @@ test.describe("Calibration UI", () => {
     await page.getByRole("button", { name: "Set Output" }).click();
 
     // Wait for raw current to appear.
-    const currentStat = page.locator(".stat", { hasText: "Active Current" });
+    const currentStat = page.locator(".ll-stat", { hasText: "Active Current" });
     await expect(currentStat.getByText("Raw:")).not.toContainText("--");
-    await expect(currentStat.locator(".stat-value")).toContainText("0.8550 A");
-    const dacStat = page.locator(".stat", { hasText: "DAC Code" });
-    await expect(dacStat.locator(".stat-value")).toContainText("819");
+    await expect(currentStat.locator(".ll-stat-value")).toContainText(
+      "0.8550 A",
+    );
+    const dacStat = page.locator(".ll-stat", { hasText: "DAC Code" });
+    await expect(dacStat.locator(".ll-stat-value")).toContainText("819");
 
     // Advanced: subtract baseline current (e.g., adapters/fixtures).
     await page.locator("summary", { hasText: "高级选项" }).click();
@@ -81,7 +83,7 @@ test.describe("Calibration UI", () => {
     // Switch to current tab (CH2) and copy CH1 calibration into CH2 draft.
     await page.getByRole("tab", { name: "电流通道2" }).click();
     await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
-      /tab-active/,
+      /ll-tab-active/,
     );
 
     await expect(draftCurrentTableA).toContainText("No draft points.");
@@ -94,7 +96,7 @@ test.describe("Calibration UI", () => {
     // Switch back to CH1.
     await page.getByRole("tab", { name: "电流通道1" }).click();
     await expect(page.getByRole("tab", { name: "电流通道1" })).toHaveClass(
-      /tab-active/,
+      /ll-tab-active/,
     );
 
     // Unit toggle + precision: in mA mode, inputs are 1µA steps (0.001mA).
@@ -118,25 +120,27 @@ test.describe("Calibration UI", () => {
     // and show a warning.
     await page.getByRole("button", { name: "2A" }).click();
     await page.getByRole("button", { name: "Set Output" }).click();
-    await expect(currentStat.locator(".stat-value")).toContainText("1.7100 A");
-    await expect(dacStat.locator(".stat-value")).toContainText("1638");
+    await expect(currentStat.locator(".ll-stat-value")).toContainText(
+      "1.7100 A",
+    );
+    await expect(dacStat.locator(".ll-stat-value")).toContainText("1638");
     await page.getByRole("button", { name: "Capture" }).click();
     expect(await draftRowsMA.count()).toBe(2);
 
     // Apply and commit.
-    const hardwareIoCard = page.locator(".card", { hasText: "硬件 I/O" });
+    const hardwareIoCard = page.locator(".ll-panel", { hasText: "硬件 I/O" });
     await hardwareIoCard
       .getByRole("button", { name: "Apply", exact: true })
       .click();
     await page
       .getByRole("dialog")
-      .locator(".modal-action")
+      .locator(".ll-modal-action")
       .getByRole("button", { name: "Close" })
       .click();
     await hardwareIoCard.getByRole("button", { name: "Commit" }).click();
     await page
       .getByRole("dialog")
-      .locator(".modal-action")
+      .locator(".ll-modal-action")
       .getByRole("button", { name: "Close" })
       .click();
 
@@ -157,7 +161,7 @@ test.describe("Calibration UI", () => {
     const sidebar = page.locator("aside");
     await expect(sidebar).toHaveCount(1);
     await expect(
-      sidebar.getByRole("link", { name: "Status", exact: true }),
+      sidebar.getByRole("link", { name: "状态", exact: true }),
     ).toBeVisible();
 
     await page.goto("/");
@@ -205,19 +209,19 @@ test.describe("Calibration UI", () => {
 
     await page.goto(`/${deviceId}/calibration`);
     await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
-      /tab-active/,
+      /ll-tab-active/,
     );
 
-    const modeBadge = page.locator(".badge", { hasText: "cal_mode:" });
+    const modeBadge = page.locator(".ll-badge", { hasText: "cal_mode:" });
     await expect(modeBadge).toContainText("current_ch2");
 
-    const currentStat = page.locator(".stat", { hasText: "Active Current" });
+    const currentStat = page.locator(".ll-stat", { hasText: "Active Current" });
     await expect(currentStat.getByText("Raw:")).not.toContainText("--");
 
     await page.reload();
 
     await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
-      /tab-active/,
+      /ll-tab-active/,
     );
     const draftCurrentTable = page.locator("table", { hasText: "Value (A)" });
     const draftRows = draftCurrentTable.locator("tbody tr");
@@ -246,7 +250,7 @@ test.describe("Calibration UI", () => {
     await page.getByRole("button", { name: "1A" }).click();
     await page.getByRole("button", { name: "Set Output" }).click();
 
-    const modeBadge = page.locator(".badge", { hasText: "cal_mode:" });
+    const modeBadge = page.locator(".ll-badge", { hasText: "cal_mode:" });
     await expect(modeBadge).toContainText("current_ch1");
 
     await page.goto("/devices");

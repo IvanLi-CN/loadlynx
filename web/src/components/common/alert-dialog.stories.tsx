@@ -13,7 +13,7 @@ function AlertDialogHarness(args: AlertDialogProps) {
     <div className="p-6">
       <button
         type="button"
-        className="btn btn-primary"
+        className="ll-button ll-button-primary"
         onClick={() => setOpen(true)}
       >
         Open
@@ -66,6 +66,34 @@ export const CloseCloses: Story = {
     await waitFor(() => {
       if (canvas.queryByRole("dialog")) {
         throw new Error("Expected dialog to close after clicking Close");
+      }
+    });
+  },
+};
+
+export const BackdropCloses: Story = {
+  play: async ({ canvasElement }) => {
+    closeCalls = 0;
+    const canvas = within(canvasElement);
+
+    await userEvent.click(canvas.getByRole("button", { name: "Open" }));
+    canvas.getByRole("dialog");
+
+    const backdrop =
+      canvasElement.querySelector<HTMLButtonElement>(".ll-modal-backdrop");
+    if (!backdrop) {
+      throw new Error("Expected modal backdrop to be present");
+    }
+
+    await userEvent.click(backdrop);
+    if (closeCalls !== 1) {
+      throw new Error(
+        `Expected onClose to be called exactly once, got ${closeCalls}`,
+      );
+    }
+    await waitFor(() => {
+      if (canvas.queryByRole("dialog")) {
+        throw new Error("Expected dialog to close after clicking backdrop");
       }
     });
   },

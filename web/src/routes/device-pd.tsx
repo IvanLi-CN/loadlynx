@@ -279,15 +279,15 @@ export function DevicePdRoute() {
           <Link
             to="/$deviceId/status"
             params={{ deviceId }}
-            className="btn btn-sm btn-outline"
+            className="ll-button ll-button-sm ll-button-outline"
           >
             Back
           </Link>
         </header>
 
-        <div className="card bg-base-100 shadow-sm border border-base-200">
-          <div className="card-body p-8">
-            <div className="badge badge-warning badge-outline mb-4">
+        <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+          <div className="ll-panel-body p-8">
+            <div className="ll-badge ll-badge-warning ll-badge-outline mb-4">
               UNSUPPORTED
             </div>
             <h3 className="text-xl font-bold mb-2">
@@ -328,7 +328,7 @@ export function DevicePdRoute() {
         <Link
           to="/$deviceId/status"
           params={{ deviceId }}
-          className="btn btn-sm btn-outline"
+          className="ll-button ll-button-sm ll-button-outline"
         >
           Back
         </Link>
@@ -337,8 +337,8 @@ export function DevicePdRoute() {
       {topError ? (
         <div
           className={[
-            "alert shadow-sm rounded-lg text-sm",
-            topError.kind === "warning" ? "alert-warning" : "alert-error",
+            "ll-alert shadow-sm rounded-lg text-sm",
+            topError.kind === "warning" ? "ll-alert-warning" : "ll-alert-error",
           ].join(" ")}
         >
           <span className="font-bold">Error: {topError.summary}</span>
@@ -348,14 +348,14 @@ export function DevicePdRoute() {
         </div>
       ) : null}
 
-      <section className="rounded-box bg-base-200/10 overflow-hidden">
+      <section className="rounded-lg bg-base-200/10 overflow-hidden">
         <div className="p-6 border-b border-base-content/10">
           <div className="flex flex-wrap items-center gap-3">
             <div className="text-sm font-semibold">Status</div>
             <div
               className={[
-                "badge",
-                pd?.attached ? "badge-success" : "badge-ghost",
+                "ll-badge",
+                pd?.attached ? "ll-badge-success" : "ll-badge-ghost",
               ].join(" ")}
             >
               {pd?.attached ? "ATTACHED" : "DETACHED"}
@@ -374,14 +374,14 @@ export function DevicePdRoute() {
         <div className="p-6 grid gap-4">
           <div className="flex flex-wrap items-center gap-3">
             <div className="text-xs text-base-content/60">Mode</div>
-            <div className="join">
+            <div className="ll-join">
               <button
                 type="button"
                 className={[
-                  "btn btn-sm join-item",
+                  "ll-button ll-button-sm ll-join-item",
                   tab === "fixed"
-                    ? "btn-info text-info-content font-semibold"
-                    : "btn-ghost border border-base-content/20 text-base-content/70",
+                    ? "ll-button-primary text-info-content font-semibold"
+                    : "ll-button-ghost border border-base-content/20 text-base-content/70",
                 ].join(" ")}
                 onClick={() => setTab("fixed")}
               >
@@ -390,10 +390,10 @@ export function DevicePdRoute() {
               <button
                 type="button"
                 className={[
-                  "btn btn-sm join-item",
+                  "ll-button ll-button-sm ll-join-item",
                   tab === "pps"
-                    ? "btn-info text-info-content font-semibold"
-                    : "btn-ghost border border-base-content/20 text-base-content/70",
+                    ? "ll-button-primary text-info-content font-semibold"
+                    : "ll-button-ghost border border-base-content/20 text-base-content/70",
                 ].join(" ")}
                 onClick={() => setTab("pps")}
               >
@@ -403,7 +403,7 @@ export function DevicePdRoute() {
           </div>
 
           {pd?.allow_extended_voltage === false ? (
-            <div className="alert alert-info shadow-sm text-xs sm:text-sm">
+            <div className="ll-alert ll-alert-info shadow-sm text-xs sm:text-sm">
               <span>
                 Safe5V only (allow_extended_voltage=false) — Apply will save the
                 profile, but the active contract stays at 5V until extended
@@ -413,7 +413,7 @@ export function DevicePdRoute() {
           ) : null}
 
           {applyMutation.isSuccess ? (
-            <div className="alert alert-success shadow-sm text-xs sm:text-sm">
+            <div className="ll-alert ll-alert-success shadow-sm text-xs sm:text-sm">
               <span>
                 {applyMutation.data?.allow_extended_voltage === false
                   ? "Saved (Safe5V only)."
@@ -423,14 +423,14 @@ export function DevicePdRoute() {
           ) : null}
 
           {applyError ? (
-            <div className="alert alert-error shadow-sm text-xs sm:text-sm">
+            <div className="ll-alert ll-alert-error shadow-sm text-xs sm:text-sm">
               <span className="font-bold">{applyError.summary}</span>
             </div>
           ) : null}
 
           <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_1px_minmax(0,1fr)] md:gap-0 items-start">
             <section className="md:pr-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
                 {tab === "fixed" ? "Fixed PDOs" : "PPS APDOs"}
               </h3>
               <p className="text-xs text-base-content/60 mb-4">
@@ -456,7 +456,9 @@ export function DevicePdRoute() {
                         onClick={() => setSelectedFixedPos(entry.pos)}
                       >
                         <div className="flex items-center gap-3">
-                          <span className="badge badge-ghost">{entry.pos}</span>
+                          <span className="ll-badge ll-badge-ghost">
+                            {entry.pos}
+                          </span>
                           <span className="font-semibold">
                             {formatMilliVolts(entry.mv)}
                           </span>
@@ -491,7 +493,7 @@ export function DevicePdRoute() {
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex items-center gap-3">
-                            <span className="badge badge-ghost">
+                            <span className="ll-badge ll-badge-ghost">
                               {entry.pos}
                             </span>
                             <span className="font-semibold">
@@ -521,7 +523,7 @@ export function DevicePdRoute() {
             <div className="hidden md:block w-px self-stretch bg-base-content/15" />
 
             <section className="md:pl-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-2 h-auto min-h-0">
                 Configure
               </h3>
               <p className="text-xs text-base-content/60 mb-4">
@@ -529,7 +531,7 @@ export function DevicePdRoute() {
               </p>
 
               <div className="grid gap-4">
-                <div className="rounded-box bg-base-200/20 p-4">
+                <div className="rounded-lg bg-base-200/20 p-4">
                   <div className="text-xs text-base-content/60 mb-1">Saved</div>
                   <div className="text-sm">
                     Mode:{" "}
@@ -552,7 +554,7 @@ export function DevicePdRoute() {
                   </div>
                 </div>
 
-                <div className="rounded-box bg-base-200/20 p-4">
+                <div className="rounded-lg bg-base-200/20 p-4">
                   <div className="text-xs text-base-content/60 mb-1">
                     Active (contract)
                   </div>
@@ -568,7 +570,7 @@ export function DevicePdRoute() {
                     </div>
                     <input
                       type="number"
-                      className="input input-bordered input-sm w-40"
+                      className="ll-input ll-input-sm w-40"
                       value={fixedIReqMa}
                       min={0}
                       step={50}
@@ -582,7 +584,7 @@ export function DevicePdRoute() {
                     </div>
                     <button
                       type="button"
-                      className="btn btn-success btn-sm ml-auto"
+                      className="ll-button ll-button-primary ll-button-sm ml-auto"
                       disabled={applyDisabled}
                       onClick={() => {
                         applyMutation.reset();
@@ -601,7 +603,7 @@ export function DevicePdRoute() {
                     </div>
                     <input
                       type="number"
-                      className="input input-bordered input-sm w-44"
+                      className="ll-input ll-input-sm w-44"
                       value={ppsTargetMv}
                       step={20}
                       min={selectedPps?.min_mv ?? undefined}
@@ -640,7 +642,7 @@ export function DevicePdRoute() {
                     </div>
                     <input
                       type="number"
-                      className="input input-bordered input-sm w-40"
+                      className="ll-input ll-input-sm w-40"
                       value={ppsIReqMa}
                       min={0}
                       step={50}
@@ -660,7 +662,7 @@ export function DevicePdRoute() {
 
                     <button
                       type="button"
-                      className="btn btn-success btn-sm ml-auto"
+                      className="ll-button ll-button-primary ll-button-sm ml-auto"
                       disabled={applyDisabled}
                       onClick={() => {
                         applyMutation.reset();

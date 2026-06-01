@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="390" height="844" viewBox="0 0 390 844" role="img" aria-label="Mobile cyberpunk shell probe">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop stop-color="#050817"/>
+      <stop offset="1" stop-color="#12051a"/>
+    </linearGradient>
+    <filter id="glow"><feGaussianBlur stdDeviation="3" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+  </defs>
+  <rect width="390" height="844" fill="url(#bg)"/>
+  <path d="M0 86H390M0 172H390M0 258H390M0 344H390M0 430H390M0 516H390M0 602H390M0 688H390M0 774H390" stroke="#0ff" stroke-opacity=".08"/>
+  <rect x="18" y="22" width="354" height="64" rx="10" fill="#07111c" stroke="#00e5ff" stroke-opacity=".45"/>
+  <text x="34" y="56" fill="#d8fbff" font-family="ui-monospace, monospace" font-size="17" font-weight="700">LOADLYNX</text>
+  <rect x="300" y="39" width="44" height="10" rx="5" fill="#00e5ff" filter="url(#glow)"/>
+  <rect x="18" y="110" width="354" height="148" rx="10" fill="#090f1b" stroke="#00e5ff" stroke-opacity=".32"/>
+  <text x="34" y="142" fill="#7cf7ff" font-family="ui-monospace, monospace" font-size="12">READBACK</text>
+  <text x="34" y="204" fill="#aaffdd" font-family="system-ui" font-size="54" font-weight="800">12.038 V</text>
+  <rect x="18" y="280" width="168" height="110" rx="10" fill="#090f1b" stroke="#ff2fb3" stroke-opacity=".38"/>
+  <rect x="204" y="280" width="168" height="110" rx="10" fill="#090f1b" stroke="#ffd166" stroke-opacity=".38"/>
+  <text x="34" y="326" fill="#ff8bd7" font-family="ui-monospace, monospace" font-size="13">OUTPUT OFF</text>
+  <text x="220" y="326" fill="#ffe39a" font-family="ui-monospace, monospace" font-size="13">PD ATTACHED</text>
+  <rect x="18" y="414" width="354" height="318" rx="10" fill="#070d18" stroke="#00e5ff" stroke-opacity=".25"/>
+  <text x="34" y="452" fill="#d8fbff" font-family="system-ui" font-size="18" font-weight="700">移动抽屉与单列控制</text>
+  <rect x="34" y="486" width="322" height="44" rx="8" fill="#061823" stroke="#00e5ff" stroke-opacity=".5"/>
+  <rect x="34" y="548" width="322" height="44" rx="8" fill="#1d0920" stroke="#ff2fb3" stroke-opacity=".5"/>
+  <rect x="34" y="610" width="322" height="44" rx="8" fill="#1b1505" stroke="#ffd166" stroke-opacity=".45"/>
+  <rect x="18" y="760" width="354" height="58" rx="10" fill="#061823" stroke="#00e5ff" stroke-opacity=".55"/>
+</svg>

@@ -79,7 +79,10 @@ export function DeviceLayout() {
           and add or select a device.
         </p>
         <div>
-          <Link to="/devices" className="btn btn-sm btn-outline">
+          <Link
+            to="/devices"
+            className="ll-button ll-button-sm ll-button-outline"
+          >
             Back to devices
           </Link>
         </div>

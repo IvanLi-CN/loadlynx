@@ -394,7 +394,7 @@ export function DeviceSettingsRoute() {
       </header>
 
       {topError ? (
-        <div className="alert alert-error shadow-sm rounded-lg text-sm">
+        <div className="ll-alert ll-alert-error shadow-sm rounded-lg text-sm">
           <span className="font-bold">Error: {topError.summary}</span>
           {topError.hint && (
             <span className="text-xs opacity-80 block">{topError.hint}</span>
@@ -405,13 +405,13 @@ export function DeviceSettingsRoute() {
       <div className="grid gap-6 md:grid-cols-2 md:items-start">
         <div className="grid gap-6">
           {/* 1. Device Identity */}
-          <div className="card bg-base-100 shadow-sm border border-base-200">
-            <div className="card-body p-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+          <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+            <div className="ll-panel-body p-6">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
                 Device Identity
               </h3>
               <div className="overflow-x-auto">
-                <table className="table table-xs">
+                <table className="ll-table ll-table-xs">
                   <tbody>
                     <tr>
                       <td className="text-base-content/60">Device ID</td>
@@ -448,30 +448,30 @@ export function DeviceSettingsRoute() {
           </div>
 
           {/* 3. Capabilities */}
-          <div className="card bg-base-100 shadow-sm border border-base-200">
-            <div className="card-body p-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+          <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+            <div className="ll-panel-body p-6">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
                 Capabilities
               </h3>
               <div className="flex flex-wrap gap-2">
                 {identity ? (
                   <>
                     <div
-                      className={`badge ${identity.capabilities.cc_supported ? "badge-neutral" : "badge-ghost opacity-50"}`}
+                      className={`ll-badge ${identity.capabilities.cc_supported ? "ll-badge-neutral" : "ll-badge-ghost opacity-50"}`}
                     >
                       CC
                     </div>
                     <div
-                      className={`badge ${identity.capabilities.cv_supported ? "badge-neutral" : "badge-ghost opacity-50"}`}
+                      className={`ll-badge ${identity.capabilities.cv_supported ? "ll-badge-neutral" : "ll-badge-ghost opacity-50"}`}
                     >
                       CV
                     </div>
                     <div
-                      className={`badge ${identity.capabilities.cp_supported ? "badge-neutral" : "badge-ghost opacity-50"}`}
+                      className={`ll-badge ${identity.capabilities.cp_supported ? "ll-badge-neutral" : "ll-badge-ghost opacity-50"}`}
                     >
                       CP
                     </div>
-                    <div className="badge badge-ghost">
+                    <div className="ll-badge ll-badge-ghost">
                       API v{identity.capabilities.api_version}
                     </div>
                   </>
@@ -485,9 +485,9 @@ export function DeviceSettingsRoute() {
           </div>
 
           {/* 5. Backup & Restore */}
-          <div className="card bg-base-100 shadow-sm border border-base-200">
-            <div className="card-body p-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+          <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+            <div className="ll-panel-body p-6">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
                 Backup & Restore
               </h3>
               <div className="grid gap-5 text-xs">
@@ -501,7 +501,7 @@ export function DeviceSettingsRoute() {
                       >
                         <input
                           type="checkbox"
-                          className="checkbox checkbox-xs"
+                          className="ll-checkbox ll-checkbox-xs"
                           checked={
                             (section === "settings.wifi" &&
                               !backupWifiCredentialsSupported) ||
@@ -525,12 +525,12 @@ export function DeviceSettingsRoute() {
                     ))}
                   </div>
                   {!backupWifiCredentialsSupported ? (
-                    <div className="alert alert-warning shadow-sm text-xs">
+                    <div className="ll-alert ll-alert-warning shadow-sm text-xs">
                       <span>WiFi credentials require local USB/devd.</span>
                     </div>
                   ) : null}
                   {backupPdUnsupported ? (
-                    <div className="alert alert-warning shadow-sm text-xs">
+                    <div className="ll-alert ll-alert-warning shadow-sm text-xs">
                       <span>
                         USB-PD settings are not supported by this device.
                       </span>
@@ -538,7 +538,7 @@ export function DeviceSettingsRoute() {
                   ) : null}
                   <button
                     type="button"
-                    className="btn btn-neutral btn-sm"
+                    className="ll-button ll-button-neutral ll-button-sm"
                     disabled={
                       !baseUrl ||
                       effectiveBackupExportSelection.length === 0 ||
@@ -549,7 +549,7 @@ export function DeviceSettingsRoute() {
                     Export Backup
                   </button>
                   {backupExportMutation.error ? (
-                    <div className="alert alert-error shadow-sm text-xs">
+                    <div className="ll-alert ll-alert-error shadow-sm text-xs">
                       <span>
                         Export failed:{" "}
                         {backupExportMutation.error instanceof Error
@@ -566,13 +566,13 @@ export function DeviceSettingsRoute() {
                     aria-label="Import backup file"
                     type="file"
                     accept="application/json,.json"
-                    className="file-input file-input-bordered file-input-sm w-full"
+                    className="ll-file-input ll-file-input-sm w-full"
                     onChange={(event) => {
                       void handleBackupFile(event.target.files?.[0] ?? null);
                     }}
                   />
                   {backupImportError ? (
-                    <div className="alert alert-error shadow-sm text-xs">
+                    <div className="ll-alert ll-alert-error shadow-sm text-xs">
                       <span>{backupImportError}</span>
                     </div>
                   ) : null}
@@ -582,7 +582,7 @@ export function DeviceSettingsRoute() {
                         <span className="font-bold truncate">
                           {backupImportName || "backup.json"}
                         </span>
-                        <span className="badge badge-ghost">
+                        <span className="ll-badge ll-badge-ghost">
                           schema v{backupImport.schema_version}
                         </span>
                       </div>
@@ -594,7 +594,7 @@ export function DeviceSettingsRoute() {
                           >
                             <input
                               type="checkbox"
-                              className="checkbox checkbox-xs"
+                              className="ll-checkbox ll-checkbox-xs"
                               checked={backupRestoreSelection.includes(section)}
                               onChange={() =>
                                 setBackupRestoreSelection((current) =>
@@ -607,13 +607,13 @@ export function DeviceSettingsRoute() {
                         ))}
                       </div>
                       {backupWarnings.length > 0 ? (
-                        <div className="alert alert-warning shadow-sm text-xs">
+                        <div className="ll-alert ll-alert-warning shadow-sm text-xs">
                           <span>{backupWarnings.join(" · ")}</span>
                         </div>
                       ) : null}
                       <button
                         type="button"
-                        className="btn btn-outline btn-sm"
+                        className="ll-button ll-button-outline ll-button-sm"
                         disabled={
                           !baseUrl ||
                           backupRestoreSelection.length === 0 ||
@@ -626,14 +626,14 @@ export function DeviceSettingsRoute() {
                     </div>
                   ) : null}
                   {backupSafetyBlocked ? (
-                    <div className="alert alert-error shadow-sm text-xs">
+                    <div className="ll-alert ll-alert-error shadow-sm text-xs">
                       <span>
                         Restore safety-blocked:{" "}
                         {backupRestoreMutation.error?.message}
                       </span>
                     </div>
                   ) : backupRestoreMutation.error ? (
-                    <div className="alert alert-error shadow-sm text-xs">
+                    <div className="ll-alert ll-alert-error shadow-sm text-xs">
                       <span>
                         Restore failed: {backupRestoreMutation.error.message}
                       </span>
@@ -641,11 +641,7 @@ export function DeviceSettingsRoute() {
                   ) : null}
                   {backupRestoreMutation.data ? (
                     <div
-                      className={`alert shadow-sm text-xs ${
-                        backupRestoreMutation.data.ok
-                          ? "alert-success"
-                          : "alert-warning"
-                      }`}
+                      className={`ll-alert shadow-sm text-xs ${backupRestoreMutation.data.ok ? "ll-alert-success" : "ll-alert-warning"}`}
                     >
                       <span>
                         {backupRestoreMutation.data.restored
@@ -666,13 +662,13 @@ export function DeviceSettingsRoute() {
 
         <div className="grid gap-6">
           {/* 2. Network */}
-          <div className="card bg-base-100 shadow-sm border border-base-200">
-            <div className="card-body p-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+          <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+            <div className="ll-panel-body p-6">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
                 Network
               </h3>
               <div className="overflow-x-auto">
-                <table className="table table-xs">
+                <table className="ll-table ll-table-xs">
                   <tbody>
                     <tr>
                       <td className="text-base-content/60">Hostname</td>
@@ -699,9 +695,9 @@ export function DeviceSettingsRoute() {
           </div>
 
           {/* 4. WiFi */}
-          <div className="card bg-base-100 shadow-sm border border-base-200">
-            <div className="card-body p-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+          <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+            <div className="ll-panel-body p-6">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
                 WiFi
               </h3>
               <div className="grid gap-3">
@@ -716,20 +712,20 @@ export function DeviceSettingsRoute() {
                   <span>{wifi?.ip ?? "..."}</span>
                 </div>
                 <input
-                  className="input input-bordered input-sm w-full"
+                  className="ll-input ll-input-sm w-full"
                   placeholder="SSID"
                   value={wifiSsid}
                   onChange={(event) => setWifiSsid(event.target.value)}
                 />
                 <input
-                  className="input input-bordered input-sm w-full"
+                  className="ll-input ll-input-sm w-full"
                   placeholder="PSK"
                   type="password"
                   value={wifiPsk}
                   onChange={(event) => setWifiPsk(event.target.value)}
                 />
                 {wifiMutation.error && isHttpApiError(wifiMutation.error) ? (
-                  <div className="alert alert-error shadow-sm text-xs">
+                  <div className="ll-alert ll-alert-error shadow-sm text-xs">
                     <span>
                       WiFi update failed: {wifiMutation.error.code ?? "HTTP"} —{" "}
                       {wifiMutation.error.message}
@@ -739,7 +735,7 @@ export function DeviceSettingsRoute() {
                 <div className="flex flex-wrap gap-2">
                   <button
                     type="button"
-                    className="btn btn-neutral btn-sm"
+                    className="ll-button ll-button-neutral ll-button-sm"
                     disabled={
                       !wifiSsid.trim() ||
                       !wifiPsk ||
@@ -752,7 +748,7 @@ export function DeviceSettingsRoute() {
                   </button>
                   <button
                     type="button"
-                    className="btn btn-outline btn-sm"
+                    className="ll-button ll-button-outline ll-button-sm"
                     disabled={wifiClearMutation.isPending || !baseUrl}
                     onClick={handleWifiClear}
                   >
@@ -764,14 +760,14 @@ export function DeviceSettingsRoute() {
           </div>
 
           {/* 6. Actions */}
-          <div className="card bg-base-100 shadow-sm border border-base-200">
-            <div className="card-body p-6">
-              <h3 className="card-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
+          <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+            <div className="ll-panel-body p-6">
+              <h3 className="ll-panel-title text-sm uppercase tracking-wider text-base-content/50 mb-4 h-auto min-h-0">
                 Actions
               </h3>
               <div className="flex flex-col gap-3">
                 {softResetMutation.isSuccess ? (
-                  <div className="alert alert-success shadow-sm text-xs sm:text-sm">
+                  <div className="ll-alert ll-alert-success shadow-sm text-xs sm:text-sm">
                     <span>
                       Soft reset requested (reason:{" "}
                       {softResetMutation.data?.reason ?? "manual"}).
@@ -779,7 +775,7 @@ export function DeviceSettingsRoute() {
                   </div>
                 ) : null}
                 {softResetError ? (
-                  <div className="alert alert-error shadow-sm text-xs sm:text-sm">
+                  <div className="ll-alert ll-alert-error shadow-sm text-xs sm:text-sm">
                     <span className="font-bold">{softResetError.summary}</span>
                     {softResetError.hint && (
                       <span className="text-xs opacity-80 block">
@@ -790,14 +786,14 @@ export function DeviceSettingsRoute() {
                 ) : null}
                 <button
                   type="button"
-                  className="btn btn-outline btn-sm text-error hover:bg-error hover:text-white"
+                  className="ll-button ll-button-outline ll-button-sm text-error hover:bg-error hover:text-white"
                   onClick={handleSoftReset}
                 >
                   Soft Reset
                 </button>
                 <button
                   type="button"
-                  className="btn btn-outline btn-sm"
+                  className="ll-button ll-button-outline ll-button-sm"
                   disabled={diagnosticsMutation.isPending || !baseUrl}
                   onClick={() => diagnosticsMutation.mutate()}
                 >

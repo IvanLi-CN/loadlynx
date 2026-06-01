@@ -21,27 +21,27 @@ export function DevicesPanel() {
         {ENABLE_MOCK_DEVTOOLS ? (
           <button
             type="button"
-            className="btn btn-sm btn-primary"
+            className="ll-button ll-button-sm ll-button-primary"
             onClick={() => addDemoDevice.mutate()}
             disabled={addDemoDevice.isPending}
           >
             {addDemoDevice.isPending ? (
-              <span className="loading loading-spinner loading-xs" />
+              <span className="ll-loading ll-loading-spinner ll-loading-xs" />
             ) : null}
             Add demo device
           </button>
         ) : null}
       </header>
 
-      <div className="card bg-base-100 shadow-sm border border-base-200">
-        <div className="card-body p-4">
+      <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
+        <div className="ll-panel-body p-4">
           {devices.length === 0 ? (
             <p className="text-sm text-base-content/70">
               No devices yet. Add a demo device to populate the list.
             </p>
           ) : (
             <div className="overflow-x-auto">
-              <table className="table table-zebra table-sm">
+              <table className="ll-table ll-table-sm">
                 <thead>
                   <tr>
                     <th>Name</th>

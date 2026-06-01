@@ -23,7 +23,7 @@ function Tile({
           : "text-slate-100";
 
   return (
-    <div className="instrument-card px-4 py-3">
+    <div className="min-w-0 border-t border-slate-400/10 py-3 sm:border-t-0 sm:border-l sm:first:border-l-0 sm:pl-4 sm:first:pl-0">
       <div className="instrument-label">{label}</div>
       <div className={`mt-2 text-sm font-semibold ${toneClass}`}>{value}</div>
     </div>
@@ -52,10 +52,12 @@ export function HealthTiles({
     linkLatencyMs != null ? `${Math.round(linkLatencyMs)} ms` : "—";
 
   return (
-    <section aria-label="Health tiles" className="grid grid-cols-3 gap-3">
-      <Tile label="Analog State" value={analogValue} tone="neutral" />
-      <Tile label="Fault Flags" value={faultValue} tone={faultTone} />
-      <Tile label="Latency" value={latencyText} tone="neutral" />
+    <section aria-label="Health tiles" className="instrument-card p-5">
+      <div className="grid gap-x-4 sm:grid-cols-3">
+        <Tile label="Analog State" value={analogValue} tone="neutral" />
+        <Tile label="Fault Flags" value={faultValue} tone={faultTone} />
+        <Tile label="Latency" value={latencyText} tone="neutral" />
+      </div>
     </section>
   );
 }

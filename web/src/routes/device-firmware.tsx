@@ -37,7 +37,7 @@ export function DeviceFirmwareRoute() {
       </header>
 
       {!canUseDevd ? (
-        <div role="alert" className="alert alert-warning">
+        <div role="alert" className="ll-alert ll-alert-warning">
           <span>
             This device is not bound to an active devd USB lease. Connect it
             from the Devices page before using devd firmware operations.
@@ -45,17 +45,17 @@ export function DeviceFirmwareRoute() {
         </div>
       ) : null}
 
-      <section className="card bg-base-100 border border-base-200 shadow-sm">
-        <div className="card-body gap-4">
+      <section className="ll-panel bg-base-100 border border-base-200 shadow-sm">
+        <div className="ll-panel-body gap-4">
           <div className="grid gap-4 md:grid-cols-3">
-            <label className="form-control">
-              <div className="label pb-1">
-                <span className="label-text">Target board</span>
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Target board</span>
               </div>
               <select
                 id="firmware-target"
                 name="firmware_target"
-                className="select select-bordered"
+                className="ll-select"
                 value={target}
                 onChange={(event) =>
                   setTarget(event.target.value as DevdTargetKind)
@@ -66,28 +66,28 @@ export function DeviceFirmwareRoute() {
               </select>
             </label>
 
-            <label className="form-control">
-              <div className="label pb-1">
-                <span className="label-text">Artifact ID</span>
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Artifact ID</span>
               </div>
               <input
                 id="firmware-artifact-id"
                 name="firmware_artifact_id"
-                className="input input-bordered"
+                className="ll-input"
                 value={artifactId}
                 onChange={(event) => setArtifactId(event.target.value)}
                 placeholder="Select or type a staged artifact id"
               />
             </label>
 
-            <label className="form-control">
-              <div className="label pb-1">
-                <span className="label-text">Catalog manifest</span>
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Catalog manifest</span>
               </div>
               <input
                 id="firmware-manifest-path"
                 name="firmware_manifest_path"
-                className="input input-bordered"
+                className="ll-input"
                 value={manifestPath}
                 onChange={(event) => setManifestPath(event.target.value)}
                 placeholder="/path/to/firmware-catalog.json"
@@ -95,16 +95,16 @@ export function DeviceFirmwareRoute() {
             </label>
           </div>
 
-          <label className="label cursor-pointer justify-start gap-3">
+          <label className="ll-label-row cursor-pointer justify-start gap-3">
             <input
               id="firmware-dry-run"
               name="firmware_dry_run"
               type="checkbox"
-              className="checkbox checkbox-sm"
+              className="ll-checkbox ll-checkbox-sm"
               checked={dryRun}
               onChange={(event) => setDryRun(event.target.checked)}
             />
-            <span className="label-text">
+            <span className="ll-label-text">
               Dry-run only: verify target evidence without touching hardware
             </span>
           </label>
@@ -112,7 +112,7 @@ export function DeviceFirmwareRoute() {
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
-              className="btn btn-primary"
+              className="ll-button ll-button-primary"
               disabled={
                 !canUseDevd ||
                 !manifestPath.trim() ||
@@ -144,14 +144,14 @@ export function DeviceFirmwareRoute() {
               }}
             >
               {selectArtifactMutation.isPending || flashMutation.isPending ? (
-                <span className="loading loading-spinner loading-xs"></span>
+                <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
               ) : null}
               {dryRun ? "Verify flash dry-run" : "Flash firmware"}
             </button>
           </div>
 
           {selectArtifactMutation.error || flashMutation.error ? (
-            <div role="alert" className="alert alert-error text-sm">
+            <div role="alert" className="ll-alert ll-alert-error text-sm">
               <span>
                 {selectArtifactMutation.error instanceof Error
                   ? selectArtifactMutation.error.message
@@ -163,7 +163,7 @@ export function DeviceFirmwareRoute() {
           ) : null}
 
           {flashMutation.data ? (
-            <div className="mockup-code text-xs">
+            <div className="ll-codeblock text-xs">
               <pre data-prefix="$">
                 <code>
                   {JSON.stringify(flashMutation.data.target_evidence, null, 2)}
@@ -174,13 +174,13 @@ export function DeviceFirmwareRoute() {
         </div>
       </section>
 
-      <section className="card bg-base-100 border border-base-200 shadow-sm">
-        <div className="card-body gap-4">
+      <section className="ll-panel bg-base-100 border border-base-200 shadow-sm">
+        <div className="ll-panel-body gap-4">
           <div className="flex items-center justify-between">
-            <h3 className="card-title text-base">USB session</h3>
+            <h3 className="ll-panel-title text-base">USB session</h3>
             <button
               type="button"
-              className="btn btn-sm btn-outline"
+              className="ll-button ll-button-sm ll-button-outline"
               disabled={!canUseDevd || sessionQuery.isFetching}
               onClick={() => void sessionQuery.refetch()}
             >
@@ -195,7 +195,7 @@ export function DeviceFirmwareRoute() {
                   Logs
                 </div>
                 <div className="mt-2 max-h-64 overflow-auto rounded border border-base-200">
-                  <table className="table table-xs">
+                  <table className="ll-table ll-table-xs">
                     <tbody>
                       {sessionQuery.data.logs.map((entry) => (
                         <tr key={entry.id}>
@@ -213,7 +213,7 @@ export function DeviceFirmwareRoute() {
                   Trace
                 </div>
                 <div className="mt-2 max-h-64 overflow-auto rounded border border-base-200">
-                  <table className="table table-xs">
+                  <table className="ll-table ll-table-xs">
                     <tbody>
                       {sessionQuery.data.trace.map((entry) => (
                         <tr key={entry.id}>
