@@ -2,7 +2,7 @@ use chrono::Utc;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use loadlynx_devd::{
-    FLASH_CONFIRMATION_PHRASE, IpcHttpRequest, TargetKind, default_ipc_endpoint, ipc_http_request,
+    FLASH_CONFIRMATION_TEXT, IpcHttpRequest, TargetKind, default_ipc_endpoint, ipc_http_request,
     list_digital_usb_port_candidates, write_default_digital_usb_port,
 };
 use reqwest::{Client, Url};
@@ -61,8 +61,8 @@ enum Command {
         manifest_path: Option<String>,
         #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
-        #[arg(long)]
-        confirm_phrase: Option<String>,
+        #[arg(long = "confirm", alias = "confirm-phrase")]
+        confirm: Option<String>,
         #[arg(long)]
         expected_identity_device_id: Option<String>,
         #[arg(long)]
@@ -770,7 +770,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             artifact,
             manifest_path,
             dry_run,
-            confirm_phrase,
+            confirm,
             expected_identity_device_id,
             acknowledge_non_project_firmware,
         } => {
@@ -779,7 +779,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 select_device_artifact(&client, &resolved, manifest_path.clone(), artifact.clone())
                     .await?;
             }
-            let confirmation_phrase = resolve_flash_confirmation_phrase(dry_run, confirm_phrase)?;
+            let confirmation_text = resolve_flash_confirmation_text(dry_run, confirm)?;
             post_usb_operation_with_optional_lease(
                 &client,
                 &resolved,
@@ -788,7 +788,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     "target": target.kind(),
                     "artifact_id": artifact,
                     "dry_run": dry_run,
-                    "confirmation_phrase": confirmation_phrase,
+                    "confirmation_phrase": confirmation_text,
                     "expected_identity_device_id": expected_identity_device_id,
                     "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
                 }),
@@ -1594,7 +1594,7 @@ fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
     Value::Object(body)
 }
 
-fn resolve_flash_confirmation_phrase(
+fn resolve_flash_confirmation_text(
     dry_run: bool,
     provided: Option<String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
@@ -1605,9 +1605,9 @@ fn resolve_flash_confirmation_phrase(
         return Ok(provided);
     }
     eprintln!("Real digital firmware flash is high risk.");
-    eprintln!("Type exactly `{FLASH_CONFIRMATION_PHRASE}` to continue.");
+    eprintln!("Type `{FLASH_CONFIRMATION_TEXT}` to continue.");
     let typed: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Confirmation phrase")
+        .with_prompt("Confirmation")
         .allow_empty(false)
         .interact_text()?;
     Ok(Some(typed))

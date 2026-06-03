@@ -40,7 +40,7 @@ Use a local-first control plane:
 - Treat lease and physical serialization as separate layers: leases authorize clients and identify ownership, while a per-port owner or queue serializes the actual USB/probe operations.
 - CLI hardware-changing commands print target evidence before acting.
 - Firmware artifacts are selected through a catalog and verified by SHA-256 before flashing.
-- Real first-flash or non-project-firmware flows need a stronger gate than "tool exited 0": artifact/hash/target evidence, typed phrase, explicit risk acknowledgement when applicable, and post-flash identity capture.
+- Real first-flash or non-project-firmware flows need a stronger gate than "tool exited 0": artifact/hash/target evidence, explicit `yes` confirmation, explicit risk acknowledgement when applicable, and post-flash identity capture.
 - Runtime identity must match `build_id`, profile, features and target chip before log decode can be trusted.
 - LAN records and USB records merge by `identity.device_id`, not by URL, port path or display name.
 - Sensitive frame fields such as WiFi PSK are redacted at trace ingestion, before logs leave the daemon.

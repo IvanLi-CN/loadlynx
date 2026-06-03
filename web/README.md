@@ -119,9 +119,9 @@ Examples:
 - GitHub Pages and release Web bundles are formal human UI paths for browsers
   that expose `navigator.serial`.
 - Web Serial firmware flashing requires a release firmware catalog JSON, the
-  matching firmware file, SHA-256 verification, the typed phrase
-  `FLASH LOADLYNX DIGITAL`, non-project firmware acknowledgement when
-  applicable, and post-flash identity capture.
+  matching firmware file, SHA-256 verification, explicit `yes` confirmation,
+  non-project firmware acknowledgement when applicable, and post-flash identity
+  capture.
 - Web Serial stores only device identity/profile metadata. It reconnects through
   browser-granted ports from `navigator.serial.getPorts()` and does not persist
   OS serial port paths.

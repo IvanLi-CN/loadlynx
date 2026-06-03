@@ -66,15 +66,16 @@ just loadlynx <args>
 ## Device Selection
 
 - Never guess or silently switch hardware targets.
-- For CLI/devd ESP32-S3 USB CDC work, use repo-local `.esp32-port` only after the owner approves the exact port path.
+- For CLI/devd ESP32-S3 USB CDC work, use repo-local `.esp32-port` only after the owner explicitly authorizes the specific USB CDC port path.
+- Explicit authorization can be natural language. Do not require the owner to answer with a fixed phrase or command string; the authorized action and target only need to be unambiguous.
 - Set the approved digital USB CDC port only with:
 
 ```bash
 just loadlynx usb-port set digital <path>
 ```
 
-- Do not use interactive candidate selection as an Agent to bypass exact owner approval.
-- Do not call `just agentd selector set ...` or edit `.esp32-port` / `.stm32-port` unless the owner explicitly approves the exact change.
+- Do not use interactive candidate selection as an Agent to bypass explicit owner authorization.
+- Do not call `just agentd selector set ...` or edit `.esp32-port` / `.stm32-port` unless the owner explicitly authorizes the specific change.
 - Before flash/reset/monitor/HIL, echo the target from `just agentd-get-port digital`, `just agentd-get-port analog`, or the approved `.esp32-port` path for devd digital work.
 
 ## devd, CLI, And USB CDC
@@ -108,14 +109,14 @@ just loadlynx status --hardware <saved-hardware-id>
 
 - Build analog firmware with `just a-build`; build digital firmware with `just d-build`.
 - For CLI/devd ESP32-S3 digital firmware flows, use devd's lease-gated direct `espflash` path against the approved `.esp32-port` target.
-- CLI, devd bridge, and Web Serial real digital flashes must share the same first-flash/non-project gate: artifact/hash/target evidence, typed confirmation phrase, explicit non-project acknowledgement when applicable, and post-flash identity capture. Do not claim success from `espflash` exit status alone.
+- CLI, devd bridge, and Web Serial real digital flashes must share the same first-flash/non-project gate: artifact/hash/target evidence, explicit owner confirmation, explicit non-project acknowledgement when applicable, and post-flash identity capture. Do not claim success from `espflash` exit status alone.
 - Run a devd firmware dry-run before real flash:
 
 ```bash
 just loadlynx flash digital --device <device-id> --artifact <artifact-id>
 ```
 
-- For real devd digital flash, require a valid lease, selected artifact, artifact hash verification, target evidence, typed phrase, and post-flash identity capture. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
+- For real devd digital flash, require a valid lease, selected artifact, artifact hash verification, target evidence, explicit owner confirmation, and post-flash identity capture. Do not require a fixed typed phrase for this confirmation. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
 - Do not fall back to `just agentd flash digital` for CLI/devd digital flashing.
 - Web Serial flash uses `esptool-js`, release firmware catalog/assets, browser-granted ports, and identity/profile memory only. It must not save OS port paths.
 - For analog firmware and non-devd firmware workflows, use `mcu-agentd` through `just agentd ...` and preserve selector guardrails.
@@ -134,4 +135,4 @@ just loadlynx flash digital --device <device-id> --artifact <artifact-id>
 - Prefer targeted checks for the changed surface: `just devd-test`, affected `cargo test`, `just a-build`, `just d-build`, non-hardware Web checks, or release workflow linting.
 - For release workflow changes, verify official and development Releases build required firmware/host-tools assets before creating a GitHub Release.
 - HIL evidence must identify target, transport, lease/session where applicable, artifact/firmware identity, and observed protocol/log result.
-- If a selector is missing, stale, unreadable, or ambiguous, stop and ask the owner for the exact hardware target.
+- If a selector is missing, stale, unreadable, or ambiguous, stop and ask the owner to identify the hardware target unambiguously.

@@ -13,7 +13,7 @@
 - `loadlynx` implements user-level hardware memory through `loadlynx hardware available/recent/path/list/save/forget`, `loadlynx status --hardware <id>`, and best-effort automatic updates after successful `status --device` or `status --url`.
 - CLI hardware memory is stored in the user's OS config directory, not in the repository checkout: macOS `~/Library/Application Support/LoadLynx/devices.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`, Windows `%APPDATA%\LoadLynx\devices.json`; `LOADLYNX_HOME` overrides the directory for tests or advanced setups.
 - The user skill explicitly treats missing `loadlynx wifi ...` support as a stop condition because the current CLI command surface does not implement that complete user capability.
-- The user and developer skills require first-flash/non-project firmware gates for real ESP32-S3 flash: artifact/hash/target evidence, typed phrase, explicit non-project acknowledgement when applicable, and post-flash identity capture.
+- The user and developer skills require first-flash/non-project firmware gates for real ESP32-S3 flash: artifact/hash/target evidence, explicit owner confirmation, explicit non-project acknowledgement when applicable, and post-flash identity capture. Owner confirmation can be natural language and must not require a fixed typed phrase.
 - Web Serial is documented as the formal human browser path for GitHub Pages and release Web bundles. It uses release catalog/assets and browser-granted ports, stores identity/profile memory only, and does not save OS port paths.
 
 ## Verification

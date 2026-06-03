@@ -29,4 +29,4 @@ Skill-driven user hardware operation is CLI-only. USB/devd access is preferred f
 
 Released host tools now include installer scripts and `SHA256SUMS` verification as the primary user install path. The CLI/devd skill boundary changed with the host tools: CLI hardware operation uses IPC and sibling auto-start, while HTTP bridge usage is limited to loopback browser/debug paths. The skills explicitly treat Web Serial as a formal human browser path, not the agent-operated hardware path.
 
-Real ESP32-S3 flash instructions now require first-flash/non-project gates across CLI, devd bridge and Web Serial: artifact/hash/target evidence, typed phrase, explicit non-project acknowledgement when applicable, and post-flash identity capture.
+Real ESP32-S3 flash instructions now require first-flash/non-project gates across CLI, devd bridge and Web Serial: artifact/hash/target evidence, explicit owner confirmation, explicit non-project acknowledgement when applicable, and post-flash identity capture. Owner confirmation can be natural language and must not require a fixed typed phrase.

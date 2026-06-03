@@ -34,7 +34,7 @@ use tower_http::{
 pub const DEFAULT_BIND: &str = "127.0.0.1:30180";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30180";
 pub const DEFAULT_IPC_IDLE_TIMEOUT_SECS: u64 = 30;
-pub const FLASH_CONFIRMATION_PHRASE: &str = "FLASH LOADLYNX DIGITAL";
+pub const FLASH_CONFIRMATION_TEXT: &str = "yes";
 pub const DEFAULT_DIGITAL_USB_PORT_FILE: &str = ".esp32-port";
 pub const DEFAULT_ANALOG_PROBE_FILE: &str = ".stm32-port";
 const DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE: &str = ".esp32-port";
@@ -1192,10 +1192,10 @@ fn enforce_flash_gate(
     if target != &TargetKind::DigitalEsp32s3 {
         return Ok(());
     }
-    if input.confirmation_phrase.as_deref() != Some(FLASH_CONFIRMATION_PHRASE) {
+    if !is_flash_confirmation(input.confirmation_phrase.as_deref()) {
         return Err(HttpError::bad_request(
             "flash_confirmation_required",
-            format!("type confirmation phrase exactly: {FLASH_CONFIRMATION_PHRASE}"),
+            format!("type `{FLASH_CONFIRMATION_TEXT}` to confirm real digital flash"),
         ));
     }
     if !is_loadlynx_project_artifact(artifact)
@@ -1228,6 +1228,12 @@ fn enforce_flash_gate(
         }
     }
     Ok(())
+}
+
+fn is_flash_confirmation(value: Option<&str>) -> bool {
+    value
+        .map(str::trim)
+        .is_some_and(|value| value.eq_ignore_ascii_case(FLASH_CONFIRMATION_TEXT))
 }
 
 fn is_loadlynx_project_artifact(artifact: &FirmwareArtifact) -> bool {
@@ -6868,7 +6874,7 @@ mod tests {
                 artifact_id: Some("digital".to_string()),
                 dry_run: Some(false),
                 lease_id: None,
-                confirmation_phrase: Some(FLASH_CONFIRMATION_PHRASE.to_string()),
+                confirmation_phrase: Some(FLASH_CONFIRMATION_TEXT.to_string()),
                 expected_identity_device_id: None,
                 acknowledge_non_project_firmware: Some(true),
             }),
@@ -6879,7 +6885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_digital_flash_requires_confirmation_phrase() {
+    async fn real_digital_flash_requires_confirmation_text() {
         let state = AppState::new(PathBuf::from("."));
         {
             let mut guard = state.inner.lock().expect("state lock");
@@ -6926,7 +6932,7 @@ mod tests {
                 artifact_id: Some("foreign".to_string()),
                 dry_run: Some(false),
                 lease_id: None,
-                confirmation_phrase: Some(FLASH_CONFIRMATION_PHRASE.to_string()),
+                confirmation_phrase: Some(FLASH_CONFIRMATION_TEXT.to_string()),
                 expected_identity_device_id: None,
                 acknowledge_non_project_firmware: Some(false),
             }),

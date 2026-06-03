@@ -11,7 +11,7 @@ import {
   hasWebSerialSupport,
   parseFirmwareCatalog,
   runWebSerialDigitalFlash,
-  WEB_SERIAL_FLASH_CONFIRMATION_PHRASE,
+  WEB_SERIAL_FLASH_CONFIRMATION_TEXT,
   type WebSerialFlashResult,
 } from "../web-serial/loadlynx-web-serial.ts";
 
@@ -22,13 +22,13 @@ export function DeviceFirmwareRoute() {
   const [artifactId, setArtifactId] = useState("");
   const [manifestPath, setManifestPath] = useState("");
   const [dryRun, setDryRun] = useState(true);
-  const [devdConfirmPhrase, setDevdConfirmPhrase] = useState("");
+  const [devdConfirmText, setDevdConfirmText] = useState("");
   const [devdExpectedIdentity, setDevdExpectedIdentity] = useState("");
   const [devdNonProjectAck, setDevdNonProjectAck] = useState(false);
   const [webArtifactId, setWebArtifactId] = useState("");
   const [webCatalogFile, setWebCatalogFile] = useState<File | null>(null);
   const [webFirmwareFile, setWebFirmwareFile] = useState<File | null>(null);
-  const [webConfirmPhrase, setWebConfirmPhrase] = useState("");
+  const [webConfirmText, setWebConfirmText] = useState("");
   const [webExpectedIdentity, setWebExpectedIdentity] = useState("");
   const [webNonProjectAck, setWebNonProjectAck] = useState(false);
   const [webFlashResult, setWebFlashResult] =
@@ -53,7 +53,7 @@ export function DeviceFirmwareRoute() {
         <h2 className="text-2xl font-bold">Firmware</h2>
         <p className="text-sm text-base-content/70">
           Flash through the local devd bridge or a Web Serial browser session.
-          Real digital flashes require artifact hash evidence, typed
+          Real digital flashes require artifact hash evidence, explicit
           confirmation, and post-flash identity capture.
         </p>
       </header>
@@ -135,13 +135,13 @@ export function DeviceFirmwareRoute() {
             <div className="grid gap-4 md:grid-cols-3">
               <label className="ll-form-control">
                 <div className="ll-label-row pb-1">
-                  <span className="ll-label-text">Confirmation phrase</span>
+                  <span className="ll-label-text">Confirmation</span>
                 </div>
                 <input
                   className="ll-input"
-                  value={devdConfirmPhrase}
-                  onChange={(event) => setDevdConfirmPhrase(event.target.value)}
-                  placeholder={WEB_SERIAL_FLASH_CONFIRMATION_PHRASE}
+                  value={devdConfirmText}
+                  onChange={(event) => setDevdConfirmText(event.target.value)}
+                  placeholder={WEB_SERIAL_FLASH_CONFIRMATION_TEXT}
                 />
               </label>
               <label className="ll-form-control">
@@ -200,7 +200,7 @@ export function DeviceFirmwareRoute() {
                       target,
                       artifactId: selectedArtifactId,
                       dryRun,
-                      confirmationPhrase: devdConfirmPhrase || undefined,
+                      confirmationPhrase: devdConfirmText || undefined,
                       expectedIdentityDeviceId:
                         devdExpectedIdentity.trim() || undefined,
                       acknowledgeNonProjectFirmware: devdNonProjectAck,
@@ -311,13 +311,13 @@ export function DeviceFirmwareRoute() {
             </label>
             <label className="ll-form-control">
               <div className="ll-label-row pb-1">
-                <span className="ll-label-text">Confirmation phrase</span>
+                <span className="ll-label-text">Confirmation</span>
               </div>
               <input
                 className="ll-input"
-                value={webConfirmPhrase}
-                onChange={(event) => setWebConfirmPhrase(event.target.value)}
-                placeholder={WEB_SERIAL_FLASH_CONFIRMATION_PHRASE}
+                value={webConfirmText}
+                onChange={(event) => setWebConfirmText(event.target.value)}
+                placeholder={WEB_SERIAL_FLASH_CONFIRMATION_TEXT}
               />
             </label>
             <label className="ll-label-row cursor-pointer justify-start gap-3 pt-7">
@@ -355,7 +355,7 @@ export function DeviceFirmwareRoute() {
                       catalog,
                       artifactId: webArtifactId.trim() || undefined,
                       firmwareFile: webFirmwareFile,
-                      confirmationPhrase: webConfirmPhrase,
+                      confirmationPhrase: webConfirmText,
                       expectedIdentityDeviceId:
                         webExpectedIdentity.trim() || undefined,
                       acknowledgeNonProjectFirmware: webNonProjectAck,

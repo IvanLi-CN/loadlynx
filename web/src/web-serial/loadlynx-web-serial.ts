@@ -1,4 +1,4 @@
-export const WEB_SERIAL_FLASH_CONFIRMATION_PHRASE = "FLASH LOADLYNX DIGITAL";
+export const WEB_SERIAL_FLASH_CONFIRMATION_TEXT = "yes";
 
 export interface WebSerialIdentityProfile {
   deviceId: string;
@@ -83,10 +83,11 @@ export async function runWebSerialDigitalFlash(
   if (!hasWebSerialSupport()) {
     throw new Error("This browser does not expose Web Serial");
   }
-  if (input.confirmationPhrase !== WEB_SERIAL_FLASH_CONFIRMATION_PHRASE) {
-    throw new Error(
-      `Type confirmation phrase exactly: ${WEB_SERIAL_FLASH_CONFIRMATION_PHRASE}`,
-    );
+  if (
+    input.confirmationPhrase.trim().toLowerCase() !==
+    WEB_SERIAL_FLASH_CONFIRMATION_TEXT
+  ) {
+    throw new Error(`Type ${WEB_SERIAL_FLASH_CONFIRMATION_TEXT} to confirm`);
   }
   const artifact = selectDigitalArtifact(input.catalog, input.artifactId);
   if (!isLoadLynxArtifact(artifact) && !input.acknowledgeNonProjectFirmware) {

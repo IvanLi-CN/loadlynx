@@ -158,7 +158,7 @@ Flash behavior:
 - `target=analog_stm32g431`: use probe-rs or `mcu-agentd` backend, exact probe selector required.
 - `dry_run=true` must validate target resolution, artifact presence and hashes without touching hardware.
 - Real flash must refuse if the requested target does not match the selected device/board identity.
-- Real ESP32-S3 flash through CLI/devd/Web Serial must require artifact/hash/target evidence, the typed phrase `FLASH LOADLYNX DIGITAL`, explicit non-project firmware acknowledgement when applicable, and post-flash identity capture. A successful vendor-tool exit code alone is not sufficient.
+- Real ESP32-S3 flash through CLI/devd/Web Serial must require artifact/hash/target evidence, explicit `yes` confirmation, explicit non-project firmware acknowledgement when applicable, and post-flash identity capture. A successful vendor-tool exit code alone is not sufficient.
 - If flashing digital firmware disrupts USB CDC, devd must release affected leases and surface reconnect instructions.
 
 ### CLI
@@ -173,7 +173,7 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx devices --ipc /tmp/loadlynx-devd.sock`
 - `loadlynx status --url http://loadlynx-xxxxxx.local`
 - `loadlynx status --device <id>`
-- `loadlynx flash digital --device <id> --artifact <artifact_id> [--dry-run] [--confirm-phrase <phrase>]`
+- `loadlynx flash digital --device <id> --artifact <artifact_id> [--dry-run] [--confirm yes]`
 - `loadlynx flash analog --device <id> --artifact <artifact_id> [--dry-run]`
 - `loadlynx reset digital|analog --device <id>`
 - `loadlynx monitor digital|analog --device <id> --tail 200`
@@ -198,7 +198,7 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Devices/Fleet: merge LAN and USB marks for the same `identity.device_id`.
 - Device detail: status, CC/CV/PD/control, calibration, firmware, logs/API.
 - Firmware page: artifact source, target board selector, match/mismatch warning, dry-run, flash progress, reconnect state.
-- Web Serial firmware path: browser file inputs for release catalog and firmware file, SHA-256 verification, typed phrase, identity confirmation, non-project acknowledgement, esptool-js flash, and post-flash identity/profile capture without saving OS port paths.
+- Web Serial firmware path: browser file inputs for release catalog and firmware file, SHA-256 verification, `yes` confirmation, identity confirmation, non-project acknowledgement, esptool-js flash, and post-flash identity/profile capture without saving OS port paths.
 - USB session page/panel: lease state, heartbeat/reconnect, bounded logs, raw trace with sensitive redaction.
 
 ## 验收标准

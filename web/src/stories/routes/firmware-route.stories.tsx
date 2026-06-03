@@ -93,7 +93,7 @@ export const WebSerialGate: Story = {
     await waitFor(() => {
       canvas.getByRole("heading", { name: "Firmware" });
       canvas.getByText("Web Serial flash");
-      canvas.getByPlaceholderText("FLASH LOADLYNX DIGITAL");
+      canvas.getByPlaceholderText("yes");
       canvas.getByText("Acknowledge non-project firmware risk");
     });
   },

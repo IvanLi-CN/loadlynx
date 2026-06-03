@@ -99,7 +99,8 @@ loadlynx-devd bridge-http --bind 127.0.0.1:30180
   - Do not use Web UI or raw HTTP to apply PD settings if the CLI has not shipped that workflow.
 - Firmware and network lifecycle:
   - Firmware flash is a user workflow only when the Release provides firmware catalog/assets and the installed CLI can select and verify them.
-  - Real ESP32-S3 flash requires artifact/hash/target evidence, typed confirmation phrase, non-project firmware acknowledgement when applicable, and post-flash identity capture. A successful flash command alone is not enough to claim the device is usable.
+  - Real ESP32-S3 flash requires artifact/hash/target evidence, explicit owner confirmation, non-project firmware acknowledgement when applicable, and post-flash identity capture. A successful flash command alone is not enough to claim the device is usable.
+  - Owner confirmation can be natural language. Do not require the owner to answer with a fixed phrase; the requested flash action and target only need to be unambiguous.
   - WiFi configuration is a user workflow only when the installed CLI exposes a real WiFi command.
 - If a requested business workflow is absent from the installed CLI, stop and escalate to the developer skill to implement, test, package, and release that CLI capability.
 
@@ -148,8 +149,8 @@ loadlynx hardware forget <saved-hardware-id>
 - CLI firmware flash:
   - Confirm `loadlynx flash --help` supports the needed artifact/catalog options.
   - Use dry-run first whenever the CLI exposes it.
-  - Require the user to confirm the device id, target board, firmware artifact, confirmation phrase, and whether the command is dry-run or real flash.
-  - Do not flash if target evidence, artifact hash verification, lease/session requirements, typed phrase, or post-flash identity capture are missing.
+  - Require the user to confirm the device id, target board, firmware artifact, and whether the command is dry-run or real flash.
+  - Do not flash if target evidence, artifact hash verification, lease/session requirements, explicit confirmation, or post-flash identity capture are missing.
 - Web Serial:
   - GitHub Pages and release Web bundle are supported human browser paths for Web Serial identity/status/control/WiFi/diagnostics and ESP32-S3 flash when the browser exposes `navigator.serial`.
   - Web Serial saves identity/profile only and reconnects through browser-granted ports from `navigator.serial.getPorts()`. It must not save OS port paths.
