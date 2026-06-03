@@ -74,4 +74,5 @@ export interface DevdFlashResponse {
   dry_run: boolean;
   action: "flash" | string;
   target_evidence: unknown;
+  post_flash_identity?: unknown;
 }

@@ -1,8 +1,9 @@
 use chrono::Utc;
 use clap::{ArgAction, Parser, Subcommand, ValueEnum};
-use dialoguer::{Confirm, Select, theme::ColorfulTheme};
+use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use loadlynx_devd::{
-    DEFAULT_DEVD_URL, TargetKind, list_digital_usb_port_candidates, write_default_digital_usb_port,
+    FLASH_CONFIRMATION_PHRASE, IpcHttpRequest, TargetKind, default_ipc_endpoint, ipc_http_request,
+    list_digital_usb_port_candidates, write_default_digital_usb_port,
 };
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -12,15 +13,19 @@ use std::{
     env, fs, io,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
 };
+use tokio::process::Command as TokioCommand;
 
 #[derive(Debug, Parser)]
 #[command(name = "loadlynx")]
 #[command(about = "LoadLynx LAN/USB/devd control CLI")]
 struct Cli {
-    #[arg(long, default_value = DEFAULT_DEVD_URL)]
-    devd: String,
+    #[arg(long, global = true, default_value_t = default_ipc_endpoint())]
+    ipc: String,
+    #[arg(long, global = true)]
+    no_auto_start: bool,
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -56,6 +61,12 @@ enum Command {
         manifest_path: Option<String>,
         #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
+        #[arg(long)]
+        confirm_phrase: Option<String>,
+        #[arg(long)]
+        expected_identity_device_id: Option<String>,
+        #[arg(long)]
+        acknowledge_non_project_firmware: bool,
     },
     Reset {
         target: BoardTarget,
@@ -503,17 +514,152 @@ fn api_url(base: &str, path: &str) -> Result<Url, Box<dyn std::error::Error + Se
     Ok(url)
 }
 
+async fn ensure_ipc_devd(
+    endpoint: &str,
+    auto_start: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if devd_health(endpoint).await.is_ok() {
+        return Ok(());
+    }
+    if !auto_start {
+        return Err(format!(
+            "loadlynx-devd IPC is not available at {endpoint}; start `loadlynx-devd serve --endpoint {endpoint}` or omit --no-auto-start"
+        )
+        .into());
+    }
+
+    let mut child = spawn_ipc_devd_process(endpoint).await?;
+
+    for _ in 0..100 {
+        if devd_health(endpoint).await.is_ok() {
+            return Ok(());
+        }
+        if let Some(status) = child.try_wait()? {
+            return Err(format!(
+                "loadlynx-devd exited early while starting IPC at {endpoint}: {status}"
+            )
+            .into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+
+    let _ = child.kill().await;
+    Err(format!("loadlynx-devd IPC did not become ready at {endpoint}").into())
+}
+
+async fn devd_health(endpoint: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let value = request_devd_value(endpoint, reqwest::Method::GET, "/health", None).await?;
+    if value.get("ok").and_then(Value::as_bool) == Some(true) {
+        Ok(())
+    } else {
+        Err("loadlynx-devd health response was not ok".into())
+    }
+}
+
+fn sibling_devd_binary() -> PathBuf {
+    let exe_name = if cfg!(windows) {
+        "loadlynx-devd.exe"
+    } else {
+        "loadlynx-devd"
+    };
+    env::current_exe()
+        .ok()
+        .and_then(|path| path.parent().map(|parent| parent.join(exe_name)))
+        .filter(|path| path.exists())
+        .unwrap_or_else(|| PathBuf::from(exe_name))
+}
+
+async fn spawn_ipc_devd_process(
+    endpoint: &str,
+) -> Result<tokio::process::Child, Box<dyn std::error::Error + Send + Sync>> {
+    let devd_bin = sibling_devd_binary();
+    if devd_bin.exists() {
+        return TokioCommand::new(&devd_bin)
+            .arg("serve")
+            .arg("--endpoint")
+            .arg(endpoint)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                format!(
+                    "failed to auto-start {}: {error}",
+                    devd_bin.to_string_lossy()
+                )
+                .into()
+            });
+    }
+
+    let manifest = PathBuf::from("tools/loadlynx-devd/Cargo.toml");
+    TokioCommand::new("cargo")
+        .arg("run")
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .arg("--bin")
+        .arg("loadlynx-devd")
+        .arg("--")
+        .arg("serve")
+        .arg("--endpoint")
+        .arg(endpoint)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|error| {
+            format!(
+                "failed to auto-start cargo fallback for {}: {error}",
+                manifest.to_string_lossy()
+            )
+            .into()
+        })
+}
+
+async fn request_devd_value(
+    endpoint: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(test)]
+    if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
+        let client = Client::new();
+        return request_http_value(&client, endpoint, method, path, body).await;
+    }
+
+    let response = ipc_http_request(
+        endpoint,
+        IpcHttpRequest {
+            method: method.as_str().to_string(),
+            path: path.to_string(),
+            body,
+        },
+    )
+    .await?;
+    if (200..300).contains(&response.status) {
+        Ok(response.body)
+    } else {
+        Err(format!(
+            "devd IPC request failed with HTTP {}: {}",
+            response.status, response.body
+        )
+        .into())
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
     let json_output = cli.json;
+    let devd = cli.ipc;
+    for endpoint in initial_devd_endpoints(&cli.command, &devd) {
+        ensure_ipc_devd(&endpoint, !cli.no_auto_start).await?;
+    }
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
     let payload = match cli.command {
-        Command::Hardware { command } => {
-            handle_hardware_command(command, &client, &cli.devd).await?
-        }
+        Command::Hardware { command } => handle_hardware_command(command, &client, &devd).await?,
         Command::UsbPort {
             command: UsbPortCommand::Set { args },
         } => {
@@ -527,23 +673,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             }
         }
         Command::Discover { mdns, lan_scan } => {
-            let scan = client
-                .post(api_url(&cli.devd, "/api/v1/devices/scan")?)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?;
+            let scan =
+                request_devd_value(&devd, reqwest::Method::POST, "/api/v1/devices/scan", None)
+                    .await?;
             json!({"mdns_requested": mdns, "lan_scan_requested": lan_scan, "devd": scan})
         }
         Command::Devices => {
-            client
-                .get(api_url(&cli.devd, "/api/v1/devices")?)
-                .send()
-                .await?
-                .error_for_status()?
-                .json::<Value>()
-                .await?
+            request_devd_value(&devd, reqwest::Method::GET, "/api/v1/devices", None).await?
         }
         Command::Status {
             url,
@@ -552,7 +688,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } => {
             ensure_one_status_selector(url.as_ref(), device.as_ref(), hardware.as_ref())?;
             if let Some(hardware_id) = hardware {
-                match resolve_saved_hardware(&hardware_id, &cli.devd)? {
+                match resolve_saved_hardware(&hardware_id, &devd)? {
                     ResolvedHardware::Usb(resolved) => {
                         let lease =
                             create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
@@ -561,19 +697,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             resolved.devd.clone(),
                             lease.clone(),
                         );
-                        let mut url = api_url(&resolved.devd, "/api/v1/status")?;
-                        url.query_pairs_mut()
-                            .append_pair("device_id", &resolved.device)
-                            .append_pair("lease_id", &lease.lease_id);
+                        let path = format!(
+                            "/api/v1/status?device_id={}&lease_id={}",
+                            resolved.device, lease.lease_id
+                        );
                         let status: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
                             async {
-                                Ok(client
-                                    .get(url)
-                                    .send()
-                                    .await?
-                                    .error_for_status()?
-                                    .json::<Value>()
-                                    .await?)
+                                request_devd_value(
+                                    &resolved.devd,
+                                    reqwest::Method::GET,
+                                    &path,
+                                    None,
+                                )
+                                .await
                             }
                             .await;
                         let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
@@ -607,28 +743,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let _ = remember_connected_http(&id, &url);
                 status
             } else if let Some(device) = device {
-                let lease = create_cli_lease(&client, &cli.devd, &device).await?;
+                let lease = create_cli_lease(&client, &devd, &device).await?;
                 let heartbeat =
-                    spawn_cli_lease_heartbeat(client.clone(), cli.devd.clone(), lease.clone());
-                let mut url = api_url(&cli.devd, "/api/v1/status")?;
-                url.query_pairs_mut()
-                    .append_pair("device_id", &device)
-                    .append_pair("lease_id", &lease.lease_id);
-                let status: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-                    Ok(client
-                        .get(url)
-                        .send()
-                        .await?
-                        .error_for_status()?
-                        .json::<Value>()
-                        .await?)
-                }
-                .await;
-                let _ = release_cli_lease(&client, &cli.devd, &lease.lease_id).await;
+                    spawn_cli_lease_heartbeat(client.clone(), devd.clone(), lease.clone());
+                let path = format!(
+                    "/api/v1/status?device_id={device}&lease_id={}",
+                    lease.lease_id
+                );
+                let status: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
+                    async { request_devd_value(&devd, reqwest::Method::GET, &path, None).await }
+                        .await;
+                let _ = release_cli_lease(&client, &devd, &lease.lease_id).await;
                 heartbeat.abort();
                 let status = status?;
                 let id = generated_usb_hardware_id(&device);
-                let _ = remember_connected_usb(&id, &device, &cli.devd);
+                let _ = remember_connected_usb(&id, &device, &devd);
                 status
             } else {
                 return Err("status requires --hardware, --device, or --url".into());
@@ -641,17 +770,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             artifact,
             manifest_path,
             dry_run,
+            confirm_phrase,
+            expected_identity_device_id,
+            acknowledge_non_project_firmware,
         } => {
-            let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
+            let resolved = resolve_usb_target(device, hardware, &devd)?;
             if manifest_path.is_some() {
                 select_device_artifact(&client, &resolved, manifest_path.clone(), artifact.clone())
                     .await?;
             }
+            let confirmation_phrase = resolve_flash_confirmation_phrase(dry_run, confirm_phrase)?;
             post_usb_operation_with_optional_lease(
                 &client,
                 &resolved,
                 &format!("/api/v1/devices/{}/flash", resolved.device),
-                json!({"target": target.kind(), "artifact_id": artifact, "dry_run": dry_run}),
+                json!({
+                    "target": target.kind(),
+                    "artifact_id": artifact,
+                    "dry_run": dry_run,
+                    "confirmation_phrase": confirmation_phrase,
+                    "expected_identity_device_id": expected_identity_device_id,
+                    "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
+                }),
                 dry_run,
             )
             .await?
@@ -662,7 +802,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             hardware,
             dry_run,
         } => {
-            let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
+            let resolved = resolve_usb_target(device, hardware, &devd)?;
             post_usb_operation_with_optional_lease(
                 &client,
                 &resolved,
@@ -679,7 +819,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             tail,
             format,
         } => {
-            let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
+            let resolved = resolve_usb_target(device, hardware, &devd)?;
             run_monitor(&client, resolved, tail, format).await?
         }
         Command::Output { command } => match command {
@@ -694,7 +834,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 ensure_one_output_selector(url.as_ref(), hardware.as_ref())?;
                 let body = output_set_body(enable, target_i_ma);
                 if let Some(hardware_id) = hardware {
-                    match resolve_saved_hardware(&hardware_id, &cli.devd)? {
+                    match resolve_saved_hardware(&hardware_id, &devd)? {
                         ResolvedHardware::Http { url } => {
                             client
                                 .post(api_url(&url, "/api/v1/cc")?)
@@ -713,21 +853,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 resolved.devd.clone(),
                                 lease.clone(),
                             );
-                            let mut output_url = api_url(&resolved.devd, "/api/v1/cc")?;
-                            output_url
-                                .query_pairs_mut()
-                                .append_pair("device_id", &resolved.device)
-                                .append_pair("lease_id", &lease.lease_id);
+                            let path = format!(
+                                "/api/v1/cc?device_id={}&lease_id={}",
+                                resolved.device, lease.lease_id
+                            );
                             let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
                                 async {
-                                    Ok(client
-                                        .post(output_url)
-                                        .json(&body)
-                                        .send()
-                                        .await?
-                                        .error_for_status()?
-                                        .json::<Value>()
-                                        .await?)
+                                    request_devd_value(
+                                        &resolved.devd,
+                                        reqwest::Method::POST,
+                                        &path,
+                                        Some(body.clone()),
+                                    )
+                                    .await
                                 }
                                 .await;
                             let _ =
@@ -760,7 +898,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 i_req_ma,
                 allow_extended_voltage,
             } => {
-                let resolved = resolve_usb_target(device, hardware, &cli.devd)?;
+                let resolved = resolve_usb_target(device, hardware, &devd)?;
                 let mut body = serde_json::Map::new();
                 if let Some(mode) = mode {
                     body.insert(
@@ -792,20 +930,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let lease = create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
                 let heartbeat =
                     spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-                let mut pd_url = api_url(&resolved.devd, "/api/v1/pd")?;
-                pd_url
-                    .query_pairs_mut()
-                    .append_pair("device_id", &resolved.device)
-                    .append_pair("lease_id", &lease.lease_id);
+                let path = format!(
+                    "/api/v1/pd?device_id={}&lease_id={}",
+                    resolved.device, lease.lease_id
+                );
                 let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-                    Ok(client
-                        .post(pd_url)
-                        .json(&Value::Object(body))
-                        .send()
-                        .await?
-                        .error_for_status()?
-                        .json::<Value>()
-                        .await?)
+                    request_devd_value(
+                        &resolved.devd,
+                        reqwest::Method::POST,
+                        &path,
+                        Some(Value::Object(body.clone())),
+                    )
+                    .await
                 }
                 .await;
                 let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
@@ -821,7 +957,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -845,7 +981,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -866,7 +1002,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -888,7 +1024,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -911,7 +1047,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let output_enabled = resolve_output_enable(enable, disable)?;
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -933,7 +1069,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -954,7 +1090,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -975,7 +1111,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -997,7 +1133,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1018,7 +1154,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1039,7 +1175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1060,7 +1196,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1081,7 +1217,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1103,7 +1239,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         } => {
             request_api_value(
                 &client,
-                &cli.devd,
+                &devd,
                 ApiSelector {
                     url,
                     device,
@@ -1124,7 +1260,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 request_api_value(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1148,7 +1284,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 handle_backup_export(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1170,7 +1306,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 handle_backup_import(
                     &client,
-                    &cli.devd,
+                    &devd,
                     ApiSelector {
                         url,
                         device,
@@ -1197,22 +1333,252 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 }
 
 async fn select_device_artifact(
-    client: &Client,
+    _client: &Client,
     resolved: &ResolvedUsbHardware,
     manifest_path: Option<String>,
     artifact_id: Option<String>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(client
-        .post(api_url(
-            &resolved.devd,
-            &format!("/api/v1/devices/{}/artifact", resolved.device),
-        )?)
-        .json(&json!({"manifest_path": manifest_path, "artifact_id": artifact_id}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Value>()
-        .await?)
+    request_devd_value(
+        &resolved.devd,
+        reqwest::Method::POST,
+        &format!("/api/v1/devices/{}/artifact", resolved.device),
+        Some(json!({"manifest_path": manifest_path, "artifact_id": artifact_id})),
+    )
+    .await
+}
+
+fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> {
+    let endpoints = match command {
+        Command::Discover { .. } | Command::Devices => vec![default_devd.to_string()],
+        Command::Status {
+            url,
+            device,
+            hardware,
+        } => selector_devd_endpoint(
+            url.as_ref(),
+            device.as_ref(),
+            hardware.as_ref(),
+            default_devd,
+        )
+        .into_iter()
+        .collect(),
+        Command::Flash {
+            device, hardware, ..
+        }
+        | Command::Reset {
+            device, hardware, ..
+        }
+        | Command::Monitor {
+            device, hardware, ..
+        }
+        | Command::Pd {
+            command: PdCommand::Set {
+                device, hardware, ..
+            },
+        } => usb_target_devd_endpoint(device.as_ref(), hardware.as_ref(), default_devd)
+            .into_iter()
+            .collect(),
+        Command::Output {
+            command: OutputCommand::Set { url, hardware, .. },
+        } => selector_devd_endpoint(url.as_ref(), None, hardware.as_ref(), default_devd)
+            .into_iter()
+            .collect(),
+        Command::Wifi { command } => match command {
+            WifiCommand::Show {
+                url,
+                device,
+                hardware,
+            }
+            | WifiCommand::Set {
+                url,
+                device,
+                hardware,
+                ..
+            }
+            | WifiCommand::Clear {
+                url,
+                device,
+                hardware,
+                ..
+            } => selector_devd_endpoint(
+                url.as_ref(),
+                device.as_ref(),
+                hardware.as_ref(),
+                default_devd,
+            )
+            .into_iter()
+            .collect(),
+        },
+        Command::Control { command } => match command {
+            ControlCommand::Get {
+                url,
+                device,
+                hardware,
+            }
+            | ControlCommand::Set {
+                url,
+                device,
+                hardware,
+                ..
+            } => selector_devd_endpoint(
+                url.as_ref(),
+                device.as_ref(),
+                hardware.as_ref(),
+                default_devd,
+            )
+            .into_iter()
+            .collect(),
+        },
+        Command::Preset { command } => match command {
+            PresetCommand::List {
+                url,
+                device,
+                hardware,
+            }
+            | PresetCommand::Set {
+                url,
+                device,
+                hardware,
+                ..
+            }
+            | PresetCommand::Apply {
+                url,
+                device,
+                hardware,
+                ..
+            } => selector_devd_endpoint(
+                url.as_ref(),
+                device.as_ref(),
+                hardware.as_ref(),
+                default_devd,
+            )
+            .into_iter()
+            .collect(),
+        },
+        Command::Calibration { command } => match command {
+            CalibrationCommand::Profile {
+                url,
+                device,
+                hardware,
+            }
+            | CalibrationCommand::Mode {
+                url,
+                device,
+                hardware,
+                ..
+            }
+            | CalibrationCommand::Apply {
+                url,
+                device,
+                hardware,
+                ..
+            }
+            | CalibrationCommand::Commit {
+                url,
+                device,
+                hardware,
+                ..
+            }
+            | CalibrationCommand::Reset {
+                url,
+                device,
+                hardware,
+                ..
+            } => selector_devd_endpoint(
+                url.as_ref(),
+                device.as_ref(),
+                hardware.as_ref(),
+                default_devd,
+            )
+            .into_iter()
+            .collect(),
+        },
+        Command::SoftReset {
+            url,
+            device,
+            hardware,
+            ..
+        }
+        | Command::Diagnostics {
+            command:
+                DiagnosticsCommand::Export {
+                    url,
+                    device,
+                    hardware,
+                },
+        } => selector_devd_endpoint(
+            url.as_ref(),
+            device.as_ref(),
+            hardware.as_ref(),
+            default_devd,
+        )
+        .into_iter()
+        .collect(),
+        Command::Backup { command } => match command {
+            BackupCommand::Export {
+                url,
+                device,
+                hardware,
+                ..
+            }
+            | BackupCommand::Import {
+                url,
+                device,
+                hardware,
+                ..
+            } => selector_devd_endpoint(
+                url.as_ref(),
+                device.as_ref(),
+                hardware.as_ref(),
+                default_devd,
+            )
+            .into_iter()
+            .collect(),
+        },
+        Command::UsbPort { .. } | Command::Hardware { .. } => Vec::new(),
+    };
+
+    let mut seen = HashSet::new();
+    endpoints
+        .into_iter()
+        .filter(|endpoint| seen.insert(endpoint.clone()))
+        .collect()
+}
+
+fn selector_devd_endpoint(
+    url: Option<&String>,
+    device: Option<&String>,
+    hardware: Option<&String>,
+    default_devd: &str,
+) -> Option<String> {
+    if url.is_some() {
+        return None;
+    }
+    if device.is_some() {
+        return Some(default_devd.to_string());
+    }
+    hardware
+        .and_then(|id| resolve_saved_hardware(id, default_devd).ok())
+        .and_then(|resolved| match resolved {
+            ResolvedHardware::Usb(resolved) => Some(resolved.devd),
+            ResolvedHardware::Http { .. } => None,
+        })
+}
+
+fn usb_target_devd_endpoint(
+    device: Option<&String>,
+    hardware: Option<&String>,
+    default_devd: &str,
+) -> Option<String> {
+    if device.is_some() {
+        return Some(default_devd.to_string());
+    }
+    hardware
+        .and_then(|id| resolve_saved_hardware(id, default_devd).ok())
+        .and_then(|resolved| match resolved {
+            ResolvedHardware::Usb(resolved) => Some(resolved.devd),
+            ResolvedHardware::Http { .. } => None,
+        })
 }
 
 fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
@@ -1222,6 +1588,25 @@ fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
         body.insert("target_i_ma".to_string(), json!(target_i_ma));
     }
     Value::Object(body)
+}
+
+fn resolve_flash_confirmation_phrase(
+    dry_run: bool,
+    provided: Option<String>,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    if dry_run {
+        return Ok(provided);
+    }
+    if provided.is_some() {
+        return Ok(provided);
+    }
+    eprintln!("Real digital firmware flash is high risk.");
+    eprintln!("Type exactly `{FLASH_CONFIRMATION_PHRASE}` to continue.");
+    let typed: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Confirmation phrase")
+        .allow_empty(false)
+        .interact_text()?;
+    Ok(Some(typed))
 }
 
 fn print_cli_payload(
@@ -2396,24 +2781,19 @@ async fn request_devd_usb_value_once(
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let lease = create_cli_lease(client, &resolved.devd, &resolved.device).await?;
     let heartbeat = spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-    let mut url = api_url(&resolved.devd, path)?;
-    url.query_pairs_mut()
-        .append_pair("device_id", &resolved.device)
-        .append_pair("lease_id", &lease.lease_id);
+    let separator = if path.contains('?') { '&' } else { '?' };
+    let path = format!(
+        "{path}{separator}device_id={}&lease_id={}",
+        resolved.device, lease.lease_id
+    );
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-        let mut request = client.request(method, url);
-        if let Some(body) = body {
-            request = request.json(&body);
+        match request_devd_value(&resolved.devd, method, &path, body).await {
+            Ok(value) => Ok(value),
+            Err(error) if retryable_503 && error.to_string().contains("HTTP 503") => {
+                Err(format!("retryable 503 from devd USB request: {error}").into())
+            }
+            Err(error) => Err(error),
         }
-        let response = request.send().await?;
-        if retryable_503 && response.status() == reqwest::StatusCode::SERVICE_UNAVAILABLE {
-            let message = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "service unavailable".to_string());
-            return Err(format!("retryable 503 from devd USB request: {message}").into());
-        }
-        Ok(response.error_for_status()?.json::<Value>().await?)
     }
     .await;
     let _ = release_cli_lease(client, &resolved.devd, &lease.lease_id).await;
@@ -2450,34 +2830,38 @@ fn resolve_output_enable(
 }
 
 async fn create_cli_lease(
-    client: &Client,
+    _client: &Client,
     devd: &str,
     device: &str,
 ) -> Result<CliLease, Box<dyn std::error::Error + Send + Sync>> {
-    Ok(client
-        .post(api_url(devd, "/api/v1/serial/lease")?)
-        .json(&json!({"device_id": device}))
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<CliLease>()
-        .await?)
+    Ok(serde_json::from_value(
+        request_devd_value(
+            devd,
+            reqwest::Method::POST,
+            "/api/v1/serial/lease",
+            Some(json!({"device_id": device})),
+        )
+        .await?,
+    )?)
 }
 
 async fn release_cli_lease(
-    client: &Client,
+    _client: &Client,
     devd: &str,
     lease_id: &str,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let _ = client
-        .delete(api_url(devd, &format!("/api/v1/serial/lease/{lease_id}"))?)
-        .send()
-        .await?;
+    let _ = request_devd_value(
+        devd,
+        reqwest::Method::DELETE,
+        &format!("/api/v1/serial/lease/{lease_id}"),
+        None,
+    )
+    .await;
     Ok(())
 }
 
 fn spawn_cli_lease_heartbeat(
-    client: Client,
+    _client: Client,
     devd: String,
     lease: CliLease,
 ) -> tokio::task::JoinHandle<()> {
@@ -2486,11 +2870,15 @@ fn spawn_cli_lease_heartbeat(
         let mut interval = tokio::time::interval(std::time::Duration::from_millis(interval_ms));
         loop {
             interval.tick().await;
-            let Ok(url) = api_url(&devd, &format!("/api/v1/serial/lease/{}", lease.lease_id))
-            else {
-                break;
-            };
-            if client.post(url).send().await.is_err() {
+            if request_devd_value(
+                &devd,
+                reqwest::Method::POST,
+                &format!("/api/v1/serial/lease/{}", lease.lease_id),
+                None,
+            )
+            .await
+            .is_err()
+            {
                 break;
             }
         }
@@ -2522,14 +2910,7 @@ async fn post_usb_operation_with_optional_lease(
     }
 
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-        Ok(client
-            .post(api_url(&resolved.devd, path)?)
-            .json(&payload)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?)
+        request_devd_value(&resolved.devd, reqwest::Method::POST, path, Some(payload)).await
     }
     .await;
 
@@ -2553,23 +2934,18 @@ async fn run_monitor(
         spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
     let mut seen = HashSet::new();
     loop {
-        let mut url = api_url(
+        let session = request_devd_value(
             &resolved.devd,
+            reqwest::Method::GET,
             &format!(
-                "/api/v1/devices/{}/session?logs_limit={tail}&trace_limit={}",
+                "/api/v1/devices/{}/session?logs_limit={tail}&trace_limit={}&lease_id={}",
                 resolved.device,
-                tail * 2
+                tail * 2,
+                lease.lease_id
             ),
-        )?;
-        url.query_pairs_mut()
-            .append_pair("lease_id", &lease.lease_id);
-        let session = client
-            .get(url)
-            .send()
-            .await?
-            .error_for_status()?
-            .json::<Value>()
-            .await?;
+            None,
+        )
+        .await?;
         print_session_delta(&session, &mut seen, &format)?;
         tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
     }
@@ -2694,7 +3070,7 @@ fn choose_digital_usb_port_interactive() -> io::Result<String> {
 
 async fn handle_hardware_command(
     command: HardwareCommand,
-    client: &Client,
+    _client: &Client,
     devd: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let path = hardware_registry_path()?;
@@ -2702,35 +3078,28 @@ async fn handle_hardware_command(
         HardwareCommand::Available { scan } => {
             let registry = read_hardware_registry(&path)?;
             let scan_result = if scan {
-                Some(match api_url(devd, "/api/v1/devices/scan") {
-                    Ok(url) => match client.post(url).send().await {
-                        Ok(response) => match response.error_for_status() {
-                            Ok(response) => match response.json::<Value>().await {
-                                Ok(value) => json!({"ok": true, "response": value}),
-                                Err(error) => devd_error_payload(error),
-                            },
-                            Err(error) => devd_error_payload(error),
-                        },
+                Some(
+                    match request_devd_value(
+                        devd,
+                        reqwest::Method::POST,
+                        "/api/v1/devices/scan",
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(value) => json!({"ok": true, "response": value}),
                         Err(error) => devd_error_payload(error),
                     },
-                    Err(error) => devd_error_payload(error),
-                })
+                )
             } else {
                 None
             };
-            let devd_devices = match api_url(devd, "/api/v1/devices") {
-                Ok(url) => match client.get(url).send().await {
-                    Ok(response) => match response.error_for_status() {
-                        Ok(response) => match response.json::<Value>().await {
-                            Ok(value) => json!({"ok": true, "response": value}),
-                            Err(error) => devd_error_payload(error),
-                        },
-                        Err(error) => devd_error_payload(error),
-                    },
+            let devd_devices =
+                match request_devd_value(devd, reqwest::Method::GET, "/api/v1/devices", None).await
+                {
+                    Ok(value) => json!({"ok": true, "response": value}),
                     Err(error) => devd_error_payload(error),
-                },
-                Err(error) => devd_error_payload(error),
-            };
+                };
             Ok(available_hardware_payload(
                 path,
                 devd,
@@ -3427,6 +3796,69 @@ mod tests {
         ])
         .unwrap_err();
         assert!(err.to_string().contains("unsupported USB port target"));
+    }
+
+    #[test]
+    fn initial_devd_endpoints_skip_local_commands() {
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "usb-port",
+            "set",
+            "digital",
+            "/dev/cu.usbmodem212101",
+        ])
+        .expect("usb-port parse");
+        assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "hardware",
+            "list",
+        ])
+        .expect("hardware list parse");
+        assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
+    }
+
+    #[test]
+    fn initial_devd_endpoints_include_usb_commands() {
+        let cli = Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "devices"])
+            .expect("devices parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "status",
+            "--device",
+            "digital-1",
+        ])
+        .expect("status device parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+    }
+
+    #[test]
+    fn initial_devd_endpoints_skip_http_url_commands() {
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "status",
+            "--url",
+            "http://loadlynx.local",
+        ])
+        .expect("status url parse");
+        assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
     }
 
     #[test]

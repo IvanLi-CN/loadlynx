@@ -22,6 +22,9 @@ devd-test:
 devd-serve +args:
   cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynx-devd -- serve {{args}}
 
+devd-bridge-http +args:
+  cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynx-devd -- bridge-http {{args}}
+
 loadlynx +args:
   cargo run --manifest-path tools/loadlynx-devd/Cargo.toml --bin loadlynx -- {{args}}
 

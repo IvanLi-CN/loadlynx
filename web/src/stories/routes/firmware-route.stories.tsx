@@ -85,3 +85,16 @@ export const DryRunEvidence: Story = {
 export const MissingLease: Story = {
   render: () => <FirmwareRouteNoLeaseStory />,
 };
+
+export const WebSerialGate: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await waitFor(() => {
+      canvas.getByRole("heading", { name: "Firmware" });
+      canvas.getByText("Web Serial flash");
+      canvas.getByPlaceholderText("FLASH LOADLYNX DIGITAL");
+      canvas.getByText("Acknowledge non-project firmware risk");
+    });
+  },
+};

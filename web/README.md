@@ -2,7 +2,8 @@
 
 This `web/` directory hosts the LoadLynx network control web console. At this
 stage it provides the browser console for device discovery, CC control, status,
-USB-PD settings, firmware dry-runs, calibration and settings.
+USB-PD settings, firmware dry-runs, Web Serial ESP32-S3 flashing, calibration
+and settings.
 
 ## Tech stack
 
@@ -18,6 +19,7 @@ USB-PD settings, firmware dry-runs, calibration and settings.
 - Biome for linting/formatting
 - Playwright for end-to-end tests
 - Lefthook for local Git hooks
+- esptool-js for browser Web Serial ESP32-S3 flashing
 
 The Web UI deliberately does not use daisyUI. Do not add `daisyui`, `@plugin "daisyui"` or daisyUI semantic classes such as `btn`, `card`, `input`, `select`, `badge`, `alert`, `table`, `menu`, `modal`, `tabs`, `mockup-code` or `loading`. Use local `ll-*` component classes or local primitives from `src/components/ui/`.
 
@@ -63,6 +65,19 @@ bun install
 bun run dev
 ```
 
+For local hardware-backed Web development, start the HTTP bridge separately and
+point Vite at it:
+
+```bash
+just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors
+VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:30180 bun run dev
+```
+
+`loadlynx-devd serve` is the IPC daemon for CLI workflows. It uses a Unix
+socket on macOS/Linux and a named pipe on Windows by default; Web/browser paths
+use `loadlynx-devd bridge-http` or Web Serial. The HTTP bridge must stay on
+loopback.
+
 Core scripts:
 
 - `bun run dev` – start the Vite development server.
@@ -98,6 +113,20 @@ Examples:
 - Required device endpoints (see `docs/interfaces/network-http-api.md`):
   - `GET /api/v1/pd` — read attach/contract/capabilities/saved config
   - `POST /api/v1/pd` — apply config; Web uses `POST` + `Content-Type: text/plain` with a JSON string body to avoid private-network preflight issues.
+
+## Web Serial
+
+- GitHub Pages and release Web bundles are formal human UI paths for browsers
+  that expose `navigator.serial`.
+- Web Serial firmware flashing requires a release firmware catalog JSON, the
+  matching firmware file, SHA-256 verification, the typed phrase
+  `FLASH LOADLYNX DIGITAL`, non-project firmware acknowledgement when
+  applicable, and post-flash identity capture.
+- Web Serial stores only device identity/profile metadata. It reconnects through
+  browser-granted ports from `navigator.serial.getPorts()` and does not persist
+  OS serial port paths.
+- Browsers without Web Serial should use Chrome/Edge or the released
+  CLI/devd host tools.
 
 ## Simulation devices & mock backend
 

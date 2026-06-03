@@ -99,7 +99,7 @@ just agentd-get-port analog
 
 `loadlynx-devd` 是 CLI 访问 ESP32-S3 USB CDC JSONL 的本地守护。验证 CLI/devd 控制面时通过 `just loadlynx usb-port set digital <path>` 复用仓根项目开发端口缓存作为默认端口记忆，不要切换 `mcu-agentd selector`。CLI/devd 的 ESP32-S3 digital firmware flash 也走 devd：持有 lease/session、校验 artifact hash，并对批准的项目开发端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。不要退回 `just agentd flash digital`。如果项目开发端口缓存包含 selector metadata，CLI/devd 只使用端口路径行。
 
-普通用户需要操作硬件时，应从 GitHub Releases 下载对应平台的 `loadlynx-host-tools-*.tar.gz`，并通过 `loadlynx` CLI 操作硬件：USB/devd 优先，HTTP 其次。该发布包包含 `loadlynx-devd` 本地守护程序 / USB bridge，以及 `loadlynx` CLI 工具（当前源码可见命令包括 `discover`、`devices`、`status`、`output set`、`usb-port set`、`hardware`、`flash`、`reset`、`monitor`）。用户侧 CLI 用 `loadlynx hardware available/recent/path/list/save/forget` 和 `loadlynx status --hardware <id>` 记忆、查找、列出可连接设备、列出最近连接设备、列出已记住设备与遗忘设备；`status --device` 与 `status --url` 成功后会更新用户级记忆，后续优先找回 USB 设备，再 fallback 到 HTTP 设备。硬件记忆保存到用户配置目录：macOS `~/Library/Application Support/LoadLynx/devices.json`，Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`，Windows `%APPDATA%\LoadLynx\devices.json`，可用 `LOADLYNX_HOME` 覆盖目录。若安装版 CLI 不支持 WiFi 配置，不能退回 Web UI，需要进入开发/维护路径补齐并发布。用户侧固件烧录必须使用同一 Release 发布的 firmware catalog/assets，并先确认当前 `loadlynx flash --help` 支持所需流程。从源码构建、`just`、项目开发端口缓存、缺失 CLI 功能实现和 HIL 验证属于开发/维护路径。
+普通用户需要操作硬件时，应从 GitHub Releases 使用 `install-loadlynx-host.sh` / `install-loadlynx-host.ps1` 安装 host tools；安装器会下载对应平台的 `loadlynx-host-tools-*.tar.gz`，用 release `SHA256SUMS` 校验后安装到用户目录，并只打印 PATH 提示，不自动修改 shell/profile。也可以手动下载 archive，但必须先用 `SHA256SUMS` 校验。发布包包含 `loadlynx-devd` 本地守护程序 / USB bridge，以及 `loadlynx` CLI 工具。CLI/devd 本地控制为 IPC-first：`loadlynx` 通过本地 IPC endpoint 与 sibling `loadlynx-devd serve` 通信，并可按需 auto-start；macOS/Linux 默认使用 Unix socket，Windows 默认使用 named pipe，`--ipc` / `--endpoint` 仅在需要覆盖默认 endpoint 时使用。旧的普通 `--devd http://...` CLI 路径不再作为用户操作入口。`loadlynx-devd bridge-http` 仅用于浏览器/Web/debug bridge，必须绑定 loopback。用户侧通过 `loadlynx` CLI 操作硬件：USB/devd IPC 优先，HTTP 设备 URL 其次。CLI 用 `loadlynx hardware available/recent/path/list/save/forget` 和 `loadlynx status --hardware <id>` 记忆、查找、列出可连接设备、列出最近连接设备、列出已记住设备与遗忘设备；`status --device` 与 `status --url` 成功后会更新用户级记忆，后续优先找回 USB 设备，再 fallback 到 HTTP 设备。硬件记忆保存到用户配置目录：macOS `~/Library/Application Support/LoadLynx/devices.json`，Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`，Windows `%APPDATA%\LoadLynx\devices.json`，可用 `LOADLYNX_HOME` 覆盖目录。若安装版 CLI 不支持 WiFi 配置，不能退回 raw HTTP，需要进入开发/维护路径补齐并发布。用户侧固件烧录必须使用同一 Release 发布的 firmware catalog/assets，并先确认当前 `loadlynx flash --help` 支持所需流程；真实 ESP32-S3 flash 需要 artifact/hash/target evidence、typed phrase、非项目固件风险确认（如适用）和 post-flash identity capture。GitHub Pages 与 release Web bundle 也是正式 Web Serial 人类操作入口；Web Serial 仅保存 identity/profile，不保存 OS 端口路径。不做桌面壳。从源码构建、`just`、项目开发端口缓存、缺失 CLI 功能实现和 HIL 验证属于开发/维护路径。
 
 常用本地入口：
 
@@ -110,10 +110,13 @@ just loadlynx usb-port set digital /dev/cu.usbmodemXXXX
 # 人工交互选择端口（方向键选择，候选项按 espflash 默认串口枚举规则）
 just loadlynx usb-port set digital
 
-# 启动 devd
-just devd-serve --bind 127.0.0.1:30180 --allow-dev-cors
+# 启动 devd IPC（CLI 路径）
+just devd-serve --endpoint /tmp/loadlynx-devd.sock
 
-# 启动 Web，并显式指向 devd
+# 启动 devd HTTP bridge（浏览器/Web 路径，loopback only）
+just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors
+
+# 启动 Web，并显式指向 HTTP bridge
 (cd web && VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:30180 bun run dev)
 ```
 

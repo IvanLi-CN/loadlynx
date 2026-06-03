@@ -14,7 +14,7 @@ related_specs: [e3rv6]
 
 Embedded projects often grow separate hardware entrypoints: browser LAN HTTP, USB serial scripts, firmware flash commands, log monitors and development daemons. Once a Web UI also needs USB writes or firmware flashing, letting multiple processes compete for the same serial port creates unreliable behavior and unsafe device selection.
 
-The reusable pattern is a project-specific local daemon (`devd`) that owns USB/probe sessions and exposes a localhost HTTP/SSE API to Web, CLI and future desktop tools.
+The reusable pattern is a project-specific local daemon (`devd`) that owns USB/probe sessions, exposes an IPC API to CLI tools, and exposes a loopback-only HTTP bridge only for browser/debug paths.
 
 ## Symptoms
 
@@ -35,15 +35,19 @@ Use a local-first control plane:
 - `scan` only discovers candidates; it never connects or picks a device.
 - The owner explicitly selects a candidate before `bind`, `connect`, `lease`, `flash` or `reset`.
 - USB/Web writes require a per-device lease with heartbeat and TTL cleanup.
+- CLI-to-devd traffic should be IPC-first when the CLI is a released local tool. Keep HTTP bridge URLs out of ordinary CLI help, auto-start a sibling daemon when reasonable, and reserve local HTTP for browser/debug paths.
+- Any HTTP bridge that can write hardware must bind loopback only unless a separate authenticated remote-access design exists.
 - Treat lease and physical serialization as separate layers: leases authorize clients and identify ownership, while a per-port owner or queue serializes the actual USB/probe operations.
 - CLI hardware-changing commands print target evidence before acting.
 - Firmware artifacts are selected through a catalog and verified by SHA-256 before flashing.
+- Real first-flash or non-project-firmware flows need a stronger gate than "tool exited 0": artifact/hash/target evidence, typed phrase, explicit risk acknowledgement when applicable, and post-flash identity capture.
 - Runtime identity must match `build_id`, profile, features and target chip before log decode can be trusted.
 - LAN records and USB records merge by `identity.device_id`, not by URL, port path or display name.
 - Sensitive frame fields such as WiFi PSK are redacted at trace ingestion, before logs leave the daemon.
 - Keep device-local transports compact and purpose-built. When USB/serial frame budgets are tight, firmware may return a compact operation-specific payload while the daemon expands it back to the public HTTP/Web shape for CLI and browser callers.
 - Separate local physical-access writes from LAN writes in the user interface. LAN credential writes should require an explicit unsafe-network confirmation or flag, while USB/devd writes can rely on lease and selected-port evidence.
 - Web evidence should come from mock-first Storybook canvas/docs states so localhost hardware daemons are not required for UI review.
+- Web Serial can be a formal browser path when users need static GitHub Pages or release bundle operation, but it should save identity/profile metadata only and reconnect through browser-granted ports rather than OS serial paths.
 - If an owner-facing backup/export workflow explicitly needs secrets, expose that as a narrow read operation with a sensitive artifact contract. Keep ordinary status, diagnostics, traces and logs redacted; do not broaden generic observability paths just to make backups convenient.
 
 ## Guardrails / Reuse Notes
@@ -64,6 +68,7 @@ Use a local-first control plane:
 - Treat mDNS/DNS-SD as convenience discovery. Always keep manual IP/hostname entry and bounded scan fallback.
 - For dual-MCU devices, represent board targets explicitly instead of flattening them into one generic "serial device".
 - Keep firmware catalog generation outside the daemon. devd should verify manifests and hashes, not invent release metadata.
+- Release installers should verify a `SHA256SUMS` file that covers every release asset, install into a user-owned directory, validate installed binaries, and print PATH guidance without editing profiles automatically.
 
 ## References
 

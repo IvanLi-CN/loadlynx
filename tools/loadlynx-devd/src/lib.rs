@@ -20,8 +20,11 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    net::TcpListener,
     process::Command,
     sync::{broadcast, oneshot},
+    time::timeout,
 };
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -30,6 +33,8 @@ use tower_http::{
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:30180";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30180";
+pub const DEFAULT_IPC_IDLE_TIMEOUT_SECS: u64 = 30;
+pub const FLASH_CONFIRMATION_PHRASE: &str = "FLASH LOADLYNX DIGITAL";
 pub const DEFAULT_DIGITAL_USB_PORT_FILE: &str = ".esp32-port";
 pub const DEFAULT_ANALOG_PROBE_FILE: &str = ".stm32-port";
 const DEFAULT_DIGITAL_USB_PORT_SELECTOR_SOURCE: &str = ".esp32-port";
@@ -56,12 +61,60 @@ const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
 const SERIAL_WIFI_WAIT_OPERATION_WAIT_MS: u64 = 40_000;
 const LOADLYNX_PRESET_COUNT: usize = 5;
 
+pub fn default_ipc_endpoint() -> String {
+    #[cfg(windows)]
+    {
+        return r"\\.\pipe\loadlynx-devd".to_string();
+    }
+    #[cfg(not(windows))]
+    {
+        let base = env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(env::temp_dir);
+        return base
+            .join("loadlynx-devd.sock")
+            .to_string_lossy()
+            .into_owned();
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct DevdConfig {
     pub bind: SocketAddr,
     pub web_root: Option<PathBuf>,
     pub allow_dev_cors: bool,
     pub repo_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct IpcConfig {
+    pub endpoint: String,
+    pub idle_timeout: Duration,
+    pub repo_root: PathBuf,
+}
+
+impl IpcConfig {
+    pub fn new(endpoint: String, idle_timeout: Duration) -> Self {
+        Self {
+            endpoint,
+            idle_timeout,
+            repo_root: env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IpcHttpRequest {
+    pub method: String,
+    pub path: String,
+    #[serde(default)]
+    pub body: Option<Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IpcHttpResponse {
+    pub status: u16,
+    pub body: Value,
 }
 
 impl DevdConfig {
@@ -335,6 +388,9 @@ struct FlashRequest {
     artifact_id: Option<String>,
     dry_run: Option<bool>,
     lease_id: Option<String>,
+    confirmation_phrase: Option<String>,
+    expected_identity_device_id: Option<String>,
+    acknowledge_non_project_firmware: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -394,10 +450,281 @@ pub async fn serve(config: DevdConfig) -> Result<(), Box<dyn std::error::Error +
 
     let state = AppState::new(config.repo_root.clone());
     let router = router(state, config.web_root, config.allow_dev_cors);
-    let listener = tokio::net::TcpListener::bind(config.bind).await?;
-    tracing::info!("loadlynx-devd listening on http://{}", config.bind);
+    ensure_loopback_bind(&config.bind)?;
+    let listener = TcpListener::bind(config.bind).await?;
+    tracing::info!(
+        "loadlynx-devd bridge-http listening on http://{}",
+        config.bind
+    );
     axum::serve(listener, router).await?;
     Ok(())
+}
+
+pub async fn serve_ipc(config: IpcConfig) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .try_init()
+        .ok();
+
+    let state = AppState::new(config.repo_root.clone());
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let http_addr = http_listener.local_addr()?;
+    let http_base = format!("http://{http_addr}");
+    let router = router(state, None, false);
+    tokio::spawn(async move {
+        if let Err(error) = axum::serve(http_listener, router).await {
+            tracing::error!("internal devd HTTP dispatcher stopped: {error}");
+        }
+    });
+
+    tracing::info!("loadlynx-devd IPC listening on {}", config.endpoint);
+
+    #[cfg(windows)]
+    {
+        return serve_ipc_windows(config, http_base).await;
+    }
+    #[cfg(not(windows))]
+    {
+        return serve_ipc_unix(config, http_base).await;
+    }
+}
+
+pub async fn ipc_http_request(
+    endpoint: &str,
+    request: IpcHttpRequest,
+) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    #[cfg(windows)]
+    {
+        return ipc_http_request_windows(endpoint, request).await;
+    }
+    #[cfg(not(windows))]
+    {
+        return ipc_http_request_unix(endpoint, request).await;
+    }
+}
+
+#[cfg(not(windows))]
+async fn serve_ipc_unix(
+    config: IpcConfig,
+    http_base: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let path = PathBuf::from(&config.endpoint);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if path.exists() {
+        let _ = fs::remove_file(&path);
+    }
+    let listener = tokio::net::UnixListener::bind(&path)?;
+    loop {
+        match timeout(config.idle_timeout, listener.accept()).await {
+            Ok(Ok((stream, _peer))) => {
+                let http_base = http_base.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_ipc_connection_unix(stream, http_base).await {
+                        tracing::warn!("IPC connection failed: {error}");
+                    }
+                });
+            }
+            Ok(Err(error)) => return Err(Box::new(error)),
+            Err(_) => {
+                tracing::info!(
+                    "loadlynx-devd IPC idle timeout after {}s; exiting",
+                    config.idle_timeout.as_secs()
+                );
+                let _ = fs::remove_file(&path);
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+async fn serve_ipc_windows(
+    config: IpcConfig,
+    http_base: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let pipe_name = normalize_named_pipe_name(&config.endpoint);
+    loop {
+        let server = tokio::net::windows::named_pipe::ServerOptions::new().create(&pipe_name)?;
+        match timeout(config.idle_timeout, server.connect()).await {
+            Ok(Ok(())) => {
+                let http_base = http_base.clone();
+                tokio::spawn(async move {
+                    if let Err(error) = handle_ipc_connection_windows(server, http_base).await {
+                        tracing::warn!("IPC connection failed: {error}");
+                    }
+                });
+            }
+            Ok(Err(error)) => return Err(Box::new(error)),
+            Err(_) => {
+                tracing::info!(
+                    "loadlynx-devd IPC idle timeout after {}s; exiting",
+                    config.idle_timeout.as_secs()
+                );
+                return Ok(());
+            }
+        }
+    }
+}
+
+#[cfg(not(windows))]
+async fn ipc_http_request_unix(
+    endpoint: &str,
+    request: IpcHttpRequest,
+) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    let mut stream = tokio::net::UnixStream::connect(endpoint).await?;
+    ipc_roundtrip(&mut stream, request).await
+}
+
+#[cfg(windows)]
+async fn ipc_http_request_windows(
+    endpoint: &str,
+    request: IpcHttpRequest,
+) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    let pipe_name = normalize_named_pipe_name(endpoint);
+    let mut stream = loop {
+        match tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe_name) {
+            Ok(stream) => break stream,
+            Err(error) => {
+                if let Some(code) = error.raw_os_error() {
+                    if code == 231 {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                }
+                return Err(Box::new(error));
+            }
+        }
+    };
+    ipc_roundtrip(&mut stream, request).await
+}
+
+async fn ipc_roundtrip<S>(
+    stream: &mut S,
+    request: IpcHttpRequest,
+) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let line = serde_json::to_vec(&request)?;
+    stream.write_all(&line).await?;
+    stream.write_all(b"\n").await?;
+    stream.flush().await?;
+    let mut reader = BufReader::new(stream);
+    let mut response = String::new();
+    reader.read_line(&mut response).await?;
+    let response: IpcHttpResponse = serde_json::from_str(response.trim_end())?;
+    Ok(response)
+}
+
+#[cfg(not(windows))]
+async fn handle_ipc_connection_unix(
+    stream: tokio::net::UnixStream,
+    http_base: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    handle_ipc_connection(stream, http_base).await
+}
+
+#[cfg(windows)]
+async fn handle_ipc_connection_windows(
+    stream: tokio::net::windows::named_pipe::NamedPipeServer,
+    http_base: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    handle_ipc_connection(stream, http_base).await
+}
+
+async fn handle_ipc_connection<S>(
+    stream: S,
+    http_base: String,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (reader, mut writer) = tokio::io::split(stream);
+    let mut lines = BufReader::new(reader).lines();
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()?;
+    while let Some(line) = lines.next_line().await? {
+        let response = match serde_json::from_str::<IpcHttpRequest>(&line) {
+            Ok(request) => proxy_ipc_http(&client, &http_base, request).await,
+            Err(error) => IpcHttpResponse {
+                status: 400,
+                body: json!({"error": {"code": "ipc_invalid_json", "message": error.to_string(), "retryable": false}}),
+            },
+        };
+        writer
+            .write_all(serde_json::to_string(&response)?.as_bytes())
+            .await?;
+        writer.write_all(b"\n").await?;
+        writer.flush().await?;
+    }
+    Ok(())
+}
+
+async fn proxy_ipc_http(
+    client: &reqwest::Client,
+    base: &str,
+    request: IpcHttpRequest,
+) -> IpcHttpResponse {
+    let method = match reqwest::Method::from_bytes(request.method.as_bytes()) {
+        Ok(method) => method,
+        Err(error) => {
+            return IpcHttpResponse {
+                status: 400,
+                body: json!({"error": {"code": "ipc_invalid_method", "message": error.to_string(), "retryable": false}}),
+            };
+        }
+    };
+    let url = match reqwest::Url::parse(base).and_then(|base| base.join(&request.path)) {
+        Ok(url) => url,
+        Err(error) => {
+            return IpcHttpResponse {
+                status: 400,
+                body: json!({"error": {"code": "ipc_invalid_path", "message": error.to_string(), "retryable": false}}),
+            };
+        }
+    };
+    let mut outbound = client.request(method, url);
+    if let Some(body) = request.body {
+        outbound = outbound.json(&body);
+    }
+    match outbound.send().await {
+        Ok(response) => {
+            let status = response.status().as_u16();
+            let text = response.text().await.unwrap_or_default();
+            let body = if text.trim().is_empty() {
+                Value::Null
+            } else {
+                serde_json::from_str(&text).unwrap_or_else(|_| json!({"raw": text}))
+            };
+            IpcHttpResponse { status, body }
+        }
+        Err(error) => IpcHttpResponse {
+            status: 503,
+            body: json!({"error": {"code": "ipc_dispatch_failed", "message": error.to_string(), "retryable": true}}),
+        },
+    }
+}
+
+#[cfg(windows)]
+fn normalize_named_pipe_name(raw: &str) -> String {
+    if raw.starts_with(r"\\.\pipe\") {
+        raw.to_string()
+    } else {
+        format!(r"\\.\pipe\{}", raw)
+    }
+}
+
+pub fn ensure_loopback_bind(
+    bind: &SocketAddr,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if bind.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(format!("loadlynx-devd may only bind loopback addresses; got {bind}").into())
+    }
 }
 
 impl AppState {
@@ -807,8 +1134,8 @@ async fn flash_device(
     let (artifact, target, dry_run, evidence) = resolve_operation(
         &state,
         &id,
-        input.target,
-        input.artifact_id,
+        input.target.clone(),
+        input.artifact_id.clone(),
         input.dry_run.unwrap_or(true),
     )?;
     verify_artifact_files(&artifact)?;
@@ -817,6 +1144,7 @@ async fn flash_device(
             json!({"ok": true, "dry_run": true, "action": "flash", "target_evidence": evidence}),
         ));
     }
+    enforce_flash_gate(&state, &id, &target, &artifact, &input)?;
     {
         let guard = state.inner.lock().expect("state lock");
         ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
@@ -826,16 +1154,22 @@ async fn flash_device(
             .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
         ensure_real_operation_uses_cached_target(device, &target)?;
     }
-    match target {
-        TargetKind::DigitalEsp32s3 => run_espflash_digital(&state, &id, &artifact).await?,
-        TargetKind::AnalogStm32g431 => run_probe_rs_analog(&state, &id, &artifact).await?,
+    let post_flash_identity = match target {
+        TargetKind::DigitalEsp32s3 => {
+            run_espflash_digital(&state, &id, &artifact).await?;
+            Some(capture_post_flash_identity(&state, &id).await?)
+        }
+        TargetKind::AnalogStm32g431 => {
+            run_probe_rs_analog(&state, &id, &artifact).await?;
+            None
+        }
         TargetKind::LanHttp | TargetKind::Mock => {
             return Err(HttpError::bad_request(
                 "target_unsupported",
                 "target cannot be flashed",
             ));
         }
-    }
+    };
     emit(
         &state,
         Some(id),
@@ -844,8 +1178,92 @@ async fn flash_device(
         json!({"artifact_id": artifact.artifact_id, "target": target}),
     );
     Ok(Json(
-        json!({"ok": true, "dry_run": false, "action": "flash", "target_evidence": evidence}),
+        json!({"ok": true, "dry_run": false, "action": "flash", "target_evidence": evidence, "post_flash_identity": post_flash_identity}),
     ))
+}
+
+fn enforce_flash_gate(
+    state: &AppState,
+    device_id: &str,
+    target: &TargetKind,
+    artifact: &FirmwareArtifact,
+    input: &FlashRequest,
+) -> Result<(), HttpError> {
+    if target != &TargetKind::DigitalEsp32s3 {
+        return Ok(());
+    }
+    if input.confirmation_phrase.as_deref() != Some(FLASH_CONFIRMATION_PHRASE) {
+        return Err(HttpError::bad_request(
+            "flash_confirmation_required",
+            format!("type confirmation phrase exactly: {FLASH_CONFIRMATION_PHRASE}"),
+        ));
+    }
+    if !is_loadlynx_project_artifact(artifact)
+        && input.acknowledge_non_project_firmware != Some(true)
+    {
+        return Err(HttpError::bad_request(
+            "non_project_firmware_ack_required",
+            "non-project or unknown firmware requires acknowledge_non_project_firmware=true",
+        ));
+    }
+    if let Some(expected_identity) = input.expected_identity_device_id.as_deref() {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        let actual = device
+            .identity
+            .as_ref()
+            .and_then(|identity| identity.get("device_id"))
+            .and_then(Value::as_str);
+        if actual != Some(expected_identity) {
+            return Err(HttpError::conflict(
+                "identity_confirmation_mismatch",
+                format!(
+                    "expected identity device_id {expected_identity}, current identity is {}",
+                    actual.unwrap_or("<unknown>")
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn is_loadlynx_project_artifact(artifact: &FirmwareArtifact) -> bool {
+    let haystack = format!(
+        "{} {} {}",
+        artifact.artifact_id, artifact.name, artifact.protocol
+    )
+    .to_ascii_lowercase();
+    haystack.contains("loadlynx")
+}
+
+async fn capture_post_flash_identity(
+    state: &AppState,
+    device_id: &str,
+) -> Result<Value, HttpError> {
+    tokio::time::sleep(Duration::from_millis(750)).await;
+    let port_path = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        device
+            .digital_target
+            .as_ref()
+            .and_then(|target| target.port_path.clone())
+            .ok_or_else(|| {
+                HttpError::conflict(
+                    "target_port_missing",
+                    "post-flash identity capture requires the approved ESP32-S3 USB port path",
+                )
+            })?
+    };
+    let identity = request_usb_identity(state, device_id, &port_path).await?;
+    update_device_identity(state, device_id, identity.clone())?;
+    Ok(identity)
 }
 
 async fn reset_device(
@@ -6450,11 +6868,72 @@ mod tests {
                 artifact_id: Some("digital".to_string()),
                 dry_run: Some(false),
                 lease_id: None,
+                confirmation_phrase: Some(FLASH_CONFIRMATION_PHRASE.to_string()),
+                expected_identity_device_id: None,
+                acknowledge_non_project_firmware: Some(true),
             }),
         )
         .await
         .unwrap_err();
         assert_eq!(err.0.code, "web_session_required");
+    }
+
+    #[tokio::test]
+    async fn real_digital_flash_requires_confirmation_phrase() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert(
+                "digital".to_string(),
+                test_artifact("digital", TargetKind::DigitalEsp32s3),
+            );
+        }
+
+        let err = flash_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(FlashRequest {
+                target: Some(TargetKind::DigitalEsp32s3),
+                artifact_id: Some("digital".to_string()),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: None,
+                expected_identity_device_id: None,
+                acknowledge_non_project_firmware: Some(true),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "flash_confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn real_digital_flash_requires_non_project_acknowledgement() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut artifact = test_artifact("foreign", TargetKind::DigitalEsp32s3);
+            artifact.name = "Foreign firmware".to_string();
+            artifact.protocol = "unknown".to_string();
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert("foreign".to_string(), artifact);
+        }
+
+        let err = flash_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(FlashRequest {
+                target: Some(TargetKind::DigitalEsp32s3),
+                artifact_id: Some("foreign".to_string()),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: Some(FLASH_CONFIRMATION_PHRASE.to_string()),
+                expected_identity_device_id: None,
+                acknowledge_non_project_firmware: Some(false),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "non_project_firmware_ack_required");
     }
 
     #[tokio::test]

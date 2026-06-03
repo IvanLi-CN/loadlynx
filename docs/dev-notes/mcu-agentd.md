@@ -31,7 +31,8 @@ LoadLynx 的硬件在环（HIL）工作流使用外部 `mcu-agentd`（默认 sib
 
 - devd 构建：`just devd-build`
 - devd 测试：`just devd-test`
-- devd 启动：`just devd-serve --bind 127.0.0.1:30180 --allow-dev-cors`
+- devd IPC 启动：`just devd-serve`
+- devd HTTP bridge 启动：`just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors`
 - CLI：`just loadlynx devices` 或 `just loadlynx flash digital --device <id> --artifact <artifact_id> --dry-run`
 
 真实 flash/reset 前仍必须打印目标证据，并继续遵守 selector guardrails。

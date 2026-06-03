@@ -22,7 +22,7 @@
 - `channel:beta` creates a prerelease `vX.Y.Z-beta.<run-number>`.
 - `channel:dev` creates a prerelease `dev-<timestamp>-<sha>`.
 - Stable version discovery ignores `dev-*` tags and other non-stable tags.
-- Official release artifacts include analog ELF, digital ELF, host tools for supported host targets, and a Web bundle.
+- Official release artifacts include analog ELF, digital ELF, firmware catalog, host tools for supported host targets, user installer scripts, Web bundle, and `SHA256SUMS` covering every release asset.
 - Release builds inject the computed version into firmware and Web artifacts instead of rewriting package manifests.
 
 ## GitHub Integration
@@ -36,7 +36,7 @@
 
 - A PR without exactly one `type:*` and one `channel:*` fails `Label Gate`.
 - A PR with `type:patch` and `channel:stable` on top of `v0.1.0` produces `v0.1.1`.
-- A merged stable PR creates a GitHub Release containing analog, digital, host-tools, and Web artifacts.
+- A merged stable PR creates a GitHub Release containing analog, digital, firmware catalog, host-tools, installer, Web, and `SHA256SUMS` artifacts.
 - Firmware/Web release metadata reports the injected release version.
 - The source PR receives the release completion comment.
 - Ordinary PR CI failures do not trigger Telegram notifications.

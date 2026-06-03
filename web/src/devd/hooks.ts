@@ -128,6 +128,9 @@ export function useDevdFlash(baseUrl: string = DEFAULT_DEVD_BASE_URL) {
       target: DevdTargetKind;
       artifactId?: string;
       dryRun: boolean;
+      confirmationPhrase?: string;
+      expectedIdentityDeviceId?: string;
+      acknowledgeNonProjectFirmware?: boolean;
     }) => flashDevdDevice({ baseUrl, ...input }),
   });
 }

@@ -18,7 +18,9 @@ The control plane is implemented across the local daemon, CLI, Web routes and ES
 - Treat `mcu-agentd` as a backend/fallback integration point for non-devd firmware workflows and analog/probe operations. Devd/Web ESP32-S3 digital firmware flashing uses devd's lease-gated direct `espflash` path with the approved `.esp32-port` target.
 - Keep Web USB lease TTL short enough to recover from tab crashes while tolerating brief SSE/heartbeat jitter.
 - Keep LAN discovery read-oriented until a separate LAN write-control safety design is accepted.
-- `tools/loadlynx-devd/` exposes `loadlynx-devd serve` and `loadlynx` from one Rust package.
+- `tools/loadlynx-devd/` exposes `loadlynx-devd serve`, `loadlynx-devd bridge-http`, and `loadlynx` from one Rust package.
+- `loadlynx-devd serve` is the IPC daemon for CLI workflows. It binds a native JSONL IPC endpoint, uses an internal dispatcher for the existing API surface, and exits after an idle timeout. macOS/Linux use Unix sockets and Windows uses named pipes. `loadlynx` exposes `--ipc` / `--no-auto-start`, auto-starts a sibling devd when needed, and no longer exposes the old ordinary `--devd http://...` CLI path.
+- `loadlynx-devd bridge-http` is the browser/debug bridge and rejects non-loopback binds. Local Web development points `VITE_LOADLYNX_DEVD_URL` at this bridge; skill-driven hardware operations still use CLI IPC.
 - devd scans native USB serial candidates, the cached digital `.esp32-port` USB path, LAN/mock candidates, but never writes selector cache files. When `.esp32-port` uses the mcu-agentd selector-record format, devd reads only the path line and ignores metadata lines such as `mac=...`.
 - Compatibility endpoints require an explicit `device_id`/`lease_id` when there is no unique active lease.
 - devd now manages USB CDC through lease-scoped per-port serial owners. Multiple Web/CLI clients may hold leases for the same device, but JSONL writes are serialized through the owner, request/response matching uses devd-generated unique `request_id` values, serial open/I/O failures are retried on later commands, and flash/reset reserve the port exclusively before invoking `espflash`.
@@ -37,7 +39,9 @@ The control plane is implemented across the local daemon, CLI, Web routes and ES
 - CLI business workflows cover WiFi show/set/clear, control get/set, preset list/set/apply, calibration profile/mode/apply/commit/reset, soft-reset and diagnostics export. Control writes require explicit `--enable` or `--disable`. LAN WiFi writes require `--allow-insecure-lan-wifi`; USB/devd writes create short-lived leases internally. CLI output is human-readable by default, with `--json` preserving structured automation output.
 - Web Settings exposes devd-backed WiFi status/config and diagnostics export. LAN WiFi writes require a confirmation dialog; USB/devd writes proceed as local physical-access operations.
 - ESP32-S3 USB Serial/JTAG can interleave binary logs with JSONL response text. devd keeps an enlarged per-command non-protocol buffer, prefers complete matching `request_id` responses, and uses operation-scoped recovery for identity, status, output-control, control, presets, calibration profile and WiFi status responses. Recovery is limited to frames/text observed in the matching command window and shaped like the requested operation; unrelated response IDs or stale monitor frames are never success.
-- Firmware flash/reset paths default to dry-run and include target evidence. Real ESP32-S3 digital flash calls direct `espflash` through devd after artifact hash verification and a valid Web lease: ELF artifacts use `espflash flash`, and raw image artifacts require `flash_address` before using `espflash write-bin`. Analog flash/reset and reset-only paths continue to use existing backend guardrails.
+- Firmware flash/reset paths default to dry-run and include target evidence. Real ESP32-S3 digital flash calls direct `espflash` through devd after artifact hash verification and a valid Web lease: ELF artifacts use `espflash flash`, and raw image artifacts require `flash_address` before using `espflash write-bin`. Real digital flash also requires the typed phrase `FLASH LOADLYNX DIGITAL`, non-project firmware acknowledgement when applicable, and post-flash identity capture before success is reported. Analog flash/reset and reset-only paths continue to use existing backend guardrails.
+- Web Serial is implemented as a formal browser path for GitHub Pages and release Web bundles. The Firmware route accepts release catalog JSON and a matching firmware file, verifies SHA-256 in-browser, gates real ESP32-S3 flash with the same phrase/risk/identity requirements, flashes through `esptool-js`, and stores only identity/profile metadata instead of OS port paths.
+- Release packaging includes host-tools installers, platform host-tools archives, firmware artifacts, a firmware catalog, the Web bundle, and `SHA256SUMS` covering all release assets. The installers verify `SHA256SUMS`, install to user-owned directories, validate `loadlynx` and `loadlynx-devd`, and only print PATH guidance.
 - Web Storybook coverage uses canvas stories for Devices devd lease creation and Firmware dry-run/session states.
 
 ## Verification Plan
@@ -53,6 +57,7 @@ The control plane is implemented across the local daemon, CLI, Web routes and ES
 - `cargo test` in `tools/loadlynx-devd`
 - `bun run check` in `web`
 - `bun run build` in `web`
+- `tools/loadlynx-devd/install/install-loadlynx-host.sh --dry-run`
 - `bun run build-storybook --quiet` in `web`
 - Storybook mock screenshot for `Routes/Settings` with PSK leak assertion
 
