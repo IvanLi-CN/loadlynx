@@ -1535,7 +1535,11 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
             .into_iter()
             .collect(),
         },
-        Command::UsbPort { .. } | Command::Hardware { .. } => Vec::new(),
+        Command::UsbPort { .. } => Vec::new(),
+        Command::Hardware {
+            command: HardwareCommand::Available { scan: true },
+        } => vec![default_devd.to_string()],
+        Command::Hardware { .. } => Vec::new(),
     };
 
     let mut seen = HashSet::new();
@@ -3821,6 +3825,16 @@ mod tests {
         ])
         .expect("hardware list parse");
         assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "hardware",
+            "available",
+        ])
+        .expect("hardware available parse");
+        assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
     }
 
     #[test]
@@ -3841,6 +3855,20 @@ mod tests {
             "digital-1",
         ])
         .expect("status device parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "hardware",
+            "available",
+            "--scan",
+        ])
+        .expect("hardware available scan parse");
         assert_eq!(
             initial_devd_endpoints(&cli.command, &cli.ipc),
             vec!["/tmp/loadlynx.sock"]
