@@ -11,10 +11,13 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, VecDeque},
-    env, fs, io,
+    env, fs,
+    future::Future,
+    io,
     net::SocketAddr,
     path::PathBuf,
     process::Stdio,
+    sync::atomic::{AtomicUsize, Ordering},
     sync::{Arc, Mutex, mpsc as std_mpsc},
     thread,
     time::{Duration, Instant},
@@ -23,8 +26,8 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
     process::Command,
-    sync::{broadcast, oneshot},
-    time::timeout,
+    sync::{Notify, broadcast, oneshot},
+    time::sleep,
 };
 use tower_http::{
     cors::{AllowOrigin, CorsLayer},
@@ -516,24 +519,37 @@ async fn serve_ipc_unix(
         let _ = fs::remove_file(&path);
     }
     let listener = tokio::net::UnixListener::bind(&path)?;
+    let active_connections = Arc::new(AtomicUsize::new(0));
+    let idle_notify = Arc::new(Notify::new());
     loop {
-        match timeout(config.idle_timeout, listener.accept()).await {
-            Ok(Ok((stream, _peer))) => {
-                let http_base = http_base.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle_ipc_connection_unix(stream, http_base).await {
-                        tracing::warn!("IPC connection failed: {error}");
-                    }
-                });
+        if active_connections.load(Ordering::SeqCst) == 0 {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _peer) = accepted?;
+                    let http_base = http_base.clone();
+                    spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
+                        handle_ipc_connection_unix(stream, http_base).await
+                    });
+                }
+                _ = sleep(config.idle_timeout) => {
+                    tracing::info!(
+                        "loadlynx-devd IPC idle timeout after {}s; exiting",
+                        config.idle_timeout.as_secs()
+                    );
+                    let _ = fs::remove_file(&path);
+                    return Ok(());
+                }
             }
-            Ok(Err(error)) => return Err(Box::new(error)),
-            Err(_) => {
-                tracing::info!(
-                    "loadlynx-devd IPC idle timeout after {}s; exiting",
-                    config.idle_timeout.as_secs()
-                );
-                let _ = fs::remove_file(&path);
-                return Ok(());
+        } else {
+            tokio::select! {
+                accepted = listener.accept() => {
+                    let (stream, _peer) = accepted?;
+                    let http_base = http_base.clone();
+                    spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
+                        handle_ipc_connection_unix(stream, http_base).await
+                    });
+                }
+                _ = idle_notify.notified() => {}
             }
         }
     }
@@ -545,27 +561,57 @@ async fn serve_ipc_windows(
     http_base: String,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pipe_name = normalize_named_pipe_name(&config.endpoint);
+    let active_connections = Arc::new(AtomicUsize::new(0));
+    let idle_notify = Arc::new(Notify::new());
     loop {
         let server = tokio::net::windows::named_pipe::ServerOptions::new().create(&pipe_name)?;
-        match timeout(config.idle_timeout, server.connect()).await {
-            Ok(Ok(())) => {
-                let http_base = http_base.clone();
-                tokio::spawn(async move {
-                    if let Err(error) = handle_ipc_connection_windows(server, http_base).await {
-                        tracing::warn!("IPC connection failed: {error}");
-                    }
-                });
+        if active_connections.load(Ordering::SeqCst) == 0 {
+            tokio::select! {
+                connected = server.connect() => {
+                    connected?;
+                    let http_base = http_base.clone();
+                    spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
+                        handle_ipc_connection_windows(server, http_base).await
+                    });
+                }
+                _ = sleep(config.idle_timeout) => {
+                    tracing::info!(
+                        "loadlynx-devd IPC idle timeout after {}s; exiting",
+                        config.idle_timeout.as_secs()
+                    );
+                    return Ok(());
+                }
             }
-            Ok(Err(error)) => return Err(Box::new(error)),
-            Err(_) => {
-                tracing::info!(
-                    "loadlynx-devd IPC idle timeout after {}s; exiting",
-                    config.idle_timeout.as_secs()
-                );
-                return Ok(());
+        } else {
+            tokio::select! {
+                connected = server.connect() => {
+                    connected?;
+                    let http_base = http_base.clone();
+                    spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
+                        handle_ipc_connection_windows(server, http_base).await
+                    });
+                }
+                _ = idle_notify.notified() => {}
             }
         }
     }
+}
+
+fn spawn_tracked_ipc_connection<F>(
+    active_connections: Arc<AtomicUsize>,
+    idle_notify: Arc<Notify>,
+    handler: F,
+) where
+    F: Future<Output = Result<(), Box<dyn std::error::Error + Send + Sync>>> + Send + 'static,
+{
+    active_connections.fetch_add(1, Ordering::SeqCst);
+    tokio::spawn(async move {
+        if let Err(error) = handler.await {
+            tracing::warn!("IPC connection failed: {error}");
+        }
+        active_connections.fetch_sub(1, Ordering::SeqCst);
+        idle_notify.notify_waiters();
+    });
 }
 
 #[cfg(not(windows))]

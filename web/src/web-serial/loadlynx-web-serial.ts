@@ -29,6 +29,8 @@ export interface FirmwareCatalog {
   artifacts: FirmwareCatalogArtifact[];
 }
 
+type WebSerialFlashFile = FirmwareCatalogFile & { flash_address: number };
+
 export interface WebSerialFlashInput {
   catalog: FirmwareCatalog;
   artifactId?: string;
@@ -119,7 +121,7 @@ export async function runWebSerialDigitalFlash(
     );
   }
 
-  await flashEsp32s3(port, bytes, file.flash_address ?? undefined);
+  await flashEsp32s3(port, bytes, file.flash_address);
   const postFlashIdentity = await tryCaptureIdentity(port);
   if (postFlashIdentity) {
     saveWebSerialIdentityProfile(postFlashIdentity);
@@ -168,17 +170,17 @@ function selectDigitalArtifact(
 
 function selectFlashFile(
   artifact: FirmwareCatalogArtifact,
-): FirmwareCatalogFile {
-  const file =
-    artifact.files.find((candidate) => candidate.kind === "image") ??
-    artifact.files.find((candidate) => candidate.kind === "elf");
+): WebSerialFlashFile {
+  const file = artifact.files.find((candidate) => candidate.kind === "image");
   if (!file) {
-    throw new Error("Artifact does not include an image or ELF flash file");
+    throw new Error(
+      "Web Serial flashing requires a raw image artifact; ELF files are only supported by CLI/devd flashing",
+    );
   }
-  if (file.kind === "image" && file.flash_address == null) {
+  if (file.flash_address == null) {
     throw new Error("Raw image artifacts require flash_address");
   }
-  return file;
+  return file as WebSerialFlashFile;
 }
 
 function isLoadLynxArtifact(artifact: FirmwareCatalogArtifact): boolean {
@@ -200,7 +202,7 @@ async function sha256Hex(bytes: Uint8Array): Promise<string> {
 async function flashEsp32s3(
   port: SerialPortLike,
   bytes: Uint8Array,
-  flashAddress?: number,
+  flashAddress: number,
 ): Promise<void> {
   const esptool = (await import("esptool-js")) as Record<string, unknown>;
   const Transport = esptool.Transport as new (
@@ -227,9 +229,8 @@ async function flashEsp32s3(
     },
   });
   await loader.main();
-  const data = uint8ArrayToBinaryString(bytes);
   await loader.writeFlash({
-    fileArray: [{ data, address: flashAddress ?? 0 }],
+    fileArray: [{ data: bytes, address: flashAddress }],
     flashSize: "keep",
     eraseAll: false,
     compress: true,
@@ -335,13 +336,4 @@ function readProfiles(): WebSerialIdentityProfile[] {
   } catch {
     return [];
   }
-}
-
-function uint8ArrayToBinaryString(bytes: Uint8Array): string {
-  let out = "";
-  const chunkSize = 0x8000;
-  for (let index = 0; index < bytes.length; index += chunkSize) {
-    out += String.fromCharCode(...bytes.subarray(index, index + chunkSize));
-  }
-  return out;
 }
