@@ -406,6 +406,8 @@ struct ResetRequest {
 #[derive(Debug, Deserialize)]
 struct LeaseRequest {
     device_id: String,
+    expected_identity_device_id: Option<String>,
+    bind_probe: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1462,7 +1464,10 @@ async fn create_lease(
                 format!("USB serial port is reserved for {reason}"),
             ));
         }
-        if !port_path.starts_with("mock://") {
+        if !port_path.starts_with("mock://")
+            && input.expected_identity_device_id.is_none()
+            && input.bind_probe != Some(true)
+        {
             match read_default_digital_usb_port(&state.repo_root) {
                 Some(default) if default == port_path => {}
                 _ => {
@@ -1476,12 +1481,27 @@ async fn create_lease(
         validate_port_not_leased_by_other_device(&state, &input.device_id, port_path)?;
         if is_default_or_scanned_usb_source(&state, &input.device_id) {
             match request_usb_identity(&state, &input.device_id, port_path).await {
-                Ok(identity) => update_device_identity_for_lease_probe(
-                    &state,
-                    &input.device_id,
-                    port_path,
-                    identity,
-                )?,
+                Ok(identity) => {
+                    if let Some(expected) = input.expected_identity_device_id.as_deref() {
+                        let actual = identity.get("device_id").and_then(Value::as_str);
+                        if actual != Some(expected) {
+                            stop_serial_owner(&state, port_path);
+                            return Err(HttpError::conflict(
+                                "identity_confirmation_mismatch",
+                                format!(
+                                    "expected identity device_id {expected}, current identity is {}",
+                                    actual.unwrap_or("<missing>")
+                                ),
+                            ));
+                        }
+                    }
+                    update_device_identity_for_lease_probe(
+                        &state,
+                        &input.device_id,
+                        port_path,
+                        identity,
+                    )?;
+                }
                 Err(error)
                     if port_path.starts_with("mock://")
                         || matches!(
@@ -6434,6 +6454,8 @@ mod tests {
             State(state.clone()),
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
             }),
         )
         .await
@@ -6456,6 +6478,8 @@ mod tests {
             State(state.clone()),
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
             }),
         )
         .await
@@ -6491,6 +6515,8 @@ mod tests {
             State(state.clone()),
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
             }),
         )
         .await
@@ -6529,6 +6555,8 @@ mod tests {
             State(state.clone()),
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
             }),
         )
         .await
@@ -6609,6 +6637,8 @@ mod tests {
             State(state.clone()),
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
             }),
         )
         .await
@@ -6617,6 +6647,8 @@ mod tests {
             State(state.clone()),
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
             }),
         )
         .await
@@ -6683,6 +6715,8 @@ mod tests {
             State(state.clone()),
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
             }),
         )
         .await

@@ -50,7 +50,7 @@ just loadlynx <args>
 - Firmware development uses `just a-build` for STM32G431 analog and `just d-build` for ESP32-S3 digital.
 - Release maintenance must keep GitHub Releases publishing the user-facing assets required by the user skill: installer scripts, platform `loadlynx-host-tools-<platform>.tar.gz` archives, firmware assets/catalogs when user CLI/Web flashing is advertised, web bundle, `SHA256SUMS` covering every release asset, and accurate release notes.
 - If user docs require `loadlynx wifi ...`, first verify that the CLI, devd API, firmware protocol, persistence behavior, and release binaries implement it. If absent, implement and test it before presenting WiFi configuration as a user capability.
-- If user docs require remembered hardware, verify `loadlynx hardware available/recent/path/list/save/forget` and `loadlynx status --hardware ...`. The registry must remain user-level config, not project checkout state.
+- If user docs require remembered hardware, verify `loadlynx hardware available/path/list/bind/default/use/forget`, `loadlynx status`, and `loadlynx status --hardware ...`. The registry must remain user-level config, not project checkout state.
 
 ## Business Capability Development
 
@@ -93,10 +93,10 @@ just devd-serve --endpoint /tmp/loadlynx-devd.sock
 
 ```bash
 just loadlynx --ipc /tmp/loadlynx-devd.sock devices
-just loadlynx hardware available
-just loadlynx hardware recent
+just loadlynx hardware available --scan
 just loadlynx hardware list
-just loadlynx --ipc /tmp/loadlynx-devd.sock status --device <device-id>
+just loadlynx hardware bind usb --candidate <scan-candidate-id> --set-default
+just loadlynx status
 just loadlynx status --hardware <saved-hardware-id>
 ```
 
@@ -113,10 +113,10 @@ just loadlynx status --hardware <saved-hardware-id>
 - Run a devd firmware dry-run before real flash:
 
 ```bash
-just loadlynx flash digital --device <device-id> --artifact <artifact-id>
+just loadlynx flash digital --hardware <saved-hardware-id> --artifact <artifact-id>
 ```
 
-- For real devd digital flash, require a valid lease, selected artifact, artifact hash verification, target evidence, explicit owner confirmation, and post-flash identity capture. Do not require a fixed typed phrase for this confirmation. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
+- For real devd digital flash, use a saved USB hardware target (`--hardware <saved-hardware-id>` or saved default), require a valid lease, selected artifact, artifact hash verification, target evidence, explicit owner confirmation, and post-flash identity capture. Do not require a fixed typed phrase for this confirmation. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
 - Do not fall back to `just agentd flash digital` for CLI/devd digital flashing.
 - Web Serial flash uses `esptool-js`, release firmware catalog/assets, browser-granted ports, and identity/profile memory only. It must not save OS port paths.
 - For analog firmware and non-devd firmware workflows, use `mcu-agentd` through `just agentd ...` and preserve selector guardrails.

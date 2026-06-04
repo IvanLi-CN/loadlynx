@@ -346,7 +346,9 @@ pub type I2c0Bus = i2c0::I2c0Bus;
 pub type EepromMutex = Mutex<CriticalSectionRawMutex, eeprom::SharedM24c64>;
 static EEPROM: StaticCell<EepromMutex> = StaticCell::new();
 
-use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind, ProfileSource};
+#[cfg(feature = "net_http")]
+use loadlynx_calibration_format::ProfileSource;
+use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
 
 #[derive(Clone, Debug)]
 pub struct CalibrationState {
@@ -942,7 +944,90 @@ async fn write_usb_calibration_profile_response(
     out.push_str("}}").ok();
 }
 
+fn usb_short_id_from_mac(mac: [u8; 6]) -> heapless::String<6> {
+    let mut out: heapless::String<6> = heapless::String::new();
+    for byte in mac.iter().skip(3) {
+        let _ = core::write!(out, "{:02x}", byte);
+    }
+    out
+}
+
+fn usb_hostname_from_short_id(short_id: &str) -> heapless::String<32> {
+    let mut out: heapless::String<32> = heapless::String::new();
+    let _ = out.push_str("loadlynx-");
+    for ch in short_id.chars() {
+        if ch.is_ascii_alphanumeric() {
+            let _ = out.push(ch.to_ascii_lowercase());
+        }
+    }
+    out
+}
+
+fn usb_fqdn_from_hostname(hostname: &str) -> heapless::String<48> {
+    let mut out: heapless::String<48> = heapless::String::new();
+    let _ = out.push_str(hostname);
+    let _ = out.push_str(".local");
+    out
+}
+
+fn output_enable_allowed_for_restore(min_v_mv: i32) -> bool {
+    if LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
+        return false;
+    }
+    if !LINK_UP.load(Ordering::Relaxed) {
+        return false;
+    }
+    let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
+    match analog_state {
+        AnalogState::Faulted | AnalogState::Offline => return false,
+        AnalogState::CalMissing | AnalogState::MeasurementInvalid | AnalogState::Ready => {}
+    }
+
+    if min_v_mv > 0 && LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
+        let v_main_mv = LAST_V_MAIN_MV.load(Ordering::Relaxed);
+        if v_main_mv <= min_v_mv.max(0) {
+            return false;
+        }
+    }
+
+    true
+}
+
+async fn apply_calibration_mode(
+    kind: CalKind,
+    calibration: &'static CalibrationMutex,
+    control: &'static ControlMutex,
+) {
+    let prev_kind = { calibration.lock().await.cal_mode };
+    let mode_changed = prev_kind != kind;
+    let state_changed = if mode_changed {
+        let mut guard = control.lock().await;
+        let leaving_current_calibration = control::calibration_mode_uses_cc_override(prev_kind)
+            && !control::calibration_mode_uses_cc_override(kind);
+        let allow_restore_output = !leaving_current_calibration
+            || output_enable_allowed_for_restore(guard.active_preset().min_v_mv);
+        guard.apply_calibration_mode_transition(prev_kind, kind, allow_restore_output)
+    } else {
+        false
+    };
+
+    if mode_changed {
+        let mut guard = calibration.lock().await;
+        guard.cal_mode = kind;
+        if guard.pending_cal_mode == Some(kind) {
+            guard.pending_cal_mode = None;
+        }
+    }
+    if mode_changed || state_changed {
+        bump_control_rev();
+    }
+}
+
 async fn write_usb_identity_response(out: &mut UsbJsonLine, request_id: Option<&str>) {
+    let mac = hal::efuse::Efuse::mac_address();
+    let short_id = usb_short_id_from_mac(mac);
+    let device_id = usb_hostname_from_short_id(short_id.as_str());
+    let hostname = usb_fqdn_from_hostname(device_id.as_str());
     out.clear();
     out.push_str("{\"type\":\"response\"").ok();
     if let Some(id) = request_id {
@@ -950,7 +1035,13 @@ async fn write_usb_identity_response(out: &mut UsbJsonLine, request_id: Option<&
         write_json_string_escaped(out, id);
         out.push('"').ok();
     }
-    out.push_str(",\"ok\":true,\"data\":{\"device_id\":\"digital-esp32s3\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"protocol\":\"loadlynx.cdc.v1\",\"firmware_version\":\"").ok();
+    out.push_str(",\"ok\":true,\"data\":{\"device_id\":\"").ok();
+    write_json_string_escaped(out, device_id.as_str());
+    out.push_str("\",\"hostname\":\"").ok();
+    write_json_string_escaped(out, hostname.as_str());
+    out.push_str("\",\"short_id\":\"").ok();
+    write_json_string_escaped(out, short_id.as_str());
+    out.push_str("\",\"target\":\"digital\",\"mcu\":\"esp32s3\",\"protocol\":\"loadlynx.cdc.v1\",\"firmware_version\":\"").ok();
     write_json_string_escaped(out, FW_VERSION);
     out.push_str("\",\"digital_fw_version\":\"").ok();
     write_json_string_escaped(out, FW_VERSION);
@@ -1746,7 +1837,7 @@ async fn write_usb_calibration_response(
                         );
                         return;
                     }
-                    net::apply_calibration_mode(kind, calibration, control).await;
+                    apply_calibration_mode(kind, calibration, control).await;
                     write_usb_net_ack_response(out, request_id);
                 }
                 Err(err) => {
@@ -6401,7 +6492,7 @@ async fn apply_fast_status(
         }
     };
     if let Some(kind) = reconcile_cal_mode {
-        net::apply_calibration_mode(kind, calibration, control).await;
+        apply_calibration_mode(kind, calibration, control).await;
     }
 
     let mut guard = telemetry.lock().await;
@@ -7602,8 +7693,7 @@ async fn feed_decoder(
                                 if hdr.flags & FLAG_IS_ACK != 0 {
                                     let total =
                                         CAL_MODE_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-                                    net::apply_calibration_mode(mode.kind, calibration, control)
-                                        .await;
+                                    apply_calibration_mode(mode.kind, calibration, control).await;
                                     info!(
                                         "cal_mode ACK received: seq={} kind={:?} (ack_total={})",
                                         hdr.seq, mode.kind, total

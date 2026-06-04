@@ -377,26 +377,39 @@ enum HardwareCommand {
         #[arg(long)]
         scan: bool,
     },
-    List,
-    Recent,
-    Path,
-    Save {
-        #[arg(long)]
-        id: String,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long, value_enum)]
+    Bind {
+        #[arg(value_enum)]
         transport: SavedTransport,
         #[arg(long)]
-        device: Option<String>,
+        candidate: Option<String>,
         #[arg(long)]
         url: Option<String>,
         #[arg(long)]
-        devd: Option<String>,
+        name: Option<String>,
+        #[arg(long)]
+        set_default: bool,
     },
+    Default {
+        #[command(subcommand)]
+        command: HardwareDefaultCommand,
+    },
+    Use {
+        id: String,
+        #[arg(long, value_enum)]
+        transport: SavedTransport,
+    },
+    List,
+    Path,
     Forget {
         id: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum HardwareDefaultCommand {
+    Show,
+    Set { id: String },
+    Clear,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -422,7 +435,7 @@ enum PdModeArg {
     Pps,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "snake_case")]
 enum SavedTransport {
     Usb,
@@ -430,7 +443,7 @@ enum SavedTransport {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-struct SavedHardware {
+struct LegacySavedHardware {
     id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<String>,
@@ -445,10 +458,55 @@ struct SavedHardware {
     last_seen_unix_seconds: Option<u64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SavedHardware {
+    id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_transport: Option<SavedTransport>,
+    #[serde(default, skip_serializing_if = "SavedTransports::is_empty")]
+    transports: SavedTransports,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_seen_unix_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+struct SavedTransports {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usb: Option<SavedUsbTransport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    http: Option<SavedHttpTransport>,
+}
+
+impl SavedTransports {
+    fn is_empty(&self) -> bool {
+        self.usb.is_none() && self.http.is_none()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SavedUsbTransport {
+    device: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    port_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    devd: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct SavedHttpTransport {
+    url: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct HardwareRegistry {
     #[serde(default = "hardware_registry_schema_version")]
     schema_version: u8,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    default_hardware_id: Option<String>,
     #[serde(default)]
     hardware: Vec<SavedHardware>,
 }
@@ -463,6 +521,7 @@ impl Default for HardwareRegistry {
     fn default() -> Self {
         Self {
             schema_version: hardware_registry_schema_version(),
+            default_hardware_id: None,
             hardware: Vec::new(),
         }
     }
@@ -470,8 +529,11 @@ impl Default for HardwareRegistry {
 
 #[derive(Debug, Clone)]
 struct ResolvedUsbHardware {
+    hardware_id: String,
     device: String,
     devd: String,
+    port_path: Option<String>,
+    expected_identity_device_id: String,
 }
 
 #[derive(Debug, Clone)]
@@ -657,7 +719,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()?;
-    let payload = match cli.command {
+    let payload_result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
+        let payload = match cli.command {
         Command::Hardware { command } => handle_hardware_command(command, &client, &devd).await?,
         Command::UsbPort {
             command: UsbPortCommand::Set { args },
@@ -686,36 +749,34 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             hardware,
         } => {
             ensure_one_status_selector(url.as_ref(), device.as_ref(), hardware.as_ref())?;
-            if let Some(hardware_id) = hardware {
+            if let Some(device) = device {
+                return Err(format!(
+                    "temporary devd device id `{device}` cannot be used for status; bind it first with `loadlynx hardware bind usb --candidate {device}` and then use --hardware <hardware-id>"
+                )
+                .into());
+            }
+            if let Some(url) = url {
+                let status = client
+                    .get(api_url(&url, "/api/v1/status")?)
+                    .send()
+                    .await?
+                    .error_for_status()?
+                    .json::<Value>()
+                    .await?;
+                status
+            } else if let Some(hardware_id) = hardware.or_else(|| Some("default".to_string())) {
                 match resolve_saved_hardware(&hardware_id, &devd)? {
                     ResolvedHardware::Usb(resolved) => {
-                        let lease =
-                            create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
-                        let heartbeat = spawn_cli_lease_heartbeat(
-                            client.clone(),
-                            resolved.devd.clone(),
-                            lease.clone(),
-                        );
-                        let path = format!(
-                            "/api/v1/status?device_id={}&lease_id={}",
-                            resolved.device, lease.lease_id
-                        );
-                        let status: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
-                            async {
-                                request_devd_value(
-                                    &resolved.devd,
-                                    reqwest::Method::GET,
-                                    &path,
-                                    None,
-                                )
-                                .await
-                            }
-                            .await;
-                        let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
-                        heartbeat.abort();
-                        let status = status?;
+                        let status = request_devd_usb_value(
+                            &client,
+                            &resolved,
+                            reqwest::Method::GET,
+                            "/api/v1/status",
+                            None,
+                        )
+                        .await?;
                         let _ =
-                            remember_connected_usb(&hardware_id, &resolved.device, &resolved.devd);
+                            mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
                         status
                     }
                     ResolvedHardware::Http { url } => {
@@ -726,40 +787,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             .error_for_status()?
                             .json::<Value>()
                             .await?;
-                        let _ = remember_connected_http(&hardware_id, &url);
+                        let _ = mark_hardware_transport_used(&hardware_id, SavedTransport::Http);
                         status
                     }
                 }
-            } else if let Some(url) = url {
-                let status = client
-                    .get(api_url(&url, "/api/v1/status")?)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Value>()
-                    .await?;
-                let id = generated_http_hardware_id(&url)?;
-                let _ = remember_connected_http(&id, &url);
-                status
-            } else if let Some(device) = device {
-                let lease = create_cli_lease(&client, &devd, &device).await?;
-                let heartbeat =
-                    spawn_cli_lease_heartbeat(client.clone(), devd.clone(), lease.clone());
-                let path = format!(
-                    "/api/v1/status?device_id={device}&lease_id={}",
-                    lease.lease_id
-                );
-                let status: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
-                    async { request_devd_value(&devd, reqwest::Method::GET, &path, None).await }
-                        .await;
-                let _ = release_cli_lease(&client, &devd, &lease.lease_id).await;
-                heartbeat.abort();
-                let status = status?;
-                let id = generated_usb_hardware_id(&device);
-                let _ = remember_connected_usb(&id, &device, &devd);
-                status
             } else {
-                return Err("status requires --hardware, --device, or --url".into());
+                return Err("status requires a saved default hardware, --hardware, or --url".into());
             }
         }
         Command::Flash {
@@ -845,32 +878,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                                 .await?
                         }
                         ResolvedHardware::Usb(resolved) => {
-                            let lease =
-                                create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
-                            let heartbeat = spawn_cli_lease_heartbeat(
-                                client.clone(),
-                                resolved.devd.clone(),
-                                lease.clone(),
-                            );
-                            let path = format!(
-                                "/api/v1/cc?device_id={}&lease_id={}",
-                                resolved.device, lease.lease_id
-                            );
-                            let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> =
-                                async {
-                                    request_devd_value(
-                                        &resolved.devd,
-                                        reqwest::Method::POST,
-                                        &path,
-                                        Some(body.clone()),
-                                    )
-                                    .await
-                                }
-                                .await;
-                            let _ =
-                                release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
-                            heartbeat.abort();
-                            result?
+                            request_devd_usb_value(
+                                &client,
+                                &resolved,
+                                reqwest::Method::POST,
+                                "/api/v1/cc",
+                                Some(body.clone()),
+                            )
+                            .await?
                         }
                     }
                 } else if let Some(url) = url {
@@ -883,7 +898,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .json::<Value>()
                         .await?
                 } else {
-                    return Err("output set requires --hardware or --url".into());
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector {
+                            url: None,
+                            device: None,
+                            hardware: None,
+                        },
+                        reqwest::Method::POST,
+                        "/api/v1/cc",
+                        Some(body),
+                        false,
+                    )
+                    .await?
                 }
             }
         },
@@ -926,26 +954,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         json!(allow_extended_voltage),
                     );
                 }
-                let lease = create_cli_lease(&client, &resolved.devd, &resolved.device).await?;
-                let heartbeat =
-                    spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-                let path = format!(
-                    "/api/v1/pd?device_id={}&lease_id={}",
-                    resolved.device, lease.lease_id
-                );
-                let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-                    request_devd_value(
-                        &resolved.devd,
-                        reqwest::Method::POST,
-                        &path,
-                        Some(Value::Object(body.clone())),
-                    )
-                    .await
-                }
-                .await;
-                let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
-                heartbeat.abort();
-                result?
+                request_devd_usb_value(
+                    &client,
+                    &resolved,
+                    reqwest::Method::POST,
+                    "/api/v1/pd",
+                    Some(Value::Object(body)),
+                )
+                .await?
             }
         },
         Command::Wifi { command } => match command {
@@ -1319,6 +1335,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 .await?
             }
         },
+        };
+        Ok(payload)
+    }
+    .await;
+
+    let payload = match payload_result {
+        Ok(payload) => payload,
+        Err(error) => {
+            print_cli_error(&*error, json_output)?;
+            std::process::exit(1);
+        }
     };
 
     if payload
@@ -1538,6 +1565,13 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
         Command::Hardware {
             command: HardwareCommand::Available { scan: true },
         } => vec![default_devd.to_string()],
+        Command::Hardware {
+            command:
+                HardwareCommand::Bind {
+                    transport: SavedTransport::Usb,
+                    ..
+                },
+        } => vec![default_devd.to_string()],
         Command::Hardware { .. } => Vec::new(),
     };
 
@@ -1560,12 +1594,13 @@ fn selector_devd_endpoint(
     if device.is_some() {
         return Some(default_devd.to_string());
     }
-    hardware
+    let resolved = hardware
         .and_then(|id| resolve_saved_hardware(id, default_devd).ok())
-        .and_then(|resolved| match resolved {
-            ResolvedHardware::Usb(resolved) => Some(resolved.devd),
-            ResolvedHardware::Http { .. } => None,
-        })
+        .or_else(|| resolve_saved_hardware("default", default_devd).ok());
+    resolved.and_then(|resolved| match resolved {
+        ResolvedHardware::Usb(resolved) => Some(resolved.devd),
+        ResolvedHardware::Http { .. } => None,
+    })
 }
 
 fn usb_target_devd_endpoint(
@@ -1576,12 +1611,13 @@ fn usb_target_devd_endpoint(
     if device.is_some() {
         return Some(default_devd.to_string());
     }
-    hardware
+    let resolved = hardware
         .and_then(|id| resolve_saved_hardware(id, default_devd).ok())
-        .and_then(|resolved| match resolved {
-            ResolvedHardware::Usb(resolved) => Some(resolved.devd),
-            ResolvedHardware::Http { .. } => None,
-        })
+        .or_else(|| resolve_saved_hardware("default", default_devd).ok());
+    resolved.and_then(|resolved| match resolved {
+        ResolvedHardware::Usb(resolved) => Some(resolved.devd),
+        ResolvedHardware::Http { .. } => None,
+    })
 }
 
 fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
@@ -1624,6 +1660,46 @@ fn print_cli_payload(
         println!("{}", render_human_payload(&payload)?);
     }
     Ok(())
+}
+
+fn print_cli_error(
+    error: &(dyn std::error::Error + Send + Sync),
+    json_output: bool,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let message = error.to_string();
+    if json_output {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json!({
+                "ok": false,
+                "error_code": classify_cli_error_code(&message),
+                "error": message,
+            }))?
+        );
+    } else {
+        eprintln!("Error: {message}");
+    }
+    Ok(())
+}
+
+fn classify_cli_error_code(message: &str) -> &'static str {
+    if message.contains("default hardware is not set") {
+        "default_hardware_not_set"
+    } else if message.contains("saved hardware not found") {
+        "hardware_not_found"
+    } else if message.contains("is not a stable LoadLynx hardware id") {
+        "unstable_hardware_identity"
+    } else if message.contains("identity_confirmation_mismatch") {
+        "identity_confirmation_mismatch"
+    } else if message.contains("device_not_found") {
+        "device_not_found"
+    } else if message.contains("target_selector_not_cached") {
+        "target_selector_not_cached"
+    } else if message.contains("bind it first") {
+        "hardware_not_bound"
+    } else {
+        "command_failed"
+    }
 }
 
 fn render_human_payload(payload: &Value) -> Result<String, serde_json::Error> {
@@ -2697,13 +2773,17 @@ async fn request_api_value(
     if let Some(hardware_id) = selector.hardware {
         match resolve_saved_hardware(&hardware_id, default_devd)? {
             ResolvedHardware::Usb(resolved) => {
-                request_devd_usb_value(client, &resolved, method, path, body).await
+                let value = request_devd_usb_value(client, &resolved, method, path, body).await?;
+                let _ = mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
+                Ok(value)
             }
             ResolvedHardware::Http { url } => {
                 if is_wifi_write && !allow_insecure_lan_wifi {
                     return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
                 }
-                request_http_value(client, &url, method, path, body).await
+                let value = request_http_value(client, &url, method, path, body).await?;
+                let _ = mark_hardware_transport_used(&hardware_id, SavedTransport::Http);
+                Ok(value)
             }
         }
     } else if let Some(url) = selector.url {
@@ -2712,13 +2792,26 @@ async fn request_api_value(
         }
         request_http_value(client, &url, method, path, body).await
     } else if let Some(device) = selector.device {
-        let resolved = ResolvedUsbHardware {
-            device,
-            devd: default_devd.to_string(),
-        };
-        request_devd_usb_value(client, &resolved, method, path, body).await
+        Err(format!(
+            "temporary devd device id `{device}` cannot be used for operations; bind it first with `loadlynx hardware bind usb --candidate {device}` and then use --hardware <hardware-id>"
+        )
+        .into())
     } else {
-        Err("command requires --hardware, --device, or --url".into())
+        match resolve_saved_hardware("default", default_devd)? {
+            ResolvedHardware::Usb(resolved) => {
+                let value = request_devd_usb_value(client, &resolved, method, path, body).await?;
+                let _ = mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
+                Ok(value)
+            }
+            ResolvedHardware::Http { url } => {
+                if is_wifi_write && !allow_insecure_lan_wifi {
+                    return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
+                }
+                let value = request_http_value(client, &url, method, path, body).await?;
+                let _ = mark_default_transport_used(SavedTransport::Http);
+                Ok(value)
+            }
+        }
     }
 }
 
@@ -2733,12 +2826,14 @@ async fn request_http_value(
     if let Some(body) = body {
         request = request.json(&body);
     }
-    Ok(request
-        .send()
-        .await?
-        .error_for_status()?
-        .json::<Value>()
-        .await?)
+    let response = request.send().await?;
+    let status = response.status();
+    let value = response.json::<Value>().await?;
+    if status.is_success() {
+        Ok(value)
+    } else {
+        Err(format!("HTTP {status}: {value}").into())
+    }
 }
 
 async fn request_devd_usb_value(
@@ -2775,6 +2870,37 @@ fn is_retryable_devd_usb_error(error: &(dyn std::error::Error + Send + Sync)) ->
     message.contains("retryable 503") || message.contains("503 Service Unavailable")
 }
 
+fn resolve_scanned_usb_device_for_saved_hardware(
+    resolved: &ResolvedUsbHardware,
+    scan: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let Some(saved_port_path) = resolved.port_path.as_deref() else {
+        return Ok(resolved.device.clone());
+    };
+    let devices = scan
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or("devd scan response did not include devices")?;
+    devices
+        .iter()
+        .find(|device| {
+            device
+                .get("digital_target")
+                .and_then(|target| target.get("port_path"))
+                .and_then(Value::as_str)
+                == Some(saved_port_path)
+        })
+        .and_then(|device| device.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "saved USB hardware {} was not found at saved port path {} after devd scan",
+                resolved.hardware_id, saved_port_path
+            )
+            .into()
+        })
+}
+
 async fn request_devd_usb_value_once(
     client: &Client,
     resolved: &ResolvedUsbHardware,
@@ -2783,12 +2909,12 @@ async fn request_devd_usb_value_once(
     body: Option<Value>,
     retryable_503: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let lease = create_cli_lease(client, &resolved.devd, &resolved.device).await?;
+    let (lease, lease_device) = create_cli_lease_for_resolved_usb(client, resolved).await?;
     let heartbeat = spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
     let separator = if path.contains('?') { '&' } else { '?' };
     let path = format!(
         "{path}{separator}device_id={}&lease_id={}",
-        resolved.device, lease.lease_id
+        lease_device, lease.lease_id
     );
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
         match request_devd_value(&resolved.devd, method, &path, body).await {
@@ -2815,7 +2941,7 @@ fn ensure_one_api_selector(
         .filter(|selected| *selected)
         .count();
     match count {
-        0 => Err("command requires --hardware, --device, or --url".into()),
+        0 => Ok(()),
         1 => Ok(()),
         _ => Err("command accepts only one of --hardware, --device, or --url".into()),
     }
@@ -2833,7 +2959,63 @@ fn resolve_output_enable(
     }
 }
 
-async fn create_cli_lease(
+async fn create_cli_lease_with_expected(
+    _client: &Client,
+    devd: &str,
+    device: &str,
+    expected_identity_device_id: Option<&str>,
+) -> Result<CliLease, Box<dyn std::error::Error + Send + Sync>> {
+    let body = match expected_identity_device_id {
+        Some(expected) => json!({"device_id": device, "expected_identity_device_id": expected}),
+        None => json!({"device_id": device}),
+    };
+    Ok(serde_json::from_value(
+        request_devd_value(
+            devd,
+            reqwest::Method::POST,
+            "/api/v1/serial/lease",
+            Some(body),
+        )
+        .await?,
+    )?)
+}
+
+async fn create_cli_lease_for_resolved_usb(
+    client: &Client,
+    resolved: &ResolvedUsbHardware,
+) -> Result<(CliLease, String), Box<dyn std::error::Error + Send + Sync>> {
+    match create_cli_lease_with_expected(
+        client,
+        &resolved.devd,
+        &resolved.device,
+        Some(&resolved.expected_identity_device_id),
+    )
+    .await
+    {
+        Ok(lease) => Ok((lease, resolved.device.clone())),
+        Err(error) if error.to_string().contains("device_not_found") => {
+            let scan = request_devd_value(
+                &resolved.devd,
+                reqwest::Method::POST,
+                "/api/v1/devices/scan",
+                None,
+            )
+            .await?;
+            let device = resolve_scanned_usb_device_for_saved_hardware(resolved, &scan)?;
+            let lease = create_cli_lease_with_expected(
+                client,
+                &resolved.devd,
+                &device,
+                Some(&resolved.expected_identity_device_id),
+            )
+            .await?;
+            Ok((lease, device))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn create_cli_bind_probe_lease(
     _client: &Client,
     devd: &str,
     device: &str,
@@ -2843,7 +3025,7 @@ async fn create_cli_lease(
             devd,
             reqwest::Method::POST,
             "/api/v1/serial/lease",
-            Some(json!({"device_id": device})),
+            Some(json!({"device_id": device, "bind_probe": true})),
         )
         .await?,
     )?)
@@ -2899,12 +3081,21 @@ async fn post_usb_operation_with_optional_lease(
     let lease = if dry_run {
         None
     } else {
-        Some(create_cli_lease(client, &resolved.devd, &resolved.device).await?)
+        Some(create_cli_lease_for_resolved_usb(client, resolved).await?)
     };
     let heartbeat = lease.as_ref().map(|lease| {
-        spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone())
+        spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.0.clone())
     });
-    if let Some(lease) = lease.as_ref()
+    let operation_path = if let Some((_, lease_device)) = lease.as_ref() {
+        path.replacen(
+            &format!("/devices/{}", resolved.device),
+            &format!("/devices/{lease_device}"),
+            1,
+        )
+    } else {
+        path.to_string()
+    };
+    if let Some((lease, _)) = lease.as_ref()
         && let Some(object) = payload.as_object_mut()
     {
         object.insert(
@@ -2914,11 +3105,17 @@ async fn post_usb_operation_with_optional_lease(
     }
 
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
-        request_devd_value(&resolved.devd, reqwest::Method::POST, path, Some(payload)).await
+        request_devd_value(
+            &resolved.devd,
+            reqwest::Method::POST,
+            &operation_path,
+            Some(payload),
+        )
+        .await
     }
     .await;
 
-    if let Some(lease) = lease.as_ref() {
+    if let Some((lease, _)) = lease.as_ref() {
         let _ = release_cli_lease(client, &resolved.devd, &lease.lease_id).await;
     }
     if let Some(heartbeat) = heartbeat {
@@ -2933,7 +3130,7 @@ async fn run_monitor(
     tail: usize,
     format: MonitorFormat,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    let lease = create_cli_lease(client, &resolved.devd, &resolved.device).await?;
+    let (lease, lease_device) = create_cli_lease_for_resolved_usb(client, &resolved).await?;
     let _heartbeat =
         spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
     let mut seen = HashSet::new();
@@ -2943,7 +3140,7 @@ async fn run_monitor(
             reqwest::Method::GET,
             &format!(
                 "/api/v1/devices/{}/session?logs_limit={tail}&trace_limit={}&lease_id={}",
-                resolved.device,
+                lease_device,
                 tail * 2,
                 lease.lease_id
             ),
@@ -3074,7 +3271,7 @@ fn choose_digital_usb_port_interactive() -> io::Result<String> {
 
 async fn handle_hardware_command(
     command: HardwareCommand,
-    _client: &Client,
+    client: &Client,
     devd: &str,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let path = hardware_registry_path()?;
@@ -3113,45 +3310,146 @@ async fn handle_hardware_command(
                 registry,
             ))
         }
-        HardwareCommand::List => {
-            let mut registry = read_hardware_registry(&path)?;
-            sort_hardware(&mut registry.hardware);
-            Ok(json!({"path": path, "hardware": registry.hardware}))
-        }
-        HardwareCommand::Recent => {
-            let mut registry = read_hardware_registry(&path)?;
-            sort_recent_hardware(&mut registry.hardware);
-            Ok(json!({"path": path, "hardware": registry.hardware}))
-        }
-        HardwareCommand::Path => Ok(json!({"path": path})),
-        HardwareCommand::Save {
-            id,
-            name,
+        HardwareCommand::Bind {
             transport,
-            device,
+            candidate,
             url,
-            devd,
+            name,
+            set_default,
         } => {
-            validate_manual_hardware(&id, &transport, device.as_deref(), url.as_deref())?;
             let mut registry = read_hardware_registry(&path)?;
-            let hardware = SavedHardware {
-                id,
-                name,
-                transport,
-                device,
-                url,
-                devd,
-                last_seen_unix_seconds: Some(current_unix_seconds()),
+            let now = current_unix_seconds();
+            let saved = match transport {
+                SavedTransport::Usb => {
+                    let candidate = candidate.ok_or(
+                        "USB bind requires --candidate <scan-candidate-id>; run `loadlynx hardware available --scan --json` first",
+                    )?;
+                    let scan = request_devd_value(
+                        devd,
+                        reqwest::Method::POST,
+                        "/api/v1/devices/scan",
+                        None,
+                    )
+                    .await?;
+                    let device_record = scan
+                        .get("devices")
+                        .and_then(Value::as_array)
+                        .and_then(|devices| {
+                            devices.iter().find(|device| {
+                                device.get("id").and_then(Value::as_str) == Some(candidate.as_str())
+                            })
+                        })
+                        .ok_or_else(|| format!("USB candidate not found: {candidate}"))?;
+                    let port_path = device_record
+                        .get("digital_target")
+                        .and_then(|target| target.get("port_path"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string);
+                    let identity = read_usb_identity_for_bind(client, devd, &candidate).await?;
+                    let hardware_id = stable_hardware_id_from_identity(&identity)?;
+                    upsert_hardware_transport(
+                        &mut registry,
+                        hardware_id,
+                        name,
+                        Some(identity),
+                        SavedTransport::Usb,
+                        Some(SavedUsbTransport {
+                            device: candidate,
+                            port_path,
+                            devd: None,
+                        }),
+                        None,
+                        now,
+                    )
+                }
+                SavedTransport::Http => {
+                    let url = url.ok_or("HTTP bind requires --url <base-url>")?;
+                    let identity = request_http_value(
+                        client,
+                        &url,
+                        reqwest::Method::GET,
+                        "/api/v1/identity",
+                        None,
+                    )
+                    .await?;
+                    let hardware_id = stable_hardware_id_from_identity(&identity)?;
+                    upsert_hardware_transport(
+                        &mut registry,
+                        hardware_id,
+                        name,
+                        Some(identity),
+                        SavedTransport::Http,
+                        None,
+                        Some(SavedHttpTransport { url }),
+                        now,
+                    )
+                }
             };
-            let saved = upsert_hardware(&mut registry, hardware);
+            if set_default || registry.default_hardware_id.is_none() {
+                registry.default_hardware_id = Some(saved.id.clone());
+            }
+            write_hardware_registry(&path, &registry)?;
+            Ok(
+                json!({"path": path, "hardware": saved, "default_hardware_id": registry.default_hardware_id}),
+            )
+        }
+        HardwareCommand::Default { command } => match command {
+            HardwareDefaultCommand::Show => {
+                let registry = read_hardware_registry(&path)?;
+                let hardware = registry
+                    .default_hardware_id
+                    .as_ref()
+                    .and_then(|id| registry.hardware.iter().find(|hardware| hardware.id == *id));
+                Ok(
+                    json!({"path": path, "default_hardware_id": registry.default_hardware_id, "hardware": hardware}),
+                )
+            }
+            HardwareDefaultCommand::Set { id } => {
+                let mut registry = read_hardware_registry(&path)?;
+                if !registry.hardware.iter().any(|hardware| hardware.id == id) {
+                    return Err(format!("saved hardware not found: {id}").into());
+                }
+                registry.default_hardware_id = Some(id.clone());
+                write_hardware_registry(&path, &registry)?;
+                Ok(json!({"path": path, "default_hardware_id": id}))
+            }
+            HardwareDefaultCommand::Clear => {
+                let mut registry = read_hardware_registry(&path)?;
+                registry.default_hardware_id = None;
+                write_hardware_registry(&path, &registry)?;
+                Ok(json!({"path": path, "default_hardware_id": Value::Null}))
+            }
+        },
+        HardwareCommand::Use { id, transport } => {
+            let mut registry = read_hardware_registry(&path)?;
+            let hardware = registry
+                .hardware
+                .iter_mut()
+                .find(|hardware| hardware.id == id)
+                .ok_or_else(|| format!("saved hardware not found: {id}"))?;
+            ensure_hardware_has_transport(hardware, transport)?;
+            hardware.last_transport = Some(transport);
+            hardware.last_seen_unix_seconds = Some(current_unix_seconds());
+            let saved = hardware.clone();
             write_hardware_registry(&path, &registry)?;
             Ok(json!({"path": path, "hardware": saved}))
         }
+        HardwareCommand::List => {
+            let mut registry = read_hardware_registry(&path)?;
+            sort_hardware(&mut registry.hardware);
+            Ok(
+                json!({"path": path, "default_hardware_id": registry.default_hardware_id, "hardware": registry.hardware}),
+            )
+        }
+        HardwareCommand::Path => Ok(json!({"path": path})),
         HardwareCommand::Forget { id } => {
             let mut registry = read_hardware_registry(&path)?;
             let before = registry.hardware.len();
             registry.hardware.retain(|hardware| hardware.id != id);
             let removed = registry.hardware.len() != before;
+            if registry.default_hardware_id.as_deref() == Some(id.as_str()) {
+                registry.default_hardware_id = None;
+            }
             write_hardware_registry(&path, &registry)?;
             Ok(json!({"path": path, "id": id, "removed": removed}))
         }
@@ -3164,32 +3462,52 @@ fn resolve_saved_hardware(
 ) -> Result<ResolvedHardware, Box<dyn std::error::Error + Send + Sync>> {
     let path = hardware_registry_path()?;
     let registry = read_hardware_registry(&path)?;
+    let id = if id == "default" {
+        registry.default_hardware_id.as_deref().ok_or(
+            "default hardware is not set; run `loadlynx hardware default set <hardware-id>`",
+        )?
+    } else {
+        id
+    };
     let hardware = registry
         .hardware
         .iter()
         .find(|hardware| hardware.id == id)
         .ok_or_else(|| format!("saved hardware not found: {id}"))?;
 
-    match &hardware.transport {
+    let transport = hardware
+        .last_transport
+        .ok_or_else(|| format!("saved hardware {id} has no selected transport; run `loadlynx hardware use {id} --transport <usb|http>`"))?;
+    resolve_hardware_transport(hardware, transport, default_devd)
+}
+
+fn resolve_hardware_transport(
+    hardware: &SavedHardware,
+    transport: SavedTransport,
+    default_devd: &str,
+) -> Result<ResolvedHardware, Box<dyn std::error::Error + Send + Sync>> {
+    match transport {
         SavedTransport::Usb => {
-            let device = hardware
-                .device
-                .clone()
-                .ok_or_else(|| format!("saved USB hardware {id} is missing device"))?;
+            let usb =
+                hardware.transports.usb.as_ref().ok_or_else(|| {
+                    format!("saved hardware {} has no USB transport", hardware.id)
+                })?;
             Ok(ResolvedHardware::Usb(ResolvedUsbHardware {
-                device,
-                devd: hardware
-                    .devd
-                    .clone()
-                    .unwrap_or_else(|| default_devd.to_string()),
+                hardware_id: hardware.id.clone(),
+                device: usb.device.clone(),
+                devd: usb.devd.clone().unwrap_or_else(|| default_devd.to_string()),
+                port_path: usb.port_path.clone(),
+                expected_identity_device_id: hardware.id.clone(),
             }))
         }
         SavedTransport::Http => {
-            let url = hardware
-                .url
-                .clone()
-                .ok_or_else(|| format!("saved HTTP hardware {id} is missing url"))?;
-            Ok(ResolvedHardware::Http { url })
+            let http =
+                hardware.transports.http.as_ref().ok_or_else(|| {
+                    format!("saved hardware {} has no HTTP transport", hardware.id)
+                })?;
+            Ok(ResolvedHardware::Http {
+                url: http.url.clone(),
+            })
         }
     }
 }
@@ -3199,8 +3517,8 @@ fn resolve_usb_target(
     hardware: Option<String>,
     default_devd: &str,
 ) -> Result<ResolvedUsbHardware, Box<dyn std::error::Error + Send + Sync>> {
-    if device.is_some() && hardware.is_some() {
-        return Err("command accepts only one of --hardware or --device".into());
+    if device.is_some() {
+        return Err("temporary devd --device ids can only be used during `loadlynx hardware bind`; bind the hardware first and use --hardware <hardware-id>".into());
     }
     if let Some(hardware_id) = hardware {
         match resolve_saved_hardware(&hardware_id, default_devd)? {
@@ -3210,13 +3528,13 @@ fn resolve_usb_target(
             )
             .into()),
         }
-    } else if let Some(device) = device {
-        Ok(ResolvedUsbHardware {
-            device,
-            devd: default_devd.to_string(),
-        })
     } else {
-        Err("command requires --hardware or --device".into())
+        match resolve_saved_hardware("default", default_devd)? {
+            ResolvedHardware::Usb(resolved) => Ok(resolved),
+            ResolvedHardware::Http { .. } => {
+                Err("default hardware uses HTTP; this command requires USB/devd hardware".into())
+            }
+        }
     }
 }
 
@@ -3230,7 +3548,7 @@ fn ensure_one_status_selector(
         .filter(|selected| *selected)
         .count();
     match count {
-        0 => Err("status requires --hardware, --device, or --url".into()),
+        0 => Ok(()),
         1 => Ok(()),
         _ => Err("status accepts only one of --hardware, --device, or --url".into()),
     }
@@ -3242,111 +3560,107 @@ fn ensure_one_output_selector(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     match (url.is_some(), hardware.is_some()) {
         (true, true) => Err("output set accepts only one of --hardware or --url".into()),
-        (false, false) => Err("output set requires --hardware or --url".into()),
         _ => Ok(()),
     }
 }
 
-fn validate_manual_hardware(
-    id: &str,
-    transport: &SavedTransport,
-    device: Option<&str>,
-    url: Option<&str>,
+fn mark_default_transport_used(
+    transport: SavedTransport,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if id.trim().is_empty() {
-        return Err("hardware id must not be empty".into());
-    }
-    match transport {
-        SavedTransport::Usb if device.is_none() => {
-            Err("USB hardware records require --device".into())
-        }
-        SavedTransport::Http if url.is_none() => Err("HTTP hardware records require --url".into()),
-        SavedTransport::Http => {
-            Url::parse(url.expect("checked above"))?;
-            Ok(())
-        }
-        _ => Ok(()),
-    }
+    let path = hardware_registry_path()?;
+    let registry = read_hardware_registry(&path)?;
+    let Some(id) = registry.default_hardware_id.clone() else {
+        return Ok(());
+    };
+    drop(registry);
+    mark_hardware_transport_used(&id, transport)
 }
 
-fn remember_connected_usb(
+fn mark_hardware_transport_used(
     id: &str,
-    device: &str,
-    devd: &str,
+    transport: SavedTransport,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = hardware_registry_path()?;
     let mut registry = read_hardware_registry(&path)?;
-    upsert_hardware(
-        &mut registry,
-        SavedHardware {
-            id: id.to_string(),
-            name: None,
-            transport: SavedTransport::Usb,
-            device: Some(device.to_string()),
-            url: None,
-            devd: Some(devd.to_string()),
-            last_seen_unix_seconds: Some(current_unix_seconds()),
-        },
-    );
+    let Some(hardware) = registry
+        .hardware
+        .iter_mut()
+        .find(|hardware| hardware.id == id)
+    else {
+        return Ok(());
+    };
+    ensure_hardware_has_transport(hardware, transport)?;
+    hardware.last_transport = Some(transport);
+    hardware.last_seen_unix_seconds = Some(current_unix_seconds());
     write_hardware_registry(&path, &registry)
 }
 
-fn remember_connected_http(
-    id: &str,
-    url: &str,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let path = hardware_registry_path()?;
-    let mut registry = read_hardware_registry(&path)?;
-    upsert_hardware(
-        &mut registry,
-        SavedHardware {
-            id: id.to_string(),
-            name: None,
-            transport: SavedTransport::Http,
-            device: None,
-            url: Some(url.to_string()),
-            devd: None,
-            last_seen_unix_seconds: Some(current_unix_seconds()),
-        },
-    );
-    write_hardware_registry(&path, &registry)
-}
-
-fn upsert_hardware(registry: &mut HardwareRegistry, mut hardware: SavedHardware) -> SavedHardware {
+fn upsert_hardware_transport(
+    registry: &mut HardwareRegistry,
+    id: String,
+    name: Option<String>,
+    identity: Option<Value>,
+    transport: SavedTransport,
+    usb: Option<SavedUsbTransport>,
+    http: Option<SavedHttpTransport>,
+    now: u64,
+) -> SavedHardware {
     if let Some(existing) = registry
         .hardware
         .iter_mut()
-        .find(|existing| existing.id == hardware.id)
+        .find(|existing| existing.id == id)
     {
-        if hardware.name.is_none() {
-            hardware.name = existing.name.clone();
+        if name.is_some() {
+            existing.name = name;
         }
-        *existing = hardware.clone();
+        if identity.is_some() {
+            existing.identity = identity;
+        }
+        match transport {
+            SavedTransport::Usb => existing.transports.usb = usb,
+            SavedTransport::Http => existing.transports.http = http,
+        }
+        existing.last_transport = Some(transport);
+        existing.last_seen_unix_seconds = Some(now);
+        let hardware = existing.clone();
         sort_hardware(&mut registry.hardware);
         return hardware;
     }
+    let mut transports = SavedTransports::default();
+    match transport {
+        SavedTransport::Usb => transports.usb = usb,
+        SavedTransport::Http => transports.http = http,
+    }
+    let hardware = SavedHardware {
+        id,
+        name,
+        identity,
+        last_transport: Some(transport),
+        transports,
+        last_seen_unix_seconds: Some(now),
+    };
     registry.hardware.push(hardware.clone());
     sort_hardware(&mut registry.hardware);
     hardware
 }
 
 fn sort_hardware(hardware: &mut [SavedHardware]) {
-    hardware.sort_by(|left, right| {
-        transport_rank(&left.transport)
-            .cmp(&transport_rank(&right.transport))
-            .then_with(|| left.id.cmp(&right.id))
-    });
+    hardware.sort_by(|left, right| left.id.cmp(&right.id));
 }
 
-fn sort_recent_hardware(hardware: &mut [SavedHardware]) {
-    hardware.sort_by(|left, right| {
-        right
-            .last_seen_unix_seconds
-            .unwrap_or(0)
-            .cmp(&left.last_seen_unix_seconds.unwrap_or(0))
-            .then_with(|| transport_rank(&left.transport).cmp(&transport_rank(&right.transport)))
-            .then_with(|| left.id.cmp(&right.id))
-    });
+fn ensure_hardware_has_transport(
+    hardware: &SavedHardware,
+    transport: SavedTransport,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match transport {
+        SavedTransport::Usb if hardware.transports.usb.is_none() => {
+            Err(format!("saved hardware {} has no USB transport", hardware.id).into())
+        }
+        SavedTransport::Http if hardware.transports.http.is_none() => {
+            Err(format!("saved hardware {} has no HTTP transport", hardware.id).into())
+        }
+        _ => Ok(()),
+    }
 }
 
 fn available_hardware_payload(
@@ -3358,29 +3672,19 @@ fn available_hardware_payload(
     mut registry: HardwareRegistry,
 ) -> Value {
     sort_hardware(&mut registry.hardware);
-    let remembered_usb = registry
-        .hardware
-        .iter()
-        .filter(|hardware| hardware.transport == SavedTransport::Usb)
-        .cloned()
-        .collect::<Vec<_>>();
-    let remembered_http = registry
-        .hardware
-        .iter()
-        .filter(|hardware| hardware.transport == SavedTransport::Http)
-        .cloned()
-        .collect::<Vec<_>>();
 
     json!({
         "path": path,
         "devd": devd,
+        "default_hardware_id": registry.default_hardware_id,
         "scan_requested": scan,
         "scan": scan_result,
         "usb": {
             "devices": devd_devices,
-            "remembered": remembered_usb,
+            "remembered": registry.hardware.iter().filter(|hardware| hardware.transports.usb.is_some()).cloned().collect::<Vec<_>>(),
         },
-        "http_fallback": remembered_http,
+        "http_fallback": registry.hardware.iter().filter(|hardware| hardware.transports.http.is_some()).cloned().collect::<Vec<_>>(),
+        "hardware": registry.hardware,
     })
 }
 
@@ -3388,10 +3692,37 @@ fn devd_error_payload(error: impl std::fmt::Display) -> Value {
     json!({"ok": false, "error": error.to_string()})
 }
 
-fn transport_rank(transport: &SavedTransport) -> u8 {
-    match transport {
-        SavedTransport::Usb => 0,
-        SavedTransport::Http => 1,
+async fn read_usb_identity_for_bind(
+    client: &Client,
+    devd: &str,
+    device: &str,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let lease = create_cli_bind_probe_lease(client, devd, device).await?;
+    let heartbeat = spawn_cli_lease_heartbeat(client.clone(), devd.to_string(), lease.clone());
+    let path = format!(
+        "/api/v1/identity?device_id={device}&lease_id={}",
+        lease.lease_id
+    );
+    let identity = request_devd_value(devd, reqwest::Method::GET, &path, None).await;
+    let _ = release_cli_lease(client, devd, &lease.lease_id).await;
+    heartbeat.abort();
+    identity
+}
+
+fn stable_hardware_id_from_identity(
+    identity: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let id = identity
+        .get("device_id")
+        .and_then(Value::as_str)
+        .ok_or("identity did not include stable device_id")?;
+    if id.starts_with("loadlynx-") || id.starts_with("mock-") {
+        Ok(id.to_string())
+    } else {
+        Err(format!(
+            "identity device_id `{id}` is not a stable LoadLynx hardware id; update firmware before binding or controlling this device"
+        )
+        .into())
     }
 }
 
@@ -3405,7 +3736,72 @@ fn read_hardware_registry(
     if content.trim().is_empty() {
         return Ok(HardwareRegistry::default());
     }
-    Ok(serde_json::from_str(&content)?)
+    let value: Value = serde_json::from_str(&content)?;
+    if value.get("default_hardware_id").is_some()
+        || value
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            >= 2
+    {
+        return Ok(serde_json::from_value(value)?);
+    }
+    migrate_legacy_hardware_registry(value)
+}
+
+fn migrate_legacy_hardware_registry(
+    value: Value,
+) -> Result<HardwareRegistry, Box<dyn std::error::Error + Send + Sync>> {
+    #[derive(Deserialize)]
+    struct LegacyHardwareRegistry {
+        #[serde(default)]
+        hardware: Vec<LegacySavedHardware>,
+    }
+
+    let legacy: LegacyHardwareRegistry = serde_json::from_value(value)?;
+    let mut registry = HardwareRegistry::default();
+    for item in legacy.hardware {
+        let now = item
+            .last_seen_unix_seconds
+            .unwrap_or_else(current_unix_seconds);
+        match item.transport {
+            SavedTransport::Usb => {
+                let Some(device) = item.device else {
+                    continue;
+                };
+                upsert_hardware_transport(
+                    &mut registry,
+                    item.id,
+                    item.name,
+                    None,
+                    SavedTransport::Usb,
+                    Some(SavedUsbTransport {
+                        device,
+                        port_path: None,
+                        devd: item.devd,
+                    }),
+                    None,
+                    now,
+                );
+            }
+            SavedTransport::Http => {
+                let Some(url) = item.url else {
+                    continue;
+                };
+                upsert_hardware_transport(
+                    &mut registry,
+                    item.id,
+                    item.name,
+                    None,
+                    SavedTransport::Http,
+                    None,
+                    Some(SavedHttpTransport { url }),
+                    now,
+                );
+            }
+        }
+    }
+    Ok(registry)
 }
 
 fn write_hardware_registry(
@@ -3463,42 +3859,6 @@ fn hardware_registry_path_from_values(
     }
 }
 
-fn generated_usb_hardware_id(device: &str) -> String {
-    format!("usb-{}", sanitize_hardware_id(device))
-}
-
-fn generated_http_hardware_id(
-    base_url: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    let url = Url::parse(base_url)?;
-    let mut id = url.host_str().unwrap_or("device").to_string();
-    if let Some(port) = url.port() {
-        id.push('-');
-        id.push_str(&port.to_string());
-    }
-    Ok(format!("http-{}", sanitize_hardware_id(&id)))
-}
-
-fn sanitize_hardware_id(input: &str) -> String {
-    let mut id = String::new();
-    let mut last_was_dash = false;
-    for ch in input.chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() {
-            id.push(ch);
-            last_was_dash = false;
-        } else if !last_was_dash {
-            id.push('-');
-            last_was_dash = true;
-        }
-    }
-    let id = id.trim_matches('-').to_string();
-    if id.is_empty() {
-        "device".to_string()
-    } else {
-        id
-    }
-}
-
 fn current_unix_seconds() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -3507,7 +3867,7 @@ fn current_unix_seconds() -> u64 {
 }
 
 fn hardware_registry_schema_version() -> u8 {
-    1
+    2
 }
 
 #[cfg(test)]
@@ -3522,12 +3882,22 @@ mod tests {
     #[derive(Clone, Default)]
     struct TestHttpState {
         lease_creates: Arc<AtomicUsize>,
+        scans: Arc<AtomicUsize>,
         operation_payloads: Arc<Mutex<Vec<Value>>>,
+        lease_payloads: Arc<Mutex<Vec<Value>>>,
     }
 
     async fn spawn_test_http(state: TestHttpState) -> String {
-        async fn create_lease(State(state): State<TestHttpState>) -> axum::Json<Value> {
+        async fn create_lease(
+            State(state): State<TestHttpState>,
+            axum::Json(payload): axum::Json<Value>,
+        ) -> axum::Json<Value> {
             state.lease_creates.fetch_add(1, Ordering::SeqCst);
+            state
+                .lease_payloads
+                .lock()
+                .expect("lease payloads lock")
+                .push(payload);
             axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000}))
         }
 
@@ -3551,14 +3921,87 @@ mod tests {
             axum::Json(json!({"ok": true, "payload": payload}))
         }
 
+        async fn status() -> axum::Json<Value> {
+            axum::Json(json!({"ok": true, "link_up": true}))
+        }
+
+        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
+            state.scans.fetch_add(1, Ordering::SeqCst);
+            axum::Json(
+                json!({"devices": [{"id": "digital-1", "digital_target": {"port_path": "mock://esp32s3"}}]}),
+            )
+        }
+
         let app = Router::new()
             .route("/api/v1/serial/lease", post(create_lease))
             .route(
                 "/api/v1/serial/lease/{lease_id}",
                 post(heartbeat_lease).delete(release_lease),
             )
+            .route("/api/v1/status", axum::routing::get(status))
+            .route("/api/v1/devices/scan", post(scan))
             .route("/api/v1/devices/{device}/flash", post(operation))
             .route("/api/v1/devices/{device}/reset", post(operation))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_scan_required_test_http(state: TestHttpState) -> String {
+        async fn create_lease_after_scan(
+            State(state): State<TestHttpState>,
+            axum::Json(payload): axum::Json<Value>,
+        ) -> (StatusCode, axum::Json<Value>) {
+            state.lease_creates.fetch_add(1, Ordering::SeqCst);
+            state
+                .lease_payloads
+                .lock()
+                .expect("lease payloads lock")
+                .push(payload);
+            if state.scans.load(Ordering::SeqCst) == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(json!({"code": "device_not_found"})),
+                )
+            } else {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000})),
+                )
+            }
+        }
+
+        async fn heartbeat_lease() -> axum::Json<Value> {
+            axum::Json(json!({"ok": true}))
+        }
+
+        async fn release_lease() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+
+        async fn status() -> axum::Json<Value> {
+            axum::Json(json!({"ok": true, "link_up": true}))
+        }
+
+        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
+            state.scans.fetch_add(1, Ordering::SeqCst);
+            axum::Json(
+                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
+            )
+        }
+
+        let app = Router::new()
+            .route("/api/v1/serial/lease", post(create_lease_after_scan))
+            .route(
+                "/api/v1/serial/lease/{lease_id}",
+                post(heartbeat_lease).delete(release_lease),
+            )
+            .route("/api/v1/status", axum::routing::get(status))
+            .route("/api/v1/devices/scan", post(scan))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
@@ -3967,8 +4410,11 @@ mod tests {
         let state = TestHttpState::default();
         let devd = spawn_test_http(state.clone()).await;
         let resolved = ResolvedUsbHardware {
+            hardware_id: "mock-loadlynx-devd".to_string(),
             device: "digital-1".to_string(),
             devd,
+            port_path: None,
+            expected_identity_device_id: "mock-loadlynx-devd".to_string(),
         };
 
         post_usb_operation_with_optional_lease(
@@ -3999,8 +4445,11 @@ mod tests {
         let state = TestHttpState::default();
         let devd = spawn_test_http(state.clone()).await;
         let resolved = ResolvedUsbHardware {
+            hardware_id: "mock-loadlynx-devd".to_string(),
             device: "digital-1".to_string(),
             devd,
+            port_path: None,
+            expected_identity_device_id: "mock-loadlynx-devd".to_string(),
         };
 
         post_usb_operation_with_optional_lease(
@@ -4131,39 +4580,86 @@ mod tests {
     }
 
     #[test]
-    fn hardware_registry_round_trips_and_sorts_usb_first() {
+    fn hardware_registry_round_trips_v2_entities() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("devices.json");
         let mut registry = HardwareRegistry::default();
-        upsert_hardware(
+        registry.default_hardware_id = Some("loadlynx-bench".to_string());
+        upsert_hardware_transport(
             &mut registry,
-            SavedHardware {
-                id: "http-bench".to_string(),
-                name: None,
-                transport: SavedTransport::Http,
-                device: None,
-                url: Some("http://loadlynx.local".to_string()),
-                devd: None,
-                last_seen_unix_seconds: Some(10),
-            },
+            "loadlynx-bench".to_string(),
+            None,
+            None,
+            SavedTransport::Http,
+            None,
+            Some(SavedHttpTransport {
+                url: "http://loadlynx.local".to_string(),
+            }),
+            10,
         );
-        upsert_hardware(
+        upsert_hardware_transport(
             &mut registry,
-            SavedHardware {
-                id: "usb-bench".to_string(),
-                name: Some("Bench".to_string()),
-                transport: SavedTransport::Usb,
-                device: Some("digital-1".to_string()),
-                url: None,
-                devd: Some("http://127.0.0.1:30180".to_string()),
-                last_seen_unix_seconds: Some(20),
-            },
+            "loadlynx-bench".to_string(),
+            Some("Bench".to_string()),
+            None,
+            SavedTransport::Usb,
+            Some(SavedUsbTransport {
+                device: "digital-1".to_string(),
+                port_path: Some("/dev/cu.usbmodem1".to_string()),
+                devd: None,
+            }),
+            None,
+            20,
         );
         write_hardware_registry(&path, &registry).unwrap();
 
         let reloaded = read_hardware_registry(&path).unwrap();
-        assert_eq!(reloaded.hardware[0].id, "usb-bench");
-        assert_eq!(reloaded.hardware[1].id, "http-bench");
+        assert_eq!(
+            reloaded.default_hardware_id.as_deref(),
+            Some("loadlynx-bench")
+        );
+        assert_eq!(reloaded.hardware.len(), 1);
+        assert_eq!(reloaded.hardware[0].id, "loadlynx-bench");
+        assert_eq!(
+            reloaded.hardware[0].last_transport,
+            Some(SavedTransport::Usb)
+        );
+        assert!(reloaded.hardware[0].transports.usb.is_some());
+        assert!(reloaded.hardware[0].transports.http.is_some());
+    }
+
+    #[test]
+    fn legacy_hardware_registry_migrates_to_v2_entities() {
+        let legacy = json!({
+            "schema_version": 1,
+            "hardware": [
+                {
+                    "id": "loadlynx-bench",
+                    "name": "Bench",
+                    "transport": "usb",
+                    "device": "digital-1",
+                    "devd": "http://127.0.0.1:30180",
+                    "last_seen_unix_seconds": 10
+                },
+                {
+                    "id": "loadlynx-bench",
+                    "transport": "http",
+                    "url": "http://loadlynx-bench.local",
+                    "last_seen_unix_seconds": 20
+                }
+            ]
+        });
+
+        let migrated = migrate_legacy_hardware_registry(legacy).unwrap();
+        assert_eq!(migrated.schema_version, 2);
+        assert_eq!(migrated.hardware.len(), 1);
+        assert_eq!(migrated.hardware[0].id, "loadlynx-bench");
+        assert_eq!(
+            migrated.hardware[0].last_transport,
+            Some(SavedTransport::Http)
+        );
+        assert!(migrated.hardware[0].transports.usb.is_some());
+        assert!(migrated.hardware[0].transports.http.is_some());
     }
 
     #[test]
@@ -4171,30 +4667,28 @@ mod tests {
         let cli = Cli::try_parse_from([
             "loadlynx",
             "hardware",
-            "save",
-            "--id",
-            "bench",
-            "--transport",
+            "bind",
             "usb",
-            "--device",
+            "--candidate",
             "digital-1",
+            "--set-default",
         ])
         .unwrap();
         match cli.command {
             Command::Hardware {
                 command:
-                    HardwareCommand::Save {
-                        id,
+                    HardwareCommand::Bind {
                         transport,
-                        device,
+                        candidate,
+                        set_default,
                         ..
                     },
             } => {
-                assert_eq!(id, "bench");
                 assert_eq!(transport, SavedTransport::Usb);
-                assert_eq!(device.as_deref(), Some("digital-1"));
+                assert_eq!(candidate.as_deref(), Some("digital-1"));
+                assert!(set_default);
             }
-            _ => panic!("expected hardware save command"),
+            _ => panic!("expected hardware bind command"),
         }
 
         let cli =
@@ -4214,12 +4708,17 @@ mod tests {
             _ => panic!("expected hardware available command"),
         }
 
-        let cli = Cli::try_parse_from(["loadlynx", "hardware", "recent"]).unwrap();
+        let cli =
+            Cli::try_parse_from(["loadlynx", "hardware", "default", "set", "loadlynx-abc123"])
+                .unwrap();
         match cli.command {
             Command::Hardware {
-                command: HardwareCommand::Recent,
-            } => {}
-            _ => panic!("expected hardware recent command"),
+                command:
+                    HardwareCommand::Default {
+                        command: HardwareDefaultCommand::Set { id },
+                    },
+            } => assert_eq!(id, "loadlynx-abc123"),
+            _ => panic!("expected hardware default set command"),
         }
 
         let cli = Cli::try_parse_from([
@@ -4297,86 +4796,146 @@ mod tests {
     }
 
     #[test]
-    fn generated_hardware_ids_are_stable() {
+    fn cli_errors_are_classified_for_json_automation() {
         assert_eq!(
-            generated_usb_hardware_id("Mock LoadLynx/devd"),
-            "usb-mock-loadlynx-devd"
+            classify_cli_error_code("default hardware is not set; run bind"),
+            "default_hardware_not_set"
         );
         assert_eq!(
-            generated_http_hardware_id("http://loadlynx-1234.local:8080").unwrap(),
-            "http-loadlynx-1234-local-8080"
+            classify_cli_error_code(
+                "identity device_id `digital-esp32s3` is not a stable LoadLynx hardware id"
+            ),
+            "unstable_hardware_identity"
+        );
+    }
+
+    #[tokio::test]
+    async fn bind_probe_lease_marks_explicit_binding_probe() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_http(state.clone()).await;
+
+        create_cli_bind_probe_lease(&Client::new(), &devd, "digital-1")
+            .await
+            .unwrap();
+
+        let payloads = state.lease_payloads.lock().expect("lease payloads lock");
+        assert_eq!(
+            payloads[0].get("bind_probe").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(payloads[0].get("expected_identity_device_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn saved_usb_request_scans_fresh_devd_before_retrying_lease() {
+        let state = TestHttpState::default();
+        let devd = spawn_scan_required_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "loadlynx-bench".to_string(),
+            device: "digital-stale".to_string(),
+            devd,
+            port_path: Some("mock://esp32s3".to_string()),
+            expected_identity_device_id: "loadlynx-bench".to_string(),
+        };
+
+        let value = request_devd_usb_value(
+            &Client::new(),
+            &resolved,
+            reqwest::Method::GET,
+            "/api/v1/status",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value.get("link_up").and_then(Value::as_bool), Some(true));
+        assert_eq!(state.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 2);
+        let payloads = state.lease_payloads.lock().expect("lease payloads lock");
+        assert_eq!(
+            payloads[1].get("device_id").and_then(Value::as_str),
+            Some("digital-current")
+        );
+        assert_eq!(
+            payloads[1]
+                .get("expected_identity_device_id")
+                .and_then(Value::as_str),
+            Some("loadlynx-bench")
         );
     }
 
     #[test]
-    fn recent_hardware_sorts_by_last_seen_descending() {
+    fn hardware_use_updates_last_transport() {
         let mut hardware = vec![
             SavedHardware {
-                id: "old-usb".to_string(),
+                id: "loadlynx-old".to_string(),
                 name: None,
-                transport: SavedTransport::Usb,
-                device: Some("old".to_string()),
-                url: None,
-                devd: None,
+                identity: None,
+                last_transport: Some(SavedTransport::Usb),
+                transports: SavedTransports {
+                    usb: Some(SavedUsbTransport {
+                        device: "old".to_string(),
+                        port_path: None,
+                        devd: None,
+                    }),
+                    http: None,
+                },
                 last_seen_unix_seconds: Some(10),
             },
             SavedHardware {
-                id: "new-http".to_string(),
+                id: "loadlynx-new".to_string(),
                 name: None,
-                transport: SavedTransport::Http,
-                device: None,
-                url: Some("http://new.local".to_string()),
-                devd: None,
-                last_seen_unix_seconds: Some(30),
-            },
-            SavedHardware {
-                id: "new-usb".to_string(),
-                name: None,
-                transport: SavedTransport::Usb,
-                device: Some("new".to_string()),
-                url: None,
-                devd: None,
+                identity: None,
+                last_transport: Some(SavedTransport::Http),
+                transports: SavedTransports {
+                    usb: None,
+                    http: Some(SavedHttpTransport {
+                        url: "http://new.local".to_string(),
+                    }),
+                },
                 last_seen_unix_seconds: Some(30),
             },
         ];
 
-        sort_recent_hardware(&mut hardware);
+        sort_hardware(&mut hardware);
 
         assert_eq!(
             hardware
                 .iter()
                 .map(|hardware| hardware.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["new-usb", "new-http", "old-usb"]
+            vec!["loadlynx-new", "loadlynx-old"]
         );
     }
 
     #[test]
     fn available_hardware_payload_keeps_usb_and_http_fallback_separate() {
         let mut registry = HardwareRegistry::default();
-        upsert_hardware(
+        upsert_hardware_transport(
             &mut registry,
-            SavedHardware {
-                id: "http-bench".to_string(),
-                name: None,
-                transport: SavedTransport::Http,
-                device: None,
-                url: Some("http://loadlynx.local".to_string()),
-                devd: None,
-                last_seen_unix_seconds: Some(10),
-            },
+            "loadlynx-http".to_string(),
+            None,
+            None,
+            SavedTransport::Http,
+            None,
+            Some(SavedHttpTransport {
+                url: "http://loadlynx.local".to_string(),
+            }),
+            10,
         );
-        upsert_hardware(
+        upsert_hardware_transport(
             &mut registry,
-            SavedHardware {
-                id: "usb-bench".to_string(),
-                name: None,
-                transport: SavedTransport::Usb,
-                device: Some("digital-1".to_string()),
-                url: None,
-                devd: Some("http://127.0.0.1:30180".to_string()),
-                last_seen_unix_seconds: Some(20),
-            },
+            "loadlynx-usb".to_string(),
+            None,
+            None,
+            SavedTransport::Usb,
+            Some(SavedUsbTransport {
+                device: "digital-1".to_string(),
+                port_path: None,
+                devd: None,
+            }),
+            None,
+            20,
         );
 
         let payload = available_hardware_payload(
@@ -4392,13 +4951,13 @@ mod tests {
             payload
                 .pointer("/usb/remembered/0/id")
                 .and_then(Value::as_str),
-            Some("usb-bench")
+            Some("loadlynx-usb")
         );
         assert_eq!(
             payload
                 .pointer("/http_fallback/0/id")
                 .and_then(Value::as_str),
-            Some("http-bench")
+            Some("loadlynx-http")
         );
         assert_eq!(payload.get("scan").unwrap(), &Value::Null);
     }
@@ -4419,7 +4978,7 @@ mod tests {
             "http://127.0.0.1:30180",
         )
         .unwrap_err();
-        assert!(usb_err.to_string().contains("only one"));
+        assert!(usb_err.to_string().contains("bind the hardware first"));
 
         let output_err = ensure_one_output_selector(
             Some(&"http://loadlynx.local".to_string()),
