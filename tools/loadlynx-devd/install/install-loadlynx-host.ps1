@@ -100,6 +100,24 @@ try {
     if (-not (Test-Path $Loadlynx)) { Fail "archive missing loadlynx.exe" }
     if (-not (Test-Path $Devd)) { Fail "archive missing loadlynx-devd.exe" }
 
+    $InstalledLoadlynx = Join-Path $InstallDir "loadlynx.exe"
+    if ((Test-Path $InstalledLoadlynx) -and -not $Force) {
+        $InstalledVersion = ""
+        try {
+            $VersionOutput = & $InstalledLoadlynx --version 2>$null
+            if ($VersionOutput) {
+                $InstalledVersion = (($VersionOutput | Select-Object -First 1) -split '\s+')[-1]
+            }
+        } catch {
+            $InstalledVersion = ""
+        }
+        if ($InstalledVersion -and $Version -ne "latest" -and $InstalledVersion -eq $Version) {
+            Write-Host "loadlynx $InstalledVersion is already installed; use -Force to reinstall"
+            exit 0
+        }
+        Fail "loadlynx is already installed in $InstallDir; use -Force to replace it"
+    }
+
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
     Copy-Item -Force $Loadlynx (Join-Path $InstallDir "loadlynx.exe")
     Copy-Item -Force $Devd (Join-Path $InstallDir "loadlynx-devd.exe")

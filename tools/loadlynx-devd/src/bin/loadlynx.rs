@@ -621,7 +621,6 @@ async fn request_devd_value(
     path: &str,
     body: Option<Value>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    #[cfg(test)]
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
         let client = Client::new();
         return request_http_value(&client, endpoint, method, path, body).await;
@@ -3887,6 +3886,23 @@ mod tests {
         ])
         .expect("status url parse");
         assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
+    }
+
+    #[tokio::test]
+    async fn request_devd_value_accepts_legacy_http_endpoint() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_http(state).await;
+
+        let value = request_devd_value(
+            &devd,
+            reqwest::Method::POST,
+            "/api/v1/devices/digital-1/reset",
+            Some(json!({"dry_run": true})),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value.get("ok").and_then(Value::as_bool), Some(true));
     }
 
     #[test]
