@@ -2870,6 +2870,11 @@ fn is_retryable_devd_usb_error(error: &(dyn std::error::Error + Send + Sync)) ->
     message.contains("retryable 503") || message.contains("503 Service Unavailable")
 }
 
+fn saved_usb_device_needs_relookup(error: &(dyn std::error::Error + Send + Sync)) -> bool {
+    let message = error.to_string();
+    message.contains("device_not_found") || message.contains("identity_confirmation_mismatch")
+}
+
 fn resolve_scanned_usb_device_for_saved_hardware(
     resolved: &ResolvedUsbHardware,
     scan: &Value,
@@ -2993,7 +2998,7 @@ async fn create_cli_lease_for_resolved_usb(
     .await
     {
         Ok(lease) => Ok((lease, resolved.device.clone())),
-        Err(error) if error.to_string().contains("device_not_found") => {
+        Err(error) if saved_usb_device_needs_relookup(&*error) => {
             let scan = request_devd_value(
                 &resolved.devd,
                 reqwest::Method::POST,
@@ -4011,6 +4016,66 @@ mod tests {
         format!("http://{addr}")
     }
 
+    async fn spawn_identity_mismatch_then_scan_test_http(state: TestHttpState) -> String {
+        async fn create_lease_after_scan(
+            State(state): State<TestHttpState>,
+            axum::Json(payload): axum::Json<Value>,
+        ) -> (StatusCode, axum::Json<Value>) {
+            state.lease_creates.fetch_add(1, Ordering::SeqCst);
+            state
+                .lease_payloads
+                .lock()
+                .expect("lease payloads lock")
+                .push(payload);
+            if state.scans.load(Ordering::SeqCst) == 0 {
+                (
+                    StatusCode::CONFLICT,
+                    axum::Json(json!({"code": "identity_confirmation_mismatch"})),
+                )
+            } else {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000})),
+                )
+            }
+        }
+
+        async fn heartbeat_lease() -> axum::Json<Value> {
+            axum::Json(json!({"ok": true}))
+        }
+
+        async fn release_lease() -> StatusCode {
+            StatusCode::NO_CONTENT
+        }
+
+        async fn status() -> axum::Json<Value> {
+            axum::Json(json!({"ok": true, "link_up": true}))
+        }
+
+        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
+            state.scans.fetch_add(1, Ordering::SeqCst);
+            axum::Json(
+                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
+            )
+        }
+
+        let app = Router::new()
+            .route("/api/v1/serial/lease", post(create_lease_after_scan))
+            .route(
+                "/api/v1/serial/lease/{lease_id}",
+                post(heartbeat_lease).delete(release_lease),
+            )
+            .route("/api/v1/status", axum::routing::get(status))
+            .route("/api/v1/devices/scan", post(scan))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
     #[test]
     fn backup_include_defaults_to_all_and_expands_settings() {
         let selection = parse_backup_selection(&[]).expect("default selection");
@@ -4851,6 +4916,43 @@ mod tests {
         assert_eq!(value.get("link_up").and_then(Value::as_bool), Some(true));
         assert_eq!(state.scans.load(Ordering::SeqCst), 1);
         assert_eq!(state.lease_creates.load(Ordering::SeqCst), 2);
+        let payloads = state.lease_payloads.lock().expect("lease payloads lock");
+        assert_eq!(
+            payloads[1].get("device_id").and_then(Value::as_str),
+            Some("digital-current")
+        );
+        assert_eq!(
+            payloads[1]
+                .get("expected_identity_device_id")
+                .and_then(Value::as_str),
+            Some("loadlynx-bench")
+        );
+    }
+
+    #[tokio::test]
+    async fn saved_usb_request_scans_after_identity_mismatch() {
+        let state = TestHttpState::default();
+        let devd = spawn_identity_mismatch_then_scan_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "loadlynx-bench".to_string(),
+            device: "digital-reused".to_string(),
+            devd,
+            port_path: Some("mock://esp32s3".to_string()),
+            expected_identity_device_id: "loadlynx-bench".to_string(),
+        };
+
+        let value = request_devd_usb_value(
+            &Client::new(),
+            &resolved,
+            reqwest::Method::GET,
+            "/api/v1/status",
+            None,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(value.get("link_up").and_then(Value::as_bool), Some(true));
+        assert_eq!(state.scans.load(Ordering::SeqCst), 1);
         let payloads = state.lease_payloads.lock().expect("lease payloads lock");
         assert_eq!(
             payloads[1].get("device_id").and_then(Value::as_str),
