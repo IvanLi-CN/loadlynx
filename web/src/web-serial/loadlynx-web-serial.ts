@@ -208,12 +208,15 @@ async function flashEsp32s3(
   const Transport = esptool.Transport as new (
     port: SerialPortLike,
     tracing?: boolean,
-  ) => unknown;
+  ) => {
+    disconnect(): Promise<void>;
+  };
   const ESPLoader = esptool.ESPLoader as new (
     options: unknown,
   ) => {
     main(): Promise<void>;
     writeFlash(options: unknown): Promise<void>;
+    after(mode?: string): Promise<void>;
   };
   if (!Transport || !ESPLoader) {
     throw new Error("esptool-js did not expose Transport and ESPLoader");
@@ -228,13 +231,18 @@ async function flashEsp32s3(
       write: () => undefined,
     },
   });
-  await loader.main();
-  await loader.writeFlash({
-    fileArray: [{ data: bytes, address: flashAddress }],
-    flashSize: "keep",
-    eraseAll: false,
-    compress: true,
-  });
+  try {
+    await loader.main();
+    await loader.writeFlash({
+      fileArray: [{ data: bytes, address: flashAddress }],
+      flashSize: "keep",
+      eraseAll: false,
+      compress: true,
+    });
+    await loader.after("hard_reset");
+  } finally {
+    await transport.disconnect().catch(() => undefined);
+  }
 }
 
 async function tryCaptureIdentity(
@@ -294,10 +302,15 @@ async function jsonlRequest(
     try {
       const deadline = Date.now() + 5000;
       while (Date.now() < deadline) {
-        const { value, done } = await reader.read();
+        const remainingMs = deadline - Date.now();
+        const result = await readWithTimeout(reader, remainingMs);
+        if (!result) break;
+        const { value, done } = result;
         if (done) break;
         buffered += decoder.decode(value, { stream: true });
-        for (const line of buffered.split(/\r?\n/)) {
+        const lines = buffered.split(/\r?\n/);
+        buffered = lines.pop() ?? "";
+        for (const line of lines) {
           if (!line.trim().startsWith("{")) continue;
           const parsed = JSON.parse(line) as Record<string, unknown>;
           if (parsed.id === requestId) {
@@ -314,6 +327,24 @@ async function jsonlRequest(
       await port.close().catch(() => undefined);
     }
   }
+}
+
+async function readWithTimeout(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  timeoutMs: number,
+): Promise<ReadableStreamReadResult<Uint8Array> | undefined> {
+  let timeoutId: number | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timeoutId = window.setTimeout(resolve, Math.max(0, timeoutMs));
+  });
+  const result = await Promise.race([reader.read(), timeout]);
+  if (timeoutId) {
+    window.clearTimeout(timeoutId);
+  }
+  if (!result) {
+    await reader.cancel().catch(() => undefined);
+  }
+  return result;
 }
 
 function saveWebSerialIdentityProfile(profile: WebSerialIdentityProfile): void {
