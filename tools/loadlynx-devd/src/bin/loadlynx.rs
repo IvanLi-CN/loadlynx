@@ -540,7 +540,7 @@ struct ResolvedUsbHardware {
 #[derive(Debug, Clone)]
 enum ResolvedHardware {
     Usb(ResolvedUsbHardware),
-    Http { url: String },
+    Http { hardware_id: String, url: String },
 }
 
 impl BoardTarget {
@@ -780,7 +780,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                             mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
                         status
                     }
-                    ResolvedHardware::Http { url } => {
+                    ResolvedHardware::Http { hardware_id, url } => {
                         let status = client
                             .get(api_url(&url, "/api/v1/status")?)
                             .send()
@@ -868,7 +868,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 let body = output_set_body(enable, target_i_ma);
                 if let Some(hardware_id) = hardware {
                     match resolve_saved_hardware(&hardware_id, &devd)? {
-                        ResolvedHardware::Http { url } => {
+                        ResolvedHardware::Http { url, .. } => {
                             client
                                 .post(api_url(&url, "/api/v1/cc")?)
                                 .json(&body)
@@ -2800,7 +2800,7 @@ async fn request_api_value(
                 let _ = mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
                 Ok(value)
             }
-            ResolvedHardware::Http { url } => {
+            ResolvedHardware::Http { hardware_id, url } => {
                 if is_wifi_write && !allow_insecure_lan_wifi {
                     return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
                 }
@@ -2826,7 +2826,7 @@ async fn request_api_value(
                 let _ = mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
                 Ok(value)
             }
-            ResolvedHardware::Http { url } => {
+            ResolvedHardware::Http { url, .. } => {
                 if is_wifi_write && !allow_insecure_lan_wifi {
                     return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
                 }
@@ -3564,6 +3564,7 @@ fn resolve_hardware_transport(
                     format!("saved hardware {} has no HTTP transport", hardware.id)
                 })?;
             Ok(ResolvedHardware::Http {
+                hardware_id: hardware.id.clone(),
                 url: http.url.clone(),
             })
         }
@@ -4874,6 +4875,31 @@ mod tests {
                 Some("loadlynx-abc123")
             ),
             ResolvedHardware::Http { .. } => panic!("expected usb hardware"),
+        }
+    }
+
+    #[test]
+    fn resolved_http_hardware_carries_real_hardware_id() {
+        let hardware = SavedHardware {
+            id: "loadlynx-http".to_string(),
+            name: None,
+            identity: None,
+            last_transport: Some(SavedTransport::Http),
+            transports: SavedTransports {
+                usb: None,
+                http: Some(SavedHttpTransport {
+                    url: "http://loadlynx-http.local".to_string(),
+                }),
+            },
+            last_seen_unix_seconds: None,
+        };
+
+        match resolve_hardware_transport(&hardware, SavedTransport::Http, "http://devd").unwrap() {
+            ResolvedHardware::Http { hardware_id, url } => {
+                assert_eq!(hardware_id, "loadlynx-http");
+                assert_eq!(url, "http://loadlynx-http.local");
+            }
+            ResolvedHardware::Usb(_) => panic!("expected http hardware"),
         }
     }
 
