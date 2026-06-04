@@ -3786,7 +3786,14 @@ fn stable_hardware_id_from_identity(
 }
 
 fn is_stable_hardware_id(id: &str) -> bool {
-    id.starts_with("loadlynx-") || id.starts_with("mock-")
+    id.strip_prefix("loadlynx-").is_some_and(is_hex_short_id) || id.starts_with("mock-")
+}
+
+fn is_hex_short_id(value: &str) -> bool {
+    value.len() == 6
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 fn read_hardware_registry(
@@ -4759,10 +4766,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("devices.json");
         let mut registry = HardwareRegistry::default();
-        registry.default_hardware_id = Some("loadlynx-bench".to_string());
+        registry.default_hardware_id = Some("loadlynx-a1b2c3".to_string());
         upsert_hardware_transport(
             &mut registry,
-            "loadlynx-bench".to_string(),
+            "loadlynx-a1b2c3".to_string(),
             None,
             None,
             SavedTransport::Http,
@@ -4774,7 +4781,7 @@ mod tests {
         );
         upsert_hardware_transport(
             &mut registry,
-            "loadlynx-bench".to_string(),
+            "loadlynx-a1b2c3".to_string(),
             Some("Bench".to_string()),
             None,
             SavedTransport::Usb,
@@ -4791,10 +4798,10 @@ mod tests {
         let reloaded = read_hardware_registry(&path).unwrap();
         assert_eq!(
             reloaded.default_hardware_id.as_deref(),
-            Some("loadlynx-bench")
+            Some("loadlynx-a1b2c3")
         );
         assert_eq!(reloaded.hardware.len(), 1);
-        assert_eq!(reloaded.hardware[0].id, "loadlynx-bench");
+        assert_eq!(reloaded.hardware[0].id, "loadlynx-a1b2c3");
         assert_eq!(
             reloaded.hardware[0].last_transport,
             Some(SavedTransport::Usb)
@@ -4809,7 +4816,7 @@ mod tests {
             "schema_version": 1,
             "hardware": [
                 {
-                    "id": "loadlynx-bench",
+                    "id": "loadlynx-a1b2c3",
                     "name": "Bench",
                     "transport": "usb",
                     "device": "digital-1",
@@ -4817,7 +4824,7 @@ mod tests {
                     "last_seen_unix_seconds": 10
                 },
                 {
-                    "id": "loadlynx-bench",
+                    "id": "loadlynx-a1b2c3",
                     "transport": "http",
                     "url": "http://loadlynx-bench.local",
                     "last_seen_unix_seconds": 20
@@ -4828,7 +4835,7 @@ mod tests {
         let migrated = migrate_legacy_hardware_registry(legacy).unwrap();
         assert_eq!(migrated.schema_version, 2);
         assert_eq!(migrated.hardware.len(), 1);
-        assert_eq!(migrated.hardware[0].id, "loadlynx-bench");
+        assert_eq!(migrated.hardware[0].id, "loadlynx-a1b2c3");
         assert_eq!(
             migrated.hardware[0].last_transport,
             Some(SavedTransport::Http)
@@ -4881,7 +4888,7 @@ mod tests {
     #[test]
     fn resolved_http_hardware_carries_real_hardware_id() {
         let hardware = SavedHardware {
-            id: "loadlynx-http".to_string(),
+            id: "loadlynx-d4e5f6".to_string(),
             name: None,
             identity: None,
             last_transport: Some(SavedTransport::Http),
@@ -4896,7 +4903,7 @@ mod tests {
 
         match resolve_hardware_transport(&hardware, SavedTransport::Http, "http://devd").unwrap() {
             ResolvedHardware::Http { hardware_id, url } => {
-                assert_eq!(hardware_id, "loadlynx-http");
+                assert_eq!(hardware_id, "loadlynx-d4e5f6");
                 assert_eq!(url, "http://loadlynx-http.local");
             }
             ResolvedHardware::Usb(_) => panic!("expected http hardware"),
@@ -5050,6 +5057,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stable_hardware_ids_require_mac_derived_shape() {
+        assert!(is_stable_hardware_id("loadlynx-a1b2c3"));
+        assert!(is_stable_hardware_id("loadlynx-012345"));
+        assert!(is_stable_hardware_id("mock-loadlynx-devd"));
+        assert!(!is_stable_hardware_id("loadlynx-bench"));
+        assert!(!is_stable_hardware_id("loadlynx-A1B2C3"));
+        assert!(!is_stable_hardware_id("llx-digital-01"));
+    }
+
     #[tokio::test]
     async fn bind_probe_lease_marks_explicit_binding_probe() {
         let state = TestHttpState::default();
@@ -5072,11 +5089,11 @@ mod tests {
         let state = TestHttpState::default();
         let devd = spawn_scan_required_test_http(state.clone()).await;
         let resolved = ResolvedUsbHardware {
-            hardware_id: "loadlynx-bench".to_string(),
+            hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-stale".to_string(),
             devd,
             port_path: Some("mock://esp32s3".to_string()),
-            expected_identity_device_id: Some("loadlynx-bench".to_string()),
+            expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
         };
 
         let value = request_devd_usb_value(
@@ -5101,7 +5118,7 @@ mod tests {
             payloads[1]
                 .get("expected_identity_device_id")
                 .and_then(Value::as_str),
-            Some("loadlynx-bench")
+            Some("loadlynx-a1b2c3")
         );
     }
 
@@ -5110,11 +5127,11 @@ mod tests {
         let state = TestHttpState::default();
         let devd = spawn_identity_mismatch_then_scan_test_http(state.clone()).await;
         let resolved = ResolvedUsbHardware {
-            hardware_id: "loadlynx-bench".to_string(),
+            hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-reused".to_string(),
             devd,
             port_path: Some("mock://esp32s3".to_string()),
-            expected_identity_device_id: Some("loadlynx-bench".to_string()),
+            expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
         };
 
         let value = request_devd_usb_value(
@@ -5138,7 +5155,7 @@ mod tests {
             payloads[1]
                 .get("expected_identity_device_id")
                 .and_then(Value::as_str),
-            Some("loadlynx-bench")
+            Some("loadlynx-a1b2c3")
         );
     }
 
@@ -5169,11 +5186,11 @@ mod tests {
         let state = TestHttpState::default();
         let devd = spawn_artifact_scan_required_test_http(state.clone()).await;
         let resolved = ResolvedUsbHardware {
-            hardware_id: "loadlynx-bench".to_string(),
+            hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-stale".to_string(),
             devd,
             port_path: Some("mock://esp32s3".to_string()),
-            expected_identity_device_id: Some("loadlynx-bench".to_string()),
+            expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
         };
 
         let value = select_device_artifact(
@@ -5207,7 +5224,7 @@ mod tests {
     fn hardware_use_updates_last_transport() {
         let mut hardware = vec![
             SavedHardware {
-                id: "loadlynx-old".to_string(),
+                id: "loadlynx-000010".to_string(),
                 name: None,
                 identity: None,
                 last_transport: Some(SavedTransport::Usb),
@@ -5222,7 +5239,7 @@ mod tests {
                 last_seen_unix_seconds: Some(10),
             },
             SavedHardware {
-                id: "loadlynx-new".to_string(),
+                id: "loadlynx-000030".to_string(),
                 name: None,
                 identity: None,
                 last_transport: Some(SavedTransport::Http),
@@ -5243,7 +5260,7 @@ mod tests {
                 .iter()
                 .map(|hardware| hardware.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["loadlynx-new", "loadlynx-old"]
+            vec!["loadlynx-000010", "loadlynx-000030"]
         );
     }
 
@@ -5252,7 +5269,7 @@ mod tests {
         let mut registry = HardwareRegistry::default();
         upsert_hardware_transport(
             &mut registry,
-            "loadlynx-http".to_string(),
+            "loadlynx-d4e5f6".to_string(),
             None,
             None,
             SavedTransport::Http,
@@ -5264,7 +5281,7 @@ mod tests {
         );
         upsert_hardware_transport(
             &mut registry,
-            "loadlynx-usb".to_string(),
+            "loadlynx-a1b2c3".to_string(),
             None,
             None,
             SavedTransport::Usb,
@@ -5290,13 +5307,13 @@ mod tests {
             payload
                 .pointer("/usb/remembered/0/id")
                 .and_then(Value::as_str),
-            Some("loadlynx-usb")
+            Some("loadlynx-a1b2c3")
         );
         assert_eq!(
             payload
                 .pointer("/http_fallback/0/id")
                 .and_then(Value::as_str),
-            Some("loadlynx-http")
+            Some("loadlynx-d4e5f6")
         );
         assert_eq!(payload.get("scan").unwrap(), &Value::Null);
     }
