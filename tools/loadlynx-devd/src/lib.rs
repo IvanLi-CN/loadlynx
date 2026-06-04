@@ -515,9 +515,7 @@ async fn serve_ipc_unix(
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    if path.exists() {
-        let _ = fs::remove_file(&path);
-    }
+    remove_stale_unix_socket(&path).await?;
     let listener = tokio::net::UnixListener::bind(&path)?;
     let active_connections = Arc::new(AtomicUsize::new(0));
     let idle_notify = Arc::new(Notify::new());
@@ -552,6 +550,28 @@ async fn serve_ipc_unix(
                 _ = idle_notify.notified() => {}
             }
         }
+    }
+}
+
+#[cfg(not(windows))]
+async fn remove_stale_unix_socket(path: &PathBuf) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    match tokio::net::UnixStream::connect(path).await {
+        Ok(_stream) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("IPC endpoint is already in use: {}", path.to_string_lossy()),
+        )),
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
+            ) =>
+        {
+            fs::remove_file(path)
+        }
+        Err(error) => Err(error),
     }
 }
 
@@ -6877,6 +6897,32 @@ mod tests {
         assert!(release_lease_inner(&state, "lease-2", "released"));
         let registry = state.serial.lock().expect("serial registry lock");
         assert!(!registry.owners.contains_key(&canonical_port_key(port_path)));
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn unix_ipc_startup_refuses_live_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loadlynx-devd.sock");
+        let _listener = tokio::net::UnixListener::bind(&path).unwrap();
+
+        let err = remove_stale_unix_socket(&path).await.unwrap_err();
+
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(path.exists());
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn unix_ipc_startup_removes_stale_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("loadlynx-devd.sock");
+        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        drop(listener);
+
+        remove_stale_unix_socket(&path).await.unwrap();
+
+        assert!(!path.exists());
     }
 
     #[tokio::test]

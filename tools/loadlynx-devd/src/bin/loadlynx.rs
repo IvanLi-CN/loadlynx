@@ -778,7 +778,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 select_device_artifact(&client, &resolved, manifest_path.clone(), artifact.clone())
                     .await?;
             }
-            let confirmation_text = resolve_flash_confirmation_text(dry_run, confirm)?;
+            let confirmation_text = resolve_flash_confirmation_text(&target, dry_run, confirm)?;
             post_usb_operation_with_optional_lease(
                 &client,
                 &resolved,
@@ -1594,10 +1594,11 @@ fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
 }
 
 fn resolve_flash_confirmation_text(
+    target: &BoardTarget,
     dry_run: bool,
     provided: Option<String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    if dry_run {
+    if dry_run || !matches!(target, BoardTarget::Digital) {
         return Ok(provided);
     }
     if provided.is_some() {
@@ -3927,6 +3928,14 @@ mod tests {
             Command::Flash { dry_run, .. } => assert!(!dry_run),
             _ => panic!("expected flash command"),
         }
+    }
+
+    #[test]
+    fn analog_real_flash_does_not_require_digital_confirmation() {
+        assert_eq!(
+            resolve_flash_confirmation_text(&BoardTarget::Analog, false, None).unwrap(),
+            None
+        );
     }
 
     #[test]
