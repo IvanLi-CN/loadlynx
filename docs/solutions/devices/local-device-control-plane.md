@@ -71,6 +71,7 @@ Use a local-first control plane:
 - Treat mDNS/DNS-SD as convenience discovery. Always keep manual IP/hostname entry and bounded scan fallback.
 - For dual-MCU devices, represent board targets explicitly instead of flattening them into one generic "serial device".
 - If older firmware exposes only a generic USB identity, block binding and control until firmware provides a stable hardware ID. Do not synthesize a persistent ID from OS port paths or daemon candidate IDs.
+- Treat bind-probe leases as a narrow identity-binding capability. They may bypass a project-local approved-port cache only to read identity for an explicitly selected candidate, and must be rejected by ordinary operation checks. Saved USB operation leases must return the expected stable identity; a missing identity field is a failed confirmation.
 - Keep firmware catalog generation outside the daemon. devd should verify manifests and hashes, not invent release metadata.
 - Release installers should verify a `SHA256SUMS` file that covers every release asset, install into a user-owned directory, validate installed binaries, and print PATH guidance without editing profiles automatically.
 
