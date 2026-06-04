@@ -197,6 +197,7 @@ struct WebLease {
     lease_id: String,
     device_id: String,
     identity_device_id: Option<String>,
+    bind_probe: bool,
     port_path: Option<String>,
     expires_at: Instant,
 }
@@ -1544,6 +1545,7 @@ async fn create_lease(
         lease_id: lease_id.clone(),
         device_id: input.device_id.clone(),
         identity_device_id,
+        bind_probe: input.bind_probe == Some(true),
         port_path: lease_port_path,
         expires_at: Instant::now() + Duration::from_millis(WEB_LEASE_TTL_MS),
     };
@@ -1956,7 +1958,7 @@ async fn compat_cc(
             query.lease_id.as_deref(),
             query.device_id.as_deref(),
         )?;
-        ensure_active_lease_for_device(&guard, &device.id, query.lease_id.as_deref())?;
+        ensure_active_lease_for_device(&guard, &device.id, query.lease_id.as_deref(), false)?;
         let port_path = device
             .digital_target
             .as_ref()
@@ -2532,7 +2534,12 @@ fn select_serial_port_for_compat(
 ) -> Result<(String, String), HttpError> {
     let device =
         select_compat_device(state, query.lease_id.as_deref(), query.device_id.as_deref())?;
-    ensure_active_lease_for_device(state, &device.id, query.lease_id.as_deref())?;
+    ensure_active_lease_for_device(
+        state,
+        &device.id,
+        query.lease_id.as_deref(),
+        operation == "identity",
+    )?;
     let port_path = device
         .digital_target
         .as_ref()
@@ -2970,6 +2977,7 @@ fn ensure_lease_for_target(
         ));
     };
     let lease = active_lease_by_id(state, lease_id)?;
+    ensure_operation_lease(lease)?;
     if let Some(target) = target_device_id
         && lease.device_id != target
     {
@@ -2985,16 +2993,30 @@ fn ensure_active_lease_for_device(
     state: &DevdState,
     device_id: &str,
     lease_id: Option<&str>,
+    allow_bind_probe: bool,
 ) -> Result<(), HttpError> {
     if let Some(lease_id) = lease_id {
-        ensure_lease_for_target(state, Some(device_id), Some(lease_id))?;
+        let lease = active_lease_by_id(state, lease_id)?;
+        if !allow_bind_probe {
+            ensure_operation_lease(lease)?;
+        }
+        if lease.device_id != device_id {
+            return Err(HttpError::conflict(
+                "device_lease_mismatch",
+                "Web USB lease does not match requested device",
+            ));
+        }
         return Ok(());
     }
 
     let active = state
         .leases
         .values()
-        .filter(|lease| lease.device_id == device_id && lease.expires_at > Instant::now())
+        .filter(|lease| {
+            lease.device_id == device_id
+                && lease.expires_at > Instant::now()
+                && (allow_bind_probe || !lease.bind_probe)
+        })
         .collect::<Vec<_>>();
     if active.is_empty() {
         Err(HttpError::bad_request(
@@ -3004,6 +3026,16 @@ fn ensure_active_lease_for_device(
     } else {
         Ok(())
     }
+}
+
+fn ensure_operation_lease(lease: &WebLease) -> Result<(), HttpError> {
+    if lease.bind_probe {
+        return Err(HttpError::conflict(
+            "bind_probe_lease_restricted",
+            "bind-probe lease can only be used for identity binding",
+        ));
+    }
+    Ok(())
 }
 
 fn active_lease_by_id<'a>(state: &'a DevdState, lease_id: &str) -> Result<&'a WebLease, HttpError> {
@@ -3117,6 +3149,7 @@ fn lease_json(lease: &WebLease) -> Value {
         "lease_id": lease.lease_id,
         "device_id": lease.device_id,
         "identity_device_id": lease.identity_device_id,
+        "bind_probe": lease.bind_probe,
         "lease_ttl_ms": WEB_LEASE_TTL_MS,
         "heartbeat_interval_ms": WEB_LEASE_HEARTBEAT_INTERVAL_MS
     })
@@ -6384,6 +6417,7 @@ mod tests {
                     lease_id: "lease-1".to_string(),
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
+                    bind_probe: false,
                     port_path: Some("mock://digital".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6394,6 +6428,7 @@ mod tests {
                     lease_id: "lease-2".to_string(),
                     device_id: "mock-loadlynx-devd-2".to_string(),
                     identity_device_id: None,
+                    bind_probe: false,
                     port_path: Some("mock://digital-2".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6416,6 +6451,7 @@ mod tests {
                         lease_id: lease_id.to_string(),
                         device_id: "mock-loadlynx-devd".to_string(),
                         identity_device_id: None,
+                        bind_probe: false,
                         port_path: Some("mock://esp32s3".to_string()),
                         expires_at: Instant::now() + Duration::from_secs(30),
                     },
@@ -6424,6 +6460,53 @@ mod tests {
 
             let device = select_compat_device(&guard, None, None).unwrap();
             assert_eq!(device.id, "mock-loadlynx-devd");
+        }
+    }
+
+    #[tokio::test]
+    async fn bind_probe_lease_is_restricted_to_identity_binding() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.leases.insert(
+                "bind-probe".to_string(),
+                WebLease {
+                    lease_id: "bind-probe".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: Some("mock-loadlynx-devd".to_string()),
+                    bind_probe: true,
+                    port_path: Some("mock://esp32s3".to_string()),
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+
+            let err =
+                ensure_lease_for_target(&guard, Some("mock-loadlynx-devd"), Some("bind-probe"))
+                    .unwrap_err();
+            assert_eq!(err.0.code, "bind_probe_lease_restricted");
+
+            let err = select_serial_port_for_compat(
+                &guard,
+                &CompatQuery {
+                    device_id: None,
+                    lease_id: Some("bind-probe".to_string()),
+                },
+                "status",
+            )
+            .unwrap_err();
+            assert_eq!(err.0.code, "bind_probe_lease_restricted");
+
+            let (device_id, port_path) = select_serial_port_for_compat(
+                &guard,
+                &CompatQuery {
+                    device_id: None,
+                    lease_id: Some("bind-probe".to_string()),
+                },
+                "identity",
+            )
+            .unwrap();
+            assert_eq!(device_id, "mock-loadlynx-devd");
+            assert_eq!(port_path, "mock://esp32s3");
         }
     }
 
@@ -6441,6 +6524,7 @@ mod tests {
                     lease_id: "other-lease".to_string(),
                     device_id: "other-device".to_string(),
                     identity_device_id: None,
+                    bind_probe: false,
                     port_path: Some("mock://esp32s3".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6625,6 +6709,7 @@ mod tests {
                     lease_id: "removed-device-lease".to_string(),
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
+                    bind_probe: false,
                     port_path: Some("mock://esp32s3".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6844,6 +6929,7 @@ mod tests {
                     lease_id: "expired".to_string(),
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
+                    bind_probe: false,
                     port_path: Some("mock://digital".to_string()),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
@@ -6874,6 +6960,7 @@ mod tests {
                     lease_id: "expired".to_string(),
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
+                    bind_probe: false,
                     port_path: Some(port_path.to_string()),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
@@ -6914,6 +7001,7 @@ mod tests {
                     lease_id: "lease-1".to_string(),
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
+                    bind_probe: false,
                     port_path: Some(port_path.to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6949,6 +7037,7 @@ mod tests {
                         lease_id: lease_id.to_string(),
                         device_id: "mock-loadlynx-devd".to_string(),
                         identity_device_id: None,
+                        bind_probe: false,
                         port_path: Some(port_path.to_string()),
                         expires_at: Instant::now() + Duration::from_secs(30),
                     },
