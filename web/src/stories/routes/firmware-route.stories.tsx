@@ -75,9 +75,10 @@ export const DryRunEvidence: Story = {
 
     await waitFor(() => {
       canvas.getByText(/mock-loadlynx-devd/);
-      if (canvas.getAllByText(/target/).length < 3) {
-        throw new Error("Expected target evidence to render");
-      }
+      canvas.getByText(/"device_id": "mock-loadlynx-devd"/, {
+        selector: "code",
+      });
+      canvas.getByText(/"target": "mock"/, { selector: "code" });
     });
   },
 };
