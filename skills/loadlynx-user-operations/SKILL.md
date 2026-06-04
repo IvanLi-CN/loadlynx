@@ -25,11 +25,15 @@ loadlynx --help
 loadlynx-devd --help
 ```
 
+- This skill is IPC-only. `loadlynx --help` must expose `--ipc`; `loadlynx-devd --help` must expose both `serve` and `bridge-http`.
+- If `loadlynx --help` exposes `--devd`, or if `loadlynx-devd --help` lacks `bridge-http`, the installed host tools are from an obsolete HTTP-devd release. Stop and upgrade to a stable release with IPC host tools before any hardware operation.
+- Do not use the obsolete `--devd http://...` CLI interface as a compatibility path, even if a pinned older release can still be installed.
 - If the requested user workflow depends on a command that is absent, stop and report that the installed release does not support it. Do not invent commands, fall back to Web UI, or switch to source/developer instructions.
 
 ## Install Released Host Tools
 
-- Download the latest stable Release unless the owner explicitly accepts a prerelease.
+- Download the latest stable Release that provides IPC host tools unless the owner explicitly accepts a prerelease.
+- If the latest stable Release installs host tools whose help output fails the IPC gate above, stop and escalate to release maintenance instead of operating hardware with that release.
 - Prefer the release installer script:
   - macOS/Linux: `install-loadlynx-host.sh`
   - Windows: `install-loadlynx-host.ps1`
@@ -137,7 +141,7 @@ loadlynx hardware save --id <name> --transport http --url http://<device-host-or
 loadlynx hardware forget <saved-hardware-id>
 ```
 
-- Use `hardware available` to see currently visible USB/devd devices plus saved HTTP fallback entries; add `--scan` when the bridge should refresh device visibility first. If devd is not running, use the reported USB error and saved HTTP fallback to decide whether to start the bridge or use HTTP.
+- Use `hardware available` to see currently visible USB/devd devices plus saved HTTP fallback entries; add `--scan` when device visibility should refresh first. If CLI IPC/devd is unavailable, use the reported USB error and saved HTTP fallback to decide whether to let the CLI auto-start IPC devd, start `loadlynx-devd serve`, or use HTTP.
 - Use `hardware recent` to list remembered hardware by most recent successful connection or save time.
 - `loadlynx status --device ...` and `loadlynx status --url ...` best-effort update the CLI hardware memory after a successful connection; a memory write failure must not hide a successful status result.
 - The memory file lives in the user's OS config directory: macOS `~/Library/Application Support/LoadLynx/devices.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`, Windows `%APPDATA%\LoadLynx\devices.json`; `LOADLYNX_HOME` overrides the directory.

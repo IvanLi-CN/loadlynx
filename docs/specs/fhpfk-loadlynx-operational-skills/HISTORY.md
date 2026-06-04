@@ -30,3 +30,7 @@ Skill-driven user hardware operation is CLI-only. USB/devd access is preferred f
 Released host tools now include installer scripts and `SHA256SUMS` verification as the primary user install path. The CLI/devd skill boundary changed with the host tools: CLI hardware operation uses IPC and sibling auto-start, while HTTP bridge usage is limited to loopback browser/debug paths. The skills explicitly treat Web Serial as a formal human browser path, not the agent-operated hardware path.
 
 Real ESP32-S3 flash instructions now require first-flash/non-project gates across CLI, devd bridge and Web Serial: artifact/hash/target evidence, explicit owner confirmation, explicit non-project acknowledgement when applicable, and post-flash identity capture. Owner confirmation can be natural language and must not require a fixed typed phrase.
+
+## Obsolete host tools gate
+
+The v0.3.0 stable release shipped before the IPC host-tools boundary and originally missed `SHA256SUMS`, which broke the installer path. The release checksum was backfilled without replacing binaries, but the user skill does not support the old `--devd http://...` CLI surface. Installed host tools must expose `loadlynx --ipc` and `loadlynx-devd bridge-http`; otherwise the correct user action is to upgrade to an IPC-capable stable release or escalate to release maintenance.
