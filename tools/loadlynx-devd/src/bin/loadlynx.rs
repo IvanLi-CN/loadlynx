@@ -3051,14 +3051,22 @@ fn validate_cli_lease_identity(
     lease: &CliLease,
     resolved: &ResolvedUsbHardware,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    if let Some(expected) = resolved.expected_identity_device_id.as_deref()
-        && let Some(actual) = lease.identity_device_id.as_deref()
-        && actual != expected
-    {
-        return Err(format!(
-            "expected identity device_id {expected}, current identity is {actual}"
-        )
-        .into());
+    if let Some(expected) = resolved.expected_identity_device_id.as_deref() {
+        match lease.identity_device_id.as_deref() {
+            Some(actual) if actual == expected => {}
+            Some(actual) => {
+                return Err(format!(
+                    "expected identity device_id {expected}, current identity is {actual}"
+                )
+                .into());
+            }
+            None => {
+                return Err(format!(
+                    "expected identity device_id {expected}, current identity is <missing>"
+                )
+                .into());
+            }
+        }
     }
     if resolved.expected_identity_device_id.is_none()
         && let Some(actual) = lease.identity_device_id.as_deref()
@@ -3973,8 +3981,12 @@ mod tests {
                 .lease_payloads
                 .lock()
                 .expect("lease payloads lock")
-                .push(payload);
-            axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000}))
+                .push(payload.clone());
+            axum::Json(json!({
+                "lease_id": "lease-1",
+                "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
+                "heartbeat_interval_ms": 1000
+            }))
         }
 
         async fn heartbeat_lease() -> axum::Json<Value> {
@@ -4037,7 +4049,7 @@ mod tests {
                 .lease_payloads
                 .lock()
                 .expect("lease payloads lock")
-                .push(payload);
+                .push(payload.clone());
             if state.scans.load(Ordering::SeqCst) == 0 {
                 (
                     StatusCode::NOT_FOUND,
@@ -4046,7 +4058,11 @@ mod tests {
             } else {
                 (
                     StatusCode::OK,
-                    axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000})),
+                    axum::Json(json!({
+                        "lease_id": "lease-1",
+                        "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
+                        "heartbeat_interval_ms": 1000
+                    })),
                 )
             }
         }
@@ -4143,7 +4159,7 @@ mod tests {
                 .lease_payloads
                 .lock()
                 .expect("lease payloads lock")
-                .push(payload);
+                .push(payload.clone());
             if state.scans.load(Ordering::SeqCst) == 0 {
                 (
                     StatusCode::CONFLICT,
@@ -4152,7 +4168,11 @@ mod tests {
             } else {
                 (
                     StatusCode::OK,
-                    axum::Json(json!({"lease_id": "lease-1", "heartbeat_interval_ms": 1000})),
+                    axum::Json(json!({
+                        "lease_id": "lease-1",
+                        "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
+                        "heartbeat_interval_ms": 1000
+                    })),
                 )
             }
         }
@@ -5179,6 +5199,29 @@ mod tests {
             err.to_string()
                 .contains("not a stable LoadLynx hardware id")
         );
+    }
+
+    #[test]
+    fn saved_usb_lease_requires_reported_expected_identity() {
+        let lease = CliLease {
+            lease_id: "lease-1".to_string(),
+            identity_device_id: None,
+            heartbeat_interval_ms: 1000,
+        };
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "loadlynx-a1b2c3".to_string(),
+            device: "digital-1".to_string(),
+            devd: "http://devd".to_string(),
+            port_path: Some("mock://esp32s3".to_string()),
+            expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
+        };
+
+        let err = validate_cli_lease_identity(&lease, &resolved).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("expected identity device_id loadlynx-a1b2c3")
+        );
+        assert!(err.to_string().contains("<missing>"));
     }
 
     #[tokio::test]
