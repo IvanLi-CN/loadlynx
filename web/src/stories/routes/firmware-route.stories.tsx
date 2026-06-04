@@ -75,13 +75,27 @@ export const DryRunEvidence: Story = {
 
     await waitFor(() => {
       canvas.getByText(/mock-loadlynx-devd/);
-      if (canvas.getAllByText(/target/).length < 3) {
-        throw new Error("Expected target evidence to render");
-      }
+      canvas.getByText(/"device_id": "mock-loadlynx-devd"/, {
+        selector: "code",
+      });
+      canvas.getByText(/"target": "mock"/, { selector: "code" });
     });
   },
 };
 
 export const MissingLease: Story = {
   render: () => <FirmwareRouteNoLeaseStory />,
+};
+
+export const WebSerialGate: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await waitFor(() => {
+      canvas.getByRole("heading", { name: "Firmware" });
+      canvas.getByText("Web Serial flash");
+      canvas.getByPlaceholderText("yes");
+      canvas.getByText("Acknowledge non-project firmware risk");
+    });
+  },
 };

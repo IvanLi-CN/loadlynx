@@ -257,6 +257,9 @@ export async function flashDevdDevice(input: {
   target: DevdTargetKind;
   artifactId?: string;
   dryRun: boolean;
+  confirmationPhrase?: string;
+  expectedIdentityDeviceId?: string;
+  acknowledgeNonProjectFirmware?: boolean;
 }): Promise<DevdFlashResponse> {
   return devdJson<DevdFlashResponse>(
     input.baseUrl ?? DEFAULT_DEVD_BASE_URL,
@@ -268,6 +271,11 @@ export async function flashDevdDevice(input: {
         artifact_id: input.artifactId || undefined,
         lease_id: input.leaseId || undefined,
         dry_run: input.dryRun,
+        confirmation_phrase: input.confirmationPhrase || undefined,
+        expected_identity_device_id:
+          input.expectedIdentityDeviceId || undefined,
+        acknowledge_non_project_firmware:
+          input.acknowledgeNonProjectFirmware ?? false,
       }),
     },
   );

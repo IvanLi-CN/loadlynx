@@ -11,6 +11,7 @@
 - Added `.github/quality-gates.json` to declare `Label Gate` as the required release-intent check.
 - Added release intent tooling for label validation, version computation, and PR release comments.
 - Refactored release automation to consume merged PR labels and inject the computed release version into artifacts.
+- Release asset assembly now publishes host-tools installer scripts, firmware catalog JSON, Web bundle, and `SHA256SUMS` covering all release files before creating the GitHub Release.
 
 ## Verification
 

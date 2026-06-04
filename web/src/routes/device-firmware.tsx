@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import {
   useDevdArtifactSelect,
@@ -7,6 +7,13 @@ import {
 } from "../devd/hooks.ts";
 import type { DevdTargetKind } from "../devd/types.ts";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
+import {
+  hasWebSerialSupport,
+  parseFirmwareCatalog,
+  runWebSerialDigitalFlash,
+  WEB_SERIAL_FLASH_CONFIRMATION_TEXT,
+  type WebSerialFlashResult,
+} from "../web-serial/loadlynx-web-serial.ts";
 
 export function DeviceFirmwareRoute() {
   const { device } = useDeviceContext();
@@ -15,6 +22,19 @@ export function DeviceFirmwareRoute() {
   const [artifactId, setArtifactId] = useState("");
   const [manifestPath, setManifestPath] = useState("");
   const [dryRun, setDryRun] = useState(true);
+  const [devdConfirmText, setDevdConfirmText] = useState("");
+  const [devdExpectedIdentity, setDevdExpectedIdentity] = useState("");
+  const [devdNonProjectAck, setDevdNonProjectAck] = useState(false);
+  const [webArtifactId, setWebArtifactId] = useState("");
+  const [webCatalogFile, setWebCatalogFile] = useState<File | null>(null);
+  const [webFirmwareFile, setWebFirmwareFile] = useState<File | null>(null);
+  const [webConfirmText, setWebConfirmText] = useState("");
+  const [webExpectedIdentity, setWebExpectedIdentity] = useState("");
+  const [webNonProjectAck, setWebNonProjectAck] = useState(false);
+  const [webFlashResult, setWebFlashResult] =
+    useState<WebSerialFlashResult | null>(null);
+  const [webFlashError, setWebFlashError] = useState<string | null>(null);
+  const [webFlashPending, setWebFlashPending] = useState(false);
   const selectArtifactMutation = useDevdArtifactSelect(devd?.baseUrl);
   const flashMutation = useDevdFlash(devd?.baseUrl);
   const sessionQuery = useDevdSession(
@@ -24,15 +44,17 @@ export function DeviceFirmwareRoute() {
   );
 
   const canUseDevd = Boolean(devd?.deviceId && devd?.leaseId);
+  const webSerialSupported = useMemo(() => hasWebSerialSupport(), []);
+  const devdNeedsGate = !dryRun && target === "digital_esp32s3";
 
   return (
     <PageContainer className="space-y-6">
       <header className="flex flex-col gap-2">
         <h2 className="text-2xl font-bold">Firmware</h2>
         <p className="text-sm text-base-content/70">
-          Flash digital or analog targets through the local devd bridge. The
-          first action should stay in dry-run mode to verify target evidence and
-          artifact hashes.
+          Flash through the local devd bridge or a Web Serial browser session.
+          Real digital flashes require artifact hash evidence, explicit
+          confirmation, and post-flash identity capture.
         </p>
       </header>
 
@@ -109,6 +131,48 @@ export function DeviceFirmwareRoute() {
             </span>
           </label>
 
+          {devdNeedsGate ? (
+            <div className="grid gap-4 md:grid-cols-3">
+              <label className="ll-form-control">
+                <div className="ll-label-row pb-1">
+                  <span className="ll-label-text">Confirmation</span>
+                </div>
+                <input
+                  className="ll-input"
+                  value={devdConfirmText}
+                  onChange={(event) => setDevdConfirmText(event.target.value)}
+                  placeholder={WEB_SERIAL_FLASH_CONFIRMATION_TEXT}
+                />
+              </label>
+              <label className="ll-form-control">
+                <div className="ll-label-row pb-1">
+                  <span className="ll-label-text">Expected identity</span>
+                </div>
+                <input
+                  className="ll-input"
+                  value={devdExpectedIdentity}
+                  onChange={(event) =>
+                    setDevdExpectedIdentity(event.target.value)
+                  }
+                  placeholder="Optional current device_id"
+                />
+              </label>
+              <label className="ll-label-row cursor-pointer justify-start gap-3 pt-7">
+                <input
+                  type="checkbox"
+                  className="ll-checkbox ll-checkbox-sm"
+                  checked={devdNonProjectAck}
+                  onChange={(event) =>
+                    setDevdNonProjectAck(event.target.checked)
+                  }
+                />
+                <span className="ll-label-text">
+                  Acknowledge non-project firmware risk
+                </span>
+              </label>
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap gap-3">
             <button
               type="button"
@@ -136,6 +200,10 @@ export function DeviceFirmwareRoute() {
                       target,
                       artifactId: selectedArtifactId,
                       dryRun,
+                      confirmationPhrase: devdConfirmText || undefined,
+                      expectedIdentityDeviceId:
+                        devdExpectedIdentity.trim() || undefined,
+                      acknowledgeNonProjectFirmware: devdNonProjectAck,
                     });
                   } catch {
                     // The mutation state renders the error.
@@ -167,6 +235,172 @@ export function DeviceFirmwareRoute() {
               <pre data-prefix="$">
                 <code>
                   {JSON.stringify(flashMutation.data.target_evidence, null, 2)}
+                </code>
+              </pre>
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="ll-panel bg-base-100 border border-base-200 shadow-sm">
+        <div className="ll-panel-body gap-4">
+          <div>
+            <h3 className="ll-panel-title text-base">Web Serial flash</h3>
+            <p className="text-sm text-base-content/70">
+              Uses browser-granted serial access and local files. It does not
+              save OS port paths.
+            </p>
+          </div>
+
+          {!webSerialSupported ? (
+            <div role="alert" className="ll-alert ll-alert-warning text-sm">
+              <span>
+                This browser does not support Web Serial. Use Chrome/Edge, or
+                install the released CLI/devd host tools.
+              </span>
+            </div>
+          ) : null}
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Firmware catalog JSON</span>
+              </div>
+              <input
+                type="file"
+                accept="application/json,.json"
+                className="ll-file-input"
+                onChange={(event) =>
+                  setWebCatalogFile(event.target.files?.[0] ?? null)
+                }
+              />
+            </label>
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Firmware binary</span>
+              </div>
+              <input
+                type="file"
+                className="ll-file-input"
+                onChange={(event) =>
+                  setWebFirmwareFile(event.target.files?.[0] ?? null)
+                }
+              />
+            </label>
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Artifact ID</span>
+              </div>
+              <input
+                className="ll-input"
+                value={webArtifactId}
+                onChange={(event) => setWebArtifactId(event.target.value)}
+                placeholder="Optional catalog artifact id"
+              />
+            </label>
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Expected identity</span>
+              </div>
+              <input
+                className="ll-input"
+                value={webExpectedIdentity}
+                onChange={(event) => setWebExpectedIdentity(event.target.value)}
+                placeholder="Optional current device_id"
+              />
+            </label>
+            <label className="ll-form-control">
+              <div className="ll-label-row pb-1">
+                <span className="ll-label-text">Confirmation</span>
+              </div>
+              <input
+                className="ll-input"
+                value={webConfirmText}
+                onChange={(event) => setWebConfirmText(event.target.value)}
+                placeholder={WEB_SERIAL_FLASH_CONFIRMATION_TEXT}
+              />
+            </label>
+            <label className="ll-label-row cursor-pointer justify-start gap-3 pt-7">
+              <input
+                type="checkbox"
+                className="ll-checkbox ll-checkbox-sm"
+                checked={webNonProjectAck}
+                onChange={(event) => setWebNonProjectAck(event.target.checked)}
+              />
+              <span className="ll-label-text">
+                Acknowledge non-project firmware risk
+              </span>
+            </label>
+          </div>
+
+          <div>
+            <button
+              type="button"
+              className="ll-button ll-button-primary"
+              disabled={
+                !webSerialSupported ||
+                !webCatalogFile ||
+                !webFirmwareFile ||
+                webFlashPending
+              }
+              onClick={() => {
+                if (!webCatalogFile || !webFirmwareFile) return;
+                void (async () => {
+                  setWebFlashPending(true);
+                  setWebFlashError(null);
+                  setWebFlashResult(null);
+                  try {
+                    const catalog = await parseFirmwareCatalog(webCatalogFile);
+                    const result = await runWebSerialDigitalFlash({
+                      catalog,
+                      artifactId: webArtifactId.trim() || undefined,
+                      firmwareFile: webFirmwareFile,
+                      confirmationPhrase: webConfirmText,
+                      expectedIdentityDeviceId:
+                        webExpectedIdentity.trim() || undefined,
+                      acknowledgeNonProjectFirmware: webNonProjectAck,
+                    });
+                    setWebFlashResult(result);
+                  } catch (error) {
+                    setWebFlashError(
+                      error instanceof Error
+                        ? error.message
+                        : "Web Serial flash failed",
+                    );
+                  } finally {
+                    setWebFlashPending(false);
+                  }
+                })();
+              }}
+            >
+              {webFlashPending ? (
+                <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
+              ) : null}
+              Flash with Web Serial
+            </button>
+          </div>
+
+          {webFlashError ? (
+            <div role="alert" className="ll-alert ll-alert-error text-sm">
+              <span>{webFlashError}</span>
+            </div>
+          ) : null}
+
+          {webFlashResult ? (
+            <div className="ll-codeblock text-xs">
+              <pre data-prefix="$">
+                <code>
+                  {JSON.stringify(
+                    {
+                      artifact_id: webFlashResult.artifact.artifact_id,
+                      file: webFlashResult.file.path,
+                      sha256: webFlashResult.sha256,
+                      post_flash_identity:
+                        webFlashResult.postFlashIdentity ?? null,
+                    },
+                    null,
+                    2,
+                  )}
                 </code>
               </pre>
             </div>

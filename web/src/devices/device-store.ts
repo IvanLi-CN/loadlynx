@@ -10,6 +10,11 @@ export interface StoredDevice {
     deviceId: string;
     leaseId?: string;
   };
+  webSerial?: {
+    identityDeviceId: string;
+    displayName?: string;
+    profileCapturedAt?: string;
+  };
 }
 
 const STORAGE_KEY = "loadlynx.devices";
@@ -46,6 +51,7 @@ function sanitizeDevices(input: unknown): StoredDevice[] {
   for (const item of input) {
     const stored = item as StoredDevice;
     const devd = stored.devd;
+    const webSerial = stored.webSerial;
     if (
       item &&
       typeof item === "object" &&
@@ -69,6 +75,20 @@ function sanitizeDevices(input: unknown): StoredDevice[] {
                 deviceId: devd.deviceId,
                 leaseId:
                   typeof devd.leaseId === "string" ? devd.leaseId : undefined,
+              }
+            : undefined,
+        webSerial:
+          webSerial && typeof webSerial.identityDeviceId === "string"
+            ? {
+                identityDeviceId: webSerial.identityDeviceId,
+                displayName:
+                  typeof webSerial.displayName === "string"
+                    ? webSerial.displayName
+                    : undefined,
+                profileCapturedAt:
+                  typeof webSerial.profileCapturedAt === "string"
+                    ? webSerial.profileCapturedAt
+                    : undefined,
               }
             : undefined,
       });

@@ -211,6 +211,9 @@ jobs:
       - name: Install just
         run: cargo install just --locked
 
+      - name: Install espflash
+        run: cargo install espflash --locked
+
       - name: Build digital firmware
         run: |
           . "$HOME/export-esp.sh"
@@ -222,8 +225,48 @@ jobs:
           mkdir -p dist/firmware
           cp firmware/analog/target/thumbv7em-none-eabihf/release/analog "dist/firmware/loadlynx-analog-${LOADLYNX_RELEASE_TAG}.elf"
           cp firmware/digital/target/xtensa-esp32s3-none-elf/release/digital "dist/firmware/loadlynx-digital-${LOADLYNX_RELEASE_TAG}.elf"
+          espflash save-image --chip esp32s3 --merge \
+            "dist/firmware/loadlynx-digital-${LOADLYNX_RELEASE_TAG}.elf" \
+            "dist/firmware/loadlynx-digital-${LOADLYNX_RELEASE_TAG}.bin"
           cp tmp/analog-fw-version.txt "dist/firmware/loadlynx-analog-${LOADLYNX_RELEASE_TAG}.version.txt"
           cp tmp/digital-fw-version.txt "dist/firmware/loadlynx-digital-${LOADLYNX_RELEASE_TAG}.version.txt"
+          python3 tools/firmware-catalog/build-catalog-entry.py \
+            --target analog_stm32g431 \
+            --artifact-id "loadlynx-analog-${LOADLYNX_RELEASE_TAG}" \
+            --name "LoadLynx analog STM32G431 ${LOADLYNX_RELEASE_TAG}" \
+            --package-version "${LOADLYNX_RELEASE_VERSION}" \
+            --file "dist/firmware/loadlynx-analog-${LOADLYNX_RELEASE_TAG}.elf" \
+            --output dist/firmware/analog-catalog.json
+          python3 tools/firmware-catalog/build-catalog-entry.py \
+            --target digital_esp32s3 \
+            --artifact-id "loadlynx-digital-${LOADLYNX_RELEASE_TAG}" \
+            --name "LoadLynx digital ESP32-S3 ${LOADLYNX_RELEASE_TAG}" \
+            --package-version "${LOADLYNX_RELEASE_VERSION}" \
+            --file "dist/firmware/loadlynx-digital-${LOADLYNX_RELEASE_TAG}.bin" \
+            --file-kind image \
+            --flash-address "0x0" \
+            --file "dist/firmware/loadlynx-digital-${LOADLYNX_RELEASE_TAG}.elf" \
+            --file-kind elf \
+            --output dist/firmware/digital-catalog.json
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          out = Path("dist/firmware")
+          artifacts = []
+          for name in ["analog-catalog.json", "digital-catalog.json"]:
+              data = json.loads((out / name).read_text())
+              for artifact in data["artifacts"]:
+                  for file in artifact["files"]:
+                      file["path"] = Path(file["path"]).name
+                  artifacts.append(artifact)
+          tag = os.environ["LOADLYNX_RELEASE_TAG"]
+          (out / f"loadlynx-firmware-catalog-{tag}.json").write_text(
+              json.dumps({"schema_version": "1", "artifacts": artifacts}, indent=2, sort_keys=True) + "\n"
+          )
+          (out / "analog-catalog.json").unlink()
+          (out / "digital-catalog.json").unlink()
+          PY
 
       - name: Upload firmware artifacts
         uses: actions/upload-artifact@v4
@@ -317,6 +360,22 @@ jobs:
           path: dist/release
           merge-multiple: true
 
+      - name: Add installer scripts
+        run: |
+          set -euo pipefail
+          cp tools/loadlynx-devd/install/install-loadlynx-host.sh dist/release/
+          cp tools/loadlynx-devd/install/install-loadlynx-host.ps1 dist/release/
+
+      - name: Generate SHA256SUMS
+        run: |
+          set -euo pipefail
+          (
+            cd dist/release
+            find . -maxdepth 1 -type f ! -name SHA256SUMS -printf '%f\n' \
+              | sort \
+              | xargs sha256sum > SHA256SUMS
+          )
+
       - name: Generate changelog
         id: changelog
         run: |
@@ -363,8 +422,11 @@ jobs:
             - Components: ${{ needs.intent.outputs.components }}
 
             Files
+            - `SHA256SUMS` - SHA-256 checksums for every release asset
+            - `install-loadlynx-host.sh` / `install-loadlynx-host.ps1` - User-level host tools installers
             - `loadlynx-analog-*.elf` - Analog STM32G431 firmware ELF
             - `loadlynx-digital-*.elf` - Digital ESP32-S3 firmware ELF
+            - `loadlynx-firmware-catalog-*.json` - Firmware catalog consumed by host tools and Web Serial flash flows
             - `loadlynx-host-tools-*.tar.gz` - Host companion/devd bridge and CLI
             - `loadlynx-web-*.tar.gz` - Web console static bundle
           files: dist/release/*

@@ -14,8 +14,8 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 
 ### Goals
 
-- 新增 LoadLynx 专用 `loadlynx-devd` 本地 daemon，提供 localhost HTTP/SSE 设备控制面。
-- Web 界面支持固件烧录、局域网设备发现（mDNS/DNS-SD + 手工 `.local` + 受控子网扫描）、devd USB-HTTP bridge 和 USB/LAN 双连接合并。
+- 新增 LoadLynx 专用 `loadlynx-devd` 本地 daemon，提供 CLI IPC 控制面和浏览器用 loopback-only HTTP bridge。
+- Web 界面支持固件烧录、局域网设备发现（mDNS/DNS-SD + 手工 `.local` + 受控子网扫描）、devd HTTP bridge、正式 Web Serial 路径和 USB/LAN 双连接合并。
 - CLI 支持通过以太网/LAN 与 USB/devd 操控硬件，并覆盖 discovery、status、flash、reset、monitor、safe control 与诊断导出。
 - 固件 artifact catalog 成为 Web、devd、CLI、本地构建和 release 的统一合同。
 - 保留 `mcu-agentd` 作为底层烧录/monitor fallback，但常规 owner-facing 操作优先走 `loadlynx-devd`。
@@ -58,7 +58,7 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - MUST: CLI 同时支持 LAN base URL 和 devd USB target，输出 JSON 与人类可读摘要。
 - SHOULD: devd 可以托管生产 Web 静态文件，并为 Vite dev server 提供 `/api` proxy 目标。
 - SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/monitor 操作。
-- COULD: 后续支持 Web Serial 直烧 ESP32-S3，但仍需 artifact catalog 与 explicit warning gate。
+- MUST: Web Serial 是 GitHub Pages 与 release Web bundle 的正式浏览器路径；支持身份/状态/控制/PD/输出/预设/校准/WiFi/诊断和 ESP32-S3 flash，并在不支持 Serial API 的浏览器引导到 released CLI/devd。
 
 ## 功能与行为规格
 
@@ -73,7 +73,21 @@ LoadLynx devd 的顶层设备记录应允许把同一实体的多个连接面合
 - `connection_marks`: `lan`, `usb`, `digital_flash`, `analog_flash`, `uart_link`。
 - `lease`: devd/Web/CLI 内部授权凭证；同一 device 可有多个有效 lease，但同一物理 USB port 在同一时刻只能归属一个已确认 device。
 
-### devd HTTP API
+### devd IPC and HTTP bridge
+
+`loadlynx-devd serve` is the CLI IPC daemon. It binds a native local IPC
+endpoint, serves JSONL IPC requests, auto-exits after idle timeout, and does
+not expose ordinary browser HTTP. macOS/Linux use Unix sockets and Windows uses
+named pipes. `loadlynx` uses this IPC surface and may auto-start a sibling
+`loadlynx-devd serve`; ordinary CLI workflows must not require or expose
+`--devd http://...`.
+
+`loadlynx-devd bridge-http` is the browser/debug bridge. It may serve the Web
+bundle and compatibility API, but it must reject non-loopback binds. GitHub
+Pages and release Web bundles should prefer Web Serial where available and use
+the bridge only when the user has started it locally.
+
+### devd HTTP bridge API
 
 - `GET /api/v1/ping`
 - `GET /api/v1/devices`
@@ -144,17 +158,22 @@ Flash behavior:
 - `target=analog_stm32g431`: use probe-rs or `mcu-agentd` backend, exact probe selector required.
 - `dry_run=true` must validate target resolution, artifact presence and hashes without touching hardware.
 - Real flash must refuse if the requested target does not match the selected device/board identity.
+- Real ESP32-S3 flash through CLI/devd/Web Serial must require artifact/hash/target evidence, explicit `yes` confirmation, explicit non-project firmware acknowledgement when applicable, and post-flash identity capture. A successful vendor-tool exit code alone is not sufficient.
 - If flashing digital firmware disrupts USB CDC, devd must release affected leases and surface reconnect instructions.
 
 ### CLI
 
+CLI devd access is IPC-only. `loadlynx --ipc <endpoint>` selects the IPC
+endpoint, `--no-auto-start` disables sibling daemon startup, and LAN/device HTTP
+still remains available through explicit `--url` or saved HTTP hardware.
+
 CLI commands should map 1:1 to devd/LAN operations:
 
 - `loadlynx discover --mdns --lan-scan --json`
-- `loadlynx devices --devd http://127.0.0.1:<port>`
+- `loadlynx devices --ipc /tmp/loadlynx-devd.sock`
 - `loadlynx status --url http://loadlynx-xxxxxx.local`
 - `loadlynx status --device <id>`
-- `loadlynx flash digital --device <id> --artifact <artifact_id> [--dry-run]`
+- `loadlynx flash digital --device <id> --artifact <artifact_id> [--dry-run] [--confirm yes]`
 - `loadlynx flash analog --device <id> --artifact <artifact_id> [--dry-run]`
 - `loadlynx reset digital|analog --device <id>`
 - `loadlynx monitor digital|analog --device <id> --tail 200`
@@ -179,6 +198,7 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Devices/Fleet: merge LAN and USB marks for the same `identity.device_id`.
 - Device detail: status, CC/CV/PD/control, calibration, firmware, logs/API.
 - Firmware page: artifact source, target board selector, match/mismatch warning, dry-run, flash progress, reconnect state.
+- Web Serial firmware path: browser file inputs for release catalog and firmware file, SHA-256 verification, `yes` confirmation, identity confirmation, non-project acknowledgement, esptool-js flash, and post-flash identity/profile capture without saving OS port paths.
 - USB session page/panel: lease state, heartbeat/reconnect, bounded logs, raw trace with sensitive redaction.
 
 ## 验收标准
@@ -221,6 +241,18 @@ CLI must print target evidence before hardware-changing operations: device id, t
   evidence_note: verifies the Firmware route can submit a devd dry-run flash request and render target evidence plus USB session logs/traces.
 
 ![devd Firmware dry-run evidence](./assets/devd-firmware-dry-run.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Firmware/WebSerialGate`
+  state: Web Serial ESP32-S3 flash gate
+  capture_scope: browser-viewport
+  requested_viewport: `loadlynxLarge`
+  viewport_strategy: storybook-viewport
+  target_program: mock-only
+  sensitive_exclusion: N/A
+  evidence_note: verifies the Firmware route exposes the official Web Serial flash path with local catalog/binary inputs, typed confirmation, identity field and non-project risk acknowledgement.
+
+![Web Serial firmware gate evidence](./assets/web-serial-firmware-gate.png)
 
 - source_type: storybook_canvas
   story_id_or_title: `Routes/Settings/WifiAndDiagnostics`
