@@ -514,6 +514,7 @@ struct HardwareRegistry {
 #[derive(Debug, Clone, Deserialize)]
 struct CliLease {
     lease_id: String,
+    identity_device_id: Option<String>,
     heartbeat_interval_ms: u64,
 }
 
@@ -533,7 +534,7 @@ struct ResolvedUsbHardware {
     device: String,
     devd: String,
     port_path: Option<String>,
-    expected_identity_device_id: String,
+    expected_identity_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1364,13 +1365,35 @@ async fn select_device_artifact(
     manifest_path: Option<String>,
     artifact_id: Option<String>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    request_devd_value(
+    let body = json!({"manifest_path": manifest_path, "artifact_id": artifact_id});
+    let result = request_devd_value(
         &resolved.devd,
         reqwest::Method::POST,
         &format!("/api/v1/devices/{}/artifact", resolved.device),
-        Some(json!({"manifest_path": manifest_path, "artifact_id": artifact_id})),
+        Some(body.clone()),
     )
-    .await
+    .await;
+    match result {
+        Ok(value) => Ok(value),
+        Err(error) if saved_usb_device_needs_relookup(&*error) => {
+            let scan = request_devd_value(
+                &resolved.devd,
+                reqwest::Method::POST,
+                "/api/v1/devices/scan",
+                None,
+            )
+            .await?;
+            let device = resolve_scanned_usb_device_for_saved_hardware(resolved, &scan)?;
+            request_devd_value(
+                &resolved.devd,
+                reqwest::Method::POST,
+                &format!("/api/v1/devices/{device}/artifact"),
+                Some(body),
+            )
+            .await
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> {
@@ -2993,11 +3016,14 @@ async fn create_cli_lease_for_resolved_usb(
         client,
         &resolved.devd,
         &resolved.device,
-        Some(&resolved.expected_identity_device_id),
+        resolved.expected_identity_device_id.as_deref(),
     )
     .await
     {
-        Ok(lease) => Ok((lease, resolved.device.clone())),
+        Ok(lease) => {
+            validate_cli_lease_identity(&lease, resolved)?;
+            Ok((lease, resolved.device.clone()))
+        }
         Err(error) if saved_usb_device_needs_relookup(&*error) => {
             let scan = request_devd_value(
                 &resolved.devd,
@@ -3011,13 +3037,39 @@ async fn create_cli_lease_for_resolved_usb(
                 client,
                 &resolved.devd,
                 &device,
-                Some(&resolved.expected_identity_device_id),
+                resolved.expected_identity_device_id.as_deref(),
             )
             .await?;
+            validate_cli_lease_identity(&lease, resolved)?;
             Ok((lease, device))
         }
         Err(error) => Err(error),
     }
+}
+
+fn validate_cli_lease_identity(
+    lease: &CliLease,
+    resolved: &ResolvedUsbHardware,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(expected) = resolved.expected_identity_device_id.as_deref()
+        && let Some(actual) = lease.identity_device_id.as_deref()
+        && actual != expected
+    {
+        return Err(format!(
+            "expected identity device_id {expected}, current identity is {actual}"
+        )
+        .into());
+    }
+    if resolved.expected_identity_device_id.is_none()
+        && let Some(actual) = lease.identity_device_id.as_deref()
+        && !is_stable_hardware_id(actual)
+    {
+        return Err(format!(
+            "identity device_id `{actual}` is not a stable LoadLynx hardware id; update firmware before binding or controlling this device"
+        )
+        .into());
+    }
+    Ok(())
 }
 
 async fn create_cli_bind_probe_lease(
@@ -3502,7 +3554,8 @@ fn resolve_hardware_transport(
                 device: usb.device.clone(),
                 devd: usb.devd.clone().unwrap_or_else(|| default_devd.to_string()),
                 port_path: usb.port_path.clone(),
-                expected_identity_device_id: hardware.id.clone(),
+                expected_identity_device_id: is_stable_hardware_id(&hardware.id)
+                    .then(|| hardware.id.clone()),
             }))
         }
         SavedTransport::Http => {
@@ -3721,7 +3774,7 @@ fn stable_hardware_id_from_identity(
         .get("device_id")
         .and_then(Value::as_str)
         .ok_or("identity did not include stable device_id")?;
-    if id.starts_with("loadlynx-") || id.starts_with("mock-") {
+    if is_stable_hardware_id(id) {
         Ok(id.to_string())
     } else {
         Err(format!(
@@ -3729,6 +3782,10 @@ fn stable_hardware_id_from_identity(
         )
         .into())
     }
+}
+
+fn is_stable_hardware_id(id: &str) -> bool {
+    id.starts_with("loadlynx-") || id.starts_with("mock-")
 }
 
 fn read_hardware_registry(
@@ -3878,7 +3935,12 @@ fn hardware_registry_schema_version() -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::{Router, extract::State, http::StatusCode, routing::post};
+    use axum::{
+        Router,
+        extract::{Path, State},
+        http::StatusCode,
+        routing::post,
+    };
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
@@ -3890,6 +3952,7 @@ mod tests {
         scans: Arc<AtomicUsize>,
         operation_payloads: Arc<Mutex<Vec<Value>>>,
         lease_payloads: Arc<Mutex<Vec<Value>>>,
+        artifact_devices: Arc<Mutex<Vec<String>>>,
     }
 
     async fn spawn_test_http(state: TestHttpState) -> String {
@@ -4006,6 +4069,52 @@ mod tests {
                 post(heartbeat_lease).delete(release_lease),
             )
             .route("/api/v1/status", axum::routing::get(status))
+            .route("/api/v1/devices/scan", post(scan))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    async fn spawn_artifact_scan_required_test_http(state: TestHttpState) -> String {
+        async fn select_artifact_after_scan(
+            State(state): State<TestHttpState>,
+            Path(device): Path<String>,
+            axum::Json(payload): axum::Json<Value>,
+        ) -> (StatusCode, axum::Json<Value>) {
+            state
+                .artifact_devices
+                .lock()
+                .expect("artifact devices lock")
+                .push(device.clone());
+            if state.scans.load(Ordering::SeqCst) == 0 {
+                (
+                    StatusCode::NOT_FOUND,
+                    axum::Json(json!({"code": "device_not_found"})),
+                )
+            } else {
+                (
+                    StatusCode::OK,
+                    axum::Json(json!({"ok": true, "device_id": device, "payload": payload})),
+                )
+            }
+        }
+
+        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
+            state.scans.fetch_add(1, Ordering::SeqCst);
+            axum::Json(
+                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
+            )
+        }
+
+        let app = Router::new()
+            .route(
+                "/api/v1/devices/{device}/artifact",
+                post(select_artifact_after_scan),
+            )
             .route("/api/v1/devices/scan", post(scan))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4479,7 +4588,7 @@ mod tests {
             device: "digital-1".to_string(),
             devd,
             port_path: None,
-            expected_identity_device_id: "mock-loadlynx-devd".to_string(),
+            expected_identity_device_id: Some("mock-loadlynx-devd".to_string()),
         };
 
         post_usb_operation_with_optional_lease(
@@ -4514,7 +4623,7 @@ mod tests {
             device: "digital-1".to_string(),
             devd,
             port_path: None,
-            expected_identity_device_id: "mock-loadlynx-devd".to_string(),
+            expected_identity_device_id: Some("mock-loadlynx-devd".to_string()),
         };
 
         post_usb_operation_with_optional_lease(
@@ -4728,6 +4837,47 @@ mod tests {
     }
 
     #[test]
+    fn legacy_usb_hardware_does_not_expect_old_generated_id() {
+        let legacy = SavedHardware {
+            id: "usb-digital-1".to_string(),
+            name: None,
+            identity: None,
+            last_transport: Some(SavedTransport::Usb),
+            transports: SavedTransports {
+                usb: Some(SavedUsbTransport {
+                    device: "digital-1".to_string(),
+                    port_path: Some("mock://esp32s3".to_string()),
+                    devd: None,
+                }),
+                http: None,
+            },
+            last_seen_unix_seconds: None,
+        };
+        let stable = SavedHardware {
+            id: "loadlynx-abc123".to_string(),
+            name: None,
+            identity: None,
+            last_transport: Some(SavedTransport::Usb),
+            transports: legacy.transports.clone(),
+            last_seen_unix_seconds: None,
+        };
+
+        match resolve_hardware_transport(&legacy, SavedTransport::Usb, "http://devd").unwrap() {
+            ResolvedHardware::Usb(resolved) => {
+                assert!(resolved.expected_identity_device_id.is_none())
+            }
+            ResolvedHardware::Http { .. } => panic!("expected usb hardware"),
+        }
+        match resolve_hardware_transport(&stable, SavedTransport::Usb, "http://devd").unwrap() {
+            ResolvedHardware::Usb(resolved) => assert_eq!(
+                resolved.expected_identity_device_id.as_deref(),
+                Some("loadlynx-abc123")
+            ),
+            ResolvedHardware::Http { .. } => panic!("expected usb hardware"),
+        }
+    }
+
+    #[test]
     fn hardware_commands_parse_saved_device_workflows() {
         let cli = Cli::try_parse_from([
             "loadlynx",
@@ -4900,7 +5050,7 @@ mod tests {
             device: "digital-stale".to_string(),
             devd,
             port_path: Some("mock://esp32s3".to_string()),
-            expected_identity_device_id: "loadlynx-bench".to_string(),
+            expected_identity_device_id: Some("loadlynx-bench".to_string()),
         };
 
         let value = request_devd_usb_value(
@@ -4938,7 +5088,7 @@ mod tests {
             device: "digital-reused".to_string(),
             devd,
             port_path: Some("mock://esp32s3".to_string()),
-            expected_identity_device_id: "loadlynx-bench".to_string(),
+            expected_identity_device_id: Some("loadlynx-bench".to_string()),
         };
 
         let value = request_devd_usb_value(
@@ -4963,6 +5113,67 @@ mod tests {
                 .get("expected_identity_device_id")
                 .and_then(Value::as_str),
             Some("loadlynx-bench")
+        );
+    }
+
+    #[test]
+    fn legacy_usb_lease_rejects_unstable_identity_when_reported() {
+        let lease = CliLease {
+            lease_id: "lease-1".to_string(),
+            identity_device_id: Some("digital-esp32s3".to_string()),
+            heartbeat_interval_ms: 1000,
+        };
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "usb-digital-1".to_string(),
+            device: "digital-1".to_string(),
+            devd: "http://devd".to_string(),
+            port_path: Some("mock://esp32s3".to_string()),
+            expected_identity_device_id: None,
+        };
+
+        let err = validate_cli_lease_identity(&lease, &resolved).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("not a stable LoadLynx hardware id")
+        );
+    }
+
+    #[tokio::test]
+    async fn artifact_selection_scans_saved_port_after_stale_device_id() {
+        let state = TestHttpState::default();
+        let devd = spawn_artifact_scan_required_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "loadlynx-bench".to_string(),
+            device: "digital-stale".to_string(),
+            devd,
+            port_path: Some("mock://esp32s3".to_string()),
+            expected_identity_device_id: Some("loadlynx-bench".to_string()),
+        };
+
+        let value = select_device_artifact(
+            &Client::new(),
+            &resolved,
+            Some("manifest.json".to_string()),
+            Some("digital-fw".to_string()),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            value.get("device_id").and_then(Value::as_str),
+            Some("digital-current")
+        );
+        assert_eq!(state.scans.load(Ordering::SeqCst), 1);
+        let artifact_devices = state
+            .artifact_devices
+            .lock()
+            .expect("artifact devices lock");
+        assert_eq!(
+            artifact_devices
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            vec!["digital-stale", "digital-current"]
         );
     }
 
