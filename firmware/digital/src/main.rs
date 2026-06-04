@@ -346,8 +346,6 @@ pub type I2c0Bus = i2c0::I2c0Bus;
 pub type EepromMutex = Mutex<CriticalSectionRawMutex, eeprom::SharedM24c64>;
 static EEPROM: StaticCell<EepromMutex> = StaticCell::new();
 
-#[cfg(feature = "net_http")]
-use loadlynx_calibration_format::ProfileSource;
 use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
 
 #[derive(Clone, Debug)]
@@ -925,8 +923,8 @@ async fn write_usb_calibration_profile_response(
     out.push_str(",\"ok\":true,\"data\":{\"compact\":\"cal_profile_v1\",\"a\":[\"")
         .ok();
     match profile.source {
-        ProfileSource::FactoryDefault => out.push_str("factory-default").ok(),
-        ProfileSource::UserCalibrated => out.push_str("user-calibrated").ok(),
+        calfmt::ProfileSource::FactoryDefault => out.push_str("factory-default").ok(),
+        calfmt::ProfileSource::UserCalibrated => out.push_str("user-calibrated").ok(),
     };
     let _ = core::write!(
         out,
