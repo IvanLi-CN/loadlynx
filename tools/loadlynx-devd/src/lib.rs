@@ -1464,10 +1464,7 @@ async fn create_lease(
                 format!("USB serial port is reserved for {reason}"),
             ));
         }
-        if !port_path.starts_with("mock://")
-            && input.expected_identity_device_id.is_none()
-            && input.bind_probe != Some(true)
-        {
+        if !port_path.starts_with("mock://") && input.bind_probe != Some(true) {
             match read_default_digital_usb_port(&state.repo_root) {
                 Some(default) if default == port_path => {}
                 _ => {
@@ -6516,6 +6513,43 @@ mod tests {
             Json(LeaseRequest {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
+                bind_probe: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(err.0.code, "target_selector_not_cached");
+        let guard = state.inner.lock().expect("state lock");
+        assert!(guard.leases.is_empty());
+        assert_eq!(
+            guard.devices.get("mock-loadlynx-devd").unwrap().connection,
+            ConnectionState::Disconnected
+        );
+    }
+
+    #[tokio::test]
+    async fn expected_identity_lease_still_requires_approved_real_port() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(dir.path().to_path_buf());
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let target = guard
+                .devices
+                .get_mut("mock-loadlynx-devd")
+                .unwrap()
+                .digital_target
+                .as_mut()
+                .unwrap();
+            target.port_path = Some("/dev/cu.usbmodem-test".to_string());
+            target.selector_source = Some("serialport scan".to_string());
+        }
+
+        let err = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: Some("loadlynx-abc123".to_string()),
                 bind_probe: None,
             }),
         )
