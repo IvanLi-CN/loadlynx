@@ -43,6 +43,7 @@ Use a local-first control plane:
 - Real first-flash or non-project-firmware flows need a stronger gate than "tool exited 0": artifact/hash/target evidence, explicit `yes` confirmation, explicit risk acknowledgement when applicable, and post-flash identity capture.
 - Runtime identity must match `build_id`, profile, features and target chip before log decode can be trusted.
 - LAN records and USB records merge by `identity.device_id`, not by URL, port path or display name.
+- `identity.device_id` must be device-unique. Do not use configurable hostnames or aliases as the registry key; keep them as display or network locator metadata.
 - A local CLI should treat discovery IDs as temporary candidate IDs. Persisted hardware should be keyed by stable firmware identity, and ordinary operations should use a saved hardware ID or a saved default instead of reusing a daemon's transient device table.
 - Saved hardware can contain multiple transport locators for the same physical device. Remember the last selected transport per hardware entity, and verify runtime identity before using a saved local USB transport so a stale port or candidate ID cannot silently control a different device.
 - Sensitive frame fields such as WiFi PSK are redacted at trace ingestion, before logs leave the daemon.

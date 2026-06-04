@@ -1553,11 +1553,10 @@ async fn render_identity_json(
     buf.clear();
     buf.push('{');
 
-    // device_id: prefer hostname, fall back to a stable placeholder.
+    // device_id must be hardware-unique. A configured hostname is human-facing
+    // and may be reused across devices, so it must not become the registry key.
     buf.push_str("\"device_id\":\"");
-    if let Some(host) = WIFI_HOSTNAME {
-        write_json_string_escaped(buf, host);
-    } else if let Some(ref names) = names {
+    if let Some(ref names) = names {
         write_json_string_escaped(buf, names.hostname.as_str());
     } else {
         write_json_string_escaped(buf, "llx-digital-01");

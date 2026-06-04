@@ -39,3 +39,5 @@ Web Serial moved from follow-up idea to official browser path for GitHub Pages a
 Real CLI usage showed that a saved hardware ID could still depend on a devd process's temporary device table. The CLI registry now keys hardware by stable firmware `identity.device_id`, stores USB and HTTP transport locators under that hardware, remembers `last_transport`, and exposes `default_hardware_id` for selector-free automation. Temporary USB candidate IDs are discovery outputs only; they must be bound before use, and saved USB operations confirm runtime identity before control.
 
 The digital firmware USB identity now derives the same `loadlynx-<short-id>` device ID as LAN/mDNS identity. Older USB firmware that reports a generic `digital-esp32s3` identity cannot be bound or controlled through saved hardware because it cannot prove which physical device is attached.
+
+HTTP identity was tightened so a configured Wi-Fi hostname cannot replace the MAC-derived `identity.device_id`. This prevents two devices with the same human-facing hostname from merging into one saved hardware record.
