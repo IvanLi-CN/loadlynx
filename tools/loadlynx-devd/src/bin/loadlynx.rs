@@ -808,6 +808,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             acknowledge_non_project_firmware,
         } => {
             let resolved = resolve_usb_target(device, hardware, &devd)?;
+            let resolved = ResolvedUsbHardware {
+                expected_identity_device_id: expected_identity_device_id.clone().or(
+                    resolved.expected_identity_device_id,
+                ),
+                ..resolved
+            };
             if manifest_path.is_some() {
                 select_device_artifact(&client, &resolved, manifest_path.clone(), artifact.clone())
                     .await?;
@@ -822,7 +828,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     "artifact_id": artifact,
                     "dry_run": dry_run,
                     "confirmation_phrase": confirmation_text,
-                    "expected_identity_device_id": expected_identity_device_id,
+                    "expected_identity_device_id": resolved.expected_identity_device_id,
                     "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
                 }),
                 dry_run,
@@ -5082,6 +5088,7 @@ mod tests {
         assert!(is_stable_hardware_id("loadlynx-a1b2c3"));
         assert!(is_stable_hardware_id("loadlynx-012345"));
         assert!(is_stable_hardware_id("mock-loadlynx-devd"));
+        assert!(!is_stable_hardware_id("digital-esp32s3"));
         assert!(!is_stable_hardware_id("loadlynx-bench"));
         assert!(!is_stable_hardware_id("loadlynx-A1B2C3"));
         assert!(!is_stable_hardware_id("llx-digital-01"));

@@ -1057,7 +1057,13 @@ async fn write_usb_identity_response(out: &mut UsbJsonLine, request_id: Option<&
         out,
         option_env!("LOADLYNX_FW_SRC_DIGEST").unwrap_or("src unknown"),
     );
-    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"features\":[\"usb_cdc_jsonl\",\"get_identity\",\"get_status\",\"get_pd\",\"set_pd_policy\",\"set_output_enabled\",\"set_cc_target\",\"get_control\",\"set_control\",\"get_presets\",\"set_preset\",\"apply_preset\",\"get_calibration_profile\",\"calibration_apply\",\"calibration_commit\",\"calibration_reset\",\"calibration_mode\",\"get_wifi_status\",\"get_wifi_credentials\",\"set_wifi_config\",\"clear_wifi_config\",\"soft_reset\",\"get_diagnostics\"]}}").ok();
+    out.push_str("\",\"features\":[\"net_http\",\"mdns_dns_sd\",\"usb_cdc_jsonl\"],\"protocol\":\"loadlynx.cdc.v1\",\"defmt\":{\"enabled\":true,\"encoding\":\"defmt-espflash\"}},\"stable_identity\":{\"device_id\":\"").ok();
+    write_json_string_escaped(out, device_id.as_str());
+    out.push_str("\",\"hostname\":\"").ok();
+    write_json_string_escaped(out, hostname.as_str());
+    out.push_str("\",\"short_id\":\"").ok();
+    write_json_string_escaped(out, short_id.as_str());
+    out.push_str("\"}}").ok();
 }
 
 async fn write_usb_status_response(

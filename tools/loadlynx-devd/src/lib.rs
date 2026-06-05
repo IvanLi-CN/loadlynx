@@ -1510,6 +1510,8 @@ async fn create_lease(
                     return Err(error);
                 }
                 Err(error) => {
+                    let legacy_preflash_identity =
+                        allows_legacy_preflash_identity_fallback(&input, &error);
                     let mut guard = state.inner.lock().expect("state lock");
                     if let Some(device) = guard.devices.get_mut(&input.device_id) {
                         push_log(
@@ -1522,8 +1524,26 @@ async fn create_lease(
                             ),
                         );
                     }
+                    drop(guard);
                     stop_serial_owner(&state, port_path);
-                    return Err(error);
+                    if legacy_preflash_identity {
+                        update_device_identity_for_lease_probe(
+                            &state,
+                            &input.device_id,
+                            port_path,
+                            json!({
+                                "device_id": "digital-esp32s3",
+                                "target": "digital",
+                                "mcu": "esp32s3",
+                                "protocol": "loadlynx.cdc.v1",
+                                "legacy_preflash_identity_fallback": true,
+                                "identity_probe_error_code": error.0.code,
+                                "identity_probe_error": error.0.message,
+                            }),
+                        )?;
+                    } else {
+                        return Err(error);
+                    }
                 }
             }
         }
@@ -1569,6 +1589,14 @@ async fn create_lease(
         "heartbeat_interval_ms": WEB_LEASE_HEARTBEAT_INTERVAL_MS,
         "lease_ttl_ms": WEB_LEASE_TTL_MS
     })))
+}
+
+fn allows_legacy_preflash_identity_fallback(input: &LeaseRequest, error: &HttpError) -> bool {
+    input.expected_identity_device_id.as_deref() == Some("digital-esp32s3")
+        && matches!(
+            error.0.code.as_str(),
+            "serial_response_timeout" | "serial_response_missing" | "serial_response_invalid"
+        )
 }
 
 async fn heartbeat_lease(
@@ -4794,6 +4822,17 @@ fn infer_serial_response_from_fragments(
     }))
 }
 
+fn is_stable_hardware_id(id: &str) -> bool {
+    id.strip_prefix("loadlynx-").is_some_and(is_hex_short_id) || id.starts_with("mock-")
+}
+
+fn is_hex_short_id(value: &str) -> bool {
+    value.len() == 6
+        && value
+            .bytes()
+            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 fn is_preset_fragment(frame: &Value) -> bool {
     frame.get("preset_id").is_some()
         && frame.get("mode").is_some()
@@ -4913,42 +4952,60 @@ fn infer_identity_response_from_fragments(
                 .and_then(Value::as_str)
                 .is_some_and(|id| id == request_id)
     })?;
+    let mut firmware_frame = None;
+    let mut stable_identity = None;
     for event in probe.frames.iter().skip(tx_index + 1) {
         if event.direction != "rx" || event.frame.get("request_id").is_some() {
             continue;
         }
         let frame = &event.frame;
-        if frame.get("build_id").is_none()
-            || frame.get("target").and_then(Value::as_str) != Some("digital_esp32s3")
+        if stable_identity.is_none()
+            && let Some(id) = frame.get("device_id").and_then(Value::as_str)
+            && is_stable_hardware_id(id)
         {
-            continue;
+            stable_identity = Some(frame.clone());
         }
-        let build_id = frame
-            .get("build_id")
-            .and_then(Value::as_str)
-            .unwrap_or("digital unknown");
-        let protocol = frame
-            .get("protocol")
-            .and_then(Value::as_str)
-            .unwrap_or("loadlynx.cdc.v1");
-        return Some(json!({
-            "type": "response",
-            "request_id": request_id,
-            "ok": true,
-            "data": {
-                "device_id": "digital-esp32s3",
-                "target": "digital",
-                "mcu": "esp32s3",
-                "protocol": protocol,
-                "firmware_version": build_id,
-                "digital_fw_version": build_id,
-                "firmware": frame,
-                "recovered_from_fragments": true
-            },
-            "recovered_from_fragments": true
-        }));
+        if firmware_frame.is_none()
+            && frame.get("build_id").is_some()
+            && frame.get("target").and_then(Value::as_str) == Some("digital_esp32s3")
+        {
+            firmware_frame = Some(frame.clone());
+        }
+        if stable_identity.is_some() && firmware_frame.is_some() {
+            break;
+        }
     }
-    None
+    let stable_identity = stable_identity?;
+    let firmware = firmware_frame?;
+    let device_id = stable_identity
+        .get("device_id")
+        .and_then(Value::as_str)
+        .filter(|id| is_stable_hardware_id(id))?;
+    let build_id = firmware
+        .get("build_id")
+        .and_then(Value::as_str)
+        .unwrap_or("digital unknown");
+    let protocol = firmware
+        .get("protocol")
+        .and_then(Value::as_str)
+        .unwrap_or("loadlynx.cdc.v1");
+    Some(json!({
+        "type": "response",
+        "request_id": request_id,
+        "ok": true,
+        "data": {
+            "device_id": device_id,
+            "target": "digital",
+            "mcu": "esp32s3",
+            "protocol": protocol,
+            "firmware_version": build_id,
+            "digital_fw_version": build_id,
+            "firmware": firmware,
+            "recovered_from_fragments": true,
+            "stable_identity": stable_identity
+        },
+        "recovered_from_fragments": true
+    }))
 }
 
 fn is_output_control_request_id(request_id: &str) -> bool {
@@ -6219,6 +6276,14 @@ mod tests {
                 SerialProtocolFrame {
                     direction: "rx",
                     frame: json!({
+                        "device_id": "loadlynx-a1b2c3",
+                        "hostname": "loadlynx-a1b2c3.local",
+                        "short_id": "a1b2c3"
+                    }),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
                         "build_id": "digital 0.1.0 (profile release, src 0x1)",
                         "build_profile": "release",
                         "features": ["net_http", "usb_cdc_jsonl"],
@@ -6233,12 +6298,13 @@ mod tests {
 
         let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
         let identity = identity_data_from_serial_response(Some(response)).unwrap();
-        assert_eq!(identity["device_id"], "digital-esp32s3");
+        assert_eq!(identity["device_id"], "loadlynx-a1b2c3");
         assert_eq!(
             identity["firmware"]["build_id"],
             "digital 0.1.0 (profile release, src 0x1)"
         );
         assert_eq!(identity["recovered_from_fragments"], true);
+        assert_eq!(identity["stable_identity"]["short_id"], "a1b2c3");
     }
 
     #[test]
@@ -6647,6 +6713,32 @@ mod tests {
             guard.devices.get("mock-loadlynx-devd").unwrap().connection,
             ConnectionState::Disconnected
         );
+    }
+
+    #[test]
+    fn legacy_preflash_identity_fallback_is_narrow() {
+        let input = LeaseRequest {
+            device_id: "digital-1".to_string(),
+            expected_identity_device_id: Some("digital-esp32s3".to_string()),
+            bind_probe: None,
+        };
+        let timeout =
+            HttpError::retryable("serial_response_timeout", "identity response timed out");
+        let open_failed = HttpError::retryable("serial_open_failed", "serial port open failed");
+        assert!(allows_legacy_preflash_identity_fallback(&input, &timeout));
+        assert!(!allows_legacy_preflash_identity_fallback(
+            &input,
+            &open_failed
+        ));
+
+        let stable_input = LeaseRequest {
+            expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
+            ..input
+        };
+        assert!(!allows_legacy_preflash_identity_fallback(
+            &stable_input,
+            &timeout
+        ));
     }
 
     #[tokio::test]

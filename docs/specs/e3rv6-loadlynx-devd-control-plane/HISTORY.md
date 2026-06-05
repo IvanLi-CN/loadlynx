@@ -41,3 +41,9 @@ Real CLI usage showed that a saved hardware ID could still depend on a devd proc
 The digital firmware USB identity now derives the same `loadlynx-<short-id>` device ID as LAN/mDNS identity. Older USB firmware that reports a generic `digital-esp32s3` identity cannot be bound or controlled through saved hardware because it cannot prove which physical device is attached.
 
 HTTP identity was tightened so a configured Wi-Fi hostname cannot replace the MAC-derived `identity.device_id`. This prevents two devices with the same human-facing hostname from merging into one saved hardware record.
+
+## USB identity recovery and legacy flash migration
+
+Real upgrade testing showed that generic-identity firmware could produce an oversized USB identity response that timed out before devd could bind the device, even after flashing a fixed host tool. The firmware identity response is kept compact and repeats the MAC-derived stable identity in a small `stable_identity` object so devd can recover `loadlynx-<short-id>` from fragmented post-transmit frames.
+
+The generic `digital-esp32s3` identity remains rejected for bind and saved control. A separate migration path exists only for real digital flash when the CLI explicitly declares `expected_identity_device_id=digital-esp32s3`; devd may tolerate an identity timeout for the preflash lease, but the operation still requires the approved port, artifact hash evidence, explicit confirmation and post-flash stable identity capture.
