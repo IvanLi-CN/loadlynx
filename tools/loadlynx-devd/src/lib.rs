@@ -5034,7 +5034,7 @@ fn infer_identity_response_from_fragments(
         }
     }
     let stable_identity = stable_identity?;
-    let firmware = firmware_frame?;
+    let firmware = firmware_frame.unwrap_or_else(|| json!({"target": "digital_esp32s3"}));
     let device_id = stable_identity
         .get("device_id")
         .and_then(Value::as_str)
@@ -6361,6 +6361,37 @@ mod tests {
             identity["firmware"]["build_id"],
             "digital 0.1.0 (profile release, src 0x1)"
         );
+        assert_eq!(identity["recovered_from_fragments"], true);
+        assert_eq!(identity["stable_identity"]["short_id"], "a1b2c3");
+    }
+
+    #[test]
+    fn identity_response_inference_recovers_stable_identity_without_firmware_payload() {
+        let request_id = "devd-get-identity-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": "get_identity"}),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "device_id": "loadlynx-a1b2c3",
+                        "hostname": "loadlynx-a1b2c3.local",
+                        "short_id": "a1b2c3"
+                    }),
+                },
+            ],
+            non_protocol_bytes: 128,
+            non_protocol_text: String::new(),
+        };
+
+        let response = infer_serial_response_from_fragments(&probe, request_id).unwrap();
+        let identity = identity_data_from_serial_response(Some(response)).unwrap();
+        assert_eq!(identity["device_id"], "loadlynx-a1b2c3");
+        assert_eq!(identity["firmware_version"], "digital unknown");
+        assert_eq!(identity["firmware"]["target"], "digital_esp32s3");
         assert_eq!(identity["recovered_from_fragments"], true);
         assert_eq!(identity["stable_identity"]["short_id"], "a1b2c3");
     }
