@@ -2998,17 +2998,25 @@ async fn create_cli_lease_with_expected(
     devd: &str,
     device: &str,
     expected_identity_device_id: Option<&str>,
+    allow_legacy_preflash_identity_fallback: bool,
 ) -> Result<CliLease, Box<dyn std::error::Error + Send + Sync>> {
-    let body = match expected_identity_device_id {
-        Some(expected) => json!({"device_id": device, "expected_identity_device_id": expected}),
-        None => json!({"device_id": device}),
-    };
+    let mut body = serde_json::Map::new();
+    body.insert("device_id".to_string(), json!(device));
+    if let Some(expected) = expected_identity_device_id {
+        body.insert("expected_identity_device_id".to_string(), json!(expected));
+    }
+    if allow_legacy_preflash_identity_fallback {
+        body.insert(
+            "allow_legacy_preflash_identity_fallback".to_string(),
+            json!(true),
+        );
+    }
     Ok(serde_json::from_value(
         request_devd_value(
             devd,
             reqwest::Method::POST,
             "/api/v1/serial/lease",
-            Some(body),
+            Some(Value::Object(body)),
         )
         .await?,
     )?)
@@ -3018,11 +3026,20 @@ async fn create_cli_lease_for_resolved_usb(
     client: &Client,
     resolved: &ResolvedUsbHardware,
 ) -> Result<(CliLease, String), Box<dyn std::error::Error + Send + Sync>> {
+    create_cli_lease_for_resolved_usb_with_options(client, resolved, false).await
+}
+
+async fn create_cli_lease_for_resolved_usb_with_options(
+    client: &Client,
+    resolved: &ResolvedUsbHardware,
+    allow_legacy_preflash_identity_fallback: bool,
+) -> Result<(CliLease, String), Box<dyn std::error::Error + Send + Sync>> {
     match create_cli_lease_with_expected(
         client,
         &resolved.devd,
         &resolved.device,
         resolved.expected_identity_device_id.as_deref(),
+        allow_legacy_preflash_identity_fallback,
     )
     .await
     {
@@ -3044,6 +3061,7 @@ async fn create_cli_lease_for_resolved_usb(
                 &resolved.devd,
                 &device,
                 resolved.expected_identity_device_id.as_deref(),
+                allow_legacy_preflash_identity_fallback,
             )
             .await?;
             validate_cli_lease_identity(&lease, resolved)?;
@@ -3152,7 +3170,16 @@ async fn post_usb_operation_with_optional_lease(
     let lease = if dry_run {
         None
     } else {
-        Some(create_cli_lease_for_resolved_usb(client, resolved).await?)
+        let allow_legacy_preflash_identity_fallback = path.ends_with("/flash")
+            && resolved.expected_identity_device_id.as_deref() == Some("digital-esp32s3");
+        Some(
+            create_cli_lease_for_resolved_usb_with_options(
+                client,
+                resolved,
+                allow_legacy_preflash_identity_fallback,
+            )
+            .await?,
+        )
     };
     let heartbeat = lease.as_ref().map(|lease| {
         spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.0.clone())

@@ -404,11 +404,12 @@ struct ResetRequest {
     lease_id: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 struct LeaseRequest {
     device_id: String,
     expected_identity_device_id: Option<String>,
     bind_probe: Option<bool>,
+    allow_legacy_preflash_identity_fallback: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1592,7 +1593,8 @@ async fn create_lease(
 }
 
 fn allows_legacy_preflash_identity_fallback(input: &LeaseRequest, error: &HttpError) -> bool {
-    input.expected_identity_device_id.as_deref() == Some("digital-esp32s3")
+    input.allow_legacy_preflash_identity_fallback == Some(true)
+        && input.expected_identity_device_id.as_deref() == Some("digital-esp32s3")
         && matches!(
             error.0.code.as_str(),
             "serial_response_timeout" | "serial_response_missing" | "serial_response_invalid"
@@ -6603,6 +6605,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
@@ -6627,6 +6630,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
@@ -6664,6 +6668,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
@@ -6701,6 +6706,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: Some("loadlynx-abc123".to_string()),
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
@@ -6721,6 +6727,7 @@ mod tests {
             device_id: "digital-1".to_string(),
             expected_identity_device_id: Some("digital-esp32s3".to_string()),
             bind_probe: None,
+            allow_legacy_preflash_identity_fallback: Some(true),
         };
         let timeout =
             HttpError::retryable("serial_response_timeout", "identity response timed out");
@@ -6729,6 +6736,15 @@ mod tests {
         assert!(!allows_legacy_preflash_identity_fallback(
             &input,
             &open_failed
+        ));
+
+        let implicit_input = LeaseRequest {
+            allow_legacy_preflash_identity_fallback: None,
+            ..input.clone()
+        };
+        assert!(!allows_legacy_preflash_identity_fallback(
+            &implicit_input,
+            &timeout
         ));
 
         let stable_input = LeaseRequest {
@@ -6767,6 +6783,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
@@ -6850,6 +6867,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
@@ -6860,6 +6878,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
@@ -6928,6 +6947,7 @@ mod tests {
                 device_id: "mock-loadlynx-devd".to_string(),
                 expected_identity_device_id: None,
                 bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
             }),
         )
         .await
