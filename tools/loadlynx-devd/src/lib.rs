@@ -198,6 +198,7 @@ struct WebLease {
     device_id: String,
     identity_device_id: Option<String>,
     bind_probe: bool,
+    legacy_preflash_only: bool,
     port_path: Option<String>,
     expires_at: Instant,
 }
@@ -1217,7 +1218,7 @@ async fn flash_device(
     enforce_flash_gate(&state, &id, &target, &artifact, &input)?;
     {
         let guard = state.inner.lock().expect("state lock");
-        ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
+        ensure_flash_lease_for_target(&guard, Some(&id), input.lease_id.as_deref(), &target)?;
         let device = guard
             .devices
             .get(&id)
@@ -1552,6 +1553,16 @@ async fn create_lease(
     let _ = connect_device(State(state.clone()), Path(input.device_id.clone()), None).await?;
 
     let lease_id = next_id();
+    let legacy_preflash_only = {
+        let guard = state.inner.lock().expect("state lock");
+        guard
+            .devices
+            .get(&input.device_id)
+            .and_then(|d| d.identity.as_ref())
+            .and_then(|i| i.get("legacy_preflash_identity_fallback"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    };
     let identity_device_id = {
         let guard = state.inner.lock().expect("state lock");
         guard
@@ -1567,6 +1578,7 @@ async fn create_lease(
         device_id: input.device_id.clone(),
         identity_device_id,
         bind_probe: input.bind_probe == Some(true),
+        legacy_preflash_only,
         port_path: lease_port_path,
         expires_at: Instant::now() + Duration::from_millis(WEB_LEASE_TTL_MS),
     };
@@ -3046,6 +3058,7 @@ fn ensure_active_lease_for_device(
             lease.device_id == device_id
                 && lease.expires_at > Instant::now()
                 && (allow_bind_probe || !lease.bind_probe)
+                && !lease.legacy_preflash_only
         })
         .collect::<Vec<_>>();
     if active.is_empty() {
@@ -3063,6 +3076,48 @@ fn ensure_operation_lease(lease: &WebLease) -> Result<(), HttpError> {
         return Err(HttpError::conflict(
             "bind_probe_lease_restricted",
             "bind-probe lease can only be used for identity binding",
+        ));
+    }
+    if lease.legacy_preflash_only {
+        return Err(HttpError::conflict(
+            "legacy_preflash_lease_restricted",
+            "legacy preflash lease can only be used for digital flash",
+        ));
+    }
+    Ok(())
+}
+
+fn ensure_flash_lease_for_target(
+    state: &DevdState,
+    target_device_id: Option<&str>,
+    lease_id: Option<&str>,
+    target: &TargetKind,
+) -> Result<(), HttpError> {
+    let Some(lease_id) = lease_id else {
+        return Err(HttpError::bad_request(
+            "web_session_required",
+            "Web USB lease is required for devd USB session access",
+        ));
+    };
+    let lease = active_lease_by_id(state, lease_id)?;
+    if lease.bind_probe {
+        return Err(HttpError::conflict(
+            "bind_probe_lease_restricted",
+            "bind-probe lease can only be used for identity binding",
+        ));
+    }
+    if lease.legacy_preflash_only && target != &TargetKind::DigitalEsp32s3 {
+        return Err(HttpError::conflict(
+            "legacy_preflash_lease_restricted",
+            "legacy preflash lease can only be used for digital flash",
+        ));
+    }
+    if let Some(target_device_id) = target_device_id
+        && lease.device_id != target_device_id
+    {
+        return Err(HttpError::conflict(
+            "device_lease_mismatch",
+            "Web USB lease does not match requested device",
         ));
     }
     Ok(())
@@ -3180,6 +3235,7 @@ fn lease_json(lease: &WebLease) -> Value {
         "device_id": lease.device_id,
         "identity_device_id": lease.identity_device_id,
         "bind_probe": lease.bind_probe,
+        "legacy_preflash_only": lease.legacy_preflash_only,
         "lease_ttl_ms": WEB_LEASE_TTL_MS,
         "heartbeat_interval_ms": WEB_LEASE_HEARTBEAT_INTERVAL_MS
     })
@@ -6486,6 +6542,7 @@ mod tests {
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
                     bind_probe: false,
+                    legacy_preflash_only: false,
                     port_path: Some("mock://digital".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6497,6 +6554,7 @@ mod tests {
                     device_id: "mock-loadlynx-devd-2".to_string(),
                     identity_device_id: None,
                     bind_probe: false,
+                    legacy_preflash_only: false,
                     port_path: Some("mock://digital-2".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6520,6 +6578,7 @@ mod tests {
                         device_id: "mock-loadlynx-devd".to_string(),
                         identity_device_id: None,
                         bind_probe: false,
+                        legacy_preflash_only: false,
                         port_path: Some("mock://esp32s3".to_string()),
                         expires_at: Instant::now() + Duration::from_secs(30),
                     },
@@ -6543,6 +6602,7 @@ mod tests {
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: Some("mock-loadlynx-devd".to_string()),
                     bind_probe: true,
+                    legacy_preflash_only: false,
                     port_path: Some("mock://esp32s3".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6579,6 +6639,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn legacy_preflash_lease_is_restricted_to_digital_flash() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.leases.insert(
+                "legacy-preflash".to_string(),
+                WebLease {
+                    lease_id: "legacy-preflash".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: Some("digital-esp32s3".to_string()),
+                    bind_probe: false,
+                    legacy_preflash_only: true,
+                    port_path: Some("mock://esp32s3".to_string()),
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+
+            let err = ensure_lease_for_target(
+                &guard,
+                Some("mock-loadlynx-devd"),
+                Some("legacy-preflash"),
+            )
+            .unwrap_err();
+            assert_eq!(err.0.code, "legacy_preflash_lease_restricted");
+
+            ensure_flash_lease_for_target(
+                &guard,
+                Some("mock-loadlynx-devd"),
+                Some("legacy-preflash"),
+                &TargetKind::DigitalEsp32s3,
+            )
+            .unwrap();
+
+            let err = ensure_flash_lease_for_target(
+                &guard,
+                Some("mock-loadlynx-devd"),
+                Some("legacy-preflash"),
+                &TargetKind::AnalogStm32g431,
+            )
+            .unwrap_err();
+            assert_eq!(err.0.code, "legacy_preflash_lease_restricted");
+        }
+    }
+
+    #[tokio::test]
     async fn failed_lease_validation_does_not_connect_device() {
         let state = AppState::new(PathBuf::from("."));
         {
@@ -6593,6 +6698,7 @@ mod tests {
                     device_id: "other-device".to_string(),
                     identity_device_id: None,
                     bind_probe: false,
+                    legacy_preflash_only: false,
                     port_path: Some("mock://esp32s3".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -6819,6 +6925,7 @@ mod tests {
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
                     bind_probe: false,
+                    legacy_preflash_only: false,
                     port_path: Some("mock://esp32s3".to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -7042,6 +7149,7 @@ mod tests {
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
                     bind_probe: false,
+                    legacy_preflash_only: false,
                     port_path: Some("mock://digital".to_string()),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
@@ -7073,6 +7181,7 @@ mod tests {
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
                     bind_probe: false,
+                    legacy_preflash_only: false,
                     port_path: Some(port_path.to_string()),
                     expires_at: Instant::now() - Duration::from_secs(1),
                 },
@@ -7114,6 +7223,7 @@ mod tests {
                     device_id: "mock-loadlynx-devd".to_string(),
                     identity_device_id: None,
                     bind_probe: false,
+                    legacy_preflash_only: false,
                     port_path: Some(port_path.to_string()),
                     expires_at: Instant::now() + Duration::from_secs(30),
                 },
@@ -7150,6 +7260,7 @@ mod tests {
                         device_id: "mock-loadlynx-devd".to_string(),
                         identity_device_id: None,
                         bind_probe: false,
+                        legacy_preflash_only: false,
                         port_path: Some(port_path.to_string()),
                         expires_at: Instant::now() + Duration::from_secs(30),
                     },
