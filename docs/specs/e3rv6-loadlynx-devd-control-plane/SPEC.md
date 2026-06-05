@@ -171,13 +171,19 @@ CLI commands should map 1:1 to devd/LAN operations:
 
 - `loadlynx discover --mdns --lan-scan --json`
 - `loadlynx devices --ipc /tmp/loadlynx-devd.sock`
+- `loadlynx hardware available --scan --json`
+- `loadlynx hardware bind usb --candidate <scan-candidate-id> [--set-default]`
+- `loadlynx hardware bind http --url http://loadlynx-xxxxxx.local [--set-default]`
+- `loadlynx hardware default set <hardware-id>`
+- `loadlynx hardware use <hardware-id> --transport usb|http`
+- `loadlynx status`
+- `loadlynx status --hardware <hardware-id>`
 - `loadlynx status --url http://loadlynx-xxxxxx.local`
-- `loadlynx status --device <id>`
-- `loadlynx flash digital --device <id> --artifact <artifact_id> [--dry-run] [--confirm yes]`
-- `loadlynx flash analog --device <id> --artifact <artifact_id> [--dry-run]`
-- `loadlynx reset digital|analog --device <id>`
-- `loadlynx monitor digital|analog --device <id> --tail 200`
-- `loadlynx pd set --device <id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
+- `loadlynx flash digital --hardware <hardware-id> --artifact <artifact_id> [--dry-run] [--confirm yes]`
+- `loadlynx flash analog --hardware <hardware-id> --artifact <artifact_id> [--dry-run]`
+- `loadlynx reset digital|analog --hardware <hardware-id>`
+- `loadlynx monitor digital|analog --hardware <hardware-id> --tail 200`
+- `loadlynx pd set --hardware <hardware-id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
 - `loadlynx output set --hardware <id> --enable --target-i-ma <ma>`
 - `loadlynx output set --hardware <id> --disable`
 - `loadlynx wifi show|set|clear --hardware <id>`
@@ -187,6 +193,8 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx calibration profile|mode|apply|commit|reset --hardware <id>`
 - `loadlynx soft-reset --hardware <id> --reason manual`
 - `loadlynx diagnostics export --hardware <id>`
+
+Temporary devd candidate IDs are discovery outputs, not operation targets. A USB candidate may only enter user operations through `hardware bind usb --candidate ...`; the bind flow must read identity over a short bind-probe lease and reject firmware that does not expose a stable `identity.device_id` such as `loadlynx-<short-id>`. Bind-probe leases are restricted to identity binding and must not authorize normal control, diagnostics, reset or flash operations. Saved hardware records use that stable ID as the registry key, may hold both USB and HTTP transport locators, remember `last_transport`, and expose a `default_hardware_id` for `loadlynx status` and other selector-free automation. Saved USB operations on a fresh auto-started devd may trigger scan before lease creation, then must confirm the current firmware identity still matches the saved hardware ID; a missing lease identity is a failed confirmation, not a permissive legacy fallback.
 
 LAN WiFi writes require the explicit `--allow-insecure-lan-wifi` CLI flag. USB/devd WiFi writes do not require that LAN safety override because they are local physical access operations.
 

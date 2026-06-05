@@ -1553,11 +1553,10 @@ async fn render_identity_json(
     buf.clear();
     buf.push('{');
 
-    // device_id: prefer hostname, fall back to a stable placeholder.
+    // device_id must be hardware-unique. A configured hostname is human-facing
+    // and may be reused across devices, so it must not become the registry key.
     buf.push_str("\"device_id\":\"");
-    if let Some(host) = WIFI_HOSTNAME {
-        write_json_string_escaped(buf, host);
-    } else if let Some(ref names) = names {
+    if let Some(ref names) = names {
         write_json_string_escaped(buf, names.hostname.as_str());
     } else {
         write_json_string_escaped(buf, "llx-digital-01");
@@ -2318,29 +2317,6 @@ pub(crate) async fn handle_presets_apply(
     }
 
     render_control_view_json(body_out, control, calibration, telemetry).await
-}
-
-fn output_enable_allowed_for_restore(min_v_mv: i32) -> bool {
-    if crate::LAST_FAULT_FLAGS.load(Ordering::Relaxed) != 0 {
-        return false;
-    }
-    if !LINK_UP.load(Ordering::Relaxed) {
-        return false;
-    }
-    let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
-    match analog_state {
-        AnalogState::Faulted | AnalogState::Offline => return false,
-        AnalogState::CalMissing | AnalogState::MeasurementInvalid | AnalogState::Ready => {}
-    }
-
-    if min_v_mv > 0 && crate::LAST_GOOD_FRAME_MS.load(Ordering::Relaxed) != 0 {
-        let v_main_mv = crate::LAST_V_MAIN_MV.load(Ordering::Relaxed);
-        if v_main_mv <= min_v_mv.max(0) {
-            return false;
-        }
-    }
-
-    true
 }
 
 struct ControlUpdateRequest {
@@ -4559,41 +4535,5 @@ pub(crate) fn parse_calibration_mode_request(
             write_error_body(body_out, "INVALID_REQUEST", msg, false, None);
             Err("400 Bad Request")
         }
-    }
-}
-
-pub(crate) async fn apply_calibration_mode(
-    kind: CalKind,
-    calibration: &'static CalibrationMutex,
-    control: &'static ControlMutex,
-) {
-    let prev_kind = { calibration.lock().await.cal_mode };
-    let mode_changed = prev_kind != kind;
-    let state_changed = if mode_changed {
-        let mut guard = control.lock().await;
-        let leaving_current_calibration = control::calibration_mode_uses_cc_override(prev_kind)
-            && !control::calibration_mode_uses_cc_override(kind);
-        let allow_restore_output = !leaving_current_calibration
-            || output_enable_allowed_for_restore(guard.active_preset().min_v_mv);
-        guard.apply_calibration_mode_transition(prev_kind, kind, allow_restore_output)
-    } else {
-        false
-    };
-
-    if mode_changed {
-        // setmode_tx_task() snapshots calibration mode and ControlState under
-        // separate locks. Apply the control-side restore/override transition
-        // before publishing the new cal_mode so any transient mixed snapshot
-        // remains conservative (old current-calibration mode + restored/off
-        // control state), instead of briefly emitting the active preset with
-        // calibration-time output_enabled=true.
-        let mut guard = calibration.lock().await;
-        guard.cal_mode = kind;
-        if guard.pending_cal_mode == Some(kind) {
-            guard.pending_cal_mode = None;
-        }
-    }
-    if mode_changed || state_changed {
-        bump_control_rev();
     }
 }

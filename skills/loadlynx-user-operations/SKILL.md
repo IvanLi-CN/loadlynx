@@ -121,12 +121,12 @@ loadlynx-devd bridge-http --bind 127.0.0.1:30180
 
 ```bash
 loadlynx hardware available
-loadlynx hardware recent
 loadlynx hardware list
+loadlynx hardware default show
 loadlynx devices
-loadlynx status --device <device-id>
 loadlynx status --url http://<device-host-or-ip>
 loadlynx status --hardware <saved-hardware-id>
+loadlynx status
 ```
 
 - Hardware memory:
@@ -134,22 +134,27 @@ loadlynx status --hardware <saved-hardware-id>
 ```bash
 loadlynx hardware path
 loadlynx hardware available --scan
-loadlynx hardware recent
 loadlynx hardware list
-loadlynx hardware save --id <name> --transport usb --device <device-id>
-loadlynx hardware save --id <name> --transport http --url http://<device-host-or-ip>
+loadlynx hardware bind usb --candidate <scan-candidate-id> [--name <name>] [--set-default]
+loadlynx hardware bind http --url http://<device-host-or-ip> [--name <name>] [--set-default]
+loadlynx hardware default set <saved-hardware-id>
+loadlynx hardware default clear
+loadlynx hardware use <saved-hardware-id> --transport usb
+loadlynx hardware use <saved-hardware-id> --transport http
 loadlynx hardware forget <saved-hardware-id>
 ```
 
-- Use `hardware available` to see currently visible USB/devd devices plus saved HTTP fallback entries; add `--scan` when device visibility should refresh first. If CLI IPC/devd is unavailable, use the reported USB error and saved HTTP fallback to decide whether to let the CLI auto-start IPC devd, start `loadlynx-devd serve`, or use HTTP.
-- Use `hardware recent` to list remembered hardware by most recent successful connection or save time.
-- `loadlynx status --device ...` and `loadlynx status --url ...` best-effort update the CLI hardware memory after a successful connection; a memory write failure must not hide a successful status result.
+- Use `hardware available` to see currently visible USB/devd candidates plus saved HTTP fallback entries; add `--scan` when device visibility should refresh first. If CLI IPC/devd is unavailable, use the reported USB error and saved HTTP fallback to decide whether to let the CLI auto-start IPC devd, start `loadlynx-devd serve`, or use HTTP.
+- Bind a hardware entity before operating it. USB binding reads firmware identity from the selected candidate; HTTP binding reads `/api/v1/identity`. Binding must fail if `identity.device_id` is missing or is not a stable `loadlynx-<short-id>` hardware ID.
+- `status`, output, PD, WiFi, control, presets, calibration, soft-reset, diagnostics, flash, reset and monitor should use `--hardware <saved-hardware-id>` or the saved default. Do not use temporary devd candidate IDs for control operations.
+- `loadlynx status` uses the saved default hardware. In non-interactive/JSON automation, a missing default is a structured `default_hardware_not_set` error.
+- `hardware use <id> --transport ...` changes the remembered transport for that hardware. `--transport` command flags, where available, should be treated as one-call overrides rather than rebinding.
 - The memory file lives in the user's OS config directory: macOS `~/Library/Application Support/LoadLynx/devices.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`, Windows `%APPDATA%\LoadLynx\devices.json`; `LOADLYNX_HOME` overrides the directory.
 - List saved hardware before scanning, then use `--hardware <saved-hardware-id>` instead of retyping device IDs or URLs.
 - CLI output control:
   - Confirm `loadlynx output --help` and `loadlynx output set --help` expose the needed command.
-  - Require the user to confirm the saved hardware ID or target base URL and intended output state before changing output.
-  - Verify the result with `loadlynx status --hardware <saved-hardware-id>`, `loadlynx status --url <base-url>`, or `loadlynx status --device <device-id>`.
+  - Require the user to confirm the saved hardware ID and intended output state before changing output.
+  - Verify the result with `loadlynx status --hardware <saved-hardware-id>` or `loadlynx status` when the intended hardware is the saved default.
 - CLI firmware flash:
   - Confirm `loadlynx flash --help` supports the needed artifact/catalog options.
   - Use dry-run first whenever the CLI exposes it.

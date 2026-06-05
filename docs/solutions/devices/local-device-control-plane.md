@@ -43,6 +43,9 @@ Use a local-first control plane:
 - Real first-flash or non-project-firmware flows need a stronger gate than "tool exited 0": artifact/hash/target evidence, explicit `yes` confirmation, explicit risk acknowledgement when applicable, and post-flash identity capture.
 - Runtime identity must match `build_id`, profile, features and target chip before log decode can be trusted.
 - LAN records and USB records merge by `identity.device_id`, not by URL, port path or display name.
+- `identity.device_id` must be device-unique. Do not use configurable hostnames or aliases as the registry key; keep them as display or network locator metadata.
+- A local CLI should treat discovery IDs as temporary candidate IDs. Persisted hardware should be keyed by stable firmware identity, and ordinary operations should use a saved hardware ID or a saved default instead of reusing a daemon's transient device table.
+- Saved hardware can contain multiple transport locators for the same physical device. Remember the last selected transport per hardware entity, and verify runtime identity before using a saved local USB transport so a stale port or candidate ID cannot silently control a different device.
 - Sensitive frame fields such as WiFi PSK are redacted at trace ingestion, before logs leave the daemon.
 - Keep device-local transports compact and purpose-built. When USB/serial frame budgets are tight, firmware may return a compact operation-specific payload while the daemon expands it back to the public HTTP/Web shape for CLI and browser callers.
 - Separate local physical-access writes from LAN writes in the user interface. LAN credential writes should require an explicit unsafe-network confirmation or flag, while USB/devd writes can rely on lease and selected-port evidence.
@@ -67,6 +70,8 @@ Use a local-first control plane:
 - Long-running firmware-side waits need matching daemon-side serial timeouts for that operation only. Keep ordinary request timeouts short, then widen timeout windows for explicit wait semantics such as WiFi connection waits.
 - Treat mDNS/DNS-SD as convenience discovery. Always keep manual IP/hostname entry and bounded scan fallback.
 - For dual-MCU devices, represent board targets explicitly instead of flattening them into one generic "serial device".
+- If older firmware exposes only a generic USB identity, block binding and control until firmware provides a stable hardware ID. Do not synthesize a persistent ID from OS port paths or daemon candidate IDs.
+- Treat bind-probe leases as a narrow identity-binding capability. They may bypass a project-local approved-port cache only to read identity for an explicitly selected candidate, and must be rejected by ordinary operation checks. Saved USB operation leases must return the expected stable identity; a missing identity field is a failed confirmation.
 - Keep firmware catalog generation outside the daemon. devd should verify manifests and hashes, not invent release metadata.
 - Release installers should verify a `SHA256SUMS` file that covers every release asset, install into a user-owned directory, validate installed binaries, and print PATH guidance without editing profiles automatically.
 

@@ -21,6 +21,8 @@ The user skill now includes released CLI firmware flash, WiFi configuration, and
 
 Hardware memory is a `loadlynx` CLI feature, not a Web UI or project-local feature. The CLI stores saved and successfully connected USB/HTTP hardware in the user's OS config directory, with `LOADLYNX_HOME` as an override for tests or explicit advanced setup. USB records sort before HTTP records so normal user workflows try the local USB/devd path before HTTP fallback. Dedicated `hardware available` and `hardware recent` commands expose currently connectable devices and recent devices without overloading the remembered-device list.
 
+The hardware memory model is binding-first. The CLI now stores one hardware entity per stable firmware `identity.device_id`, can attach USB and HTTP transports to the same entity, remembers the entity's last selected transport, and supports a saved default hardware for `loadlynx status`. Temporary devd candidate IDs are no longer valid operation targets; agents must bind a candidate first and then operate through the saved hardware ID or default.
+
 ## CLI-only hardware operation
 
 Skill-driven user hardware operation is CLI-only. USB/devd access is preferred first; HTTP is a fallback when USB is unavailable, explicitly not desired, or selected from saved hardware. Web UI can remain a product/developer surface, but it is not the operation path for these skills.
