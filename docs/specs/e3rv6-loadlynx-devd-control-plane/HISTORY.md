@@ -14,7 +14,7 @@ The USB CDC bridge moved from per-request serial opens to lease-scoped per-port 
 
 Review convergence kept two safety-compatible legacy behaviors intact: PD GET falls back to the cached PD view only for missing or mismatched serial responses, and real USB lease creation refuses to touch hardware unless the selected port matches the approved `.esp32-port` default.
 
-Real CLI HIL verification exposed that owner-facing commands must cover the full safe-control lifecycle, not just enable. The CLI now includes PD writes, CC/CV/CP targets and explicit output disable, while devd handles USB Serial/JTAG log-noise fragmentation without treating stale or mismatched request IDs as success.
+Real CLI HIL verification exposed that owner-facing commands must cover the full safe-control lifecycle, not just enable. The CLI now includes PD writes, CC current targets and explicit output disable, while devd handles USB Serial/JTAG log-noise fragmentation without treating stale or mismatched request IDs as success.
 
 ## Control Plane Completion
 

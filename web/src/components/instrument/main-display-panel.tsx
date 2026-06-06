@@ -3,7 +3,7 @@ import { Sparkline } from "./sparkline.tsx";
 
 export type MainDisplayPanelProps = {
   headline: { value: number | null; unit: "V" | "A" | "W" };
-  modeLabel: "CC" | "CV" | "CP";
+  modeLabel: "CC" | "CV" | "CP" | "CR";
   setpointLabel: string;
   uptimeLabel: string;
   trend: { points: number[]; min: number; max: number };

@@ -658,12 +658,12 @@ export function DeviceCcRoute() {
     } as const;
   })();
 
-  const availableModes: Array<"CC" | "CV" | "CP"> = ["CC", "CV"];
+  const availableModes: Array<"CC" | "CV" | "CP" | "CR"> = ["CC", "CV"];
   if (cpSupported) {
     availableModes.push("CP");
   }
 
-  const draftModeLabel: "CC" | "CV" | "CP" =
+  const draftModeLabel: "CC" | "CV" | "CP" | "CR" =
     draftPresetMode === "cc" ? "CC" : draftPresetMode === "cv" ? "CV" : "CP";
 
   const presetsButtons = Array.from({ length: 8 }, (_, idx) => {
@@ -737,7 +737,7 @@ export function DeviceCcRoute() {
                 deviceIp={identity?.network.ip ?? null}
                 firmwareVersion={identity?.digital_fw_version ?? null}
                 modeLabel={
-                  activeLoadModeBadge as "CC" | "CV" | "CP" | "UNKNOWN"
+                  activeLoadModeBadge as "CC" | "CV" | "CP" | "CR" | "UNKNOWN"
                 }
                 linkState={linkState}
                 outputState={{
@@ -789,7 +789,9 @@ export function DeviceCcRoute() {
                   <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                     <MainDisplayPanel
                       headline={headline}
-                      modeLabel={activeLoadModeBadge as "CC" | "CV" | "CP"}
+                      modeLabel={
+                        activeLoadModeBadge as "CC" | "CV" | "CP" | "CR"
+                      }
                       setpointLabel={activeSetpointLabel ?? "—"}
                       uptimeLabel={formatUptimeSeconds(uptimeSeconds)}
                       trend={{
@@ -846,9 +848,12 @@ export function DeviceCcRoute() {
                   <ControlModePanel
                     availableModes={availableModes}
                     activeMode={draftModeLabel}
-                    onModeChange={(mode) =>
-                      setDraftPresetMode(mode.toLowerCase() as LoadMode)
-                    }
+                    onModeChange={(mode) => {
+                      if (mode === "CR") {
+                        return;
+                      }
+                      setDraftPresetMode(mode.toLowerCase() as LoadMode);
+                    }}
                     outputEnabled={control?.output_enabled ?? false}
                     outputToggleDisabled={outputToggleDisabled}
                     onOutputToggle={(nextEnabled) => {

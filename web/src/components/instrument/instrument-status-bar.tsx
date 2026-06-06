@@ -2,7 +2,7 @@ export type InstrumentStatusBarProps = {
   deviceName: string;
   deviceIp: string | null;
   firmwareVersion: string | null;
-  modeLabel: "CC" | "CV" | "CP" | "UNKNOWN";
+  modeLabel: "CC" | "CV" | "CP" | "CR" | "UNKNOWN";
   linkState: "up" | "down" | "unknown";
   outputState: { enabled: boolean; setpointLabel: string | null };
   protectionState: { summary: string; level: "ok" | "warn" | "danger" };
@@ -28,7 +28,9 @@ export function InstrumentStatusBar({
         ? "Constant Voltage"
         : modeLabel === "CP"
           ? "Constant Power"
-          : "Unknown";
+          : modeLabel === "CR"
+            ? "Constant Resistance"
+            : "Unknown";
 
   const pillBase = "instrument-pill";
 
