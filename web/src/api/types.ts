@@ -241,7 +241,7 @@ export interface CcUpdateRequest {
 
 // Preset/Control (docs/interfaces/network-http-api.md §2.5)
 
-export type LoadMode = "cc" | "cv" | "cp" | "cr";
+export type LoadMode = "cc" | "cv" | "cp";
 
 export type PresetId = 1 | 2 | 3 | 4 | 5;
 

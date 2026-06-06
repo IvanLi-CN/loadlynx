@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { expect } from "@storybook/test";
 import { waitFor, within } from "@testing-library/dom";
 import userEvent from "@testing-library/user-event";
 import type { StoredDevice } from "../../devices/device-store.ts";
@@ -26,7 +27,7 @@ export const Default: Story = {
     await canvas.findByRole("button", { name: "CC" });
     await canvas.findByRole("button", { name: "CV" });
     await canvas.findByRole("button", { name: "CP" });
-    await canvas.findByRole("button", { name: "CR" });
+    expect(canvas.queryByRole("button", { name: "CR" })).toBeNull();
 
     await waitFor(
       () => {
