@@ -398,7 +398,9 @@ export function DeviceCcRoute() {
       ? "CV"
       : control?.preset.mode === "cp"
         ? "CP"
-        : "CC";
+        : control?.preset.mode === "cr"
+          ? "CR"
+          : "CC";
 
   const statusLocalMa = status?.raw.i_local_ma ?? null;
   const statusRemoteMa = status?.raw.i_remote_ma ?? null;
@@ -658,13 +660,20 @@ export function DeviceCcRoute() {
     } as const;
   })();
 
-  const availableModes: Array<"CC" | "CV" | "CP"> = ["CC", "CV"];
+  const availableModes: Array<"CC" | "CV" | "CP" | "CR"> = ["CC", "CV"];
   if (cpSupported) {
     availableModes.push("CP");
   }
+  availableModes.push("CR");
 
-  const draftModeLabel: "CC" | "CV" | "CP" =
-    draftPresetMode === "cc" ? "CC" : draftPresetMode === "cv" ? "CV" : "CP";
+  const draftModeLabel: "CC" | "CV" | "CP" | "CR" =
+    draftPresetMode === "cc"
+      ? "CC"
+      : draftPresetMode === "cv"
+        ? "CV"
+        : draftPresetMode === "cr"
+          ? "CR"
+          : "CP";
 
   const presetsButtons = Array.from({ length: 8 }, (_, idx) => {
     const id = idx + 1;
@@ -694,6 +703,12 @@ export function DeviceCcRoute() {
       value: formatWithUnit(draftPresetTargetVMv / 1000, 3, "V"),
       readback: `Read: ${formatWithUnit(localVoltageV, 3, "V")}`,
       active: draftPresetMode === "cv",
+    },
+    {
+      label: "Target Resistance",
+      value: "—",
+      readback: null,
+      active: draftPresetMode === "cr",
     },
   ];
 
@@ -737,7 +752,7 @@ export function DeviceCcRoute() {
                 deviceIp={identity?.network.ip ?? null}
                 firmwareVersion={identity?.digital_fw_version ?? null}
                 modeLabel={
-                  activeLoadModeBadge as "CC" | "CV" | "CP" | "UNKNOWN"
+                  activeLoadModeBadge as "CC" | "CV" | "CP" | "CR" | "UNKNOWN"
                 }
                 linkState={linkState}
                 outputState={{
@@ -789,7 +804,9 @@ export function DeviceCcRoute() {
                   <div className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                     <MainDisplayPanel
                       headline={headline}
-                      modeLabel={activeLoadModeBadge as "CC" | "CV" | "CP"}
+                      modeLabel={
+                        activeLoadModeBadge as "CC" | "CV" | "CP" | "CR"
+                      }
                       setpointLabel={activeSetpointLabel ?? "—"}
                       uptimeLabel={formatUptimeSeconds(uptimeSeconds)}
                       trend={{
@@ -944,6 +961,7 @@ export function DeviceCcRoute() {
                               {cpSupported ? (
                                 <option value="cp">cp</option>
                               ) : null}
+                              <option value="cr">cr</option>
                             </select>
                             {identityQuery.isSuccess && !cpSupported ? (
                               <div className="mt-2 text-[11px] text-slate-200/55">
@@ -997,6 +1015,22 @@ export function DeviceCcRoute() {
                                     ),
                                   )
                                 }
+                              />
+                            </div>
+                          ) : draftPresetMode === "cr" ? (
+                            <div>
+                              <label
+                                htmlFor="preset-target-r"
+                                className="block text-[11px] text-slate-200/60"
+                              >
+                                Target resistance (Ω)
+                              </label>
+                              <input
+                                id="preset-target-r"
+                                type="number"
+                                className="mt-1 w-full rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-100"
+                                value={0}
+                                readOnly
                               />
                             </div>
                           ) : (
