@@ -27,7 +27,7 @@
 - `deviceName: string` — 设备名
 - `deviceIp: string | null` — IP（未知时为 null）
 - `firmwareVersion: string | null` — 固件版本（未知时为 null）
-- `modeLabel: "CC" | "CV" | "CP" | "CR" | "UNKNOWN"`
+- `modeLabel: "CC" | "CV" | "CP" | "UNKNOWN"`
 - `linkState: "up" | "down" | "unknown"`
 - `outputState: { enabled: boolean; setpointLabel: string | null }`
 - `protectionState: { summary: string; level: "ok" | "warn" | "danger" }`
@@ -59,7 +59,7 @@
 **Props**
 
 - `headline: { value: number; unit: "V" | "A" | "W" }`
-- `modeLabel: "CC" | "CV" | "CP" | "CR"`
+- `modeLabel: "CC" | "CV" | "CP"`
 - `setpointLabel: string`
 - `uptimeLabel: string` — 例如 `"01:24:18"`
 - `trend: { points: number[]; min: number; max: number }`
@@ -106,8 +106,8 @@
 
 **Props**
 
-- `availableModes: Array<"CC" | "CV" | "CP" | "CR">`
-- `activeMode: "CC" | "CV" | "CP" | "CR"`
+- `availableModes: Array<"CC" | "CV" | "CP">`
+- `activeMode: "CC" | "CV" | "CP"`
 - `onModeChange: (mode) => void`
 - `outputEnabled: boolean`
 - `onOutputToggle: (nextEnabled) => void`

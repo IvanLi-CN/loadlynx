@@ -1,7 +1,7 @@
 export type ControlModePanelProps = {
-  availableModes: Array<"CC" | "CV" | "CP" | "CR">;
-  activeMode: "CC" | "CV" | "CP" | "CR";
-  onModeChange: (mode: "CC" | "CV" | "CP" | "CR") => void;
+  availableModes: Array<"CC" | "CV" | "CP">;
+  activeMode: "CC" | "CV" | "CP";
+  onModeChange: (mode: "CC" | "CV" | "CP") => void;
   outputEnabled: boolean;
   outputToggleDisabled?: boolean;
   onOutputToggle: (nextEnabled: boolean) => void;
@@ -15,7 +15,7 @@ function ModeButton({
   disabled,
   onClick,
 }: {
-  mode: "CC" | "CV" | "CP" | "CR";
+  mode: "CC" | "CV" | "CP";
   active: boolean;
   disabled: boolean;
   onClick: () => void;
@@ -48,7 +48,7 @@ export function ControlModePanel({
   outputHint,
   showOutputReenableHint = false,
 }: ControlModePanelProps) {
-  const allModes: Array<"CC" | "CV" | "CP" | "CR"> = ["CC", "CV", "CP", "CR"];
+  const allModes: Array<"CC" | "CV" | "CP"> = ["CC", "CV", "CP"];
   return (
     <section aria-label="Mode and output" className="instrument-card p-5">
       <div className="instrument-label">Mode &amp; Output</div>
