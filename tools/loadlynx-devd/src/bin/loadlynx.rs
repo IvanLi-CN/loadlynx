@@ -88,9 +88,50 @@ enum Command {
         #[arg(long, value_enum, default_value_t = MonitorFormat::Human)]
         format: MonitorFormat,
     },
-    Output {
-        #[command(subcommand)]
-        command: OutputCommand,
+    Cc {
+        target_i_ma: u32,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        preset_id: Option<u8>,
+        #[arg(long)]
+        min_v_mv: Option<u32>,
+        #[arg(long)]
+        max_i_ma_total: Option<u32>,
+        #[arg(long)]
+        max_p_mw: Option<u32>,
+        #[arg(long)]
+        disable: bool,
+    },
+    Cv {
+        target_v_mv: u32,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        preset_id: Option<u8>,
+        #[arg(long)]
+        min_v_mv: Option<u32>,
+        #[arg(long)]
+        max_i_ma_total: Option<u32>,
+        #[arg(long)]
+        max_p_mw: Option<u32>,
+        #[arg(long)]
+        disable: bool,
+    },
+    Cp {
+        target_p_mw: u32,
+        #[arg(long)]
+        hardware: Option<String>,
+        #[arg(long)]
+        preset_id: Option<u8>,
+        #[arg(long)]
+        min_v_mv: Option<u32>,
+        #[arg(long)]
+        max_i_ma_total: Option<u32>,
+        #[arg(long)]
+        max_p_mw: Option<u32>,
+        #[arg(long)]
+        disable: bool,
     },
     Pd {
         #[command(subcommand)]
@@ -137,22 +178,6 @@ enum Command {
     Hardware {
         #[command(subcommand)]
         command: HardwareCommand,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum OutputCommand {
-    Set {
-        #[arg(long)]
-        url: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
-        #[arg(long = "target-i-ma")]
-        target_i_ma: Option<u32>,
-        #[arg(long)]
-        enable: bool,
-        #[arg(long)]
-        disable: bool,
     },
 }
 
@@ -440,6 +465,31 @@ enum PdModeArg {
 enum SavedTransport {
     Usb,
     Http,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CliPreset {
+    preset_id: u8,
+    mode: String,
+    target_i_ma: u32,
+    target_v_mv: u32,
+    target_p_mw: u32,
+    min_v_mv: u32,
+    max_i_ma_total: u32,
+    max_p_mw: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CliControlView {
+    active_preset_id: u8,
+    output_enabled: bool,
+    uv_latched: bool,
+    preset: CliPreset,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct CliPresetsEnvelope {
+    presets: Vec<CliPreset>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -861,67 +911,81 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             let resolved = resolve_usb_target(device, hardware, &devd)?;
             run_monitor(&client, resolved, tail, format).await?
         }
-        Command::Output { command } => match command {
-            OutputCommand::Set {
-                url,
-                hardware,
+        Command::Cc {
+            target_i_ma,
+            hardware,
+            preset_id,
+            min_v_mv,
+            max_i_ma_total,
+            max_p_mw,
+            disable,
+        } => {
+            handle_mode_first_command(
+                &client,
+                &devd,
+                ModeFirstCommand::Cc,
                 target_i_ma,
-                enable,
+                None,
+                None,
+                hardware,
+                preset_id,
+                min_v_mv,
+                max_i_ma_total,
+                max_p_mw,
                 disable,
-            } => {
-                let enable = resolve_output_enable(enable, disable)?;
-                ensure_one_output_selector(url.as_ref(), hardware.as_ref())?;
-                let body = output_set_body(enable, target_i_ma);
-                if let Some(hardware_id) = hardware {
-                    match resolve_saved_hardware(&hardware_id, &devd)? {
-                        ResolvedHardware::Http { url, .. } => {
-                            client
-                                .post(api_url(&url, "/api/v1/cc")?)
-                                .json(&body)
-                                .send()
-                                .await?
-                                .error_for_status()?
-                                .json::<Value>()
-                                .await?
-                        }
-                        ResolvedHardware::Usb(resolved) => {
-                            request_devd_usb_value(
-                                &client,
-                                &resolved,
-                                reqwest::Method::POST,
-                                "/api/v1/cc",
-                                Some(body.clone()),
-                            )
-                            .await?
-                        }
-                    }
-                } else if let Some(url) = url {
-                    client
-                        .post(api_url(&url, "/api/v1/cc")?)
-                        .json(&body)
-                        .send()
-                        .await?
-                        .error_for_status()?
-                        .json::<Value>()
-                        .await?
-                } else {
-                    request_api_value(
-                        &client,
-                        &devd,
-                        ApiSelector {
-                            url: None,
-                            device: None,
-                            hardware: None,
-                        },
-                        reqwest::Method::POST,
-                        "/api/v1/cc",
-                        Some(body),
-                        false,
-                    )
-                    .await?
-                }
-            }
-        },
+            )
+            .await?
+        }
+        Command::Cv {
+            target_v_mv,
+            hardware,
+            preset_id,
+            min_v_mv,
+            max_i_ma_total,
+            max_p_mw,
+            disable,
+        } => {
+            handle_mode_first_command(
+                &client,
+                &devd,
+                ModeFirstCommand::Cv,
+                0,
+                Some(target_v_mv),
+                None,
+                hardware,
+                preset_id,
+                min_v_mv,
+                max_i_ma_total,
+                max_p_mw,
+                disable,
+            )
+            .await?
+        }
+        Command::Cp {
+            target_p_mw,
+            hardware,
+            preset_id,
+            min_v_mv,
+            max_i_ma_total,
+            max_p_mw,
+            disable,
+        } => {
+            handle_mode_first_command(
+                &client,
+                &devd,
+                ModeFirstCommand::Cp,
+                0,
+                None,
+                Some(target_p_mw),
+                hardware,
+                preset_id,
+                min_v_mv,
+                max_i_ma_total,
+                max_p_mw,
+                disable,
+            )
+            .await?
+        }
         Command::Pd { command } => match command {
             PdCommand::Set {
                 device,
@@ -1433,11 +1497,13 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
         } => usb_target_devd_endpoint(device.as_ref(), hardware.as_ref(), default_devd)
             .into_iter()
             .collect(),
-        Command::Output {
-            command: OutputCommand::Set { url, hardware, .. },
-        } => selector_devd_endpoint(url.as_ref(), None, hardware.as_ref(), default_devd)
-            .into_iter()
-            .collect(),
+        Command::Cc { hardware, .. }
+        | Command::Cv { hardware, .. }
+        | Command::Cp { hardware, .. } => {
+            selector_devd_endpoint(None, None, hardware.as_ref(), default_devd)
+                .into_iter()
+                .collect()
+        }
         Command::Wifi { command } => match command {
             WifiCommand::Show {
                 url,
@@ -1649,13 +1715,236 @@ fn usb_target_devd_endpoint(
     })
 }
 
-fn output_set_body(enable: bool, target_i_ma: Option<u32>) -> Value {
-    let mut body = serde_json::Map::new();
-    body.insert("enable".to_string(), json!(enable));
-    if let Some(target_i_ma) = target_i_ma {
-        body.insert("target_i_ma".to_string(), json!(target_i_ma));
+#[derive(Debug, Clone, Copy)]
+enum ModeFirstCommand {
+    Cc,
+    Cv,
+    Cp,
+}
+
+impl ModeFirstCommand {
+    fn mode(&self) -> &'static str {
+        match self {
+            Self::Cc => "cc",
+            Self::Cv => "cv",
+            Self::Cp => "cp",
+        }
     }
-    Value::Object(body)
+
+    fn label(&self) -> &'static str {
+        match self {
+            Self::Cc => "CC",
+            Self::Cv => "CV",
+            Self::Cp => "CP",
+        }
+    }
+}
+
+fn build_cli_preset(
+    control: &CliControlView,
+    presets: &[CliPreset],
+    preset_id: Option<u8>,
+) -> Result<CliPreset, Box<dyn std::error::Error + Send + Sync>> {
+    let selected_id = preset_id.unwrap_or(control.active_preset_id);
+    presets
+        .iter()
+        .find(|preset| preset.preset_id == selected_id)
+        .cloned()
+        .ok_or_else(|| format!("preset {selected_id} not found").into())
+}
+
+fn validate_mode_first_targets(
+    mode: ModeFirstCommand,
+    target_i_ma: u32,
+    target_v_mv: Option<u32>,
+    target_p_mw: Option<u32>,
+    max_i_ma_total: u32,
+    max_p_mw: u32,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match mode {
+        ModeFirstCommand::Cc => {
+            if target_i_ma > max_i_ma_total {
+                return Err(format!(
+                    "target_i_ma exceeds max_i_ma_total ({} > {})",
+                    target_i_ma, max_i_ma_total
+                )
+                .into());
+            }
+        }
+        ModeFirstCommand::Cv => {
+            target_v_mv.ok_or("target_v_mv is required for cv")?;
+        }
+        ModeFirstCommand::Cp => {
+            let target_p_mw = target_p_mw.ok_or("target_p_mw is required for cp")?;
+            if target_p_mw > max_p_mw {
+                return Err(format!(
+                    "target_p_mw exceeds max_p_mw ({} > {})",
+                    target_p_mw, max_p_mw
+                )
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn handle_mode_first_command(
+    client: &Client,
+    default_devd: &str,
+    mode: ModeFirstCommand,
+    target_i_ma: u32,
+    target_v_mv: Option<u32>,
+    target_p_mw: Option<u32>,
+    hardware: Option<String>,
+    preset_id: Option<u8>,
+    min_v_mv: Option<u32>,
+    max_i_ma_total: Option<u32>,
+    max_p_mw: Option<u32>,
+    disable: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let selector = ApiSelector {
+        url: None,
+        device: None,
+        hardware,
+    };
+
+    let control = serde_json::from_value::<CliControlView>(
+        request_api_value(
+            client,
+            default_devd,
+            selector.clone(),
+            reqwest::Method::GET,
+            "/api/v1/control",
+            None,
+            false,
+        )
+        .await?,
+    )?;
+    let presets = serde_json::from_value::<CliPresetsEnvelope>(
+        request_api_value(
+            client,
+            default_devd,
+            selector.clone(),
+            reqwest::Method::GET,
+            "/api/v1/presets",
+            None,
+            false,
+        )
+        .await?,
+    )?;
+    let mut preset = build_cli_preset(&control, &presets.presets, preset_id)?;
+
+    match mode {
+        ModeFirstCommand::Cc => {
+            let max_i_ma_total = max_i_ma_total.unwrap_or(preset.max_i_ma_total);
+            validate_mode_first_targets(
+                mode,
+                target_i_ma,
+                target_v_mv,
+                target_p_mw,
+                max_i_ma_total,
+                preset.max_p_mw,
+            )?;
+            preset.mode = mode.mode().to_string();
+            preset.target_i_ma = target_i_ma;
+            if let Some(min_v_mv) = min_v_mv {
+                preset.min_v_mv = min_v_mv;
+            }
+            preset.max_i_ma_total = max_i_ma_total;
+            if let Some(max_p_mw) = max_p_mw {
+                preset.max_p_mw = max_p_mw;
+            }
+        }
+        ModeFirstCommand::Cv => {
+            let target_v_mv = target_v_mv.ok_or("target_v_mv is required for cv")?;
+            validate_mode_first_targets(
+                mode,
+                target_i_ma,
+                Some(target_v_mv),
+                target_p_mw,
+                max_i_ma_total.unwrap_or(preset.max_i_ma_total),
+                max_p_mw.unwrap_or(preset.max_p_mw),
+            )?;
+            preset.mode = mode.mode().to_string();
+            preset.target_v_mv = target_v_mv;
+            if let Some(min_v_mv) = min_v_mv {
+                preset.min_v_mv = min_v_mv;
+            }
+            if let Some(max_i_ma_total) = max_i_ma_total {
+                preset.max_i_ma_total = max_i_ma_total;
+            }
+            if let Some(max_p_mw) = max_p_mw {
+                preset.max_p_mw = max_p_mw;
+            }
+        }
+        ModeFirstCommand::Cp => {
+            let target_p_mw = target_p_mw.ok_or("target_p_mw is required for cp")?;
+            let max_p_mw = max_p_mw.unwrap_or(preset.max_p_mw);
+            validate_mode_first_targets(
+                mode,
+                target_i_ma,
+                target_v_mv,
+                Some(target_p_mw),
+                max_i_ma_total.unwrap_or(preset.max_i_ma_total),
+                max_p_mw,
+            )?;
+            preset.mode = mode.mode().to_string();
+            preset.target_p_mw = target_p_mw;
+            if let Some(min_v_mv) = min_v_mv {
+                preset.min_v_mv = min_v_mv;
+            }
+            if let Some(max_i_ma_total) = max_i_ma_total {
+                preset.max_i_ma_total = max_i_ma_total;
+            }
+            preset.max_p_mw = max_p_mw;
+        }
+    }
+
+    request_api_value(
+        client,
+        default_devd,
+        selector.clone(),
+        reqwest::Method::POST,
+        "/api/v1/presets",
+        Some(serde_json::to_value(&preset)?),
+        false,
+    )
+    .await?;
+
+    let mut control = serde_json::from_value::<CliControlView>(
+        request_api_value(
+            client,
+            default_devd,
+            selector.clone(),
+            reqwest::Method::POST,
+            "/api/v1/presets/apply",
+            Some(json!({"preset_id": preset.preset_id})),
+            false,
+        )
+        .await?,
+    )?;
+
+    if !disable {
+        control = serde_json::from_value::<CliControlView>(
+            request_api_value(
+                client,
+                default_devd,
+                selector,
+                reqwest::Method::POST,
+                "/api/v1/control",
+                Some(json!({"output_enabled": true})),
+                false,
+            )
+            .await?,
+        )?;
+    }
+
+    Ok(serde_json::json!({
+        "mode": mode.label(),
+        "preset_id": control.active_preset_id,
+        "output_enabled": control.output_enabled,
+        "preset": control.preset,
+    }))
 }
 
 fn resolve_flash_confirmation_text(
@@ -3654,16 +3943,6 @@ fn ensure_one_status_selector(
     }
 }
 
-fn ensure_one_output_selector(
-    url: Option<&String>,
-    hardware: Option<&String>,
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    match (url.is_some(), hardware.is_some()) {
-        (true, true) => Err("output set accepts only one of --hardware or --url".into()),
-        _ => Ok(()),
-    }
-}
-
 fn mark_default_transport_used(
     transport: SavedTransport,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -5024,42 +5303,58 @@ mod tests {
 
         let cli = Cli::try_parse_from([
             "loadlynx",
-            "output",
-            "set",
+            "cc",
+            "2000",
             "--hardware",
             "usb-digital-1",
+            "--preset-id",
+            "2",
             "--disable",
         ])
         .unwrap();
         match cli.command {
-            Command::Output {
-                command:
-                    OutputCommand::Set {
-                        hardware,
-                        enable,
-                        disable,
-                        ..
-                    },
+            Command::Cc {
+                target_i_ma,
+                hardware,
+                preset_id,
+                disable,
+                ..
             } => {
+                assert_eq!(target_i_ma, 2000);
                 assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
-                assert!(!enable);
+                assert_eq!(preset_id, Some(2));
                 assert!(disable);
             }
-            _ => panic!("expected output set command"),
+            _ => panic!("expected cc command"),
         }
 
-        assert!(
-            Cli::try_parse_from([
-                "loadlynx",
-                "output",
-                "set",
-                "--hardware",
-                "usb-digital-1",
-                "--target-i-ma=-1",
-                "--enable",
-            ])
-            .is_err()
-        );
+        let cli = Cli::try_parse_from(["loadlynx", "cv", "24500", "--hardware", "usb-digital-1"])
+            .unwrap();
+        match cli.command {
+            Command::Cv {
+                target_v_mv,
+                hardware,
+                ..
+            } => {
+                assert_eq!(target_v_mv, 24_500);
+                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+            }
+            _ => panic!("expected cv command"),
+        }
+
+        let cli = Cli::try_parse_from(["loadlynx", "cp", "60000", "--hardware", "usb-digital-1"])
+            .unwrap();
+        match cli.command {
+            Command::Cp {
+                target_p_mw,
+                hardware,
+                ..
+            } => {
+                assert_eq!(target_p_mw, 60_000);
+                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+            }
+            _ => panic!("expected cp command"),
+        }
 
         let cli = Cli::try_parse_from([
             "loadlynx",
@@ -5089,7 +5384,7 @@ mod tests {
     }
 
     #[test]
-    fn output_set_requires_exactly_one_enable_state() {
+    fn mode_first_commands_parse_and_validate_targets() {
         assert_eq!(resolve_output_enable(true, false).unwrap(), true);
         assert_eq!(resolve_output_enable(false, true).unwrap(), false);
         assert!(resolve_output_enable(true, true).is_err());
@@ -5413,11 +5708,9 @@ mod tests {
         .unwrap_err();
         assert!(usb_err.to_string().contains("bind the hardware first"));
 
-        let output_err = ensure_one_output_selector(
-            Some(&"http://loadlynx.local".to_string()),
-            Some(&"bench".to_string()),
-        )
-        .unwrap_err();
-        assert!(output_err.to_string().contains("only one"));
+        let mode_err =
+            validate_mode_first_targets(ModeFirstCommand::Cp, 0, None, Some(1_000), 10_000, 500)
+                .unwrap_err();
+        assert!(mode_err.to_string().contains("target_p_mw"));
     }
 }
