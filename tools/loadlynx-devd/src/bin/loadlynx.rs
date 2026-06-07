@@ -1788,6 +1788,33 @@ fn validate_mode_first_targets(
     Ok(())
 }
 
+fn legacy_cc_output_enabled(response: &Value) -> Option<bool> {
+    response
+        .get("output_enabled")
+        .and_then(Value::as_bool)
+        .or_else(|| response.get("enable").and_then(Value::as_bool))
+        .or_else(|| {
+            response
+                .pointer("/response/output_enabled")
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| {
+            response
+                .pointer("/response/enable")
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| {
+            response
+                .pointer("/response/data/output_enabled")
+                .and_then(Value::as_bool)
+        })
+        .or_else(|| {
+            response
+                .pointer("/response/data/enable")
+                .and_then(Value::as_bool)
+        })
+}
+
 async fn handle_mode_first_command(
     client: &Client,
     default_devd: &str,
@@ -1881,24 +1908,23 @@ async fn handle_mode_first_command_for_selector(
         body.insert("enable".to_string(), Value::Bool(true));
         body.insert("target_i_ma".to_string(), json!(target_i_ma));
 
-        let control = serde_json::from_value::<CliControlView>(
-            request_api_value(
-                client,
-                default_devd,
-                selector,
-                reqwest::Method::POST,
-                "/api/v1/cc",
-                Some(Value::Object(body)),
-                false,
-            )
-            .await?,
-        )?;
+        let cc = request_api_value(
+            client,
+            default_devd,
+            selector,
+            reqwest::Method::POST,
+            "/api/v1/cc",
+            Some(Value::Object(body)),
+            false,
+        )
+        .await?;
+        let output_enabled = legacy_cc_output_enabled(&cc).unwrap_or(true);
 
         return Ok(serde_json::json!({
             "mode": mode.label(),
-            "preset_id": control.active_preset_id,
-            "output_enabled": control.output_enabled,
-            "preset": control.preset,
+            "target_i_ma": target_i_ma,
+            "output_enabled": output_enabled,
+            "cc": cc,
         }));
     }
 
@@ -2142,6 +2168,27 @@ fn render_human_payload(payload: &Value) -> Result<String, serde_json::Error> {
                 .and_then(Value::as_u64)
                 .unwrap_or_default(),
             bool_field(payload, "uv_latched").unwrap_or(false)
+        ));
+    }
+
+    if let Some(mode) = str_field(payload, "mode")
+        && payload.get("output_enabled").is_some()
+    {
+        let target = payload
+            .get("target_i_ma")
+            .and_then(Value::as_u64)
+            .map(|target| format!(" target_i_ma={target}"))
+            .unwrap_or_default();
+        let preset = payload
+            .get("preset_id")
+            .and_then(Value::as_u64)
+            .map(|preset| format!(" preset={preset}"))
+            .unwrap_or_default();
+        return Ok(format!(
+            "{mode}: output={}{}{}",
+            bool_field(payload, "output_enabled").unwrap_or(false),
+            target,
+            preset
         ));
     }
 
@@ -4432,7 +4479,17 @@ mod tests {
                 .lock()
                 .expect("cc payloads lock")
                 .push(payload);
-            axum::Json(mode_first_control_payload(true))
+            axum::Json(json!({
+                "ok": true,
+                "request_id": "request-1",
+                "response": {
+                    "request_id": "request-1",
+                    "data": {
+                        "enable": true,
+                        "target_i_ma": 2000
+                    }
+                }
+            }))
         }
 
         async fn post_control(
@@ -5599,6 +5656,16 @@ mod tests {
         assert_eq!(value.get("mode").and_then(Value::as_str), Some("CC"));
         assert_eq!(
             value.get("output_enabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            value.get("target_i_ma").and_then(Value::as_u64),
+            Some(2_000)
+        );
+        assert_eq!(
+            value
+                .pointer("/cc/response/data/enable")
+                .and_then(Value::as_bool),
             Some(true)
         );
         assert_eq!(state.identity_gets.load(Ordering::SeqCst), 1);
