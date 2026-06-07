@@ -23,6 +23,13 @@ export const Default: Story = {
 
     await canvas.findByText(/MODE & OUTPUT/i);
     await canvas.findByText(/PRESETS/i);
+    await canvas.findByRole("button", { name: "CC" });
+    await canvas.findByRole("button", { name: "CV" });
+    await canvas.findByRole("button", { name: "CP" });
+    const crBtn = await canvas.findByRole("button", { name: "CR" });
+    if (!(crBtn as HTMLButtonElement).disabled) {
+      throw new Error("Expected CR button to be visible but read-only");
+    }
 
     await waitFor(
       () => {

@@ -2,7 +2,7 @@ import { FixedNumber } from "./fixed-number.tsx";
 import { Sparkline } from "./sparkline.tsx";
 
 export type MainDisplayPanelProps = {
-  headline: { value: number | null; unit: "V" | "A" | "W" };
+  headline: { value: number | null; unit: "V" | "A" | "W" | "Ω" };
   modeLabel: "CC" | "CV" | "CP" | "CR";
   setpointLabel: string;
   uptimeLabel: string;
@@ -18,7 +18,7 @@ export function MainDisplayPanel({
   trend,
   stale = false,
 }: MainDisplayPanelProps) {
-  const digits = headline.unit === "W" ? 2 : 3;
+  const digits = headline.unit === "W" || headline.unit === "Ω" ? 2 : 3;
 
   return (
     <section aria-label="Main display" className="instrument-card p-5">

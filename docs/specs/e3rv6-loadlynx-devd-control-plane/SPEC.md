@@ -184,8 +184,10 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx reset digital|analog --hardware <hardware-id>`
 - `loadlynx monitor digital|analog --hardware <hardware-id> --tail 200`
 - `loadlynx pd set --hardware <hardware-id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
-- `loadlynx output set --hardware <id> --enable --target-i-ma <ma>`
-- `loadlynx output set --hardware <id> --disable`
+- `loadlynx cc <target_i_ma> --hardware <id>`
+- `loadlynx cv <target_v_mv> --hardware <id>`
+- `loadlynx cp <target_p_mw> --hardware <id>`
+- `loadlynx cc|cv|cp <target> --hardware <id> --disable`
 - `loadlynx wifi show|set|clear --hardware <id>`
 - `loadlynx control get --hardware <id>`
 - `loadlynx control set --hardware <id> --enable|--disable`

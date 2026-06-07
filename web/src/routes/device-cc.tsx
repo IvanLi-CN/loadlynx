@@ -58,6 +58,8 @@ import {
 } from "../fonts/smallFont.ts";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
 
+type EditableLoadMode = Exclude<LoadMode, "cr">;
+
 const FAST_STATUS_REFETCH_MS = 400;
 const PD_REFETCH_MS = 1500;
 const RETRY_DELAY_MS = 500;
@@ -398,7 +400,9 @@ export function DeviceCcRoute() {
       ? "CV"
       : control?.preset.mode === "cp"
         ? "CP"
-        : "CC";
+        : control?.preset.mode === "cr"
+          ? "CR"
+          : "CC";
 
   const statusLocalMa = status?.raw.i_local_ma ?? null;
   const statusRemoteMa = status?.raw.i_remote_ma ?? null;
@@ -434,14 +438,6 @@ export function DeviceCcRoute() {
     status?.raw.mcu_temp_mc != null ? status.raw.mcu_temp_mc / 1_000 : null;
 
   const controlMode: LoadMode = control?.preset.mode ?? "cc";
-  const controlTargetMilli =
-    controlMode === "cv"
-      ? (control?.preset.target_v_mv ?? 0)
-      : controlMode === "cp"
-        ? (control?.preset.target_p_mw ?? 0)
-        : (control?.preset.target_i_ma ?? 0);
-  const controlTargetUnit =
-    controlMode === "cv" ? "V" : controlMode === "cp" ? "W" : "A";
   const remoteActive = status?.link_up === true;
   const analogState = status?.analog_state ?? "offline";
   const faultFlags = status?.raw.fault_flags ?? 0;
@@ -451,13 +447,33 @@ export function DeviceCcRoute() {
       ? localVoltageV / totalCurrentA
       : null;
 
+  const controlTargetMilli =
+    controlMode === "cv"
+      ? (control?.preset.target_v_mv ?? 0)
+      : controlMode === "cp"
+        ? (control?.preset.target_p_mw ?? 0)
+        : controlMode === "cr"
+          ? resistanceOhms == null
+            ? -1
+            : Math.round(resistanceOhms * 1_000)
+          : (control?.preset.target_i_ma ?? 0);
+  const controlTargetUnit =
+    controlMode === "cv"
+      ? "V"
+      : controlMode === "cp"
+        ? "W"
+        : controlMode === "cr"
+          ? "Ω"
+          : "A";
+
   const lastTrendUptimeMsRef = useRef<number | null>(null);
   const [trend, setTrend] = useState<{
     v: number[];
     i: number[];
     p: number[];
+    r: number[];
     t: number[];
-  }>({ v: [], i: [], p: [], t: [] });
+  }>({ v: [], i: [], p: [], r: [], t: [] });
 
   useEffect(() => {
     const uptimeMs = status?.raw.uptime_ms ?? null;
@@ -473,10 +489,12 @@ export function DeviceCcRoute() {
       v: pushTrendPoint(prev.v, localVoltageV),
       i: pushTrendPoint(prev.i, totalCurrentA),
       p: pushTrendPoint(prev.p, totalPowerW),
+      r: pushTrendPoint(prev.r, resistanceOhms),
       t: pushTrendPoint(prev.t, tempCoreC),
     }));
   }, [
     localVoltageV,
+    resistanceOhms,
     status?.raw.uptime_ms,
     totalCurrentA,
     totalPowerW,
@@ -510,7 +528,10 @@ export function DeviceCcRoute() {
     draftPresetMode === "cp" && draftPresetTargetPMw > draftPresetMaxPMw;
 
   const savePresetDisabled =
-    !baseUrl || updatePresetMutation.isPending || cpDraftOutOfRange;
+    !baseUrl ||
+    updatePresetMutation.isPending ||
+    cpDraftOutOfRange ||
+    draftPresetMode === "cr";
 
   const explainHttpError = (error: HttpApiError): string | null => {
     switch (error.code) {
@@ -564,6 +585,11 @@ export function DeviceCcRoute() {
     if (controlMode === "cp") {
       return `${(control.preset.target_p_mw / 1000).toFixed(2)} W`;
     }
+    if (controlMode === "cr") {
+      return resistanceOhms == null
+        ? "CR read-only"
+        : `${resistanceOhms.toFixed(2)} Ω`;
+    }
     return `${(control.preset.target_i_ma / 1000).toFixed(3)} A`;
   })();
 
@@ -574,11 +600,20 @@ export function DeviceCcRoute() {
     if (controlMode === "cp") {
       return { value: totalPowerW, unit: "W" as const };
     }
+    if (controlMode === "cr") {
+      return { value: resistanceOhms, unit: "Ω" as const };
+    }
     return { value: totalCurrentA, unit: "A" as const };
   })();
 
   const activeTrendPoints =
-    controlMode === "cv" ? trend.v : controlMode === "cp" ? trend.p : trend.i;
+    controlMode === "cv"
+      ? trend.v
+      : controlMode === "cp"
+        ? trend.p
+        : controlMode === "cr"
+          ? trend.r
+          : trend.i;
   const trendMin =
     activeTrendPoints.length > 0 ? Math.min(...activeTrendPoints) : 0;
   const trendMax =
@@ -658,13 +693,19 @@ export function DeviceCcRoute() {
     } as const;
   })();
 
-  const availableModes: Array<"CC" | "CV" | "CP" | "CR"> = ["CC", "CV"];
+  const availableModes: Array<"CC" | "CV" | "CP"> = ["CC", "CV"];
   if (cpSupported) {
     availableModes.push("CP");
   }
 
   const draftModeLabel: "CC" | "CV" | "CP" | "CR" =
-    draftPresetMode === "cc" ? "CC" : draftPresetMode === "cv" ? "CV" : "CP";
+    draftPresetMode === "cc"
+      ? "CC"
+      : draftPresetMode === "cv"
+        ? "CV"
+        : draftPresetMode === "cr"
+          ? "CR"
+          : "CP";
 
   const presetsButtons = Array.from({ length: 8 }, (_, idx) => {
     const id = idx + 1;
@@ -848,12 +889,9 @@ export function DeviceCcRoute() {
                   <ControlModePanel
                     availableModes={availableModes}
                     activeMode={draftModeLabel}
-                    onModeChange={(mode) => {
-                      if (mode === "CR") {
-                        return;
-                      }
-                      setDraftPresetMode(mode.toLowerCase() as LoadMode);
-                    }}
+                    onModeChange={(mode) =>
+                      setDraftPresetMode(mode.toLowerCase() as LoadMode)
+                    }
                     outputEnabled={control?.output_enabled ?? false}
                     outputToggleDisabled={outputToggleDisabled}
                     onOutputToggle={(nextEnabled) => {
@@ -940,7 +978,7 @@ export function DeviceCcRoute() {
                               value={draftPresetMode}
                               onChange={(event) =>
                                 setDraftPresetMode(
-                                  event.target.value as LoadMode,
+                                  event.target.value as EditableLoadMode,
                                 )
                               }
                             >
@@ -948,6 +986,11 @@ export function DeviceCcRoute() {
                               <option value="cv">cv</option>
                               {cpSupported ? (
                                 <option value="cp">cp</option>
+                              ) : null}
+                              {draftPresetMode === "cr" ? (
+                                <option value="cr" disabled hidden>
+                                  cr
+                                </option>
                               ) : null}
                             </select>
                             {identityQuery.isSuccess && !cpSupported ? (
@@ -1004,7 +1047,7 @@ export function DeviceCcRoute() {
                                 }
                               />
                             </div>
-                          ) : (
+                          ) : draftPresetMode === "cp" ? (
                             <div>
                               <label
                                 htmlFor="preset-target-p"
@@ -1036,6 +1079,11 @@ export function DeviceCcRoute() {
                                   target_p_mw must be ≤ max_p_mw
                                 </div>
                               ) : null}
+                            </div>
+                          ) : (
+                            <div className="rounded-lg border border-slate-400/10 bg-black/20 px-3 py-2 text-[12px] text-slate-200/65">
+                              CR is a legacy preset mode and is read-only in
+                              this editor.
                             </div>
                           )}
 
@@ -1230,7 +1278,7 @@ export interface MainDisplayCanvasProps {
   totalPowerW: number;
   controlMode: LoadMode;
   controlTargetMilli: number;
-  controlTargetUnit: "A" | "V" | "W";
+  controlTargetUnit: "A" | "V" | "W" | "Ω";
   uptimeSeconds: number;
   tempCoreC: number | undefined;
   tempSinkC: number | undefined;
@@ -1539,7 +1587,13 @@ export function MainDisplayCanvas({
     const formatPairValue = (value: number, unit: "V" | "A") =>
       `${formatFixed2dp(value)}${unit}`;
 
-    const formatSetpointMilli = (valueMilli: number, unit: "V" | "A" | "W") => {
+    const formatSetpointMilli = (
+      valueMilli: number,
+      unit: "V" | "A" | "W" | "Ω",
+    ) => {
+      if (!Number.isFinite(valueMilli) || valueMilli < 0) {
+        return `--.--${unit}`;
+      }
       let v = Math.max(0, Math.trunc(valueMilli));
       v = Math.floor((v + 5) / 10) * 10;
       const centi = Math.floor(v / 10);
@@ -1644,6 +1698,8 @@ export function MainDisplayCanvas({
 
     if (controlMode === "cp") {
       drawSmallText("CP", 204, 18, COLOR_POWER);
+    } else if (controlMode === "cr") {
+      drawSmallText("CR", 204, 18, COLOR_RIGHT_VALUE);
     } else {
       const ccColor = controlMode === "cc" ? COLOR_CURRENT : COLOR_RIGHT_LABEL;
       const cvColor = controlMode === "cv" ? COLOR_VOLTAGE : COLOR_RIGHT_LABEL;
