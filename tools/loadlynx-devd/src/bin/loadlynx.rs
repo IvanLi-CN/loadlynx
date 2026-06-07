@@ -1878,6 +1878,45 @@ async fn handle_mode_first_command_for_selector(
     max_p_mw: Option<u32>,
     disable: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let identity = request_api_value(
+        client,
+        default_devd,
+        selector.clone(),
+        reqwest::Method::GET,
+        "/api/v1/identity",
+        None,
+        false,
+    )
+    .await?;
+    let presets_supported = identity
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("presets_supported"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if disable && !presets_supported {
+        let mut body = serde_json::Map::new();
+        body.insert("enable".to_string(), Value::Bool(false));
+
+        let cc = request_api_value(
+            client,
+            default_devd,
+            selector,
+            reqwest::Method::POST,
+            "/api/v1/cc",
+            Some(Value::Object(body)),
+            false,
+        )
+        .await?;
+        let output_enabled = legacy_cc_output_enabled(&cc).unwrap_or(false);
+
+        return Ok(serde_json::json!({
+            "mode": mode.label(),
+            "output_enabled": output_enabled,
+            "cc": cc,
+        }));
+    }
+
     if disable {
         let control = serde_json::from_value::<CliControlView>(
             request_api_value(
@@ -1899,22 +1938,6 @@ async fn handle_mode_first_command_for_selector(
             "preset": control.preset,
         }));
     }
-
-    let identity = request_api_value(
-        client,
-        default_devd,
-        selector.clone(),
-        reqwest::Method::GET,
-        "/api/v1/identity",
-        None,
-        false,
-    )
-    .await?;
-    let presets_supported = identity
-        .get("capabilities")
-        .and_then(|capabilities| capabilities.get("presets_supported"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
 
     if matches!(mode, ModeFirstCommand::Cc) && !presets_supported {
         let mut body = serde_json::Map::new();
@@ -4486,6 +4509,10 @@ mod tests {
             State(state): State<ModeFirstHttpState>,
             axum::Json(payload): axum::Json<Value>,
         ) -> axum::Json<Value> {
+            let enable = payload
+                .get("enable")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
             state.cc_posts.fetch_add(1, Ordering::SeqCst);
             state
                 .cc_payloads
@@ -4498,7 +4525,7 @@ mod tests {
                 "response": {
                     "request_id": "request-1",
                     "data": {
-                        "enable": true,
+                        "enable": enable,
                         "target_i_ma": 2000
                     }
                 }
@@ -5661,7 +5688,7 @@ mod tests {
             &Client::new(),
             "http://127.0.0.1:0",
             ApiSelector {
-                url: Some(url),
+                url: Some(url.clone()),
                 device: None,
                 hardware: None,
             },
@@ -5695,10 +5722,47 @@ mod tests {
         );
         assert_eq!(state.identity_gets.load(Ordering::SeqCst), 1);
         assert_eq!(state.cc_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.control_posts.load(Ordering::SeqCst), 0);
+        assert_eq!(state.presets_gets.load(Ordering::SeqCst), 0);
+
+        let disable_value = handle_mode_first_command_for_selector(
+            &Client::new(),
+            "http://127.0.0.1:0",
+            ApiSelector {
+                url: Some(url),
+                device: None,
+                hardware: None,
+            },
+            ModeFirstCommand::Cc,
+            2_000,
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            true,
+        )
+        .await
+        .expect("legacy cc disable should use compatibility endpoint");
+
+        assert_eq!(
+            disable_value.get("output_enabled").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            disable_value
+                .pointer("/cc/response/data/enable")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(state.identity_gets.load(Ordering::SeqCst), 2);
+        assert_eq!(state.cc_posts.load(Ordering::SeqCst), 2);
+        assert_eq!(state.control_posts.load(Ordering::SeqCst), 0);
         assert_eq!(state.presets_gets.load(Ordering::SeqCst), 0);
 
         let payloads = state.cc_payloads.lock().expect("cc payloads lock");
-        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads.len(), 2);
         assert_eq!(
             payloads[0].get("target_i_ma").and_then(Value::as_u64),
             Some(2_000)
@@ -5707,6 +5771,11 @@ mod tests {
             payloads[0].get("enable").and_then(Value::as_bool),
             Some(true)
         );
+        assert_eq!(
+            payloads[1].get("enable").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert!(payloads[1].get("target_i_ma").is_none());
     }
 
     #[test]
