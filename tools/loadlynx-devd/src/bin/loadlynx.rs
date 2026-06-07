@@ -91,6 +91,8 @@ enum Command {
     Cc {
         target_i_ma: u32,
         #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
         hardware: Option<String>,
         #[arg(long)]
         preset_id: Option<u8>,
@@ -106,6 +108,8 @@ enum Command {
     Cv {
         target_v_mv: u32,
         #[arg(long)]
+        url: Option<String>,
+        #[arg(long)]
         hardware: Option<String>,
         #[arg(long)]
         preset_id: Option<u8>,
@@ -120,6 +124,8 @@ enum Command {
     },
     Cp {
         target_p_mw: u32,
+        #[arg(long)]
+        url: Option<String>,
         #[arg(long)]
         hardware: Option<String>,
         #[arg(long)]
@@ -913,6 +919,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Command::Cc {
             target_i_ma,
+            url,
             hardware,
             preset_id,
             min_v_mv,
@@ -927,6 +934,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 target_i_ma,
                 None,
                 None,
+                url,
                 hardware,
                 preset_id,
                 min_v_mv,
@@ -938,6 +946,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Command::Cv {
             target_v_mv,
+            url,
             hardware,
             preset_id,
             min_v_mv,
@@ -952,6 +961,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 0,
                 Some(target_v_mv),
                 None,
+                url,
                 hardware,
                 preset_id,
                 min_v_mv,
@@ -963,6 +973,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         }
         Command::Cp {
             target_p_mw,
+            url,
             hardware,
             preset_id,
             min_v_mv,
@@ -977,6 +988,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 0,
                 None,
                 Some(target_p_mw),
+                url,
                 hardware,
                 preset_id,
                 min_v_mv,
@@ -1497,10 +1509,10 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
         } => usb_target_devd_endpoint(device.as_ref(), hardware.as_ref(), default_devd)
             .into_iter()
             .collect(),
-        Command::Cc { hardware, .. }
-        | Command::Cv { hardware, .. }
-        | Command::Cp { hardware, .. } => {
-            selector_devd_endpoint(None, None, hardware.as_ref(), default_devd)
+        Command::Cc { url, hardware, .. }
+        | Command::Cv { url, hardware, .. }
+        | Command::Cp { url, hardware, .. } => {
+            selector_devd_endpoint(url.as_ref(), None, hardware.as_ref(), default_devd)
                 .into_iter()
                 .collect()
         }
@@ -1822,6 +1834,7 @@ async fn handle_mode_first_command(
     target_i_ma: u32,
     target_v_mv: Option<u32>,
     target_p_mw: Option<u32>,
+    url: Option<String>,
     hardware: Option<String>,
     preset_id: Option<u8>,
     min_v_mv: Option<u32>,
@@ -1830,7 +1843,7 @@ async fn handle_mode_first_command(
     disable: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let selector = ApiSelector {
-        url: None,
+        url,
         device: None,
         hardware,
     };
@@ -5560,6 +5573,18 @@ mod tests {
                 assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
                 assert_eq!(preset_id, Some(2));
                 assert!(disable);
+            }
+            _ => panic!("expected cc command"),
+        }
+
+        let cli = Cli::try_parse_from(["loadlynx", "cc", "2000", "--url", "http://127.0.0.1:9100"])
+            .unwrap();
+        match cli.command {
+            Command::Cc {
+                target_i_ma, url, ..
+            } => {
+                assert_eq!(target_i_ma, 2000);
+                assert_eq!(url.as_deref(), Some("http://127.0.0.1:9100"));
             }
             _ => panic!("expected cc command"),
         }
