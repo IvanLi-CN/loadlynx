@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 
-import { MainDisplayCanvas } from "../../routes/device-cc.tsx";
+import { MainDisplayCanvas } from "../../routes/device-cc/main-display-canvas.tsx";
 
 const meta: Meta<typeof MainDisplayCanvas> = {
   title: "Main Display/Canvas",

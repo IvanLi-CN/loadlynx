@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
+import { waitFor } from "storybook/test";
 import type { StoredDevice } from "../../devices/device-store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
@@ -106,10 +105,12 @@ const DEVICE_CAL_OUTPUT_APPLIED: StoredDevice[] = [
 ];
 
 export const Default: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByRole("heading", { name: "Calibration" });
+  play: async ({ canvas, userEvent }) => {
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5_000 },
+    );
 
     const currentCh1Tab = canvas.getByRole("tab", { name: "电流通道1" });
     await userEvent.click(currentCh1Tab);
@@ -123,10 +124,12 @@ export const Default: Story = {
 
 export const OutputControlApplied: Story = {
   render: () => <CalibrationRouteStory devices={DEVICE_CAL_OUTPUT_APPLIED} />,
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByRole("heading", { name: "Calibration" });
+  play: async ({ canvas, canvasElement, userEvent }) => {
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5_000 },
+    );
     await userEvent.click(canvas.getByRole("tab", { name: "电流通道1" }));
     await canvas.findByText("Output control (CC)");
 
@@ -156,10 +159,12 @@ export const RestoresStoredCurrentTab: Story = {
       beforeMount={() => seedCurrentCh2Draft("mock-001", "mock://demo-1")}
     />
   ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByRole("heading", { name: "Calibration" });
+  play: async ({ canvas, canvasElement }) => {
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5_000 },
+    );
 
     const currentCh2Tab = canvas.getByRole("tab", { name: "电流通道2" });
     if (!(currentCh2Tab as HTMLElement).classList.contains("ll-tab-active")) {

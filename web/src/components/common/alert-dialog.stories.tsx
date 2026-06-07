@@ -1,7 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { waitFor } from "storybook/test";
 import { AlertDialog, type AlertDialogProps } from "./alert-dialog.tsx";
 
 let closeCalls = 0;
@@ -50,9 +49,8 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const CloseCloses: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, userEvent }) => {
     closeCalls = 0;
-    const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     canvas.getByRole("dialog");
@@ -72,9 +70,8 @@ export const CloseCloses: Story = {
 };
 
 export const BackdropCloses: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, canvasElement, userEvent }) => {
     closeCalls = 0;
-    const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     canvas.getByRole("dialog");

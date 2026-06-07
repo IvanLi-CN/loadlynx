@@ -17,6 +17,7 @@ and settings.
 - Storybook for component/route evidence
 - Bun (>= 1.0) as runtime and package manager
 - Biome for linting/formatting
+- Vitest for unit tests and Storybook story tests
 - Playwright for end-to-end tests
 - Lefthook for local Git hooks
 - esptool-js for browser Web Serial ESP32-S3 flashing
@@ -82,13 +83,25 @@ Core scripts:
 
 - `bun run dev` – start the Vite development server.
 - `bun run build` – type-check and build for production.
+- `bun run check:bundle:app` – verify built app JS chunks stay within the app bundle budget.
+- `bun run check:bundle:storybook` – verify Storybook preview chunks stay within budget and separately cap the framework mocker runtime.
 - `bun run preview` – preview the built app.
 - `bun run lint` – run `biome lint .`.
 - `bun run format` – run `biome format --write .`.
 - `bun run check` – run `biome check .`.
+- `bun run test:unit` – run Vitest unit tests.
 - `bun run test:e2e` – run Playwright E2E tests.
 - `bun run storybook` – start the Storybook dev server.
-- `bun run test:storybook:ci` – build Storybook and run Storybook tests against a static site server.
+- `bun run test:storybook` – run Storybook tests through the official Vitest addon.
+- `bun run test:storybook:ci` – build Storybook, enforce Storybook bundle budgets, then run Storybook tests through the official Vitest addon.
+
+## Bundle budgets
+
+- App build budget: every emitted `dist/assets/*.js` chunk must stay at or below `250 kB`.
+- Storybook preview budget: every emitted `storybook-static/assets/*.js` chunk must stay at or below `250 kB`.
+- Storybook framework runtime budget: `storybook-static/vite-inject-mocker-entry.js` is tracked separately with a `1200 kB` cap because it is injected by Storybook's Vitest mocker runtime rather than by LoadLynx application code.
+- `bun run test:storybook:ci` enforces the Storybook budget automatically after `build-storybook`.
+- Vite's generic chunk-size warning is not the source of truth for Storybook in this repository; the bundle budget scripts above are.
 
 ## Ports
 

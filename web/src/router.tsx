@@ -4,18 +4,12 @@ import {
   createRootRouteWithContext,
   createRoute,
   createRouter,
+  lazyRouteComponent,
   type RouterHistory,
 } from "@tanstack/react-router";
 import { ConsoleLayout } from "./layouts/console-layout.tsx";
 import { DeviceLayout } from "./layouts/device-layout.tsx";
 import { RootLayout } from "./layouts/root-layout.tsx";
-import { DeviceCalibrationRoute } from "./routes/device-calibration.tsx";
-import { DeviceCcRoute } from "./routes/device-cc.tsx";
-import { DeviceFirmwareRoute } from "./routes/device-firmware.tsx";
-import { DevicePdRoute } from "./routes/device-pd.tsx";
-import { DeviceSettingsRoute } from "./routes/device-settings.tsx";
-import { DeviceStatusRoute } from "./routes/device-status.tsx";
-import { DevicesRoute } from "./routes/devices.tsx";
 
 export interface RouterContext {
   queryClient: QueryClient;
@@ -35,13 +29,19 @@ const consoleRoute = createRoute({
 const indexRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "/",
-  component: DevicesRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/devices.tsx"),
+    "DevicesRoute",
+  ),
 });
 
 const devicesRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "devices",
-  component: DevicesRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/devices.tsx"),
+    "DevicesRoute",
+  ),
 });
 
 const deviceRoute = createRoute({
@@ -53,37 +53,55 @@ const deviceRoute = createRoute({
 const deviceCcRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "cc",
-  component: DeviceCcRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/device-cc.tsx"),
+    "DeviceCcRoute",
+  ),
 });
 
 const deviceStatusRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "status",
-  component: DeviceStatusRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/device-status.tsx"),
+    "DeviceStatusRoute",
+  ),
 });
 
 const devicePdRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "pd",
-  component: DevicePdRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/device-pd.tsx"),
+    "DevicePdRoute",
+  ),
 });
 
 const deviceSettingsRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "settings",
-  component: DeviceSettingsRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/device-settings.tsx"),
+    "DeviceSettingsRoute",
+  ),
 });
 
 const deviceCalibrationRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "calibration",
-  component: DeviceCalibrationRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/device-calibration.tsx"),
+    "DeviceCalibrationRoute",
+  ),
 });
 
 const deviceFirmwareRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "firmware",
-  component: DeviceFirmwareRoute,
+  component: lazyRouteComponent(
+    () => import("./routes/device-firmware.tsx"),
+    "DeviceFirmwareRoute",
+  ),
 });
 
 const deviceRouteTree = deviceRoute.addChildren([

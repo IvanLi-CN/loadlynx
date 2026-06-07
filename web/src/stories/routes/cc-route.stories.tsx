@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
+import { waitFor, within } from "storybook/test";
 import type { StoredDevice } from "../../devices/device-store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
@@ -18,15 +17,17 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByText(/MODE & OUTPUT/i);
-    await canvas.findByText(/PRESETS/i);
-    await canvas.findByRole("button", { name: "CC" });
-    await canvas.findByRole("button", { name: "CV" });
-    await canvas.findByRole("button", { name: "CP" });
-    const crBtn = await canvas.findByRole("button", { name: "CR" });
+  play: async ({ canvas, userEvent }) => {
+    await canvas.findByText(/MODE & OUTPUT/i, undefined, { timeout: 5_000 });
+    await canvas.findByText(/PRESETS/i, undefined, { timeout: 5_000 });
+    await canvas.findByRole("button", { name: "CC" }, { timeout: 5_000 });
+    await canvas.findByRole("button", { name: "CV" }, { timeout: 5_000 });
+    await canvas.findByRole("button", { name: "CP" }, { timeout: 5_000 });
+    const crBtn = await canvas.findByRole(
+      "button",
+      { name: "CR" },
+      { timeout: 5_000 },
+    );
     if (!(crBtn as HTMLButtonElement).disabled) {
       throw new Error("Expected CR button to be visible but read-only");
     }
@@ -102,10 +103,13 @@ export const CpUnsupported: Story = {
       devices={DEVICE_CP_UNSUPPORTED}
     />
   ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await canvas.findByText(/MODE & OUTPUT/i);
-    const cpBtn = await canvas.findByRole("button", { name: "CP" });
+  play: async ({ canvas }) => {
+    await canvas.findByText(/MODE & OUTPUT/i, undefined, { timeout: 5_000 });
+    const cpBtn = await canvas.findByRole(
+      "button",
+      { name: "CP" },
+      { timeout: 5_000 },
+    );
     if (!(cpBtn as HTMLButtonElement).disabled) {
       throw new Error(
         "Expected CP button to be disabled when cp_supported=false",
@@ -118,8 +122,7 @@ export const LinkDown: Story = {
   render: () => (
     <RouteStoryHarness initialPath="/mock-001/cc" devices={DEVICE_LINK_DOWN} />
   ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
+  play: async ({ canvas }) => {
     await canvas.findByText(/HTTP error: LINK_DOWN/i);
   },
 };
@@ -131,8 +134,7 @@ export const AnalogNotReady: Story = {
       devices={DEVICE_ANALOG_NOT_READY}
     />
   ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
+  play: async ({ canvas }) => {
     await canvas.findByText(/HTTP error: ANALOG_NOT_READY/i);
   },
 };
@@ -144,10 +146,8 @@ export const LimitViolationBlocked: Story = {
       devices={DEVICE_CP_SUPPORTED}
     />
   ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByText(/PRESETS/i);
+  play: async ({ canvas, userEvent }) => {
+    await canvas.findByText(/PRESETS/i, undefined, { timeout: 5_000 });
 
     await userEvent.click(
       await canvas.findByRole("button", { name: /Advanced/i }),

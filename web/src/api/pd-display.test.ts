@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it } from "vitest";
 import { findVisibleSavedFixedPdo } from "./pd-display.ts";
 import type { PdView } from "./types.ts";
 

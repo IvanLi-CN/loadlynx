@@ -18,9 +18,13 @@ on:
       - '.github/workflows/web-check.yml'
       - '.github/scripts/**'
 
+permissions:
+  contents: read
+
 jobs:
   web-check:
     runs-on: ubuntu-latest
+    timeout-minutes: 75
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -81,6 +85,14 @@ jobs:
       - name: Build
         working-directory: web
         run: bun run build
+
+      - name: App bundle budgets
+        working-directory: web
+        run: bun run check:bundle:app
+
+      - name: Unit tests
+        working-directory: web
+        run: bun run test:unit
 
       - name: Storybook tests
         working-directory: web

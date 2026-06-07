@@ -1,7 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
 import { useState } from "react";
+import { waitFor } from "storybook/test";
 import { ConfirmDialog, type ConfirmDialogProps } from "./confirm-dialog.tsx";
 
 let cancelCalls = 0;
@@ -61,10 +60,9 @@ export default meta;
 type Story = StoryObj<typeof meta>;
 
 export const CancelCloses: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, userEvent }) => {
     cancelCalls = 0;
     confirmCalls = 0;
-    const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     canvas.getByRole("dialog");
@@ -89,10 +87,9 @@ export const CancelCloses: Story = {
 };
 
 export const BackdropCancels: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, canvasElement, userEvent }) => {
     cancelCalls = 0;
     confirmCalls = 0;
-    const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     canvas.getByRole("dialog");
@@ -123,10 +120,9 @@ export const BackdropCancels: Story = {
 };
 
 export const ConfirmCallsHandler: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, userEvent }) => {
     cancelCalls = 0;
     confirmCalls = 0;
-    const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     canvas.getByRole("dialog");
@@ -154,10 +150,9 @@ export const ConfirmDisabled: Story = {
   args: {
     confirmDisabled: true,
   },
-  play: async ({ canvasElement }) => {
+  play: async ({ canvas, userEvent }) => {
     cancelCalls = 0;
     confirmCalls = 0;
-    const canvas = within(canvasElement);
 
     await userEvent.click(canvas.getByRole("button", { name: "Open" }));
     const confirmButton = canvas.getByRole("button", { name: "Confirm" });
