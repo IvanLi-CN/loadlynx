@@ -438,14 +438,6 @@ export function DeviceCcRoute() {
     status?.raw.mcu_temp_mc != null ? status.raw.mcu_temp_mc / 1_000 : null;
 
   const controlMode: LoadMode = control?.preset.mode ?? "cc";
-  const controlTargetMilli =
-    controlMode === "cv"
-      ? (control?.preset.target_v_mv ?? 0)
-      : controlMode === "cp"
-        ? (control?.preset.target_p_mw ?? 0)
-        : (control?.preset.target_i_ma ?? 0);
-  const controlTargetUnit =
-    controlMode === "cv" ? "V" : controlMode === "cp" ? "W" : "A";
   const remoteActive = status?.link_up === true;
   const analogState = status?.analog_state ?? "offline";
   const faultFlags = status?.raw.fault_flags ?? 0;
@@ -455,13 +447,33 @@ export function DeviceCcRoute() {
       ? localVoltageV / totalCurrentA
       : null;
 
+  const controlTargetMilli =
+    controlMode === "cv"
+      ? (control?.preset.target_v_mv ?? 0)
+      : controlMode === "cp"
+        ? (control?.preset.target_p_mw ?? 0)
+        : controlMode === "cr"
+          ? resistanceOhms == null
+            ? -1
+            : Math.round(resistanceOhms * 1_000)
+          : (control?.preset.target_i_ma ?? 0);
+  const controlTargetUnit =
+    controlMode === "cv"
+      ? "V"
+      : controlMode === "cp"
+        ? "W"
+        : controlMode === "cr"
+          ? "Ω"
+          : "A";
+
   const lastTrendUptimeMsRef = useRef<number | null>(null);
   const [trend, setTrend] = useState<{
     v: number[];
     i: number[];
     p: number[];
+    r: number[];
     t: number[];
-  }>({ v: [], i: [], p: [], t: [] });
+  }>({ v: [], i: [], p: [], r: [], t: [] });
 
   useEffect(() => {
     const uptimeMs = status?.raw.uptime_ms ?? null;
@@ -477,10 +489,12 @@ export function DeviceCcRoute() {
       v: pushTrendPoint(prev.v, localVoltageV),
       i: pushTrendPoint(prev.i, totalCurrentA),
       p: pushTrendPoint(prev.p, totalPowerW),
+      r: pushTrendPoint(prev.r, resistanceOhms),
       t: pushTrendPoint(prev.t, tempCoreC),
     }));
   }, [
     localVoltageV,
+    resistanceOhms,
     status?.raw.uptime_ms,
     totalCurrentA,
     totalPowerW,
@@ -571,6 +585,11 @@ export function DeviceCcRoute() {
     if (controlMode === "cp") {
       return `${(control.preset.target_p_mw / 1000).toFixed(2)} W`;
     }
+    if (controlMode === "cr") {
+      return resistanceOhms == null
+        ? "CR read-only"
+        : `${resistanceOhms.toFixed(2)} Ω`;
+    }
     return `${(control.preset.target_i_ma / 1000).toFixed(3)} A`;
   })();
 
@@ -581,11 +600,20 @@ export function DeviceCcRoute() {
     if (controlMode === "cp") {
       return { value: totalPowerW, unit: "W" as const };
     }
+    if (controlMode === "cr") {
+      return { value: resistanceOhms, unit: "Ω" as const };
+    }
     return { value: totalCurrentA, unit: "A" as const };
   })();
 
   const activeTrendPoints =
-    controlMode === "cv" ? trend.v : controlMode === "cp" ? trend.p : trend.i;
+    controlMode === "cv"
+      ? trend.v
+      : controlMode === "cp"
+        ? trend.p
+        : controlMode === "cr"
+          ? trend.r
+          : trend.i;
   const trendMin =
     activeTrendPoints.length > 0 ? Math.min(...activeTrendPoints) : 0;
   const trendMax =
@@ -1250,7 +1278,7 @@ export interface MainDisplayCanvasProps {
   totalPowerW: number;
   controlMode: LoadMode;
   controlTargetMilli: number;
-  controlTargetUnit: "A" | "V" | "W";
+  controlTargetUnit: "A" | "V" | "W" | "Ω";
   uptimeSeconds: number;
   tempCoreC: number | undefined;
   tempSinkC: number | undefined;
@@ -1559,7 +1587,13 @@ export function MainDisplayCanvas({
     const formatPairValue = (value: number, unit: "V" | "A") =>
       `${formatFixed2dp(value)}${unit}`;
 
-    const formatSetpointMilli = (valueMilli: number, unit: "V" | "A" | "W") => {
+    const formatSetpointMilli = (
+      valueMilli: number,
+      unit: "V" | "A" | "W" | "Ω",
+    ) => {
+      if (!Number.isFinite(valueMilli) || valueMilli < 0) {
+        return `--.--${unit}`;
+      }
       let v = Math.max(0, Math.trunc(valueMilli));
       v = Math.floor((v + 5) / 10) * 10;
       const centi = Math.floor(v / 10);
@@ -1664,6 +1698,8 @@ export function MainDisplayCanvas({
 
     if (controlMode === "cp") {
       drawSmallText("CP", 204, 18, COLOR_POWER);
+    } else if (controlMode === "cr") {
+      drawSmallText("CR", 204, 18, COLOR_RIGHT_VALUE);
     } else {
       const ccColor = controlMode === "cc" ? COLOR_CURRENT : COLOR_RIGHT_LABEL;
       const cvColor = controlMode === "cv" ? COLOR_VOLTAGE : COLOR_RIGHT_LABEL;
