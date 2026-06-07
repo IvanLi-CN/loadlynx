@@ -10,3 +10,4 @@
 - Version injection is performed at release build time; package manifests are not rewritten for each release.
 - Development releases are channel-driven instead of created for every `main` push.
 - Telegram remains scoped to release failures to avoid PR CI notification noise.
+- The protected default branch stays PR-only with `0` required approvals; `Label Gate` and signed commits enforce merge eligibility instead of mandatory human review counts.

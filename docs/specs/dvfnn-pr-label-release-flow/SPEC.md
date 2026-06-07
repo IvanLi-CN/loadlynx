@@ -28,7 +28,7 @@
 ## GitHub Integration
 
 - `Label Gate` is declared in `.github/quality-gates.json` as the required check.
-- The default branch is protected through GitHub ruleset/branch protection so release-intent labels cannot be bypassed before merge.
+- The default branch is protected through GitHub branch protection as a PR-only branch: direct pushes are disallowed, admins are still enforced, and the PR review requirement remains at `0` approvals.
 - The release workflow comments on the source PR after a successful release with version, release URL, asset list, workflow run URL, and merge commit.
 - Telegram notification scope remains release failures only.
 
