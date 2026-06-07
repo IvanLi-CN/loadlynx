@@ -1807,6 +1807,104 @@ async fn handle_mode_first_command(
         device: None,
         hardware,
     };
+    handle_mode_first_command_for_selector(
+        client,
+        default_devd,
+        selector,
+        mode,
+        target_i_ma,
+        target_v_mv,
+        target_p_mw,
+        preset_id,
+        min_v_mv,
+        max_i_ma_total,
+        max_p_mw,
+        disable,
+    )
+    .await
+}
+
+async fn handle_mode_first_command_for_selector(
+    client: &Client,
+    default_devd: &str,
+    selector: ApiSelector,
+    mode: ModeFirstCommand,
+    target_i_ma: u32,
+    target_v_mv: Option<u32>,
+    target_p_mw: Option<u32>,
+    preset_id: Option<u8>,
+    min_v_mv: Option<u32>,
+    max_i_ma_total: Option<u32>,
+    max_p_mw: Option<u32>,
+    disable: bool,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    if disable {
+        let control = serde_json::from_value::<CliControlView>(
+            request_api_value(
+                client,
+                default_devd,
+                selector,
+                reqwest::Method::POST,
+                "/api/v1/control",
+                Some(json!({"output_enabled": false})),
+                false,
+            )
+            .await?,
+        )?;
+
+        return Ok(serde_json::json!({
+            "mode": mode.label(),
+            "preset_id": control.active_preset_id,
+            "output_enabled": control.output_enabled,
+            "preset": control.preset,
+        }));
+    }
+
+    let identity = request_api_value(
+        client,
+        default_devd,
+        selector.clone(),
+        reqwest::Method::GET,
+        "/api/v1/identity",
+        None,
+        false,
+    )
+    .await?;
+    let presets_supported = identity
+        .get("capabilities")
+        .and_then(|capabilities| capabilities.get("presets_supported"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if matches!(mode, ModeFirstCommand::Cc) && !presets_supported {
+        let mut body = serde_json::Map::new();
+        body.insert("enable".to_string(), Value::Bool(true));
+        body.insert("target_i_ma".to_string(), json!(target_i_ma));
+
+        let control = serde_json::from_value::<CliControlView>(
+            request_api_value(
+                client,
+                default_devd,
+                selector,
+                reqwest::Method::POST,
+                "/api/v1/cc",
+                Some(Value::Object(body)),
+                false,
+            )
+            .await?,
+        )?;
+
+        return Ok(serde_json::json!({
+            "mode": mode.label(),
+            "preset_id": control.active_preset_id,
+            "output_enabled": control.output_enabled,
+            "preset": control.preset,
+        }));
+    }
+
+    if !presets_supported {
+        return Err("preset APIs are required for cv/cp on this device".into());
+    }
 
     let control = serde_json::from_value::<CliControlView>(
         request_api_value(
@@ -4267,7 +4365,7 @@ mod tests {
         Router,
         extract::{Path, State},
         http::StatusCode,
-        routing::post,
+        routing::{get, post},
     };
     use std::sync::{
         Arc, Mutex,
@@ -4281,6 +4379,87 @@ mod tests {
         operation_payloads: Arc<Mutex<Vec<Value>>>,
         lease_payloads: Arc<Mutex<Vec<Value>>>,
         artifact_devices: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[derive(Clone, Default)]
+    struct ModeFirstHttpState {
+        identity_gets: Arc<AtomicUsize>,
+        cc_posts: Arc<AtomicUsize>,
+        control_posts: Arc<AtomicUsize>,
+        presets_gets: Arc<AtomicUsize>,
+        cc_payloads: Arc<Mutex<Vec<Value>>>,
+    }
+
+    fn mode_first_control_payload(output_enabled: bool) -> Value {
+        json!({
+            "active_preset_id": 1,
+            "output_enabled": output_enabled,
+            "uv_latched": false,
+            "preset": {
+                "preset_id": 1,
+                "mode": "cc",
+                "target_i_ma": 1234,
+                "target_v_mv": 12000,
+                "target_p_mw": 15000,
+                "min_v_mv": 0,
+                "max_i_ma_total": 10000,
+                "max_p_mw": 150000
+            }
+        })
+    }
+
+    async fn spawn_legacy_mode_first_http(state: ModeFirstHttpState) -> String {
+        async fn identity(State(state): State<ModeFirstHttpState>) -> axum::Json<Value> {
+            state.identity_gets.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({
+                "device_id": "loadlynx-legacy",
+                "capabilities": {
+                    "cc_supported": true,
+                    "cv_supported": false,
+                    "cp_supported": false,
+                    "presets_supported": false
+                }
+            }))
+        }
+
+        async fn post_cc(
+            State(state): State<ModeFirstHttpState>,
+            axum::Json(payload): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            state.cc_posts.fetch_add(1, Ordering::SeqCst);
+            state
+                .cc_payloads
+                .lock()
+                .expect("cc payloads lock")
+                .push(payload);
+            axum::Json(mode_first_control_payload(true))
+        }
+
+        async fn post_control(
+            State(state): State<ModeFirstHttpState>,
+            axum::Json(_payload): axum::Json<Value>,
+        ) -> axum::Json<Value> {
+            state.control_posts.fetch_add(1, Ordering::SeqCst);
+            axum::Json(mode_first_control_payload(false))
+        }
+
+        async fn presets(State(state): State<ModeFirstHttpState>) -> axum::Json<Value> {
+            state.presets_gets.fetch_add(1, Ordering::SeqCst);
+            axum::Json(json!({"presets": []}))
+        }
+
+        let app = Router::new()
+            .route("/api/v1/identity", get(identity))
+            .route("/api/v1/cc", post(post_cc))
+            .route("/api/v1/control", post(post_control))
+            .route("/api/v1/presets", get(presets))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
     }
 
     async fn spawn_test_http(state: TestHttpState) -> String {
@@ -5389,6 +5568,53 @@ mod tests {
         assert_eq!(resolve_output_enable(false, true).unwrap(), false);
         assert!(resolve_output_enable(true, true).is_err());
         assert!(resolve_output_enable(false, false).is_err());
+    }
+
+    #[tokio::test]
+    async fn mode_first_legacy_cc_uses_cc_endpoint_without_presets() {
+        let state = ModeFirstHttpState::default();
+        let url = spawn_legacy_mode_first_http(state.clone()).await;
+
+        let value = handle_mode_first_command_for_selector(
+            &Client::new(),
+            "http://127.0.0.1:0",
+            ApiSelector {
+                url: Some(url),
+                device: None,
+                hardware: None,
+            },
+            ModeFirstCommand::Cc,
+            2_000,
+            None,
+            None,
+            Some(2),
+            None,
+            None,
+            None,
+            false,
+        )
+        .await
+        .expect("legacy cc should use compatibility endpoint");
+
+        assert_eq!(value.get("mode").and_then(Value::as_str), Some("CC"));
+        assert_eq!(
+            value.get("output_enabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(state.identity_gets.load(Ordering::SeqCst), 1);
+        assert_eq!(state.cc_posts.load(Ordering::SeqCst), 1);
+        assert_eq!(state.presets_gets.load(Ordering::SeqCst), 0);
+
+        let payloads = state.cc_payloads.lock().expect("cc payloads lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("target_i_ma").and_then(Value::as_u64),
+            Some(2_000)
+        );
+        assert_eq!(
+            payloads[0].get("enable").and_then(Value::as_bool),
+            Some(true)
+        );
     }
 
     #[test]

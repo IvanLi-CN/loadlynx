@@ -1,7 +1,10 @@
+type EditableControlMode = "CC" | "CV" | "CP";
+type VisibleControlMode = EditableControlMode | "CR";
+
 export type ControlModePanelProps = {
-  availableModes: Array<"CC" | "CV" | "CP" | "CR">;
-  activeMode: "CC" | "CV" | "CP" | "CR";
-  onModeChange: (mode: "CC" | "CV" | "CP" | "CR") => void;
+  availableModes: EditableControlMode[];
+  activeMode: VisibleControlMode;
+  onModeChange: (mode: EditableControlMode) => void;
   outputEnabled: boolean;
   outputToggleDisabled?: boolean;
   onOutputToggle: (nextEnabled: boolean) => void;
@@ -15,7 +18,7 @@ function ModeButton({
   disabled,
   onClick,
 }: {
-  mode: "CC" | "CV" | "CP" | "CR";
+  mode: VisibleControlMode;
   active: boolean;
   disabled: boolean;
   onClick: () => void;
@@ -38,6 +41,12 @@ function ModeButton({
   );
 }
 
+function isEditableControlMode(
+  mode: VisibleControlMode,
+): mode is EditableControlMode {
+  return mode === "CC" || mode === "CV" || mode === "CP";
+}
+
 export function ControlModePanel({
   availableModes,
   activeMode,
@@ -48,21 +57,26 @@ export function ControlModePanel({
   outputHint,
   showOutputReenableHint = false,
 }: ControlModePanelProps) {
-  const allModes: Array<"CC" | "CV" | "CP" | "CR"> = ["CC", "CV", "CP", "CR"];
+  const allModes: VisibleControlMode[] = ["CC", "CV", "CP", "CR"];
   return (
     <section aria-label="Mode and output" className="instrument-card p-5">
       <div className="instrument-label">Mode &amp; Output</div>
 
       <div className="mt-4 flex flex-wrap gap-2">
         {allModes.map((mode) => {
-          const supported = availableModes.includes(mode);
+          const supported =
+            isEditableControlMode(mode) && availableModes.includes(mode);
           return (
             <ModeButton
               key={mode}
               mode={mode}
               active={mode === activeMode}
               disabled={!supported}
-              onClick={() => onModeChange(mode)}
+              onClick={() => {
+                if (isEditableControlMode(mode)) {
+                  onModeChange(mode);
+                }
+              }}
             />
           );
         })}
