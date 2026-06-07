@@ -52,6 +52,9 @@ jobs:
       - name: Test release label tooling
         run: node .github/scripts/release-labels.test.mjs
 
+      - name: Validate quality-gates declaration
+        run: node .github/scripts/check-quality-gates.mjs
+
       - name: Cache cargo registry and target
         uses: actions/cache@v4
         with:
