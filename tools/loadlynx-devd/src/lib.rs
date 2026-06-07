@@ -67,17 +67,16 @@ const LOADLYNX_PRESET_COUNT: usize = 5;
 pub fn default_ipc_endpoint() -> String {
     #[cfg(windows)]
     {
-        return r"\\.\pipe\loadlynx-devd".to_string();
+        r"\\.\pipe\loadlynx-devd".to_string()
     }
     #[cfg(not(windows))]
     {
         let base = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(env::temp_dir);
-        return base
-            .join("loadlynx-devd.sock")
+        base.join("loadlynx-devd.sock")
             .to_string_lossy()
-            .into_owned();
+            .into_owned()
     }
 }
 
@@ -493,7 +492,7 @@ pub async fn serve_ipc(config: IpcConfig) -> Result<(), Box<dyn std::error::Erro
     }
     #[cfg(not(windows))]
     {
-        return serve_ipc_unix(config, http_base).await;
+        serve_ipc_unix(config, http_base).await
     }
 }
 

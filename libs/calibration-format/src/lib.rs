@@ -176,10 +176,10 @@ pub fn normalize_points(mut points: Vec<CalPoint, MAX_POINTS_V3>) -> Vec<CalPoin
     // Dedup by raw_100uv (keep last occurrence).
     let mut out = Vec::<CalPoint, MAX_POINTS_V3>::new();
     for p in slice.iter().copied() {
-        if let Some(last) = out.last() {
-            if last.raw_100uv == p.raw_100uv {
-                let _ = out.pop();
-            }
+        if let Some(last) = out.last()
+            && last.raw_100uv == p.raw_100uv
+        {
+            let _ = out.pop();
         }
         let _ = out.push(p);
     }
@@ -209,8 +209,7 @@ pub fn encode_calwrite_chunks(
     };
 
     let total_points = points.len().min(max_points);
-    let total_chunks =
-        ((total_points + (CALWRITE_POINTS_PER_CHUNK - 1)) / CALWRITE_POINTS_PER_CHUNK).max(1);
+    let total_chunks = total_points.div_ceil(CALWRITE_POINTS_PER_CHUNK).max(1);
 
     let mut chunks = Vec::<CalWrite, CALWRITE_MAX_CHUNKS>::new();
     for chunk_index in 0..total_chunks {
@@ -559,7 +558,7 @@ mod tests {
         let _ = prof.current_ch1.push(p(70, 71, 72));
 
         let bytes = serialize_profile(&prof);
-        let decoded = deserialize_profile((&bytes).try_into().unwrap(), DIGITAL_HW_REV).unwrap();
+        let decoded = deserialize_profile(&bytes, DIGITAL_HW_REV).unwrap();
         assert_eq!(decoded.fmt_version, CAL_FMT_VERSION_LATEST);
         assert_eq!(decoded.hw_rev, DIGITAL_HW_REV);
         assert_eq!(decoded.current_ch1.len(), 7);
@@ -567,8 +566,7 @@ mod tests {
 
         let mut corrupted = bytes;
         corrupted[17] ^= 0x01;
-        let err =
-            deserialize_profile((&corrupted).try_into().unwrap(), DIGITAL_HW_REV).unwrap_err();
+        let err = deserialize_profile(&corrupted, DIGITAL_HW_REV).unwrap_err();
         assert!(matches!(err, ProfileLoadError::CrcMismatch { .. }));
     }
 
