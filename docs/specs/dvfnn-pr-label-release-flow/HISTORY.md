@@ -13,3 +13,4 @@
 - The protected default branch stays PR-only with `0` required approvals; `Label Gate` and signed commits enforce merge eligibility instead of mandatory human review counts.
 - The quality-gates declaration must stay bound to the actual workflow and branch-protection job names exposed by GitHub Actions, so local validation treats missing declared workflow/job bindings as a contract failure instead of only checking policy scalars.
 - The quality-gates checker itself needs regression coverage, not only a live-repo smoke check, so contract parsing and drift detection can evolve safely as workflows are refactored.
+- Workflow hygiene rules such as explicit `permissions` and bounded job runtime must also be enforced by repo-local validation, otherwise they regress too easily during unrelated workflow edits.

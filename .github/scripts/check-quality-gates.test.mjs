@@ -58,9 +58,10 @@ jobs:
   {
     fileName: "check.yml",
     name: "Code Check",
+    hasPermissions: false,
     jobs: [
-      { id: "host-rust", name: null },
-      { id: "check", name: "check" },
+      { id: "host-rust", name: null, hasTimeoutMinutes: false },
+      { id: "check", name: "check", hasTimeoutMinutes: false },
     ],
   },
 );
@@ -74,22 +75,25 @@ const validWorkflows = [
   {
     fileName: "check.yml",
     name: "Code Check",
+    hasPermissions: true,
     jobs: [
-      { id: "host-rust", name: null },
-      { id: "analog-firmware", name: null },
-      { id: "digital-firmware", name: null },
-      { id: "check", name: null },
+      { id: "host-rust", name: null, hasTimeoutMinutes: true },
+      { id: "analog-firmware", name: null, hasTimeoutMinutes: true },
+      { id: "digital-firmware", name: null, hasTimeoutMinutes: true },
+      { id: "check", name: null, hasTimeoutMinutes: true },
     ],
   },
   {
     fileName: "digital-check.yml",
     name: "Digital Check",
-    jobs: [{ id: "digital-check", name: null }],
+    hasPermissions: true,
+    jobs: [{ id: "digital-check", name: null, hasTimeoutMinutes: true }],
   },
   {
     fileName: "web-check.yml",
     name: "Web Check",
-    jobs: [{ id: "web-check", name: null }],
+    hasPermissions: true,
+    jobs: [{ id: "web-check", name: null, hasTimeoutMinutes: true }],
   },
 ];
 

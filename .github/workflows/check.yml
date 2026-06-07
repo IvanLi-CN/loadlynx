@@ -62,6 +62,9 @@ jobs:
       - name: Run quality-gates contract tests
         run: npm run test:quality-gates
 
+      - name: Run workflow hygiene tests
+        run: npm run test:workflow-hygiene
+
       - name: Cache host cargo registry and targets
         uses: actions/cache@v4
         with:

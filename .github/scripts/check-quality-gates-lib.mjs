@@ -9,6 +9,7 @@ export function parseWorkflowMetadata(source, fileName) {
   const workflow = {
     fileName,
     name: null,
+    hasPermissions: false,
     jobs: [],
   };
 
@@ -22,6 +23,10 @@ export function parseWorkflowMetadata(source, fileName) {
         workflow.name = normalizeScalar(workflowNameMatch[1]);
         continue;
       }
+    }
+
+    if (!workflow.hasPermissions && /^permissions:\s*(.*)$/.test(line)) {
+      workflow.hasPermissions = true;
     }
 
     if (!inJobsSection) {
@@ -40,6 +45,7 @@ export function parseWorkflowMetadata(source, fileName) {
       currentJob = {
         id: jobIdMatch[1],
         name: null,
+        hasTimeoutMinutes: false,
       };
       workflow.jobs.push(currentJob);
       continue;
@@ -52,6 +58,11 @@ export function parseWorkflowMetadata(source, fileName) {
     const jobNameMatch = line.match(/^ {4}name:\s*(.+?)\s*$/);
     if (jobNameMatch) {
       currentJob.name = normalizeScalar(jobNameMatch[1]);
+      continue;
+    }
+
+    if (/^ {4}timeout-minutes:\s*\d+\s*$/.test(line)) {
+      currentJob.hasTimeoutMinutes = true;
     }
   }
 
@@ -136,6 +147,24 @@ export function validateQualityGates({ qualityGates, workflows }) {
     failures.push(
       `declared checks not backed by expected_pr_workflows: ${JSON.stringify([...declaredCheckNames].sort())}`,
     );
+  }
+
+  return failures;
+}
+
+export function validateWorkflowHygiene({ workflows }) {
+  const failures = [];
+
+  for (const workflow of workflows) {
+    if (!workflow.hasPermissions) {
+      failures.push(`workflow ${workflow.fileName}: missing top-level permissions`);
+    }
+
+    for (const job of workflow.jobs) {
+      if (!job.hasTimeoutMinutes) {
+        failures.push(`workflow ${workflow.fileName} job ${JSON.stringify(job.name ?? job.id)}: missing timeout-minutes`);
+      }
+    }
   }
 
   return failures;
