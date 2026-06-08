@@ -4,8 +4,11 @@ import { manualChunks } from "../scripts/chunking.ts";
 
 const config: StorybookConfig = {
   framework: "@storybook/react-vite",
-  stories: ["../src/**/*.mdx", "../src/**/*.stories.@(js|jsx|mjs|ts|tsx)"],
+  stories: ["../src/**/*.stories.@(js|jsx|mjs|ts|tsx)"],
   addons: ["@storybook/addon-vitest", "storybook/viewport"],
+  core: {
+    disableTelemetry: true,
+  },
   async viteFinal(config, options) {
     const { mergeConfig } = await import("vite");
 

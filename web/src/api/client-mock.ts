@@ -25,6 +25,8 @@ export {
 } from "./client-mock-pd.ts";
 export {
   clampI16,
+  type DevdIdentityPayload,
+  type DevdStatusPayload,
   getOrCreateMockDevice,
   type MockCalibrationState,
   type MockDeviceState,

@@ -1,6 +1,7 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import type { StoredDevice } from "../devices/device-store.ts";
+import { syncDevicesQueryCache } from "../devices/query-cache.ts";
 import { useDeviceStore } from "../devices/store-context.tsx";
 import {
   buildDevdCompatBaseUrl,
@@ -86,7 +87,7 @@ export function useDevdLeaseHeartbeats(devices: StoredDevice[] | undefined) {
                 };
               });
               store.setDevices(next);
-              queryClient.setQueryData<StoredDevice[]>(["devices"], next);
+              syncDevicesQueryCache(queryClient, next);
             })
             .catch(() => {
               // Best-effort renewal; the device row remains visible for manual reconnect.

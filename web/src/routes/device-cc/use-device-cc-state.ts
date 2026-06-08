@@ -4,11 +4,6 @@ import type { HttpApiError } from "../../api/client.ts";
 import {
   __debugSetUvLatched,
   applyPreset,
-  getControl,
-  getIdentity,
-  getPd,
-  getPresets,
-  getStatus,
   isHttpApiError,
   subscribeStatusStream,
   updateControl,
@@ -16,6 +11,7 @@ import {
 } from "../../api/client.ts";
 import { findVisibleSavedFixedPdo } from "../../api/pd-display.ts";
 import type {
+  ControlUpdateRequest,
   ControlView,
   FastStatusView,
   Identity,
@@ -25,8 +21,29 @@ import type {
   PresetId,
 } from "../../api/types.ts";
 import { formatWithUnit } from "../../components/instrument/format.ts";
+import {
+  invalidateDeviceQuery,
+  setDeviceQueryData,
+} from "../../devices/device-query-cache.ts";
+import { DEVICE_QUERY_PARTS } from "../../devices/device-query-key.ts";
+import {
+  getDeviceControlQueryOptions,
+  getDevicePdQueryOptions,
+  getDevicePresetsQueryOptions,
+  getDeviceStatusQueryOptions,
+  useDeviceIdentityByBaseUrl,
+} from "../../devices/hooks.ts";
+import { requireDeviceBaseUrl } from "../../lib/device-base-url.ts";
+import {
+  formatHttpApiErrorSummary,
+  getNetworkErrorHint,
+  isUnsupportedOperationError,
+} from "../../lib/http-error.ts";
 
 type EditableLoadMode = Exclude<LoadMode, "cr">;
+type UpdateControlMutation = ReturnType<
+  typeof useMutation<ControlView, Error, ControlUpdateRequest>
+>;
 
 const FAST_STATUS_REFETCH_MS = 400;
 const PD_REFETCH_MS = 1500;
@@ -138,9 +155,7 @@ export interface DeviceCcMutationState {
   setDraftPresetMaxIMaTotal: (value: number) => void;
   draftPresetMaxPMw: number;
   setDraftPresetMaxPMw: (value: number) => void;
-  updateControlMutation: ReturnType<
-    typeof useMutation<ControlView, Error, { output_enabled: boolean }>
-  >;
+  updateControlMutation: UpdateControlMutation;
   updatePresetMutation: ReturnType<typeof useMutation<Preset, Error, Preset>>;
   applyPresetMutation: ReturnType<
     typeof useMutation<ControlView, Error, PresetId>
@@ -170,34 +185,25 @@ export function useDeviceCcState(
     setStreamStatus(null);
   }, [baseUrl]);
 
-  const identityQuery = useQuery<Identity, HttpApiError>({
-    queryKey: ["device", deviceId, "identity"],
-    queryFn: () => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return getIdentity(baseUrl);
-    },
-    enabled: Boolean(baseUrl),
-  });
+  const identityQuery = useDeviceIdentityByBaseUrl(deviceId, baseUrl);
 
-  const controlQuery = useQuery<ControlView, HttpApiError>({
-    queryKey: ["device", deviceId, "control"],
-    queryFn: () => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return getControl(baseUrl);
-    },
-    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
-    retryDelay: RETRY_DELAY_MS,
-  });
+  const controlQuery = useQuery<ControlView, HttpApiError>(
+    getDeviceControlQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+      retryDelay: RETRY_DELAY_MS,
+    }),
+  );
 
-  const presetsQuery = useQuery<Preset[], HttpApiError>({
-    queryKey: ["device", deviceId, "presets"],
-    queryFn: () => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return getPresets(baseUrl);
-    },
-    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
-    retryDelay: RETRY_DELAY_MS,
-  });
+  const presetsQuery = useQuery<Preset[], HttpApiError>(
+    getDevicePresetsQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+      retryDelay: RETRY_DELAY_MS,
+    }),
+  );
 
   const [selectedPresetId, setSelectedPresetId] = useState<PresetId>(1);
   const selectedPresetInitializedRef = useRef(false);
@@ -242,12 +248,14 @@ export function useDeviceCcState(
 
   const updatePresetMutation = useMutation({
     mutationFn: async (payload: Preset) => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return updatePreset(baseUrl, payload);
+      return updatePreset(requireDeviceBaseUrl(baseUrl), payload);
     },
     onSuccess: (nextPreset) => {
-      queryClient.setQueryData<Preset[]>(
-        ["device", deviceId, "presets"],
+      setDeviceQueryData<Preset[]>(
+        queryClient,
+        deviceId,
+        baseUrl,
+        DEVICE_QUERY_PARTS.presets,
         (prev) => {
           const prevList = prev ?? [];
           const next = prevList.slice();
@@ -262,23 +270,31 @@ export function useDeviceCcState(
           return next;
         },
       );
-      queryClient.invalidateQueries({
-        queryKey: ["device", deviceId, "control"],
-      });
-      queryClient.invalidateQueries({
-        queryKey: ["device", deviceId, "status"],
-      });
+      void invalidateDeviceQuery(
+        queryClient,
+        deviceId,
+        baseUrl,
+        ...DEVICE_QUERY_PARTS.control,
+      );
+      void invalidateDeviceQuery(
+        queryClient,
+        deviceId,
+        baseUrl,
+        ...DEVICE_QUERY_PARTS.status,
+      );
     },
   });
 
   const applyPresetMutation = useMutation({
     mutationFn: async (presetId: PresetId) => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return applyPreset(baseUrl, presetId);
+      return applyPreset(requireDeviceBaseUrl(baseUrl), presetId);
     },
     onSuccess: (nextControl) => {
-      queryClient.setQueryData<ControlView>(
-        ["device", deviceId, "control"],
+      setDeviceQueryData(
+        queryClient,
+        deviceId,
+        baseUrl,
+        DEVICE_QUERY_PARTS.control,
         nextControl,
       );
       setSelectedPresetId(nextControl.active_preset_id);
@@ -287,25 +303,33 @@ export function useDeviceCcState(
           applyOutputWasEnabledRef.current && !nextControl.output_enabled,
         ),
       );
-      queryClient.invalidateQueries({
-        queryKey: ["device", deviceId, "status"],
-      });
+      void invalidateDeviceQuery(
+        queryClient,
+        deviceId,
+        baseUrl,
+        ...DEVICE_QUERY_PARTS.status,
+      );
     },
   });
 
   const updateControlMutation = useMutation({
-    mutationFn: async (payload: { output_enabled: boolean }) => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return updateControl(baseUrl, payload);
+    mutationFn: async (payload: ControlUpdateRequest) => {
+      return updateControl(requireDeviceBaseUrl(baseUrl), payload);
     },
     onSuccess: (nextControl) => {
-      queryClient.setQueryData<ControlView>(
-        ["device", deviceId, "control"],
+      setDeviceQueryData(
+        queryClient,
+        deviceId,
+        baseUrl,
+        DEVICE_QUERY_PARTS.control,
         nextControl,
       );
-      queryClient.invalidateQueries({
-        queryKey: ["device", deviceId, "status"],
-      });
+      void invalidateDeviceQuery(
+        queryClient,
+        deviceId,
+        baseUrl,
+        ...DEVICE_QUERY_PARTS.status,
+      );
     },
   });
 
@@ -314,45 +338,42 @@ export function useDeviceCcState(
     applyPresetMutation.isPending ||
     updateControlMutation.isPending;
 
-  const pdQuery = useQuery<PdView, HttpApiError>({
-    queryKey: ["device", deviceId, "pd"],
-    queryFn: () => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return getPd(baseUrl);
-    },
-    enabled: Boolean(baseUrl) && identityQuery.isSuccess && !writesInFlight,
-    refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
-    refetchIntervalInBackground: false,
-    retryDelay: RETRY_DELAY_MS,
-  });
+  const pdQuery = useQuery<PdView, HttpApiError>(
+    getDevicePdQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl) && identityQuery.isSuccess && !writesInFlight,
+      refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
+      retryDelay: RETRY_DELAY_MS,
+    }),
+  );
 
   const debugUvMutation = useMutation({
     mutationFn: async (uv_latched: boolean) => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return __debugSetUvLatched(baseUrl, uv_latched);
+      return __debugSetUvLatched(requireDeviceBaseUrl(baseUrl), uv_latched);
     },
     onSuccess: (nextControl) => {
-      queryClient.setQueryData<ControlView>(
-        ["device", deviceId, "control"],
+      setDeviceQueryData(
+        queryClient,
+        deviceId,
+        baseUrl,
+        DEVICE_QUERY_PARTS.control,
         nextControl,
       );
     },
   });
 
   const statusQuery = useQuery<FastStatusView, HttpApiError>({
-    queryKey: ["device", deviceId, "status"],
-    queryFn: () => {
-      if (!baseUrl) throw new Error("Device base URL is not available");
-      return getStatus(baseUrl);
-    },
-    enabled:
-      Boolean(baseUrl) &&
-      identityQuery.isSuccess &&
-      !writesInFlight &&
-      streamStatus === null,
-    refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
-    refetchIntervalInBackground: false,
-    retry: 2,
+    ...getDeviceStatusQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled:
+        Boolean(baseUrl) &&
+        identityQuery.isSuccess &&
+        !writesInFlight &&
+        streamStatus === null,
+      refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
+    }),
     retryDelay: jitterRetryDelay,
   });
 
@@ -399,20 +420,19 @@ export function useDeviceCcState(
 
   const topError = (() => {
     if (!firstHttpError) return null;
-    const code = firstHttpError.code ?? "HTTP_ERROR";
-    const summary = `${code} — ${firstHttpError.message}`;
+    const summary = formatHttpApiErrorSummary(firstHttpError);
 
-    if (firstHttpError.status === 0 && code === "NETWORK_ERROR") {
+    if (
+      firstHttpError.status === 0 &&
+      firstHttpError.code === "NETWORK_ERROR"
+    ) {
       return {
         summary,
-        hint:
-          "可能是短暂的网络抖动，已自动重试" +
-          (baseUrl ? `（baseUrl=${baseUrl}）` : "") +
-          "；若仍无法连接，请检查网络与 IP 设置。",
+        hint: `可能是短暂的网络抖动，已自动重试；若仍无法连接，请检查网络与 IP 设置。${baseUrl ? `（${getNetworkErrorHint(baseUrl)}）` : ""}`,
       } as const;
     }
 
-    if (firstHttpError.status === 404 && code === "UNSUPPORTED_OPERATION") {
+    if (isUnsupportedOperationError(firstHttpError)) {
       return {
         summary,
         hint: "固件版本不支持该 API，请升级固件后重试。",

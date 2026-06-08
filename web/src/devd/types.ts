@@ -1,5 +1,19 @@
 import type { Identity } from "../api/types.ts";
 
+export type DevdJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | DevdJsonObject
+  | DevdJsonValue[];
+
+export interface DevdJsonObject {
+  [key: string]: DevdJsonValue;
+}
+
+export type DevdJsonRecord = Record<string, DevdJsonValue | undefined>;
+
 export type DevdTargetKind =
   | "digital_esp32s3"
   | "analog_stm32g431"
@@ -60,19 +74,36 @@ export interface DevdSession {
     timestamp: string;
     direction: string;
     summary: string;
-    payload: unknown;
+    payload: DevdJsonValue;
   }>;
 }
 
+export interface DevdSelectedArtifact extends DevdJsonRecord {
+  artifact_id: string;
+  target: string;
+  name?: string;
+  protocol?: string;
+}
+
 export interface DevdArtifactSelectResponse {
-  artifact: unknown;
+  artifact: DevdSelectedArtifact;
   log_decode: DevdLogDecode;
+}
+
+export interface DevdFlashTargetEvidence extends DevdJsonRecord {
+  target: string;
+  device_id?: string;
+  identity_device_id?: string | null;
+  port_path?: string | null;
+  probe_selector?: string | null;
+  selector_source?: string | null;
+  lan_base_url?: string | null;
 }
 
 export interface DevdFlashResponse {
   ok: boolean;
   dry_run: boolean;
   action: "flash" | string;
-  target_evidence: unknown;
-  post_flash_identity?: unknown;
+  target_evidence: DevdFlashTargetEvidence;
+  post_flash_identity?: Identity | null;
 }

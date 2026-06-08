@@ -39,7 +39,7 @@
 
 ## 3. 快速验证
 
-1. 构建：`(cd firmware/digital && cargo +esp build)`。
+1. 构建：优先用 `just d-build`；若直接运行 cargo，则先 `. "$HOME/export-esp.sh"`，再执行 `(cd firmware/digital && cargo +esp build)`。
 2. 烧录：`just agentd flash digital`。
 3. 观察日志：`just agentd monitor digital --reset`，应依次看到系统上电、数字外设就绪、TPS82130 5 V 使能确认等信息。
 4. 同时测量跨板使能线，确认延时后由 0 V 拉至 3.3 V，并验证模拟板 5 V 轨启动顺序。
@@ -50,7 +50,7 @@
 
 ## 4. 串口链路与任务分工（当前实现）
 
-目标：在 ESP32‑S3 与 STM32G431 之间建立稳定的 UART 链路，并基于共享协议 crate（`loadlynx-protocol`）完成 FastStatus 遥测 + SetPoint/SoftReset/SetEnable/CalWrite 控制闭环。
+目标：在 ESP32‑S3 与 STM32G431 之间建立稳定的 UART 链路，并基于共享协议 crate（`loadlynx-protocol`）完成 FastStatus 遥测 + SoftReset/CalWrite/SetEnable/LimitProfile/SetMode/PD request 控制闭环，同时保留 legacy `SetPoint` 兼容路径。
 
 ### ESP32‑S3 侧（UART1 + UHCI DMA）
 
@@ -61,12 +61,14 @@
   - `feed_decoder` 负责从 SLIP 流中拆出完整帧，先用 `decode_frame` 做头部 + CRC 校验，再按 `msg` 分发：
     - `MSG_HELLO` → 更新 `HELLO_SEEN`/`LINK_UP` 标志；
     - `MSG_FAST_STATUS` → 调用 `apply_fast_status` 更新 `TelemetryModel`，记录电压/电流/温度与故障标志；
-    - `MSG_SET_POINT`（带 `FLAG_IS_ACK`）→ 调用 `handle_setpoint_ack`，驱动 SetPoint 重传状态机；
+    - `MSG_SET_MODE`（带 `FLAG_IS_ACK`）→ 调用 `handle_setmode_ack`，驱动原子 active-control 发送状态机；
+    - `MSG_PD_SINK_REQUEST`（带 `FLAG_IS_ACK/FLAG_IS_NACK`）→ 调用 `handle_pd_sink_request_ack`，完成 PD 请求闭环；
     - `MSG_SOFT_RESET`（带 `FLAG_IS_ACK`）→ 调用 `handle_soft_reset_frame`，确认软复位握手。
+    - `MSG_SET_POINT` → 当前数字侧不再接收控制请求；若看到 ACK 以外的 `SetPoint` 帧会按 unexpected frame 记日志。
   - 协议/SLIP 错误通过限频日志计数：`UART RX error: ...`、`protocol decode error (...)` 等。
 - 链路健康与冷启动恢复：
   - 每次成功处理 `HELLO`/`FAST_STATUS`/ACK 帧都会刷新 `LAST_GOOD_FRAME_MS`；
-  - `stats_task` 每秒检查一次该时间戳，若 >300 ms 未见有效帧则将 `LINK_UP=false` 并在日志中标记“link down”，控制发送任务会在 `LINK_UP=false` 时暂缓新的 output-on 指令；
+  - `stats_task` 每秒检查一次该时间戳，若 >300 ms 未见有效帧则将 `LINK_UP=false` 并在日志中标记“link down”，控制发送任务会在 `LINK_UP=false` 时暂缓新的 output-on `SetMode` / PD 指令；
   - `setmode_tx_task` 额外覆盖 `LAST_GOOD_FRAME_MS==0` 的冷启动无帧场景：短暂 grace 后限频重发 SoftReset、全量 CalWrite、SetEnable(true)、LimitProfile，并强制下一次 SetMode snapshot；
   - 冷启动后若已经收到帧但没有 `FastStatus`，或 `FastStatus` 电压、电流、功率持续全零，数字侧先显示 `MEAS` 与 unavailable 数值，并以 `no-fast-status` / `zero-measurement` 原因限频重发同一套恢复握手；
   - SoftReset ACK 以本次握手的 `seq` 与 ACK 计数 baseline 判定，避免旧 ACK 状态让新的恢复握手被误判为成功。
@@ -77,7 +79,7 @@
 - 物理配置：`115200` baud，8N1。
 - 结构：
   - `main` 是唯一的 Embassy task，负责外设初始化 + 采样 + FastStatus 打包与发送；
-  - 另起一个 `uart_setpoint_rx_task` 使用 `RingBufferedUartRx + SlipDecoder` 接收控制帧。
+  - 另起一个 `uart_setpoint_rx_task` 使用 `RingBufferedUartRx + SlipDecoder` 接收控制帧；任务名沿用旧名，但当前实际处理 `SetMode`/`SetPoint`/`SoftReset`/`SetEnable`/`LimitProfile`/`CalMode`/`CalWrite`/`PdSinkRequest`。
 - 主循环职责（约 20 Hz）：
   - 初始化时钟、VREFBUF、ADC1/ADC2、DAC1、USART3、`LOAD_EN_CTL/LOAD_EN_TS` 与板载 LED 后进入循环；
   - 每 50 ms：
@@ -94,9 +96,15 @@
 
 `uart_setpoint_rx_task` 在独立任务中消费 USART3 RX 环缓冲，逐帧解析控制消息：
 
+- `MSG_SET_MODE`：
+  - 成功解析后原子更新 active-control snapshot：`preset_id + output_enabled + mode + target + limits`；
+  - 这是当前主控制路径；analog 一旦见过合法 `SetMode`，主循环即以该 snapshot 为准，并忽略后续 legacy `SetPoint` 对真实控制状态的修改；
+  - 对首次或新 `seq` 应用 snapshot，重复 `seq` 视为重传，仅限频回 ACK；
+  - 通过 `encode_ack_only_frame(MSG_SET_MODE)` 立即返回 ACK。
+
 - `MSG_SET_POINT`：
-  - 成功解析后更新 `TARGET_I_LOCAL_MA`（视为“总目标电流”，两通道合计，单位 mA），并记录 `LAST_SETPOINT_SEQ`；
-  - 对首次或新 `seq` 应用 setpoint，重复 `seq` 视为重传只回 ACK 不改目标（幂等）；
+  - 仅在 analog 还未见过任何合法 `SetMode` 时，才作为 legacy CC-only 路径更新 `TARGET_I_LOCAL_MA`（视为“总目标电流”，两通道合计，单位 mA），并记录 `LAST_SETPOINT_SEQ`；
+  - 对首次或新 `seq` 应用 setpoint，重复 `seq` 视为重传只回 ACK 不改目标（幂等）；若 `SetMode` 已激活，则只回 ACK 并记录 ignored 日志；
   - 通过 `encode_ack_only_frame(MSG_SET_POINT)` 立即返回 ACK，数字侧基于 `FLAG_IS_ACK` 驱动重传状态机。
 - `MSG_SOFT_RESET`：
   - 收到请求帧后调用 `apply_soft_reset_safing`：
@@ -107,6 +115,10 @@
   - 同时刷新 `LAST_RX_GOOD_MS`。
 - `MSG_SET_ENABLE`：
   - 更新 `ENABLE_REQUESTED`（true/false），主循环按 `enable && cal_ready && (fault_flags == 0)` 决定是否真正出力。
+- `MSG_LIMIT_PROFILE`：
+  - 更新模拟侧软件软限（最大电流/功率、OVP、热降额百分比等），供 legacy CC 路径与保护逻辑共同使用。
+- `MSG_PD_SINK_REQUEST`：
+  - 记录并触发 USB-PD sink 策略协商，请求带 ACK/NACK 闭环；最终合同状态仍通过 `PD_STATUS` 回传数字侧。
 - `MSG_CAL_WRITE`：
   - 当前版本仅使用 `index=0` 的下行写入，payload 视为不透明；
   - 成功解析任意一帧即置 `CAL_READY=true`，作为 enable gating 条件之一；
@@ -122,10 +134,10 @@
     - 总目标电流 ≥2 A 时，CH1/CH2 预期近似各承担一半电流（允许少量不平衡与采样误差）；
   - 底部 5 行状态文本：运行时间、两路散热片温度、MCU 温度以及故障概要（`FAULT OK` 或 `FAULT 0xXXXXXXXX`）。
 - Telemetry 模型在后台持续积分 `energy_wh`，当前 UI 尚未单独绘制该值，但已在 `UiSnapshot` 中保留字段，便于后续扩展或上位机导出。
-- UI 不直接控制任何安全逻辑，仅反映 `FastStatus` 内容；控制路径通过上文的 SetMode/SoftReset/SetEnable 完成。
+- UI 不直接控制任何安全逻辑，仅反映 `FastStatus` 内容；当前真实控制路径通过 `SetMode` 单 owner 发送任务串行化下发，并与 `SoftReset`、`CalWrite`、`SetEnable`、`LimitProfile`、`PdSinkRequest` 共用同一条 UART TX 主线。
 - 生产固件的遥测模型初始值为 offline/unknown；只有 mock/test 场景使用 demo 快照，避免链路从未建立时 Dashboard 显示冻结的假电压/电流/功率。
 - 当链路已有帧但测量尚未可信时，UI 状态行为 `MEAS`，主电压/电流/功率显示 unavailable，而不是把全零 FastStatus 当作真实读数。
-- 风扇 PWM / Tach 控制虽然在引脚与协议层预留了钩子，但当前固件尚未实现相应驱动与控制逻辑。
+- 风扇 PWM 控制已经由 ESP32‑S3 本地 `fan_task` 驱动；`FAN_TACH` 输入与跨 MCU `thermal_derate` 联动仍保留为后续扩展。
 
 ### 联调与期望日志
 
@@ -133,7 +145,7 @@
 2. 在 ESP32‑S3 监视窗口中应看到：
    - `LoadLynx digital firmware version: ...`；
    - `LoadLynx digital alive; initializing local peripherals`（本地外设初始化）；
-   - `spawning uart link task (UHCI DMA)` 与 `SetPoint TX task starting`；
+   - `spawning uart link task (UHCI DMA)` 与 `SetMode TX task starting`；
    - 随着链路稳定，周期出现 `fast_status ok (count=...)` 与 `stats: fast_status_ok=...` 等行。
 3. 在 G431 RTT 日志中应看到：
    - `LoadLynx analog alive; init VREFBUF/ADC/DAC/UART (CC 0.5A, real telemetry)`；
@@ -144,7 +156,7 @@
    - 双端波特率/引脚是否一致（G431 使用 USART3 PC10/PC11；S3 使用 UART1 GPIO17/18）；
    - G431 侧是否正常启动并打印上述初始化/遥测日志。
 
-当前链路已实现 `HELLO`、`FAST_STATUS`、`SET_POINT + ACK`、`SoftReset`、`SetEnable` 与单块 `CalWrite` 的 v0 最小闭环，其余消息类型与带宽规划见 `docs/interfaces/uart-link.md`。
+当前链路已实现 `HELLO`、`FAST_STATUS`、`SET_MODE + ACK`、`PD_SINK_REQUEST + ACK/NACK`、`SoftReset`、`SetEnable`、`LimitProfile` 与 `CalWrite` 的当前控制闭环；`SET_POINT + ACK` 仅作为 analog 侧 legacy CC-only 兼容路径保留，其余消息类型与带宽规划见 `docs/interfaces/uart-link.md`。
 
 ## 5. STM32G431 模拟板：ADC 采样、CC 恒流与保护（当前实现）
 
@@ -182,9 +194,11 @@
 
 ### 5.3 使能 gating 与恒流控制（单/双通道调度）
 
-- 目标电流由数字板通过 `SetPoint` 下发，存入 `TARGET_I_LOCAL_MA`，单位 mA，语义为：
-  - **两通道合计目标电流** `I_total`（而非单通道电流）；
-  - 数字侧通过本地常量将该值 clamp 在 `[0, 5_000]` mA 区间，analog 侧再次按 `TARGET_I_MIN/MAX_MA` 与 `LimitProfile.max_i_ma` 做二次约束。
+- 当前主控制输入由数字板通过 `SetMode` snapshot 下发；analog 侧收到后会以其中的 `mode + target + limits` 作为 active control 真相源。
+- 对于 CC 模式，analog 最终仍落到总目标电流 `I_total`（单位 mA）的单/双通道调度：
+  - `SetMode.target_i_ma` 代表**两通道合计目标电流** `I_total`（而非单通道电流）；
+  - 数字侧会先做本地 clamp，analog 侧再按 `TARGET_I_MIN/MAX_MA` 与 `LimitProfile.max_i_ma` 做二次约束。
+- `TARGET_I_LOCAL_MA` 仍保留为 legacy `SetPoint` 兼容路径的承载原子量：仅在 analog 尚未见过首个合法 `SetMode` 时，`SetPoint` 才会更新它并驱动 CC-only 控制；一旦 `SetMode` 激活，该路径就只保留 ACK/兼容价值。
 - 有效出力条件为：
 
   ```text
@@ -256,7 +270,7 @@
     2. 将目标电流与 DAC 输出清零，清除 `FAULT_FLAGS`；
     3. 稍作延时后重新拉高 `LOAD_EN_*` 以允许重新上电；
     4. 重发一次 `HELLO`，供数字侧确认版本并重新握手；
-    5. 等待新的 `SetEnable(true)` 与 `SetPoint` 重新建立闭环。
+    5. 等待新的 `SetEnable(true)`、`LimitProfile` 与 `SetMode` snapshot 重新建立主控制闭环；legacy `SetPoint` 仅在未激活 `SetMode` 的兼容路径上才会参与恢复。
 
 ### 5.5 历史 Bring‑up 规划（简述）
 

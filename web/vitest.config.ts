@@ -11,6 +11,9 @@ const dirname = path.dirname(fileURLToPath(import.meta.url));
 export default mergeConfig(
   createViteConfig(),
   defineConfig({
+    optimizeDeps: {
+      include: ["@storybook/react-vite"],
+    },
     test: {
       projects: [
         {
@@ -37,7 +40,6 @@ export default mergeConfig(
               headless: true,
               instances: [{ browser: "chromium" }],
             },
-            setupFiles: ["./.storybook/vitest.setup.ts"],
           },
         },
       ],

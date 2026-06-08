@@ -7,6 +7,8 @@ import {
   TAB_ID,
 } from "./client-core.ts";
 import {
+  type DevdIdentityPayload,
+  type DevdStatusPayload,
   mockApplyPreset,
   mockDebugSetUvLatched,
   mockGetCc,
@@ -24,16 +26,41 @@ import {
   normalizeDevdStatus,
 } from "./client-mock.ts";
 import type {
+  ApplyPresetRequest,
   CcControlView,
   CcUpdateRequest,
+  ControlUpdateRequest,
   ControlView,
-  FastStatusJson,
+  FastStatusResponse,
   FastStatusView,
   Identity,
   PdUpdateRequest,
   PdView,
   Preset,
+  PresetsResponse,
+  SoftResetReason,
+  SoftResetRequest,
+  SoftResetResponse,
 } from "./types.ts";
+
+function toFastStatusView(payload: FastStatusResponse): FastStatusView {
+  return {
+    raw: payload.status,
+    link_up: payload.link_up,
+    hello_seen: payload.hello_seen,
+    analog_state: payload.analog_state,
+    fault_flags_decoded: payload.fault_flags_decoded,
+    state_flags_decoded: payload.state_flags_decoded ?? [],
+  };
+}
+
+function makeApplyPresetRequest(preset_id: number): ApplyPresetRequest {
+  return { preset_id };
+}
+
+function makeSoftResetRequest(reason: SoftResetReason): SoftResetRequest {
+  return { reason };
+}
 
 export async function getIdentity(baseUrl: string): Promise<Identity> {
   if (isMockBaseUrl(baseUrl)) {
@@ -41,12 +68,13 @@ export async function getIdentity(baseUrl: string): Promise<Identity> {
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
     try {
-      const payload = await httpJsonQueued<
-        Partial<Identity> & { firmware_version?: unknown }
-      >(baseUrl, "/api/v1/identity");
+      const payload = await httpJsonQueued<DevdIdentityPayload>(
+        baseUrl,
+        "/api/v1/identity",
+      );
       return normalizeDevdIdentity(baseUrl, payload);
     } catch {
-      const status = await httpJsonQueued<{ status: Partial<FastStatusJson> }>(
+      const status = await httpJsonQueued<DevdStatusPayload>(
         baseUrl,
         "/api/v1/status",
       );
@@ -64,41 +92,18 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
     return mockGetStatus(baseUrl);
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
-    const payload = await httpJsonQueued<{
-      status: Partial<FastStatusJson>;
-      link_up?: boolean;
-      hello_seen?: boolean;
-      analog_state?: FastStatusView["analog_state"];
-      fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
-      control?: {
-        mode?: string;
-        output_enabled?: boolean;
-        target_p_mw?: number;
-      };
-    }>(baseUrl, "/api/v1/status");
+    const payload = await httpJsonQueued<DevdStatusPayload>(
+      baseUrl,
+      "/api/v1/status",
+    );
     return normalizeDevdStatus(payload);
   }
 
-  interface FastStatusHttpResponse {
-    status: FastStatusJson;
-    link_up: boolean;
-    hello_seen: boolean;
-    analog_state: FastStatusView["analog_state"];
-    fault_flags_decoded: FastStatusView["fault_flags_decoded"];
-  }
-
-  const payload = await httpJsonQueued<FastStatusHttpResponse>(
+  const payload = await httpJsonQueued<FastStatusResponse>(
     baseUrl,
     "/api/v1/status",
   );
-
-  return {
-    raw: payload.status,
-    link_up: payload.link_up,
-    hello_seen: payload.hello_seen,
-    analog_state: payload.analog_state,
-    fault_flags_decoded: payload.fault_flags_decoded,
-  };
+  return toFastStatusView(payload);
 }
 
 export function subscribeStatusStream(
@@ -167,25 +172,11 @@ export function subscribeStatusStream(
 
   const parseAndEmit = (payload: string) => {
     try {
-      const parsed = JSON.parse(payload) as
-        | FastStatusView
-        | {
-            status: FastStatusJson;
-            link_up: boolean;
-            hello_seen: boolean;
-            analog_state: FastStatusView["analog_state"];
-            fault_flags_decoded: FastStatusView["fault_flags_decoded"];
-          };
+      const parsed = JSON.parse(payload) as FastStatusView | FastStatusResponse;
 
       const view: FastStatusView = isFastStatusView(parsed)
         ? parsed
-        : {
-            raw: parsed.status,
-            link_up: parsed.link_up,
-            hello_seen: parsed.hello_seen,
-            analog_state: parsed.analog_state,
-            fault_flags_decoded: parsed.fault_flags_decoded ?? [],
-          };
+        : toFastStatusView(parsed);
 
       emitMessage(view);
     } catch (error) {
@@ -375,7 +366,7 @@ export async function getPresets(baseUrl: string): Promise<Preset[]> {
   if (isMockBaseUrl(baseUrl)) {
     return (await mockGetPresets(baseUrl)).presets;
   }
-  const payload = await httpJsonQueued<{ presets: Preset[] }>(
+  const payload = await httpJsonQueued<PresetsResponse>(
     baseUrl,
     "/api/v1/presets",
   );
@@ -405,9 +396,10 @@ export async function applyPreset(
   if (isMockBaseUrl(baseUrl)) {
     return mockApplyPreset(baseUrl, preset_id);
   }
+  const payload = makeApplyPresetRequest(preset_id);
   return httpJsonQueued<ControlView>(baseUrl, "/api/v1/presets/apply", {
     method: "POST",
-    body: JSON.stringify({ preset_id }),
+    body: JSON.stringify(payload),
     headers: {
       "Content-Type": "text/plain",
     },
@@ -423,7 +415,7 @@ export async function getControl(baseUrl: string): Promise<ControlView> {
 
 export async function updateControl(
   baseUrl: string,
-  payload: { output_enabled: boolean },
+  payload: ControlUpdateRequest,
 ): Promise<ControlView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockUpdateControl(baseUrl, payload);
@@ -451,24 +443,17 @@ export async function __debugSetUvLatched(
 
 export async function postSoftReset(
   baseUrl: string,
-  reason:
-    | "manual"
-    | "firmware_update"
-    | "ui_recover"
-    | "link_recover" = "manual",
-): Promise<{ accepted: boolean; reason: string }> {
+  reason: SoftResetReason = "manual",
+): Promise<SoftResetResponse> {
   if (isMockBaseUrl(baseUrl)) {
     return mockSoftReset(baseUrl, reason);
   }
-  return httpJsonQueued<{ accepted: boolean; reason: string }>(
-    baseUrl,
-    "/api/v1/soft-reset",
-    {
-      method: "POST",
-      body: JSON.stringify({ reason }),
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-      },
+  const payload = makeSoftResetRequest(reason);
+  return httpJsonQueued<SoftResetResponse>(baseUrl, "/api/v1/soft-reset", {
+    method: "POST",
+    body: JSON.stringify(payload),
+    headers: {
+      "Content-Type": "application/json; charset=utf-8",
     },
-  );
+  });
 }

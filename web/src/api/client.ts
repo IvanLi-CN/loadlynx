@@ -7,6 +7,8 @@ export {
   getSupportedBackupSections,
   getWifiCredentials,
   getWifiStatus,
+  makeManualSoftResetRequest,
+  makeWifiSetRequest,
   postWifiConfig,
   restoreDeviceBackup,
   validateBackupEnvelope,

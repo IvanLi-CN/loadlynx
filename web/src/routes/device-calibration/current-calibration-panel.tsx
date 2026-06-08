@@ -20,25 +20,37 @@ import type {
   FastStatusView,
 } from "../../api/types.ts";
 import { piecewiseLinearDecimal } from "../../calibration/piecewise.ts";
-import {
-  validateAndNormalizeCurrentPoints,
-  validateAndNormalizeVoltagePoints,
-} from "../../calibration/validation.ts";
+import { validateAndNormalizeCurrentPoints } from "../../calibration/validation.ts";
 import { ConfirmDialog } from "../../components/common/confirm-dialog.tsx";
+import {
+  CalibrationDeviceWriteButtons,
+  CalibrationDraftActionsPanel,
+  CalibrationHardwareIoPanel,
+} from "./calibration-action-panels.tsx";
+import {
+  getCopyCh1ToCh2ConfirmConfig,
+  getResetCurrentDeviceConfirmConfig,
+  getResetDraftConfirmConfig,
+} from "./calibration-confirm.ts";
+import { CalibrationDeviceViewPanel } from "./calibration-device-view-panel.tsx";
+import { CalibrationViewTabs } from "./calibration-view-tabs.tsx";
+import {
+  runCalibrationReset,
+  runCurrentCalibrationWrite,
+} from "./device-write.ts";
+import { applyCalibrationPreview } from "./preview-profile.ts";
 import {
   type CurrentInputUnit,
   formatMaAsA,
   formatUaAsA,
   formatUaToUnit,
-  getCalibrationCurrentOptionsStorageKey,
   isDraftEmpty,
   parseCurrentInputToUa,
-  parseNonNegativeDecimalToScaledInt,
   type RefetchProfile,
-  retryDeviceCall,
   type UndoAction,
   type WithStatusStreamPaused,
 } from "./shared.ts";
+import { useCalibrationStore } from "./store-context.tsx";
 
 export interface CurrentCalibrationPanelProps {
   curve: "current_ch1" | "current_ch2";
@@ -91,6 +103,7 @@ export function CurrentCalibrationPanel({
   onRefetchProfile,
   isOffline,
 }: CurrentCalibrationPanelProps) {
+  const calibrationStore = useCalibrationStore();
   const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
   const [confirmKind, setConfirmKind] = useState<
     "reset_draft" | "reset_device_current" | "copy_ch1_to_ch2" | null
@@ -134,64 +147,20 @@ export function CurrentCalibrationPanel({
     if (typeof window === "undefined") return;
     setCurrentOptionsLoaded(false);
 
-    const readOptionsV2 = (
-      curveKey: "current_ch1" | "current_ch2",
-    ): { baselineUa: number | null; unit: CurrentInputUnit | null } => {
-      const key = getCalibrationCurrentOptionsStorageKey(
-        deviceId,
-        baseUrl,
-        curveKey,
-      );
-      const raw = window.localStorage.getItem(key);
-      if (!raw) return { baselineUa: null, unit: null };
-      const parsed = JSON.parse(raw) as unknown;
-      if (typeof parsed !== "object" || parsed === null) {
-        return { baselineUa: null, unit: null };
-      }
-      const obj = parsed as Record<string, unknown>;
-      const baselineRaw = obj.baseline_ua;
-      const unitRaw = obj.unit;
-      const baselineUa =
-        typeof baselineRaw === "number" &&
-        Number.isFinite(baselineRaw) &&
-        Number.isInteger(baselineRaw) &&
-        baselineRaw >= 0
-          ? baselineRaw
-          : null;
-      const unit =
-        unitRaw === "A" || unitRaw === "mA"
-          ? (unitRaw as CurrentInputUnit)
-          : null;
-      return { baselineUa, unit };
-    };
-
-    const readBaselineV1 = (
-      curveKey: "current_ch1" | "current_ch2",
-    ): number | null => {
-      const keyV1 = getCalibrationCurrentOptionsStorageKey(
-        deviceId,
-        baseUrl,
-        curveKey,
-        1,
-      );
-      const raw = window.localStorage.getItem(keyV1);
-      if (!raw) return null;
-      const parsed = JSON.parse(raw) as unknown;
-      if (typeof parsed !== "object" || parsed === null) return null;
-      const obj = parsed as Record<string, unknown>;
-      return typeof obj.baseline_a === "string"
-        ? parseNonNegativeDecimalToScaledInt(obj.baseline_a, 6)
-        : null;
-    };
-
     try {
-      const ch1 = readOptionsV2("current_ch1");
-      const ch2 = readOptionsV2("current_ch2");
+      const ch1 = calibrationStore.getCurrentOptions(
+        deviceId,
+        baseUrl,
+        "current_ch1",
+      );
+      const ch2 = calibrationStore.getCurrentOptions(
+        deviceId,
+        baseUrl,
+        "current_ch2",
+      );
       const unit = ch1.unit ?? ch2.unit ?? "A";
-      const baselineUaCh1 =
-        ch1.baselineUa ?? readBaselineV1("current_ch1") ?? 0;
-      const baselineUaCh2 =
-        ch2.baselineUa ?? readBaselineV1("current_ch2") ?? 0;
+      const baselineUaCh1 = ch1.baselineUa ?? 0;
+      const baselineUaCh2 = ch2.baselineUa ?? 0;
 
       setInputUnit(unit);
       setBaselineUaByCurve({
@@ -208,36 +177,28 @@ export function CurrentCalibrationPanel({
     } finally {
       setCurrentOptionsLoaded(true);
     }
-  }, [baseUrl, deviceId]);
+  }, [baseUrl, calibrationStore, deviceId]);
 
   useEffect(() => {
     if (typeof window === "undefined" || !currentOptionsLoaded) return;
     try {
       for (const curveKey of ["current_ch1", "current_ch2"] as const) {
-        const key = getCalibrationCurrentOptionsStorageKey(
-          deviceId,
-          baseUrl,
-          curveKey,
-        );
-        const keyV1 = getCalibrationCurrentOptionsStorageKey(
-          deviceId,
-          baseUrl,
-          curveKey,
-          1,
-        );
-        window.localStorage.setItem(
-          key,
-          JSON.stringify({
-            baseline_ua: baselineUaByCurve[curveKey],
-            unit: inputUnit,
-          }),
-        );
-        window.localStorage.removeItem(keyV1);
+        calibrationStore.setCurrentOptions(deviceId, baseUrl, curveKey, {
+          baselineUa: baselineUaByCurve[curveKey],
+          unit: inputUnit,
+        });
       }
     } catch {
       // ignore
     }
-  }, [baselineUaByCurve, currentOptionsLoaded, baseUrl, deviceId, inputUnit]);
+  }, [
+    baselineUaByCurve,
+    currentOptionsLoaded,
+    baseUrl,
+    calibrationStore,
+    deviceId,
+    inputUnit,
+  ]);
 
   const inputUnitStep = inputUnit === "A" ? "0.000001" : "0.001";
   const meterAdjustedUa =
@@ -453,99 +414,76 @@ export function CurrentCalibrationPanel({
   });
 
   const applyToDeviceMutation = useMutation({
-    mutationFn: async () => {
-      await withStatusStreamPaused(async () => {
-        if (draftPoints.length === 0) {
-          throw new Error("Draft is empty. Nothing to sync.");
-        }
-        const validated = validateAndNormalizeCurrentPoints(curve, draftPoints);
-        if (validated.issues.length > 0) {
-          onAlert(
-            "Calibration data cleanup (Apply)",
-            "Draft contains duplicate/conflicting samples. Apply will use a cleaned curve and may drop/merge points.",
-            validated.issues.map((issue) => `${issue.path}: ${issue.message}`),
-          );
-        }
-        if (validated.normalized.length === 0) {
-          throw new Error("No valid points after cleanup. Nothing to apply.");
-        }
-        await retryDeviceCall(() =>
+    mutationFn: async () =>
+      runCurrentCalibrationWrite({
+        action: "Apply",
+        baseUrl,
+        curve,
+        draftPoints,
+        onAlert,
+        postPoints: async ({ baseUrl, curve, points }) =>
           postCalibrationApply(baseUrl, {
             kind: curve,
-            points: validated.normalized,
+            points,
           }),
-        );
-      });
-    },
+        withStatusStreamPaused,
+      }),
     onSuccess: async () => {
       await onRefetchProfile();
     },
   });
 
   const commitToDeviceMutation = useMutation({
-    mutationFn: async () => {
-      await withStatusStreamPaused(async () => {
-        if (draftPoints.length === 0) {
-          throw new Error("Draft is empty. Nothing to sync.");
-        }
-        const validated = validateAndNormalizeCurrentPoints(curve, draftPoints);
-        if (validated.issues.length > 0) {
-          onAlert(
-            "Calibration data cleanup (Commit)",
-            "Draft contains duplicate/conflicting samples. Commit will use a cleaned curve and may drop/merge points.",
-            validated.issues.map((issue) => `${issue.path}: ${issue.message}`),
-          );
-        }
-        if (validated.normalized.length === 0) {
-          throw new Error("No valid points after cleanup. Nothing to commit.");
-        }
-        await retryDeviceCall(() =>
+    mutationFn: async () =>
+      runCurrentCalibrationWrite({
+        action: "Commit",
+        baseUrl,
+        curve,
+        draftPoints,
+        onAlert,
+        postPoints: async ({ baseUrl, curve, points }) =>
           postCalibrationCommit(baseUrl, {
             kind: curve,
-            points: validated.normalized,
+            points,
           }),
-        );
-      });
-    },
+        withStatusStreamPaused,
+      }),
     onSuccess: async () => {
       await onRefetchProfile();
     },
   });
 
   const resetDeviceCurrentMutation = useMutation({
-    mutationFn: async () => {
-      await withStatusStreamPaused(async () => {
-        await retryDeviceCall(() =>
-          postCalibrationReset(baseUrl, { kind: curve }),
-        );
-      });
-    },
+    mutationFn: async () =>
+      runCalibrationReset({
+        baseUrl,
+        kinds: [curve],
+        resetKind: async ({ baseUrl, kind }) =>
+          postCalibrationReset(baseUrl, { kind }),
+        withStatusStreamPaused,
+      }),
     onSuccess: async () => {
       await onRefetchProfile();
       onResetDraftToEmpty("Device reset to defaults. Draft cleared.");
     },
   });
 
+  const resetDraftConfirm = getResetDraftConfirmConfig(
+    isDraftEmpty(draftProfile),
+  );
+  const copyCh1ToCh2Confirm = getCopyCh1ToCh2ConfirmConfig(copyCh1SourceLabel);
+  const resetDeviceConfirm = getResetCurrentDeviceConfirmConfig(
+    curve,
+    channelLabel,
+  );
+
   return (
     <>
-      <div role="tablist" className="ll-tabs mt-4">
-        <button
-          type="button"
-          role="tab"
-          className={`ll-tab ${viewTab === "draft" ? "ll-tab-active" : ""}`}
-          onClick={() => setViewTab("draft")}
-        >
-          本地草稿
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`ll-tab ${viewTab === "device" ? "ll-tab-active" : ""}`}
-          onClick={() => setViewTab("device")}
-        >
-          设备数据
-        </button>
-      </div>
+      <CalibrationViewTabs
+        activeView={viewTab}
+        className="ll-tabs mt-4"
+        onSelectView={setViewTab}
+      />
 
       {viewTab === "draft" ? (
         <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
@@ -559,192 +497,88 @@ export function CurrentCalibrationPanel({
               </h3>
             </div>
 
-            <div className="ll-panel bg-base-200/40 border border-base-200">
-              <div className="ll-panel-body py-4 gap-3">
-                <div className="flex items-start justify-between gap-3">
-                  <h4 className="font-bold text-sm">仅本地（不读写设备）</h4>
-                  <div className="ll-badge ll-badge-neutral whitespace-nowrap shrink-0">
-                    不读写设备
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
+            <CalibrationDraftActionsPanel
+              disableApplyPreview={isDraftEmpty(draftProfile)}
+              disableExport={isDraftEmpty(draftProfile)}
+              disableResetDraft={isDraftEmpty(draftProfile)}
+              extraActions={
+                curve === "current_ch2" ? (
                   <button
                     type="button"
                     className="ll-button ll-button-sm ll-button-outline"
-                    onClick={() => {
-                      const vLocal = validateAndNormalizeVoltagePoints(
-                        "v_local",
-                        draftProfile.v_local_points,
-                      );
-                      const vRemote = validateAndNormalizeVoltagePoints(
-                        "v_remote",
-                        draftProfile.v_remote_points,
-                      );
-                      const c1 = validateAndNormalizeCurrentPoints(
-                        "current_ch1",
-                        draftProfile.current_ch1_points,
-                      );
-                      const c2 = validateAndNormalizeCurrentPoints(
-                        "current_ch2",
-                        draftProfile.current_ch2_points,
-                      );
-                      const issues = [
-                        ...vLocal.issues,
-                        ...vRemote.issues,
-                        ...c1.issues,
-                        ...c2.issues,
-                      ];
-                      if (issues.length > 0) {
-                        onAlert(
-                          "Calibration data cleanup (Preview)",
-                          "Draft contains duplicate/conflicting samples. Preview will use a cleaned curve and may drop/merge points.",
-                          issues.map(
-                            (issue) => `${issue.path}: ${issue.message}`,
-                          ),
-                        );
-                      }
-                      onSetPreviewProfile({
-                        active: draftProfile.active,
-                        v_local_points: vLocal.normalized,
-                        v_remote_points: vRemote.normalized,
-                        current_ch1_points: c1.normalized,
-                        current_ch2_points: c2.normalized,
-                      });
-                      onSetPreviewAppliedAt(Date.now());
-                    }}
-                    disabled={isDraftEmpty(draftProfile)}
+                    onClick={handleCopyCh1ToCh2}
+                    disabled={copyCh1SourcePoints.length === 0}
                   >
-                    Apply Preview
+                    Copy CH1 → CH2
                   </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={() => setConfirmKind("reset_draft")}
-                    disabled={isDraftEmpty(draftProfile)}
-                  >
-                    Reset Draft
-                  </button>
-                  {curve === "current_ch2" ? (
+                ) : null
+              }
+              importInputId={`calibration-import-${deviceId}-current`}
+              onApplyPreview={() =>
+                applyCalibrationPreview({
+                  draftProfile,
+                  onAlert,
+                  onSetPreviewAppliedAt: (value) =>
+                    onSetPreviewAppliedAt(value),
+                  onSetPreviewProfile: (value) => onSetPreviewProfile(value),
+                })
+              }
+              onExportDraft={onExportDraft}
+              onImportDraftFile={onImportDraftFile}
+              onResetDraft={() => setConfirmKind("reset_draft")}
+            />
+
+            <CalibrationHardwareIoPanel
+              actionButtons={
+                <CalibrationDeviceWriteButtons
+                  applyPending={applyToDeviceMutation.isPending}
+                  commitPending={commitToDeviceMutation.isPending}
+                  disableApply={!canWriteToDevice}
+                  disableCommit={!canWriteToDevice}
+                  onApply={() => applyToDeviceMutation.mutate()}
+                  onCommit={() => commitToDeviceMutation.mutate()}
+                />
+              }
+              disableReadDeviceToDraft={isOffline || readDeviceToDraftPending}
+              onReadDeviceToDraft={onReadDeviceToDraft}
+            >
+              <div className="ll-panel bg-base-200/40 border border-base-200">
+                <div className="ll-panel-body py-4 gap-3">
+                  <h4 className="font-bold text-sm">Output control (CC)</h4>
+                  <div className="flex gap-2 flex-wrap">
+                    {["500", "1000", "2000", "3000", "4000", "5000"].map(
+                      (value) => (
+                        <button
+                          key={value}
+                          type="button"
+                          className="ll-button ll-button-xs"
+                          onClick={() => setTargetIMa(value)}
+                        >
+                          {value === "500"
+                            ? "0.5A"
+                            : `${Number(value) / 1000}A`}
+                        </button>
+                      ),
+                    )}
+                    <input
+                      type="number"
+                      className="ll-input ll-input-sm w-28"
+                      value={targetIMa}
+                      onChange={(event) => setTargetIMa(event.target.value)}
+                      disabled={isOffline}
+                    />
                     <button
                       type="button"
-                      className="ll-button ll-button-sm ll-button-outline"
-                      onClick={handleCopyCh1ToCh2}
-                      disabled={copyCh1SourcePoints.length === 0}
+                      className="ll-button ll-button-sm ll-button-primary"
+                      disabled={isOffline}
+                      onClick={handleSetOutput}
                     >
-                      Copy CH1 → CH2
+                      Set Output
                     </button>
-                  ) : null}
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={onExportDraft}
-                    disabled={isDraftEmpty(draftProfile)}
-                  >
-                    Export
-                  </button>
-                  <label
-                    htmlFor={`calibration-import-${deviceId}-current`}
-                    className="ll-button ll-button-sm ll-button-outline"
-                  >
-                    Import
-                  </label>
-                  <input
-                    id={`calibration-import-${deviceId}-current`}
-                    type="file"
-                    accept="application/json"
-                    className="hidden"
-                    onChange={(event) => {
-                      const file = event.currentTarget.files?.[0] ?? null;
-                      void onImportDraftFile(file);
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                </div>
-              </div>
-            </div>
-
-            <div className="ll-panel bg-base-200/40 border border-base-200">
-              <div className="ll-panel-body py-4 gap-3">
-                <div className="flex items-start justify-between gap-3">
-                  <h4 className="font-bold text-sm">硬件 I/O</h4>
-                  <div className="flex items-center gap-2">
-                    <div className="ll-badge ll-badge-info whitespace-nowrap">
-                      读设备
-                    </div>
-                    <div className="ll-badge ll-badge-warning whitespace-nowrap">
-                      写设备
-                    </div>
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={onReadDeviceToDraft}
-                    disabled={isOffline || readDeviceToDraftPending}
-                  >
-                    Read Device → Draft
-                  </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={() => applyToDeviceMutation.mutate()}
-                    disabled={
-                      !canWriteToDevice || applyToDeviceMutation.isPending
-                    }
-                  >
-                    Apply
-                  </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-secondary"
-                    onClick={() => commitToDeviceMutation.mutate()}
-                    disabled={
-                      !canWriteToDevice || commitToDeviceMutation.isPending
-                    }
-                  >
-                    Commit
-                  </button>
-                </div>
-
-                <div className="ll-panel bg-base-200/40 border border-base-200">
-                  <div className="ll-panel-body py-4 gap-3">
-                    <h4 className="font-bold text-sm">Output control (CC)</h4>
-                    <div className="flex gap-2 flex-wrap">
-                      {["500", "1000", "2000", "3000", "4000", "5000"].map(
-                        (value) => (
-                          <button
-                            key={value}
-                            type="button"
-                            className="ll-button ll-button-xs"
-                            onClick={() => setTargetIMa(value)}
-                          >
-                            {value === "500"
-                              ? "0.5A"
-                              : `${Number(value) / 1000}A`}
-                          </button>
-                        ),
-                      )}
-                      <input
-                        type="number"
-                        className="ll-input ll-input-sm w-28"
-                        value={targetIMa}
-                        onChange={(event) => setTargetIMa(event.target.value)}
-                        disabled={isOffline}
-                      />
-                      <button
-                        type="button"
-                        className="ll-button ll-button-sm ll-button-primary"
-                        disabled={isOffline}
-                        onClick={handleSetOutput}
-                      >
-                        Set Output
-                      </button>
-                    </div>
                   </div>
                 </div>
               </div>
-            </div>
+            </CalibrationHardwareIoPanel>
 
             <div className="divider my-0"></div>
 
@@ -944,132 +778,56 @@ export function CurrentCalibrationPanel({
           </div>
         </div>
       ) : (
-        <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
-          <div className="ll-panel-body gap-4">
-            <div className="flex items-start justify-between gap-3">
-              <h3 className="ll-panel-title flex flex-col items-start leading-tight">
-                <span>设备数据</span>
-                <span className="text-sm font-normal text-base-content/60">
-                  Hardware
-                </span>
-              </h3>
-              <div className="flex items-center gap-2">
-                <div className="ll-badge ll-badge-info whitespace-nowrap">
-                  读设备
-                </div>
-                <div className="ll-badge ll-badge-warning whitespace-nowrap">
-                  写设备
-                </div>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="ll-button ll-button-sm ll-button-outline"
-                onClick={() => readMutation.mutate()}
-                disabled={readMutation.isPending}
-              >
-                Read
-              </button>
-              <button
-                type="button"
-                className="ll-button ll-button-sm ll-button-danger"
-                onClick={() => setConfirmKind("reset_device_current")}
-                disabled={isOffline || resetDeviceCurrentMutation.isPending}
-              >
-                Reset
-              </button>
-            </div>
-
-            <div className="divider my-0"></div>
-
-            <h4 className="font-bold text-sm">
-              {deviceProfile?.active.source === "factory-default"
-                ? "Device defaults (factory reference, read-only)"
-                : "Device profile (read-only)"}
-            </h4>
-            <div className="overflow-x-auto max-h-64">
-              <table className="ll-table ll-table-xs">
-                <thead>
-                  <tr>
-                    <th>Raw</th>
-                    <th>DAC</th>
-                    <th>Value ({inputUnit})</th>
+        <CalibrationDeviceViewPanel
+          deviceProfileSource={deviceProfile?.active.source}
+          onReadDeviceProfile={() => readMutation.mutate()}
+          onRequestReset={() => setConfirmKind("reset_device_current")}
+          readPending={readMutation.isPending}
+          resetDisabled={isOffline || resetDeviceCurrentMutation.isPending}
+        >
+          <div className="overflow-x-auto max-h-64">
+            <table className="ll-table ll-table-xs">
+              <thead>
+                <tr>
+                  <th>Raw</th>
+                  <th>DAC</th>
+                  <th>Value ({inputUnit})</th>
+                </tr>
+              </thead>
+              <tbody>
+                {devicePoints.map((point) => (
+                  <tr key={`${point.raw}-${point.ua}-${point.dac_code}`}>
+                    <td>{point.raw}</td>
+                    <td>{point.dac_code ?? "--"}</td>
+                    <td>{formatUaToUnit(point.ua, inputUnit)}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {devicePoints.map((point) => (
-                    <tr key={`${point.raw}-${point.ua}-${point.dac_code}`}>
-                      <td>{point.raw}</td>
-                      <td>{point.dac_code ?? "--"}</td>
-                      <td>{formatUaToUnit(point.ua, inputUnit)}</td>
-                    </tr>
-                  ))}
-                  {devicePoints.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={3}
-                        className="text-center text-base-content/50"
-                      >
-                        No device profile loaded.
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
+                ))}
+                {devicePoints.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={3}
+                      className="text-center text-base-content/50"
+                    >
+                      No device profile loaded.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
           </div>
-        </div>
+        </CalibrationDeviceViewPanel>
       )}
 
       <ConfirmDialog
         open={confirmKind !== null}
-        title={
-          confirmKind === "reset_draft"
-            ? "Reset Draft (Web only)"
-            : confirmKind === "copy_ch1_to_ch2"
-              ? "Copy CH1 → CH2 (Draft)"
-              : `Reset Device Calibration (Current ${channelLabel})`
-        }
-        body={
-          confirmKind === "reset_draft"
-            ? "This clears the local draft (user calibration points). The device is unchanged."
-            : confirmKind === "copy_ch1_to_ch2"
-              ? "This overwrites CH2 draft points with CH1 calibration points. The device is unchanged."
-              : "This resets current calibration on the device."
-        }
-        details={
-          confirmKind === "reset_draft"
-            ? [
-                "Affects: v_local, v_remote, current_ch1, current_ch2 (local draft only).",
-                "Writes device: No.",
-                "This clears all local draft points (export first if needed).",
-              ]
-            : confirmKind === "copy_ch1_to_ch2"
-              ? [
-                  "Affects: current_ch2 (local draft only).",
-                  `Source: current_ch1 (${copyCh1SourceLabel}).`,
-                  "Writes device: No.",
-                  "Irreversible locally: Yes (export draft first if needed).",
-                ]
-              : [
-                  `Affects: ${curve}.`,
-                  "Writes device: Yes.",
-                  "Irreversible: Yes (re-calibrate + commit to recover).",
-                ]
-        }
-        confirmLabel={
-          confirmKind === "reset_draft"
-            ? "Reset Draft"
-            : confirmKind === "copy_ch1_to_ch2"
-              ? "Copy"
-              : "Reset"
-        }
-        destructive={confirmKind === "reset_device_current"}
+        {...(confirmKind === "reset_draft"
+          ? resetDraftConfirm
+          : confirmKind === "copy_ch1_to_ch2"
+            ? copyCh1ToCh2Confirm
+            : resetDeviceConfirm)}
         confirmDisabled={
           confirmKind === "reset_draft"
-            ? isDraftEmpty(draftProfile)
+            ? resetDraftConfirm.confirmDisabled
             : confirmKind === "copy_ch1_to_ch2"
               ? copyCh1SourcePoints.length === 0
               : resetDeviceCurrentMutation.isPending || isOffline

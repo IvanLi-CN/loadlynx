@@ -1,34 +1,46 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { useState } from "react";
-import type { HttpApiError } from "../api/client.ts";
 import {
   BACKUP_SECTION_KEYS,
   deleteWifiConfig,
   exportDeviceBackup,
   exportDiagnostics,
   getBackupUnknownWarnings,
-  getIdentity,
-  getPd,
   getSupportedBackupSections,
-  getWifiStatus,
   isDevdCompatBaseUrl,
   isHttpApiError,
   isMockBaseUrl,
+  makeManualSoftResetRequest,
+  makeWifiSetRequest,
   postSoftReset,
   postWifiConfig,
   restoreDeviceBackup,
   supportsBackupWifiCredentials,
-  validateBackupEnvelope,
 } from "../api/client.ts";
 import type {
   BackupRestoreResult,
   BackupSectionKey,
-  Identity,
   LoadLynxBackup,
+  SoftResetRequest,
+  WifiSetRequest,
 } from "../api/types.ts";
 import { ConfirmDialog } from "../components/common/confirm-dialog.tsx";
 import { PageContainer } from "../components/layout/page-container.tsx";
+import { DEVICE_QUERY_PARTS } from "../devices/device-query-key.ts";
+import {
+  getDevicePdQueryOptions,
+  getDeviceWifiQueryOptions,
+  useDeviceIdentityByBaseUrl,
+} from "../devices/hooks.ts";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
+import { requireDeviceBaseUrl } from "../lib/device-base-url.ts";
+import { downloadJsonFile } from "../lib/download.ts";
+import {
+  formatHttpApiErrorSummary,
+  getNetworkErrorHint,
+  isLinkUnavailableError,
+} from "../lib/http-error.ts";
+import { parseBackupImportText } from "./device-settings/import-backup.ts";
 
 const BACKUP_SECTION_LABELS: Record<BackupSectionKey, string> = {
   presets: "Presets",
@@ -45,18 +57,6 @@ function toggleSection(
     return current.filter((entry) => entry !== section);
   }
   return [...current, section];
-}
-
-function downloadBackupJson(backup: LoadLynxBackup) {
-  const blob = new Blob([`${JSON.stringify(backup, null, 2)}\n`], {
-    type: "application/json",
-  });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = `loadlynx-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`;
-  anchor.click();
-  URL.revokeObjectURL(url);
 }
 
 export function DeviceSettingsRoute() {
@@ -80,61 +80,44 @@ export function DeviceSettingsRoute() {
   const [backupRestoreSelection, setBackupRestoreSelection] = useState<
     BackupSectionKey[]
   >([]);
+  const identityQuery = useDeviceIdentityByBaseUrl(deviceId, baseUrl);
 
-  const identityQuery = useQuery<Identity, HttpApiError>({
-    queryKey: ["device", deviceId, "identity"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getIdentity(baseUrl);
-    },
-    enabled: Boolean(baseUrl),
-  });
-
-  const wifiQuery = useQuery({
-    queryKey: ["device", deviceId, "wifi"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getWifiStatus(baseUrl);
-    },
-    enabled: Boolean(baseUrl),
-  });
+  const wifiQuery = useQuery(
+    getDeviceWifiQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl),
+    }),
+  );
 
   const topError = (() => {
     const err = identityQuery.error;
     if (!err || !isHttpApiError(err)) return null;
 
-    const code = err.code ?? "HTTP_ERROR";
-    const summary = `${code} — ${err.message}`;
+    const summary = formatHttpApiErrorSummary(err);
 
-    if (err.status === 0 && code === "NETWORK_ERROR") {
-      return { summary, hint: "Check device connectivity." } as const;
+    if (err.status === 0 && err.code === "NETWORK_ERROR") {
+      return { summary, hint: getNetworkErrorHint(baseUrl) } as const;
     }
     return { summary, hint: null } as const;
   })();
 
   const softResetMutation = useMutation({
     mutationFn: async () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return postSoftReset(baseUrl, "manual");
+      const requiredBaseUrl = requireDeviceBaseUrl(baseUrl);
+      const payload: SoftResetRequest = makeManualSoftResetRequest();
+      return postSoftReset(requiredBaseUrl, payload.reason);
     },
   });
 
   const wifiMutation = useMutation({
     mutationFn: async () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return postWifiConfig(baseUrl, {
-        ssid: wifiSsid.trim(),
-        psk: wifiPsk,
-        wait: false,
-      });
+      const requiredBaseUrl = requireDeviceBaseUrl(baseUrl);
+      const payload: WifiSetRequest = makeWifiSetRequest(
+        wifiSsid.trim(),
+        wifiPsk,
+      );
+      return postWifiConfig(requiredBaseUrl, payload);
     },
     onSuccess: () => {
       setWifiPsk("");
@@ -144,10 +127,7 @@ export function DeviceSettingsRoute() {
 
   const wifiClearMutation = useMutation({
     mutationFn: async () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return deleteWifiConfig(baseUrl);
+      return deleteWifiConfig(requireDeviceBaseUrl(baseUrl));
     },
     onSuccess: () => {
       void wifiQuery.refetch();
@@ -156,24 +136,21 @@ export function DeviceSettingsRoute() {
 
   const diagnosticsMutation = useMutation({
     mutationFn: async () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return exportDiagnostics(baseUrl);
+      return exportDiagnostics(requireDeviceBaseUrl(baseUrl));
     },
   });
 
-  const backupPdQuery = useQuery({
-    queryKey: ["device", deviceId, "backup-pd"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getPd(baseUrl);
-    },
-    enabled: Boolean(baseUrl),
-    retry: false,
-  });
+  const backupPdQuery = useQuery(
+    getDevicePdQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl),
+      refetchInterval: false,
+      parts: DEVICE_QUERY_PARTS.backupPd,
+      retry: false,
+      retryDelay: 0,
+    }),
+  );
   const backupPdUnsupported = Boolean(
     backupPdQuery.error &&
       isHttpApiError(backupPdQuery.error) &&
@@ -190,25 +167,30 @@ export function DeviceSettingsRoute() {
 
   const backupExportMutation = useMutation({
     mutationFn: async () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return exportDeviceBackup(baseUrl, effectiveBackupExportSelection);
+      return exportDeviceBackup(
+        requireDeviceBaseUrl(baseUrl),
+        effectiveBackupExportSelection,
+      );
     },
     onSuccess: (backup) => {
-      downloadBackupJson(backup);
+      downloadJsonFile(
+        `loadlynx-backup-${new Date().toISOString().replace(/[:.]/g, "-")}.json`,
+        backup,
+      );
     },
   });
 
   const backupRestoreMutation = useMutation<BackupRestoreResult, Error, void>({
     mutationFn: async () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
+      const requiredBaseUrl = requireDeviceBaseUrl(baseUrl);
       if (!backupImport) {
         throw new Error("No backup file selected.");
       }
-      return restoreDeviceBackup(baseUrl, backupImport, backupRestoreSelection);
+      return restoreDeviceBackup(
+        requiredBaseUrl,
+        backupImport,
+        backupRestoreSelection,
+      );
     },
   });
 
@@ -216,13 +198,12 @@ export function DeviceSettingsRoute() {
     const err = softResetMutation.error;
     if (!err || !isHttpApiError(err)) return null;
 
-    const code = err.code ?? "HTTP_ERROR";
-    const summary = `Soft reset failed: ${code} — ${err.message}`;
+    const summary = `Soft reset failed: ${formatHttpApiErrorSummary(err)}`;
 
     let hint: string | null = null;
-    if (code === "NETWORK_ERROR") {
+    if (err.code === "NETWORK_ERROR") {
       hint = "Network error: check device network/IP.";
-    } else if (code === "LINK_DOWN" || code === "UNAVAILABLE") {
+    } else if (isLinkUnavailableError(err)) {
       hint = "Link is not ready; soft reset is temporarily unavailable.";
     }
 
@@ -295,17 +276,14 @@ export function DeviceSettingsRoute() {
     if (!file) {
       return;
     }
-    try {
-      const parsed = validateBackupEnvelope(JSON.parse(await file.text()));
-      const supported = getSupportedBackupSections(parsed);
-      setBackupImport(parsed);
+    const result = parseBackupImportText(await file.text());
+    if (result.ok) {
+      setBackupImport(result.backup);
       setBackupImportName(file.name);
-      setBackupRestoreSelection(supported);
-    } catch (error) {
-      setBackupImportError(
-        error instanceof Error ? error.message : "Invalid backup file.",
-      );
+      setBackupRestoreSelection(result.supportedSections);
+      return;
     }
+    setBackupImportError(result.error);
   };
 
   return (

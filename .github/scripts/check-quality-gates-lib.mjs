@@ -337,3 +337,151 @@ export async function validateWebToolingContracts({
 
   return failures;
 }
+
+export async function validateCurrentTruthDocs({
+  docs = [
+    {
+      label: "docs/interfaces/network-control.md",
+      path: new URL("../../docs/interfaces/network-control.md", import.meta.url),
+      requiredSnippets: [
+        "- `POST /api/v1/control`",
+        "- `GET /api/v1/presets`、`POST /api/v1/presets`（`PUT /api/v1/presets` 为兼容别名）、`POST /api/v1/presets/apply`",
+        "- `GET /api/v1/pd`、`POST /api/v1/pd`（`PUT /api/v1/pd` 为兼容别名）",
+        "- `GET /api/v1/diagnostics/export`（`GET /api/v1/diagnostics` 仍为兼容别名）",
+      ],
+      forbiddenSnippets: [
+        "SetPoint/LimitProfile/SoftReset/SetEnable 控制闭环",
+        "映射 `SetEnable.enable`，协调 `SetPoint` 发送与安全 gating。",
+        "- `PUT /api/v1/control`\n    - 更新统一控制真相源，例如输出开关、活动 preset 或 preset 内容。",
+        "- `GET/PUT /api/v1/presets`、`POST /api/v1/presets/apply`",
+        "- `GET/PUT /api/v1/pd`",
+      ],
+    },
+    {
+      label: "docs/interfaces/network-http-api.md",
+      path: new URL("../../docs/interfaces/network-http-api.md", import.meta.url),
+      requiredSnippets: [
+        "GET /api/v1/diagnostics/export",
+        "### 3.6 `POST /api/v1/pd`（`PUT /api/v1/pd` 兼容）",
+        "### 3.9 `POST /api/v1/presets`（冻结；`PUT` 兼容）",
+        "### 3.12 `POST /api/v1/control`（冻结；`PUT` 兼容）",
+      ],
+      forbiddenSnippets: [
+        "实际下发 SetPoint.target_i_ma",
+        "### 3.9 `PUT /api/v1/presets`（冻结）",
+        "### 3.12 `PUT /api/v1/control`（冻结）",
+      ],
+    },
+    {
+      label: "docs/dev-notes/user-calibration.md",
+      path: new URL("../../docs/dev-notes/user-calibration.md", import.meta.url),
+      forbiddenSnippets: [
+        "不会用校准曲线去反算 SetPoint",
+        "Web 调用控制 API 下发对应 CC SetPoint",
+        "SetPoint（物理量目标）在 G431 侧反向插值得到 Raw 目标",
+      ],
+    },
+    {
+      label: "docs/dev-notes/current-sense-opa2365-v4-2.md",
+      path: new URL("../../docs/dev-notes/current-sense-opa2365-v4-2.md", import.meta.url),
+      forbiddenSnippets: [
+        "数字板通过单一 `SetPoint.target_i_ma` 下发**总目标电流** `I_total`",
+        "调增 SetPoint 上限与保护阈值",
+      ],
+    },
+    {
+      label: "docs/interfaces/uart-link.md",
+      path: new URL("../../docs/interfaces/uart-link.md", import.meta.url),
+      forbiddenSnippets: [
+        "空闲 10 Hz、工作 50–100 Hz 遥测",
+        "SET_POINT` (0x22) | `seq`、`target_i_ma`（mA，两通道合计 CC 设定值） | ≈18 B | 50–100 Hz",
+        "当前项目在空闲期发送 10 Hz `PING` 作为显式心跳",
+      ],
+    },
+    {
+      label: "docs/dev-notes/software.md",
+      path: new URL("../../docs/dev-notes/software.md", import.meta.url),
+      forbiddenSnippets: [
+        "目标：在 ESP32‑S3 与 STM32G431 之间建立稳定的 UART 链路，并基于共享协议 crate（`loadlynx-protocol`）完成 FastStatus 遥测 + SetPoint 控制闭环。",
+        "`MSG_SET_POINT`：当前数字侧接收控制请求并回 ACK；",
+        "当前链路已实现 `HELLO`、`FAST_STATUS` 与 `SET_POINT + ACK` 的控制闭环。",
+      ],
+    },
+  ],
+} = {}) {
+  const failures = [];
+
+  for (const doc of docs) {
+    const source = await readFile(doc.path, "utf8");
+    for (const snippet of doc.requiredSnippets ?? []) {
+      if (!source.includes(snippet)) {
+        failures.push(`${doc.label}: required current-truth phrase missing: ${JSON.stringify(snippet)}`);
+      }
+    }
+    for (const snippet of doc.forbiddenSnippets ?? []) {
+      if (source.includes(snippet)) {
+        failures.push(`${doc.label}: forbidden stale control-path phrase present: ${JSON.stringify(snippet)}`);
+      }
+    }
+  }
+
+  return failures;
+}
+
+export async function validateHttpSurfaceContracts({
+  firmwareNetPath = new URL("../../firmware/digital/src/net.rs", import.meta.url),
+  webClientDevicePath = new URL("../../web/src/api/client-device.ts", import.meta.url),
+  webClientBackupPath = new URL("../../web/src/api/client-backup.ts", import.meta.url),
+} = {}) {
+  const failures = [];
+  const firmwareNet = await readFile(firmwareNetPath, "utf8");
+  const webClientDevice = await readFile(webClientDevicePath, "utf8");
+  const webClientBackup = await readFile(webClientBackupPath, "utf8");
+
+  const requiredFirmwareSnippets = [
+    '("PUT", "/api/v1/presets") | ("POST", "/api/v1/presets")',
+    '("PUT", "/api/v1/control") | ("POST", "/api/v1/control")',
+    '("PUT", "/api/v1/pd") | ("POST", "/api/v1/pd")',
+    '("GET", "/api/v1/diagnostics") | ("GET", "/api/v1/diagnostics/export")',
+  ];
+
+  for (const snippet of requiredFirmwareSnippets) {
+    if (!firmwareNet.includes(snippet)) {
+      failures.push(
+        `firmware/digital/src/net.rs: required HTTP compatibility route missing: ${JSON.stringify(snippet)}`,
+      );
+    }
+  }
+
+  const requiredWebClientPatterns = [
+    {
+      label: "postPd must keep POST /api/v1/pd as the primary client path",
+      pattern:
+        /export async function postPd[\s\S]*?httpJsonQueued<PdView>\(baseUrl, "\/api\/v1\/pd", \{\s*method: "POST"/,
+    },
+    {
+      label: "updatePreset must keep POST /api/v1/presets as the primary client path",
+      pattern:
+        /export async function updatePreset[\s\S]*?httpJsonQueued<Preset>\(baseUrl, "\/api\/v1\/presets", \{\s*method: "POST"/,
+    },
+    {
+      label: "updateControl must keep POST /api/v1/control as the primary client path",
+      pattern:
+        /export async function updateControl[\s\S]*?httpJsonQueued<ControlView>\(baseUrl, "\/api\/v1\/control", \{\s*method: "POST"/,
+    },
+  ];
+
+  for (const requirement of requiredWebClientPatterns) {
+    if (!requirement.pattern.test(webClientDevice)) {
+      failures.push(`web/src/api/client-device.ts: ${requirement.label}`);
+    }
+  }
+
+  if (!webClientBackup.includes('"/api/v1/diagnostics/export"')) {
+    failures.push(
+      'web/src/api/client-backup.ts: exportDiagnostics must keep "/api/v1/diagnostics/export" as the primary client path',
+    );
+  }
+
+  return failures;
+}

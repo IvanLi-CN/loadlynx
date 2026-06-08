@@ -1,17 +1,23 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
-import {
-  getIdentity,
-  getPd,
-  getStatus,
-  isHttpApiError,
-} from "../api/client.ts";
+import { isHttpApiError } from "../api/client.ts";
 import { findVisibleSavedFixedPdo } from "../api/pd-display.ts";
-import type { FastStatusView, Identity, PdView } from "../api/types.ts";
+import type { FastStatusView, PdView } from "../api/types.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
+import {
+  getDevicePdQueryOptions,
+  getDeviceStatusQueryOptions,
+  useDeviceIdentityByBaseUrl,
+} from "../devices/hooks.ts";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
+import {
+  formatHttpApiErrorSummary,
+  getNetworkErrorHint,
+  isLinkUnavailableError,
+  isUnsupportedOperationError,
+} from "../lib/http-error.ts";
+import { usePageVisibility } from "../lib/page-visibility.ts";
 
 const FAST_STATUS_REFETCH_MS = 1000;
 const PD_REFETCH_MS = 1500;
@@ -19,66 +25,27 @@ const RETRY_DELAY_MS = 500;
 
 export function DeviceStatusRoute() {
   const { deviceId, device, baseUrl } = useDeviceContext();
+  const isPageVisible = usePageVisibility();
+  const identityQuery = useDeviceIdentityByBaseUrl(deviceId, baseUrl);
 
-  const [isPageVisible, setIsPageVisible] = useState(() =>
-    typeof document === "undefined"
-      ? true
-      : document.visibilityState === "visible",
+  const statusQuery = useQuery<FastStatusView, HttpApiError>(
+    getDeviceStatusQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+      refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
+    }),
   );
 
-  useEffect(() => {
-    if (typeof document === "undefined") {
-      return undefined;
-    }
-
-    const handleVisibility = () => {
-      setIsPageVisible(document.visibilityState === "visible");
-    };
-
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, []);
-
-  const identityQuery = useQuery<Identity, HttpApiError>({
-    queryKey: ["device", deviceId, "identity"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getIdentity(baseUrl);
-    },
-    enabled: Boolean(baseUrl),
-  });
-
-  const statusQuery = useQuery<FastStatusView, HttpApiError>({
-    queryKey: ["device", deviceId, "status"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getStatus(baseUrl);
-    },
-    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
-    refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
-    refetchIntervalInBackground: false,
-    retryDelay: RETRY_DELAY_MS,
-  });
-
-  const pdQuery = useQuery<PdView, HttpApiError>({
-    queryKey: ["device", deviceId, "pd"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getPd(baseUrl);
-    },
-    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
-    refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
-    refetchIntervalInBackground: false,
-    retryDelay: RETRY_DELAY_MS,
-  });
+  const pdQuery = useQuery<PdView, HttpApiError>(
+    getDevicePdQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+      refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
+      retryDelay: RETRY_DELAY_MS,
+    }),
+  );
 
   const firstHttpError: HttpApiError | null = (() => {
     // PD is optional; the PD endpoint may legitimately be unavailable or not
@@ -96,18 +63,16 @@ export function DeviceStatusRoute() {
     if (!firstHttpError) {
       return null;
     }
-    const code = firstHttpError.code ?? "HTTP_ERROR";
-    const summary = `${code} — ${firstHttpError.message}`;
+    const summary = formatHttpApiErrorSummary(firstHttpError);
 
-    if (firstHttpError.status === 0 && code === "NETWORK_ERROR") {
-      const hint =
-        "无法连接设备" +
-        (baseUrl ? `（baseUrl=${baseUrl}）` : "") +
-        "，请检查网络与 IP 设置。";
-      return { summary, hint } as const;
+    if (
+      firstHttpError.status === 0 &&
+      firstHttpError.code === "NETWORK_ERROR"
+    ) {
+      return { summary, hint: getNetworkErrorHint(baseUrl) } as const;
     }
 
-    if (firstHttpError.status === 404 && code === "UNSUPPORTED_OPERATION") {
+    if (isUnsupportedOperationError(firstHttpError)) {
       const hint = "固件版本不支持该 API，请升级固件后重试。";
       return { summary, hint } as const;
     }
@@ -116,9 +81,7 @@ export function DeviceStatusRoute() {
   })();
 
   const isLinkDownLike =
-    firstHttpError &&
-    (firstHttpError.code === "LINK_DOWN" ||
-      firstHttpError.code === "UNAVAILABLE");
+    firstHttpError && isLinkUnavailableError(firstHttpError);
 
   const identity = identityQuery.data;
   const status = statusQuery.data;
@@ -202,12 +165,7 @@ export function DeviceStatusRoute() {
     }
 
     const err = pdQuery.error;
-    if (
-      err &&
-      isHttpApiError(err) &&
-      err.status === 404 &&
-      err.code === "UNSUPPORTED_OPERATION"
-    ) {
+    if (err && isHttpApiError(err) && isUnsupportedOperationError(err)) {
       return {
         badge: "UNSUPPORTED",
         badgeClass: "ll-badge-warning",
@@ -224,8 +182,7 @@ export function DeviceStatusRoute() {
       const isTransient =
         err.status === 0 ||
         err.status === 503 ||
-        code === "LINK_DOWN" ||
-        code === "UNAVAILABLE" ||
+        isLinkUnavailableError(err) ||
         code === "ANALOG_NOT_READY";
       return {
         badge: isTransient ? "PENDING" : "ERROR",

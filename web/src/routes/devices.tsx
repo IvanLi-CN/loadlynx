@@ -1,6 +1,5 @@
-import { useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { ENABLE_MOCK_DEVTOOLS, isHttpApiError } from "../api/client.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import {
@@ -19,10 +18,16 @@ import {
   useDevicesQuery,
   useSubnetScanMutation,
 } from "../devices/hooks.ts";
+import {
+  beginManagedScan,
+  cancelManagedScan,
+  clearManagedScan,
+  isManagedScanCurrent,
+} from "../devices/scan-controller.ts";
 import { readStoredDemoMode } from "../lib/demo-mode.ts";
+import { isUnsupportedOperationError } from "../lib/http-error.ts";
 
 export function DevicesRoute() {
-  const queryClient = useQueryClient();
   const devicesQuery = useDevicesQuery();
   const addDeviceMutation = useAddDeviceMutation();
   const addRealDeviceMutation = useAddRealDeviceMutation();
@@ -44,6 +49,7 @@ export function DevicesRoute() {
 
   // Scanning state
   const scanMutation = useSubnetScanMutation();
+  const activeScanControllerRef = useRef<AbortController | null>(null);
   const [isScanPanelOpen, setIsScanPanelOpen] = useState(false);
   const [seedIp, setSeedIp] = useState("192.168.1.100"); // Default/Example
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
@@ -55,8 +61,27 @@ export function DevicesRoute() {
   const [selectedDevdDeviceId, setSelectedDevdDeviceId] = useState("");
   const [devdError, setDevdError] = useState<string | null>(null);
 
+  useEffect(() => {
+    return () => {
+      activeScanControllerRef.current = cancelManagedScan(
+        activeScanControllerRef.current,
+      );
+    };
+  }, []);
+
+  const stopScan = () => {
+    activeScanControllerRef.current = cancelManagedScan(
+      activeScanControllerRef.current,
+    );
+    scanMutation.reset();
+    setScanProgress(null);
+  };
+
   const startScan = () => {
     if (isDemoMode) return;
+
+    const controller = beginManagedScan(activeScanControllerRef.current);
+    activeScanControllerRef.current = controller;
 
     setScanProgress({ scannedCount: 0, totalCount: 0, foundCount: 0 });
     setScanResults([]);
@@ -64,15 +89,35 @@ export function DevicesRoute() {
 
     scanMutation.mutate(
       {
-        options: { seedIp: seedIp.trim() },
-        onProgress: (p: ScanProgress) => setScanProgress(p),
+        options: { seedIp: seedIp.trim(), signal: controller.signal },
+        onProgress: (p: ScanProgress) => {
+          if (
+            isManagedScanCurrent(activeScanControllerRef.current, controller)
+          ) {
+            setScanProgress(p);
+          }
+        },
       },
       {
         onSuccess: (data: DiscoveredDevice[]) => {
-          setScanResults(data);
+          if (
+            isManagedScanCurrent(activeScanControllerRef.current, controller)
+          ) {
+            setScanResults(data);
+          }
         },
         onError: (err: Error) => {
-          setScanError(err instanceof Error ? err.message : "Unknown error");
+          if (
+            isManagedScanCurrent(activeScanControllerRef.current, controller)
+          ) {
+            setScanError(err instanceof Error ? err.message : "Unknown error");
+          }
+        },
+        onSettled: () => {
+          activeScanControllerRef.current = clearManagedScan(
+            activeScanControllerRef.current,
+            controller,
+          );
         },
       },
     );
@@ -130,8 +175,6 @@ export function DevicesRoute() {
                   onSuccess: () => {
                     setNewDeviceName("");
                     setNewDeviceBaseUrl("");
-                    // Keep any stale query instances (e.g. from other tabs) in sync.
-                    queryClient.invalidateQueries({ queryKey: ["devices"] });
                   },
                 },
               );
@@ -320,21 +363,12 @@ export function DevicesRoute() {
                         leaseId: lease.lease_id,
                       };
                       const baseUrl = buildDevdCompatBaseUrl(devd);
-                      addRealDeviceMutation.mutate(
-                        {
-                          name: candidate.display_name,
-                          baseUrl,
-                          connectionMarks,
-                          devd,
-                        },
-                        {
-                          onSuccess: () => {
-                            queryClient.invalidateQueries({
-                              queryKey: ["devices"],
-                            });
-                          },
-                        },
-                      );
+                      addRealDeviceMutation.mutate({
+                        name: candidate.display_name,
+                        baseUrl,
+                        connectionMarks,
+                        devd,
+                      });
                     },
                     onError: (error) => {
                       setDevdError(
@@ -405,6 +439,9 @@ export function DevicesRoute() {
           type="button"
           onClick={() => {
             if (isDemoMode) return;
+            if (isScanPanelOpen) {
+              stopScan();
+            }
             setIsScanPanelOpen(!isScanPanelOpen);
           }}
           disabled={isDemoMode}
@@ -479,7 +516,7 @@ export function DevicesRoute() {
                 <button
                   type="button"
                   className="ll-button ll-button-ghost ll-button-sm"
-                  onClick={() => scanMutation.reset()}
+                  onClick={stopScan}
                 >
                   Cancel
                 </button>
@@ -570,12 +607,7 @@ export function DevicesRoute() {
           <button
             type="button"
             onClick={() => {
-              addDeviceMutation.mutate(undefined, {
-                onSuccess: () => {
-                  // Keep any stale query instances (e.g. from other tabs) in sync.
-                  queryClient.invalidateQueries({ queryKey: ["devices"] });
-                },
-              });
+              addDeviceMutation.mutate(undefined);
             }}
             disabled={isMutating}
             className="ll-button ll-button-secondary ll-button-sm"
@@ -613,13 +645,7 @@ export function DevicesRoute() {
                   type="button"
                   className="ll-button ll-button-secondary ll-button-sm"
                   onClick={() => {
-                    addDeviceMutation.mutate(undefined, {
-                      onSuccess: () => {
-                        queryClient.invalidateQueries({
-                          queryKey: ["devices"],
-                        });
-                      },
-                    });
+                    addDeviceMutation.mutate(undefined);
                   }}
                   disabled={isMutating}
                 >
@@ -690,7 +716,7 @@ function DeviceRow(props: { device: StoredDevice }) {
       const code = error.code ?? "HTTP_ERROR";
       if (error.status === 0 && code === "NETWORK_ERROR") {
         statusDetail = "网络异常，已自动重试；如仍失败请检查设备 IP 或网络";
-      } else if (error.status === 404 && code === "UNSUPPORTED_OPERATION") {
+      } else if (isUnsupportedOperationError(error)) {
         statusBadgeClass = "ll-badge ll-badge-warning";
         statusLabel = "Online (HTTP)";
         statusDetail = "Unsupported API on current firmware";

@@ -40,6 +40,7 @@ export const DEFAULT_ACTIVE_PROFILE: CalibrationActiveProfile = {
 
 const CALIBRATION_DRAFT_STORAGE_VERSION = 4;
 const CALIBRATION_CURRENT_OPTIONS_STORAGE_VERSION = 2;
+const CALIBRATION_VOLTAGE_OPTIONS_STORAGE_VERSION = 2;
 
 interface StoredCalibrationDraftV2 {
   version: 2;
@@ -97,6 +98,16 @@ export interface ParsedCalibrationDraft {
   };
 }
 
+export interface ParsedCalibrationCurrentOptions {
+  baselineUa: number | null;
+  unit: CurrentInputUnit | null;
+}
+
+export interface ParsedCalibrationVoltageOptions {
+  inputUv: number | null;
+  unit: VoltageInputUnit | null;
+}
+
 export function getCalibrationDraftStorageKey(
   deviceId: string,
   baseUrl: string,
@@ -116,15 +127,193 @@ export function getCalibrationCurrentOptionsStorageKey(
   return `loadlynx:calibration-current-options:v${version}:${deviceId}:${encodedBase}:${curve}`;
 }
 
+export function getCalibrationVoltageOptionsStorageKey(
+  deviceId: string,
+  baseUrl: string,
+  version = CALIBRATION_VOLTAGE_OPTIONS_STORAGE_VERSION,
+): string {
+  const encodedBase = encodeURIComponent(baseUrl);
+  return `loadlynx:calibration-voltage-options:v${version}:${deviceId}:${encodedBase}`;
+}
+
+export function readCalibrationCurrentOptionsFromStorage(
+  storage: Pick<Storage, "getItem">,
+  deviceId: string,
+  baseUrl: string,
+  curve: "current_ch1" | "current_ch2",
+): ParsedCalibrationCurrentOptions {
+  const readOptionsV2 = (): ParsedCalibrationCurrentOptions => {
+    const key = getCalibrationCurrentOptionsStorageKey(
+      deviceId,
+      baseUrl,
+      curve,
+    );
+    const raw = storage.getItem(key);
+    if (!raw) {
+      return { baselineUa: null, unit: null };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return { baselineUa: null, unit: null };
+    }
+    const obj = parsed as Record<string, unknown>;
+    const baselineRaw = obj.baseline_ua;
+    const unitRaw = obj.unit;
+    const baselineUa =
+      typeof baselineRaw === "number" &&
+      Number.isFinite(baselineRaw) &&
+      Number.isInteger(baselineRaw) &&
+      baselineRaw >= 0
+        ? baselineRaw
+        : null;
+    const unit =
+      unitRaw === "A" || unitRaw === "mA"
+        ? (unitRaw as CurrentInputUnit)
+        : null;
+    return { baselineUa, unit };
+  };
+
+  const readBaselineV1 = (): number | null => {
+    const key = getCalibrationCurrentOptionsStorageKey(
+      deviceId,
+      baseUrl,
+      curve,
+      1,
+    );
+    const raw = storage.getItem(key);
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const obj = parsed as Record<string, unknown>;
+    return typeof obj.baseline_a === "string"
+      ? parseNonNegativeDecimalToScaledInt(obj.baseline_a, 6)
+      : null;
+  };
+
+  try {
+    const current = readOptionsV2();
+    return {
+      baselineUa: current.baselineUa ?? readBaselineV1(),
+      unit: current.unit,
+    };
+  } catch {
+    return { baselineUa: null, unit: null };
+  }
+}
+
+export function writeCalibrationCurrentOptionsToStorage(
+  storage: Pick<Storage, "setItem" | "removeItem">,
+  deviceId: string,
+  baseUrl: string,
+  curve: "current_ch1" | "current_ch2",
+  options: { baselineUa: number; unit: CurrentInputUnit },
+): void {
+  const key = getCalibrationCurrentOptionsStorageKey(deviceId, baseUrl, curve);
+  const keyV1 = getCalibrationCurrentOptionsStorageKey(
+    deviceId,
+    baseUrl,
+    curve,
+    1,
+  );
+  storage.setItem(
+    key,
+    JSON.stringify({
+      baseline_ua: options.baselineUa,
+      unit: options.unit,
+    }),
+  );
+  storage.removeItem(keyV1);
+}
+
+export function readCalibrationVoltageOptionsFromStorage(
+  storage: Pick<Storage, "getItem">,
+  deviceId: string,
+  baseUrl: string,
+): ParsedCalibrationVoltageOptions {
+  const readOptionsV2 = (): ParsedCalibrationVoltageOptions => {
+    const raw = storage.getItem(
+      getCalibrationVoltageOptionsStorageKey(deviceId, baseUrl),
+    );
+    if (!raw) {
+      return { inputUv: null, unit: null };
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return { inputUv: null, unit: null };
+    }
+    const obj = parsed as Record<string, unknown>;
+    const inputUvRaw = obj.input_uv;
+    const unitRaw = obj.unit;
+    const inputUv =
+      typeof inputUvRaw === "number" &&
+      Number.isFinite(inputUvRaw) &&
+      Number.isInteger(inputUvRaw) &&
+      inputUvRaw >= 0
+        ? inputUvRaw
+        : null;
+    const unit = unitRaw === "V" ? "V" : null;
+    return { inputUv, unit };
+  };
+
+  const readInputV1 = (): number | null => {
+    const raw = storage.getItem(
+      getCalibrationVoltageOptionsStorageKey(deviceId, baseUrl, 1),
+    );
+    if (!raw) {
+      return null;
+    }
+    const parsed = JSON.parse(raw) as unknown;
+    if (typeof parsed !== "object" || parsed === null) {
+      return null;
+    }
+    const obj = parsed as Record<string, unknown>;
+    return typeof obj.input_v === "string"
+      ? parseVoltageInputToUv(obj.input_v, "V")
+      : null;
+  };
+
+  try {
+    const current = readOptionsV2();
+    return {
+      inputUv: current.inputUv ?? readInputV1(),
+      unit: current.unit ?? "V",
+    };
+  } catch {
+    return { inputUv: null, unit: null };
+  }
+}
+
+export function writeCalibrationVoltageOptionsToStorage(
+  storage: Pick<Storage, "setItem" | "removeItem">,
+  deviceId: string,
+  baseUrl: string,
+  options: { inputUv: number; unit: VoltageInputUnit },
+): void {
+  const key = getCalibrationVoltageOptionsStorageKey(deviceId, baseUrl);
+  const keyV1 = getCalibrationVoltageOptionsStorageKey(deviceId, baseUrl, 1);
+  storage.setItem(
+    key,
+    JSON.stringify({
+      input_uv: options.inputUv,
+      unit: options.unit,
+    }),
+  );
+  storage.removeItem(keyV1);
+}
+
 export function readCalibrationDraftFromStorage(
+  storage: Pick<Storage, "getItem">,
   deviceId: string,
   baseUrl: string,
 ): ParsedCalibrationDraft | null {
-  if (typeof window === "undefined") return null;
   try {
     const tryRead = (version: 2 | 3 | 4): unknown | null => {
       const key = getCalibrationDraftStorageKey(deviceId, baseUrl, version);
-      const raw = window.localStorage.getItem(key);
+      const raw = storage.getItem(key);
       if (!raw) return null;
       return JSON.parse(raw) as unknown;
     };
@@ -262,24 +451,24 @@ export function readCalibrationDraftFromStorage(
 }
 
 export function writeCalibrationDraftToStorage(
+  storage: Pick<Storage, "setItem" | "removeItem">,
   deviceId: string,
   baseUrl: string,
   draft: StoredCalibrationDraftV4 | null,
 ): void {
-  if (typeof window === "undefined") return;
   try {
     const keyV2 = getCalibrationDraftStorageKey(deviceId, baseUrl, 2);
     const keyV3 = getCalibrationDraftStorageKey(deviceId, baseUrl, 3);
     const keyV4 = getCalibrationDraftStorageKey(deviceId, baseUrl, 4);
     if (!draft) {
-      window.localStorage.removeItem(keyV2);
-      window.localStorage.removeItem(keyV3);
-      window.localStorage.removeItem(keyV4);
+      storage.removeItem(keyV2);
+      storage.removeItem(keyV3);
+      storage.removeItem(keyV4);
       return;
     }
-    window.localStorage.removeItem(keyV2);
-    window.localStorage.removeItem(keyV3);
-    window.localStorage.setItem(keyV4, JSON.stringify(draft));
+    storage.removeItem(keyV2);
+    storage.removeItem(keyV3);
+    storage.setItem(keyV4, JSON.stringify(draft));
   } catch {
     // best-effort
   }
@@ -323,14 +512,18 @@ export function parseCurrentInputToUa(
   return parseNonNegativeDecimalToScaledInt(input, currentUnitDecimals(unit));
 }
 
+export function parseVoltageInputToUv(
+  input: string,
+  unit: VoltageInputUnit,
+): number | null {
+  return parseNonNegativeDecimalToScaledInt(input, voltageUnitDecimals(unit));
+}
+
 export function parseVoltageInputToMv(
   input: string,
   unit: VoltageInputUnit,
 ): number | null {
-  const uv = parseNonNegativeDecimalToScaledInt(
-    input,
-    voltageUnitDecimals(unit),
-  );
+  const uv = parseVoltageInputToUv(input, unit);
   if (uv == null) return null;
   return Math.floor((uv + 500) / 1000);
 }
@@ -359,6 +552,15 @@ export function formatUaToUnit(ua: number, unit: CurrentInputUnit): string {
   const decimals = currentUnitDecimals(unit);
   const scale = 10 ** decimals;
   const abs = Math.max(0, Math.trunc(ua));
+  const intPart = Math.floor(abs / scale);
+  const fracPart = abs % scale;
+  return `${intPart}.${fracPart.toString().padStart(decimals, "0")}`;
+}
+
+export function formatUvToUnit(uv: number, unit: VoltageInputUnit): string {
+  const decimals = voltageUnitDecimals(unit);
+  const scale = 10 ** decimals;
+  const abs = Math.max(0, Math.trunc(uv));
   const intPart = Math.floor(abs / scale);
   const fracPart = abs % scale;
   return `${intPart}.${fracPart.toString().padStart(decimals, "0")}`;
@@ -461,18 +663,6 @@ export function formatLocalTimestamp(ms: number): string {
   } catch {
     return String(ms);
   }
-}
-
-export function downloadJson(filename: string, data: unknown): void {
-  const blob = new Blob([JSON.stringify(data, null, 2)], {
-    type: "application/json; charset=utf-8",
-  });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = filename;
-  anchor.click();
-  window.setTimeout(() => URL.revokeObjectURL(url), 250);
 }
 
 export function makeEmptyDraftProfile(

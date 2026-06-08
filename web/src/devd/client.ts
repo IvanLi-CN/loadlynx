@@ -24,7 +24,16 @@ export function buildDevdCompatBaseUrl(input: {
     return `mock://devd-${input.deviceId}`;
   }
 
-  const url = new URL(input.baseUrl ?? DEFAULT_DEVD_BASE_URL);
+  let url: URL;
+  try {
+    url = new URL(input.baseUrl ?? DEFAULT_DEVD_BASE_URL);
+  } catch {
+    throw new DevdApiError({
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: `Invalid devd base URL: ${input.baseUrl ?? DEFAULT_DEVD_BASE_URL}`,
+    });
+  }
   url.searchParams.set("device_id", input.deviceId);
   if (input.leaseId) {
     url.searchParams.set("lease_id", input.leaseId);
@@ -86,6 +95,38 @@ export class DevdApiError extends Error {
   }
 }
 
+export const __testStorybookRuntime = isStorybookRuntime;
+
+function parseMockJsonBody(
+  path: string,
+  init?: RequestInit,
+): Record<string, unknown> {
+  if (!init?.body) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(String(init.body)) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      throw new DevdApiError({
+        status: 400,
+        code: "INVALID_REQUEST",
+        message: `Mock devd request body for ${path} must be a JSON object`,
+      });
+    }
+    return parsed as Record<string, unknown>;
+  } catch (error) {
+    if (error instanceof DevdApiError) {
+      throw error;
+    }
+    throw new DevdApiError({
+      status: 400,
+      code: "INVALID_REQUEST",
+      message: `Invalid mock JSON body for ${path}`,
+    });
+  }
+}
+
 async function devdJson<T>(
   baseUrl: string,
   path: string,
@@ -95,15 +136,38 @@ async function devdJson<T>(
     return mockDevd<T>(path, init);
   }
 
-  const response = await fetch(new URL(path, baseUrl).toString(), {
-    ...init,
-    headers: {
-      "Content-Type": "application/json",
-      ...(init?.headers as Record<string, string> | undefined),
-    },
-  });
+  let response: Response;
+  try {
+    response = await fetch(new URL(path, baseUrl).toString(), {
+      ...init,
+      headers: {
+        "Content-Type": "application/json",
+        ...(init?.headers as Record<string, string> | undefined),
+      },
+    });
+  } catch (error) {
+    const message =
+      error instanceof Error ? error.message : "devd network request failed";
+    throw new DevdApiError({
+      status: 0,
+      code: "NETWORK_ERROR",
+      message,
+    });
+  }
+
   const text = await response.text();
-  const data = text ? (JSON.parse(text) as unknown) : null;
+  let data: unknown = null;
+  if (text) {
+    try {
+      data = JSON.parse(text) as unknown;
+    } catch {
+      throw new DevdApiError({
+        status: response.status,
+        code: "INVALID_JSON",
+        message: `Invalid JSON from ${path}`,
+      });
+    }
+  }
   if (!response.ok) {
     const envelope = data as { error?: { message?: string; code?: string } };
     const message = envelope.error?.message ?? `devd HTTP ${response.status}`;
@@ -124,7 +188,7 @@ function mockDevd<T>(path: string, init?: RequestInit): T {
     return { devices: MOCK_DEVD_DEVICES, leases: [] } as T;
   }
   if (path === "/api/v1/serial/lease") {
-    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    const body = parseMockJsonBody(path, init);
     return {
       lease_id: "mock-lease-1",
       device_id: body.device_id ?? "mock-loadlynx-devd",
@@ -175,7 +239,7 @@ function mockDevd<T>(path: string, init?: RequestInit): T {
     } as T;
   }
   if (/\/api\/v1\/devices\/.+\/artifact/.test(path)) {
-    const body = init?.body ? JSON.parse(String(init.body)) : {};
+    const body = parseMockJsonBody(path, init);
     return {
       artifact: {
         artifact_id: body.artifact_id ?? "digital-release-aabbcc",
@@ -188,8 +252,15 @@ function mockDevd<T>(path: string, init?: RequestInit): T {
       },
     } as T;
   }
-  return { ok: true } as T;
+  throw new DevdApiError({
+    status: 404,
+    code: "UNSUPPORTED_OPERATION",
+    message: `Unsupported mock devd route: ${path}`,
+  });
 }
+
+export const __testMockDevd = mockDevd;
+export const __testDevdJson = devdJson;
 
 export async function scanDevdDevices(
   baseUrl: string = DEFAULT_DEVD_BASE_URL,

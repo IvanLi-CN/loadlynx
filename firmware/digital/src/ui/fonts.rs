@@ -52,7 +52,7 @@ impl UtftFont {
             return;
         }
 
-        let bytes_per_row = ((self.width as usize) + 7) / 8;
+        let bytes_per_row = (self.width as usize).div_ceil(8);
         let glyph_size = bytes_per_row * self.height as usize;
         let glyph_offset = 4 + idx as usize * glyph_size;
         let glyph = &self.raw[glyph_offset..glyph_offset + glyph_size];

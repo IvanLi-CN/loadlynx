@@ -119,7 +119,7 @@ points = [{raw_100uv, raw_dac?, meas_physical}, ...]
    
    - **数字板（ESP32‑S3）是校准数据管理端**：  
      ESP 负责从 Web 收集并持久化点数组（EEPROM），必要时将点数组**预处理为 STM32 方便消费的固定格式**并通过 UART 下发。  
-     ESP **不在运行时对遥测/设定做修订**：不会把 Raw 转成校准值再上报给 UI，也不会用校准曲线去反算 SetPoint。
+     ESP **不在运行时对遥测/设定做修订**：不会把 Raw 转成校准值再上报给 UI，也不会用校准曲线去反算当前控制链下发的物理量目标（主路径为 `SetMode`，legacy `SetPoint` 仅保留兼容）。
 
    - **模拟板（STM32G431）是校准执行端**：  
      G431 接收由 ESP 下发的点/段数据，建立本地分段线性曲线，并在运行时：
@@ -169,7 +169,7 @@ Web 控制台提供“校准”入口，包含两个 Tab：**电压校准** 与 
 1. UI 提示用户将电源设定到安全电压（如 12 V）并限流，连接电流表。
 2. 用户先选择要校准的通道：CH1 或 CH2。系统将**只启用该通道**、关闭另一通道，并通过 `CalMode(kind=current_chX)` 让 STM32 仅附加该通道 Raw。
 3. 用户在 UI 设定一个电流点（如 1 A / 3 A / 4 A）；该值被视为“当前通道目标电流”。
-4. Web 调用控制 API 下发对应 CC SetPoint，等待稳定（UI 显示倒计时/稳定提示）。
+4. Web 调用控制 API 下发对应 CC 物理量目标，等待稳定（UI 显示倒计时/稳定提示）；当前实现中该目标会先收敛到 digital `ControlState`，再由统一 UART TX 路径派生 `SetMode` 主控制帧。
 5. 用户读表得到实际电流 `I_meas` 并输入。
 6. UI 锁定同一时刻 Raw：`raw_cur_100uv` 与 `raw_dac_code`（仅当前通道）。
 7. 如需更好线性，可再选择一个点重复 3–6。
@@ -389,7 +389,7 @@ payload 结构（小端）：
 2. 运行时应用：
    - 基于点数组对 ADC Raw 物理量做分段线性插值得到 calibrated 值；
    - FastStatus 上报 calibrated 物理量；
-   - SetPoint（物理量目标）在 G431 侧反向插值得到 Raw 目标，再映射到 DAC 码；
+   - 当前控制链下发的物理量目标在 G431 侧反向插值得到 Raw 目标，再映射到 DAC 码；主路径由 `SetMode` 提供，legacy `SetPoint` 仅在未激活 `SetMode` 时参与兼容；
    - 保护与 enable gating 使用 calibrated 值。
 
 ---

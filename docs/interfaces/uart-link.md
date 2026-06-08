@@ -47,39 +47,40 @@
   - 超时/出错重试：建议 3 次退避（如 5/10/20 ms）。
   - 心跳/看门狗：空闲心跳 10 Hz；>300 ms 无有效帧标记降级，主控侧可触发安全失能。
 
-### SetPoint 可靠传输方案（v1）
+### SetPoint 可靠传输方案（legacy 兼容 / 排障路径）
 
-- 目的：确保 S3 下发的每次 SetPoint 在 G431 侧都被确认或重传，避免控制目标缺失导致两端状态漂移。
+- 目的：保留早期 CC-only 控制链与相关排障路径，确保 S3 下发的每次 SetPoint 在 G431 侧都被确认或重传。
+- 当前定位：**不是当前主控制链**。现行控制面以 `SetMode + SetEnable + LimitProfile + SoftReset/CalWrite` 为主；`SetPoint` 仅在 analog 尚未见过首个合法 `SetMode` 前，作为 legacy CC-only 路径生效，之后只保留 ACK/兼容价值。
 - 消息与标志：使用 `MSG_SET_POINT`（0x22），请求帧带 `FLAG_ACK_REQ`，确认帧带 `FLAG_IS_ACK`（`FLAG_IS_NACK` 可选用于回报解析失败）。
 - 确认格式：
   - 头部 `seq`/`msg` 回显；`len=0` 时 payload 为空（可选回显 `target_i_ma` 便于调试）。
   - CRC 仍覆盖头部与 payload。
 - 数字侧（ESP32‑S3）发送侧状态机（当前固件已实现 v0 版本）：
-  - 发送 SetPoint 后进入等待 ACK 状态，超时约 40 ms 未收 ACK 则按 40/80/160 ms 退避重发，最多 3 次。
+  - 历史/兼容实现中，发送 SetPoint 后进入等待 ACK 状态，超时约 40 ms 未收 ACK 则按 40/80/160 ms 退避重发，最多 3 次。
   - 收到匹配 `seq`/`msg` 的 ACK 即清除等待；若收到 NACK（预留）则立即重发或提示错误。
   - 新目标出现时“最新值优先”：可取消旧帧、使用新 `seq` 立即发送，重置等待计时。
-  - 若遥测中的 `target_value` 与本地期望值连续多帧不一致，会触发“telemetry-mismatch”原因的强制重发。
 - 模拟侧（STM32G431）接收侧（当前固件已实现 v0 版本）：
   - 成功解析并应用 SetPoint 后立即回 ACK；若 `seq` 与上次相同，则视为重传，仅回 ACK 不重复应用（幂等）。
+  - 一旦模拟侧已经收到过合法 `SetMode`，后续 `SetPoint` 会被记录为 ignored，并只回 ACK 维持兼容。
   - 解析错误时可回 NACK，附错误码或最少头部（目前固件主要通过日志报告解码失败，NACK 仍为规划中的扩展）。
 - 软复位协同：软复位握手完成后双方可重置与 SetPoint 相关的 `seq` 记忆，避免旧重传被误判（当前实现中，由上电后固定的初始 `seq` 与短重试窗口自然限制了该问题）。
 
 - 消息集合与实现状态（v0）
   - 0x01 `HELLO`：G431→S3，上电或软复位后单次发送；当前固件已实现 v0 版本，载荷包含 `protocol_version` + 简单 `fw_version` 标识。
   - 0x02 `PING`：双向心跳/测延时；当前固件尚未实现，ID 预留给未来独立心跳帧（当前版本仅依靠 `FAST_STATUS`/控制帧作为隐式心跳）。
-  - 0x03/0x04 `ACK`/`NACK`：原计划作为独立确认帧；当前固件不使用独立消息 ID，而是复用头部 `flags`（`FLAG_IS_ACK`/`FLAG_IS_NACK`）配合原始 `msg` 实现确认（例如 SetPoint ACK），ID 预留。
+  - 0x03/0x04 `ACK`/`NACK`：原计划作为独立确认帧；当前固件不使用独立消息 ID，而是复用头部 `flags`（`FLAG_IS_ACK`/`FLAG_IS_NACK`）配合原始 `msg` 实现确认（例如 SetMode / SetPoint / PdSinkRequest ACK），ID 预留。
   - 0x10 `FAST_STATUS`：G431→S3 周期遥测；当前固件已实现 v0，字段与 `loadlynx_protocol::FastStatus` 结构一致（见下文表格）。
   - 0x11 `FAULT_EVENT`：G431→S3 故障事件帧；当前版本尚未启用此帧，故障状态通过 `FAST_STATUS.fault_flags` 传输，ID 预留。
   - 0x12 `SLOW_HOUSEKEEPING`：慢速供电/诊断帧；尚未实现，仅用于容量规划。
   - 0x13 `PdStatus`：G431→S3，USB‑PD 状态与能力摘要（Attach、合同电压/电流、可用 Fixed/PPS 档位及其最大电流 + object position）；当前固件已实现 v1。
   - 0x20 `SetEnable`：S3→G431，布尔使能；当前固件已实现 v0，用于配合 `CAL_READY` 与 `FAULT_FLAGS` 做出力 gating。
-  - 0x21 `SetMode`：S3→G431，**原子 Active Control（v1 冻结）**：一次下发 `preset_id + output_enabled + mode + target + limits`（见下文 “SetMode（0x21）原子控制帧”）。
-  - 0x22 `SetPoint`：S3→G431，恒流设定值（mA，带 ACK）；当前固件已实现 v0 版本，将 `target_i_ma` 视为**两通道合计目标电流**，由 G431 在本地按“<2 A 单通道、≥2 A 双通道近似均分”的策略在 CH1/CH2 间拆分电流，由 `setpoint_tx_task` 实现 ACK 等待与退避重传。
-  - 0x23 `SetLimits`/`LIMIT_PROFILE`：S3→G431，功率/电流/温度限值；尚未实现，未来用于热降额与风扇协同。
+  - 0x21 `SetMode`：S3→G431，**原子 Active Control（v1 冻结）**：一次下发 `preset_id + output_enabled + mode + target + limits`（见下文 “SetMode（0x21）原子控制帧”）；当前固件的主控制链。
+  - 0x22 `SetPoint`：S3→G431，恒流设定值（mA，带 ACK）；当前固件仅保留为 legacy CC-only 兼容路径，将 `target_i_ma` 视为**两通道合计目标电流**，由 G431 在本地按“<2 A 单通道、≥2 A 双通道近似均分”的策略在 CH1/CH2 间拆分电流。
+  - 0x23 `SetLimits`/`LIMIT_PROFILE`：S3→G431，功率/电流/温度限值；当前固件已实现静态 `LimitProfile v0` 下发，启动握手与恢复路径都会发送一次，供模拟侧建立软件软限。
   - 0x24 `GetStatus`：S3→G431，请求立即返回一帧 FastStatus；协议 crate 中已有类型与编码函数，但固件尚未在运行路径中使用。
   - 0x25 `CalMode`：S3→G431，校准 Raw 遥测模式选择；仅在用户校准界面启用，用于指示模拟侧**按校准类型**附加 Raw ADC/DAC 字段（见 FastStatus 可选字段）。
   - 0x26 `SoftReset`：S3↔G431，软复位请求/确认；当前固件已实现 v0，使用同一 ID 配合 `FLAG_ACK_REQ/FLAG_IS_ACK` 区分请求与 ACK。
-  - 0x27 `PdSinkRequest`：S3→G431，USB‑PD Sink 策略请求（选择 PDO/APDO object position + 目标电压/电流）；当前固件已实现 v1。
+  - 0x27 `PdSinkRequest`：S3→G431，USB‑PD Sink 策略请求（选择 PDO/APDO object position + 目标电压/电流）；当前固件已实现 v1，并使用 ACK/NACK 闭环。
   - 0x30 `CalWrite`：S3→G431，标定写入；用于**多块**下发用户校准点/曲线，G431 收齐并校验后加载本地校准并置位 `CAL_READY`。
   - 0x31 `CalRead`：G431→S3，标定读回；尚未实现，未来用于上行 `CAL_CHUNK`/EEPROM 校验。
   - 0x40+ 调试/诊断（如 `ADC_CAPTURE`、FOTA 等）：尚未实现，仅在下文表格中用于容量评估。
@@ -115,12 +116,12 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 
 - 波特率与节拍（建议）
   - 波特率：当前固件使用 115200 baud、8N1；在后续硬件与信号质量验证通过后，可按本节带宽估算提升到 460800–1M（结合布线与时钟抖动评估，最终以硬件定型为准）。
-  - 遥测与控制频率：规划为空闲 10 Hz、工作 50–100 Hz；当前 v0 实际采用约 20 Hz `FAST_STATUS` + 10 Hz `SET_POINT`，其余消息类型仍处于规划阶段。
+  - 遥测与控制频率：规划为空闲 10 Hz、工作 50–100 Hz；当前实现实际采用约 20 Hz `FAST_STATUS` + 事件驱动 `SET_MODE`（常规周期检查 250 ms，用于变化同步与恢复快照）+ 启动/恢复时的 `SoftReset`、`CalWrite`、`SetEnable`、`LIMIT_PROFILE`，legacy `SET_POINT` 不再作为主控制节拍。
 
 三、联调步骤（最小可用）
 
-- 上电：G431 发送 Hello → S3 回 Ack；随后 G431 周期发 Status（10 Hz）。
-- 设定：S3 下发 SetEnable/SetPoint（带 ACK_REQ），G431 回 Ack 并在后续 Status 中反映变更。
+- 上电：G431 发送 Hello → S3 完成 SoftReset/CalWrite/SetEnable/LimitProfile 握手；随后 G431 周期发 Status（当前约 20 Hz）。
+- 设定：S3 下发 `SetMode`（带 ACK_REQ），必要时附带 `PdSinkRequest`；G431 回 Ack，并在后续 Status 中反映模式、目标与状态变更。
 - 故障：注入温度/电压等异常 → G431 立即发 Fault 并本地失能；S3 呈现状态。
 
 四、落地建议（代码结构）
@@ -157,9 +158,9 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 
 | 数据块 | 字段概要 | 单帧字节 | 更新频率 | 估算带宽 | 备注 |
 | --- | --- | --- | --- | --- | --- |
-| `SET_POINT` (0x22) | `seq`、`target_i_ma`（mA，两通道合计 CC 设定值） | ≈18 B | 当前固件：10 Hz（编码器驱动）；规划：50–100 Hz | 0.9 kB/s ≈ 7.2 kbps（按 50 Hz 规划估算；当前 10 Hz 实际带宽约为其 1/5） | 当前固件已实现 v0：总电流恒流设定，全部要求 ACK；G431 将 `target_i_ma` clamp 到 `[0,5_000]` mA，并按 `<2 A 单通道、≥2 A 双通道近似均分` 在 CH1/CH2 间拆分目标电流；数字侧在 `setpoint_tx_task` 中实现 ACK 等待、退避重传与“最新值优先”，模拟侧应用后回 `FLAG_IS_ACK` 空载帧，并在 FastStatus 中回显 `target_value`（即总目标电流） |
-| `SET_MODE` (0x21) | `preset_id`、`output_enabled`、`mode`、`target_i_ma`（mA）、`target_v_mv`（mV）、`min_v_mv`（mV）、`max_i_ma_total`（mA）、`max_p_mw`（mW） | ≈30–40 B | 0–10 Hz（按 UI/HTTP 操作触发） | ≤400 B/s ≈ 3.2 kbps | **原子 Active Control（v1 冻结）**：一次下发 active preset + 输出开关 + 模式/目标/限值；应用 preset 必须强制 `output_enabled=false`；需 ACK |
-| `LIMIT_PROFILE` (0x23) | `max_i`、`max_p`、`ovp_mv`、`temp_trip`、`thermal_derate`、预留 | ≈20 B | 0.2–1 Hz（用户修改时） | ≤20 B/s ≈ 0.16 kbps | 每次下发表征最大允许功率/电流的参数，并附 ESP 根据风扇控制计算出的 `thermal_derate`，便于版本化；当前固件尚未实现此帧，风扇控制仅在文档与协议层预留 |
+| `SET_POINT` (0x22) | `seq`、`target_i_ma`（mA，两通道合计 CC 设定值） | ≈18 B | 当前实现：仅兼容/排障时使用；规划：50–100 Hz | 当前实现中通常接近 0 | 当前固件保留 v0 兼容路径：仅在 analog 尚未见过首个合法 `SetMode` 时才真正驱动总电流设定；之后收到该帧会记录 ignored 并回 ACK |
+| `SET_MODE` (0x21) | `preset_id`、`output_enabled`、`mode`、`target_i_ma`（mA）、`target_v_mv`（mV）、`min_v_mv`（mV）、`max_i_ma_total`（mA）、`max_p_mw`（mW） | ≈30–40 B | 0–10 Hz（按 UI/HTTP 操作触发；后台 250 ms 周期检查是否需要重发/快照） | ≤400 B/s ≈ 3.2 kbps | **当前主控制链**：一次下发 active preset + 输出开关 + 模式/目标/限值；应用 preset 必须强制 `output_enabled=false`；需 ACK |
+| `LIMIT_PROFILE` (0x23) | `max_i`、`max_p`、`ovp_mv`、`temp_trip`、`thermal_derate`、预留 | ≈20 B | 启动/恢复时必发一次；其余 0.2–1 Hz（用户修改时） | 常规带宽很低 | 当前固件已实现静态 `LimitProfile v0` 握手下发；`thermal_derate` 动态联动仍在后续阶段 |
 | `CONTROL_CMD` (0x20/0x24/0x25 等) | `SetEnable`、`ModeSwitch`、`GetStatus`、`FaultClear` 等短指令 | 8–12 B | 0–20 Hz（按键/脚本触发） | ≤160 B/s ≈ 1.3 kbps | 均带 ACK_REQ，失败可按 5/10/20 ms 退避重试；当前固件仅实际使用 `SetEnable(0x20)`，其余命令仍在规划中 |
 | `CAL_MODE` (0x25) | `kind`（0=off,1=voltage,2=current_ch1,3=current_ch2） | ≈10 B | 仅在进入/退出校准 Tab 或切换通道时发送（<1 Hz） | ≈10 B/s | 用于让模拟侧按校准类型附加 Raw ADC/DAC 字段；正常工作保持 off |
 | `SOFT_RESET` (0x26) | `reason`（u8，0=manual、1=fw_update、2=ui_recover、3=link_recover）、`timestamp_ms` | 6 B | 上电后一次；或 UI/脚本按需触发（<0.2 Hz） | ≈1.2 B/s | 数字侧通过 `SoftReset` 请求模拟侧软复位：G431 进入安全态并清空状态，然后以同 ID、带 `FLAG_IS_ACK` 的帧确认；当前固件已实现 v0 版本，数字侧在 ACK 缺失时给出警告但仍继续后续握手 |
@@ -168,7 +169,7 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 | `PING/HEARTBEAT` (0x02) | `timestamp`、`nonce` | 6 B | 10 Hz | 60 B/s ≈ 0.48 kbps | 空闲期保持链路活跃，>300 ms 无回应即判为降级；当前固件未实现独立 `PING` 帧，心跳由 `FAST_STATUS` 与控制帧隐式承担 |
 | `RESERVED_FOTA` (0x50+) | （暂未定义——需后续 bootstub/升级协议落地） | 0 B | 0 Hz | 0 | 当前项目未实现固件块传输；仅保留 ID 以免未来扩展时与现有消息冲突 |
 
-**典型带宽**：`SET_POINT + HEARTBEAT + 零星命令` ≈ 1.0 kB/s（≈ 8.0 kbps，按规划频率估算；当前 v0 仅使用其中子集，实际带宽更低）。<br>
+**典型带宽**：`SET_MODE + FAST_STATUS + 零星握手/PD 命令` 仍远低于 115200 baud 上限；当前实现不依赖高频 `SET_POINT` 流。<br>
 **最坏情况**（含固件升级）≈ 11.2 kB/s（≈ 89.6 kbps）。
 
 ### 带宽结论与后续事项
@@ -182,12 +183,12 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 
 - **当前实现（v0）**
   - STM32G431（模拟侧）：
-    - 不发送独立 `PING` 帧，链路健康完全基于接收到的控制类帧（`SetPoint`/`SoftReset`/`SetEnable`）的时间戳 `LAST_RX_GOOD_MS`。
+    - 不发送独立 `PING` 帧，链路健康完全基于接收到的控制类帧（`SetMode`/`SetPoint`/`SoftReset`/`SetEnable`/`LimitProfile`/`PdSinkRequest`）的时间戳 `LAST_RX_GOOD_MS`。
     - 若自最后一次有效控制帧起超过 300 ms 未再收到任何帧，则视为链路异常：板载 LED1 以约 2 Hz 闪烁，并在 `FAST_STATUS.state_flags` 中清除 `STATE_FLAG_LINK_GOOD`。
     - 链路异常不会直接关闭 DAC 输出，但会在 UI 上与故障/enable gating 一起提示风险。
   - ESP32‑S3（数字侧）：
     - 不发送独立 `PING` 帧，链路健康基于最近一次成功解析的 `HELLO`/`FAST_STATUS`/ACK 的时间戳 `LAST_GOOD_FRAME_MS`。
-    - `stats_task` 每秒检查一次该时间戳；若 300 ms 内无任何有效帧，则将 `LINK_UP=false`，`setpoint_tx_task` 在 `LINK_UP=false` 时 gate 掉新的 `SetPoint` 命令，并限频打印 `SetPoint TX gated (link_up=false, ...)` 日志。
+    - `stats_task` 每秒检查一次该时间戳；若 300 ms 内无任何有效帧，则将 `LINK_UP=false`，`setmode_tx_task` 在 `LINK_UP=false` 时 gate 掉新的 output-on `SetMode` / `PdSinkRequest`，直到再次收到合法帧。
     - 一旦再次接收合法帧，`LINK_UP` 被重新置 true，允许新的控制命令。
 - **规划中的理想心跳机制（未实现）**
   - 预留 0x02 作为显式 `PING/HEARTBEAT` 消息，未来可以：
@@ -203,18 +204,18 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 
 - **目的**：在开发/调试阶段保持持续供电时，避免模拟侧残留旧状态（积分、限值、故障锁存等）导致行为不一致。
 - **触发**：
-  - 当前固件在启动 SetPoint 发送任务前，通过 `SoftReset(reason=fw_update, timestamp_ms=now)` 主动向模拟侧发起一次软复位握手；
+  - 当前固件在启动 `SetMode` 发送任务时，通过 `SoftReset(reason=fw_update, timestamp_ms=now)` 主动向模拟侧发起一次软复位握手；
   - UI/上位机后续可通过脚本/按钮按需再发（推荐限速 <0.2 Hz）。
 - **模拟侧动作（G431，当前实现）**：收到请求即刻进入安全态：
   1. 通过内部逻辑拉低负载使能、清零 DAC 输出与目标电流；
   2. 清空故障锁存；控制环内部状态如积分器在当前实现中主要由硬件/简单环路承担；
   3. 记录 `reset_reason`，以同 ID、带 `FLAG_IS_ACK` 的帧回复 SoftReset ACK；
   4. 随后重新发送 `HELLO`，供数字侧确认版本并重新建立握手；
-  5. 在收到新的 `SetEnable(true)` 与 `SetPoint` 之前，保持输出 gating。
+  5. 在收到新的 `SetEnable(true)` 与 `SetMode` snapshot 之前，保持输出 gating。
 - **数字侧动作（S3，当前实现）**：
   - 使用 `encode_soft_reset_frame(is_ack=false)` 发送请求，并在 150 ms 间隔内最多重试 3 次；
   - 若在重试窗口内收到带 `FLAG_IS_ACK` 的响应，则在日志中记录成功并继续后续流程；
-  - 若最终未收到 ACK，则打印警告（例如 “soft_reset ack not received; proceed with caution”），但仍在 300 ms 静默后继续 CalWrite/SetEnable/SetPoint 流；推荐上层 UI 将此视为“软复位可能未完成”的降级状态。
+  - 若最终未收到 ACK，则打印警告（例如 “soft_reset ack not received; proceed with caution”），但仍在 300 ms 静默后继续 CalWrite/SetEnable/LimitProfile/SetMode 流；推荐上层 UI 将此视为“软复位可能未完成”的降级状态。
 - **幂等性与降级策略**：
   - 模拟侧将重复请求视为幂等的重新进入安全态操作，连续触发不会破坏状态机；`reason` 字段仅用于日志/诊断。
   - 未来理想设计中，如软复位后 300 ms 内未重新收到 `HELLO`，数字侧应在 UI 中标记“等待重握手”并禁止控制命令；当前实现仅通过 `LINK_UP`/FastStatus 缺失来反映这一状态。
@@ -292,6 +293,6 @@ Payload（CBOR map，字段编号与 `loadlynx-protocol` 一致）：
 - **规划中的完整握手**：
   1. G431 上电即发送 `HELLO` 并置 `CAL_REQ` 标志，控制环保持保守安全值（仅允许 Idle）。
   2. S3 完成自检后，从本地 EEPROM 读取标定块，逐帧下发 `CAL_RW`（0x30/0x31）。
-  3. G431 收齐所有块并验证 CRC 后，回复确认并清除 `CAL_REQ`，此后才允许 `SetEnable`/`SetPoint`。
+  3. G431 收齐所有块并验证 CRC 后，回复确认并清除 `CAL_REQ`，此后才允许 `SetEnable`/`SetMode`（legacy `SetPoint` 仅保留兼容）。
 - **版本/回退**：ESP 端需要维护 `CAL_VERSION` 与 `HW_REV`，若板子更换传感器或参数失配，可通过 `CAL_CHUNK` 上行把运行中的实时值回传到 ESP/上位机，以便重新烧录；若数据损坏，G431 仍能用“默认限幅”运行但输出被限制。
 - **量产流程与容错建议**（规划）：在治具写入阶段，ESP 作为控制端将新的标定结果通过 `CAL_RW` 推送给 G431，同时写入自身 EEPROM；流程完成后立刻做一次断电重启，验证“冷启动 → ESP 下发 → G431 恢复”这条链路。若在约 300 ms 内未能完成首次 `CAL_RW`，UI 应提示“标定未加载”，G431 保持失能状态，防止使用未匹配的补偿系数。

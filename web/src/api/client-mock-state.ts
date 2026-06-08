@@ -32,6 +32,26 @@ export interface MockCalibrationState {
   eeprom: CalibrationProfileWire | null;
 }
 
+export type DevdIdentityPayload = Partial<Identity> & {
+  firmware_version?: unknown;
+};
+
+export interface DevdControlCompatPayload {
+  mode?: string;
+  output_enabled?: boolean;
+  target_p_mw?: number;
+}
+
+export interface DevdStatusPayload {
+  status: Partial<FastStatusJson>;
+  link_up?: boolean;
+  hello_seen?: boolean;
+  analog_state?: FastStatusView["analog_state"];
+  fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
+  state_flags_decoded?: FastStatusView["state_flags_decoded"];
+  control?: DevdControlCompatPayload;
+}
+
 function createInitialCalibrationProfileWire(): CalibrationProfileWire {
   const active = {
     source: "factory-default" as const,
@@ -77,7 +97,7 @@ export function clampI16(value: number): number {
 function createInitialStatus(baseUrl?: string): FastStatusView {
   const raw: FastStatusJson = {
     uptime_ms: 123_456,
-    mode: 0,
+    mode: 1,
     state_flags: 0,
     enable: false,
     target_value: 0,
@@ -100,6 +120,7 @@ function createInitialStatus(baseUrl?: string): FastStatusView {
     hello_seen: true,
     analog_state: "ready",
     fault_flags_decoded: [],
+    state_flags_decoded: [],
   };
 
   if (baseUrl) {
@@ -166,6 +187,8 @@ function createInitialPd(baseUrl: string): PdView | null {
     contract_ma: null,
     fixed_pdos,
     pps_pdos,
+    epr_active: false,
+    epr_avs_pdos: [],
     allow_extended_voltage,
     saved,
     apply: {
@@ -260,6 +283,27 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
     },
     hostname: `loadlynx-${String(index).padStart(6, "a")}.local`,
     short_id: String(index).padStart(6, "a"),
+    firmware: {
+      target: "digital_esp32s3",
+      package_version: "0.1.0",
+      build_id:
+        "digital 0.1.0 (profile mock, v0.1.0-mock, src 0x0000000000000000)",
+      build_profile: "mock",
+      target_triple: "xtensa-esp32s3-none-elf",
+      source_digest: "src 0x0000000000000000",
+      features: ["net_http", "mdns_dns_sd", "usb_cdc_jsonl"],
+      protocol: "loadlynx.cdc.v1",
+      defmt: {
+        enabled: true,
+        encoding: "defmt-espflash",
+      },
+    },
+    usb_bridge: {
+      transport: "usb_cdc_jsonl",
+      protocol: "loadlynx.cdc.v1",
+      lease_required: true,
+      framing: "lf_json",
+    },
     capabilities: {
       cc_supported: true,
       cv_supported: true,
@@ -273,7 +317,7 @@ function createInitialIdentity(baseUrl: string, index: number): Identity {
 
 export function normalizeDevdIdentity(
   baseUrl: string,
-  payload: Partial<Identity> & { firmware_version?: unknown },
+  payload: DevdIdentityPayload,
 ): Identity {
   const url = new URL(baseUrl);
   const deviceId =
@@ -297,6 +341,13 @@ export function normalizeDevdIdentity(
     },
     hostname,
     short_id: payload.short_id ?? deviceId,
+    firmware: payload.firmware,
+    usb_bridge: payload.usb_bridge ?? {
+      transport: "usb_cdc_jsonl",
+      protocol: "loadlynx.cdc.v1",
+      lease_required: true,
+      framing: "lf_json",
+    },
     capabilities: {
       cc_supported: payload.capabilities?.cc_supported ?? true,
       cv_supported: payload.capabilities?.cv_supported ?? true,
@@ -308,27 +359,25 @@ export function normalizeDevdIdentity(
   };
 }
 
-export function normalizeDevdStatus(payload: {
-  status: Partial<FastStatusJson>;
-  link_up?: boolean;
-  hello_seen?: boolean;
-  analog_state?: FastStatusView["analog_state"];
-  fault_flags_decoded?: FastStatusView["fault_flags_decoded"];
-  control?: { mode?: string; output_enabled?: boolean; target_p_mw?: number };
-}): FastStatusView {
+export function normalizeDevdStatus(
+  payload: DevdStatusPayload,
+): FastStatusView {
+  const fallbackMode =
+    payload.control?.mode === "cc"
+      ? 1
+      : payload.control?.mode === "cv"
+        ? 2
+        : payload.control?.mode === "cp"
+          ? 3
+          : 1;
   const raw: FastStatusJson = {
     uptime_ms: payload.status.uptime_ms ?? 0,
-    mode:
-      payload.status.mode ??
-      (payload.control?.mode === "cc"
-        ? 1
-        : payload.control?.mode === "cv"
-          ? 2
-          : 3),
+    mode: payload.status.mode ?? fallbackMode,
     state_flags: payload.status.state_flags ?? 0,
     enable: payload.status.enable ?? payload.control?.output_enabled ?? false,
     target_value:
-      payload.status.target_value ?? payload.control?.target_p_mw ?? 0,
+      payload.status.target_value ??
+      (fallbackMode === 3 ? (payload.control?.target_p_mw ?? 0) : 0),
     i_local_ma: payload.status.i_local_ma ?? 0,
     i_remote_ma: payload.status.i_remote_ma ?? 0,
     v_local_mv: payload.status.v_local_mv ?? 0,
@@ -352,6 +401,7 @@ export function normalizeDevdStatus(payload: {
     hello_seen: payload.hello_seen ?? true,
     analog_state: payload.analog_state ?? "ready",
     fault_flags_decoded: payload.fault_flags_decoded ?? [],
+    state_flags_decoded: payload.state_flags_decoded ?? [],
   };
 }
 

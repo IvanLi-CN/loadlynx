@@ -17,6 +17,7 @@ export interface ScanOptions {
   seedIp: string;
   maxConcurrency?: number; // default 24
   perHostTimeoutMs?: number; // default 400
+  signal?: AbortSignal;
 }
 
 export interface ScanProgress {
@@ -24,6 +25,47 @@ export interface ScanProgress {
   totalCount: number;
   foundCount: number;
 }
+
+function parseDiscoveredIdentity(text: string): Identity | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text) as unknown;
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== "object") {
+    return null;
+  }
+
+  const identity = parsed as Partial<Identity>;
+  if (
+    typeof identity.device_id !== "string" ||
+    typeof identity.digital_fw_version !== "string" ||
+    typeof identity.analog_fw_version !== "string" ||
+    typeof identity.protocol_version !== "number" ||
+    typeof identity.uptime_ms !== "number" ||
+    !identity.network ||
+    typeof identity.network.ip !== "string" ||
+    typeof identity.network.mac !== "string" ||
+    typeof identity.network.hostname !== "string" ||
+    !identity.capabilities ||
+    typeof identity.capabilities.api_version !== "string"
+  ) {
+    return null;
+  }
+
+  const isLoadLynx =
+    identity.capabilities.api_version.length > 0 ||
+    identity.device_id.startsWith("llx-");
+  if (!isLoadLynx) {
+    return null;
+  }
+
+  return identity as Identity;
+}
+
+export const __testParseDiscoveredIdentity = parseDiscoveredIdentity;
 
 // Internal worker to scan a single IP
 async function scanSingleHost(
@@ -61,21 +103,8 @@ async function scanSingleHost(
     }
 
     const text = await response.text();
-    let identity: Identity;
-    try {
-      identity = JSON.parse(text);
-    } catch {
-      return null;
-    }
-
-    // Validation: Is this a LoadLynx device?
-    // Check api_version or device_id prefix
-    const isLoadLynx =
-      (identity.capabilities?.api_version &&
-        typeof identity.capabilities.api_version === "string") ||
-      identity.device_id?.startsWith("llx-");
-
-    if (!isLoadLynx) {
+    const identity = parseDiscoveredIdentity(text);
+    if (!identity) {
       return null;
     }
 
@@ -112,7 +141,12 @@ export async function scanSubnet(
     );
   }
 
-  const { seedIp, maxConcurrency = 24, perHostTimeoutMs = 400 } = options;
+  const {
+    seedIp,
+    maxConcurrency = 24,
+    perHostTimeoutMs = 400,
+    signal,
+  } = options;
 
   const plan = buildSubnetPlanFromSeedIp(seedIp);
   const hosts = plan.hosts;
@@ -121,44 +155,17 @@ export async function scanSubnet(
   // Results
   const discovered: DiscoveredDevice[] = [];
   let scannedCount = 0;
-
-  // We can use a simple custom concurrency loop.
-  // For React Mutation cancellation, we need to respect an abort signal if passed?
-  // scanSubnet itself is just a promise, but we can accept a signal if we want strict cancellation down to the socket.
-  // But for simplicity, we'll just check a flag or let the caller ignore the result.
-  // However, the prompt asked for "AbortController implementation for timeout".
-  // It also mentioned "Support user cancelling scan... using React Query mutation onMutate+onSettled".
-  // Actually, useMutation return provides `reset`, but to truly stop the loop we do need a signal or a "cancel" flag.
-  // React Query v5 uses `AbortSignal` in `mutationFn`? No, standard mutations don't pass signal automatically unless configured.
-  // But we can just rely on the user ignoring the promise result for "soft cancel".
-  // AND "support user cancelling... preventing subsequent batch".
-  // Let's implement a `signal` argument for `scanSubnet` just in case, logic-wise.
-
-  // Let's iterate.
-  // Chunking function
   const scanQueue = [...hosts];
-
-  // We will run `maxConcurrency` workers.
-  // Or just Promise.all on batches?
-  // Batches is easier to implement but "worker pool" is faster (doesn't wait for slowpoke in batch).
-  // Let's do a simple worker pool.
-
-  // We'll trust the caller to handle the "cancel" by just invalidating/ignoring,
-  // BUT providing a signal would be cleaner to actually stop traffic.
-  // I will add `signal` to `ScanOptions` roughly or just as second arg.
-  // For useMutation, we'll just let it run to completion or check an external Ref if we firmly wired it up.
-  // The requirements say: "onMutate + onSettled state is enough" for "Marking as cancelled".
-  // "Single IP failure must not stop scan".
-
-  // Let's optimize:
-  // This function will be called by mutationFn.
 
   const worker = async () => {
     while (scanQueue.length > 0) {
+      if (signal?.aborted) {
+        break;
+      }
       const ip = scanQueue.shift();
       if (!ip) break;
 
-      const result = await scanSingleHost(ip, perHostTimeoutMs);
+      const result = await scanSingleHost(ip, perHostTimeoutMs, signal);
       if (result) {
         // De-dupe by IP (should be unique by def, but safety first)
         if (!discovered.some((d) => d.ip === result.ip)) {
@@ -191,6 +198,9 @@ export async function scanSubnet(
 
   return discovered;
 }
+
+export const __testScanSingleHost = scanSingleHost;
+export const __testScanSubnet = scanSubnet;
 
 export function useSubnetScanMutation() {
   return useMutation<

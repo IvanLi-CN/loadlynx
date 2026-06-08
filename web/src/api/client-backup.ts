@@ -19,12 +19,18 @@ import type {
   BackupRestoreResult,
   BackupSectionKey,
   CalibrationProfileWire,
+  ControlUpdateRequest,
   ControlView,
+  DiagnosticsExport,
   LoadLynxBackup,
+  PdFixedUpdateRequest,
+  PdPpsUpdateRequest,
   Preset,
+  SoftResetRequest,
   WifiCredentials,
   WifiSetRequest,
   WifiStatus,
+  WifiStatusResponse,
 } from "./types.ts";
 
 export const BACKUP_SECTION_KEYS: BackupSectionKey[] = [
@@ -33,6 +39,22 @@ export const BACKUP_SECTION_KEYS: BackupSectionKey[] = [
   "settings.wifi",
   "settings.pd",
 ];
+
+function unwrapWifiStatusResponse(response: WifiStatusResponse): WifiStatus {
+  return "wifi" in response ? response.wifi : response;
+}
+
+export function makeWifiSetRequest(ssid: string, psk: string): WifiSetRequest {
+  return {
+    ssid,
+    psk,
+    wait: false,
+  };
+}
+
+export function makeManualSoftResetRequest(): SoftResetRequest {
+  return { reason: "manual" };
+}
 
 export async function getWifiStatus(baseUrl: string): Promise<WifiStatus> {
   if (isMockBaseUrl(baseUrl)) {
@@ -71,7 +93,7 @@ export async function postWifiConfig(
     state.wifiPsk = payload.psk;
     return structuredClone(state.wifi);
   }
-  const response = await httpJsonQueued<WifiStatus | { wifi: WifiStatus }>(
+  const response = await httpJsonQueued<WifiStatusResponse>(
     baseUrl,
     "/api/v1/wifi",
     {
@@ -82,7 +104,7 @@ export async function postWifiConfig(
       },
     },
   );
-  return "wifi" in response ? response.wifi : response;
+  return unwrapWifiStatusResponse(response);
 }
 
 export async function deleteWifiConfig(baseUrl: string): Promise<WifiStatus> {
@@ -98,14 +120,14 @@ export async function deleteWifiConfig(baseUrl: string): Promise<WifiStatus> {
     state.wifiPsk = "factory-mock-psk";
     return structuredClone(state.wifi);
   }
-  const response = await httpJsonQueued<WifiStatus | { wifi: WifiStatus }>(
+  const response = await httpJsonQueued<WifiStatusResponse>(
     baseUrl,
     "/api/v1/wifi",
     {
       method: "DELETE",
     },
   );
-  return "wifi" in response ? response.wifi : response;
+  return unwrapWifiStatusResponse(response);
 }
 
 export function getSupportedBackupSections(
@@ -219,7 +241,8 @@ export async function restoreDeviceBackup(
 
   let control: ControlView;
   try {
-    control = await updateControl(baseUrl, { output_enabled: false });
+    const payload: ControlUpdateRequest = { output_enabled: false };
+    control = await updateControl(baseUrl, payload);
   } catch (error) {
     throw new HttpApiError({
       status: 409,
@@ -320,11 +343,8 @@ async function restoreWifiBackup(
     if (wifi.source === "factory") {
       await deleteWifiConfig(baseUrl);
     } else {
-      await postWifiConfig(baseUrl, {
-        ssid: wifi.ssid,
-        psk: wifi.psk,
-        wait: false,
-      });
+      const payload = makeWifiSetRequest(wifi.ssid, wifi.psk);
+      await postWifiConfig(baseUrl, payload);
     }
   } catch (error) {
     try {
@@ -379,23 +399,25 @@ async function restorePdBackup(
   pd: NonNullable<NonNullable<LoadLynxBackup["sections"]["settings"]>["pd"]>,
 ): Promise<void> {
   if (pd.saved.mode === "fixed") {
-    await postPd(baseUrl, {
+    const request: PdFixedUpdateRequest = {
       mode: "fixed",
       object_pos: pd.saved.fixed_object_pos,
       target_mv: pd.saved.target_mv,
       i_req_ma: pd.saved.i_req_ma,
       allow_extended_voltage: pd.allow_extended_voltage,
-    });
+    };
+    await postPd(baseUrl, request);
     return;
   }
 
-  await postPd(baseUrl, {
+  const request: PdPpsUpdateRequest = {
     mode: "pps",
     object_pos: pd.saved.pps_object_pos,
     target_mv: pd.saved.pps_target_mv ?? pd.saved.target_mv,
     i_req_ma: pd.saved.i_req_ma,
     allow_extended_voltage: pd.allow_extended_voltage,
-  });
+  };
+  await postPd(baseUrl, request);
 }
 
 function formatUnknownError(error: unknown): string {
@@ -415,16 +437,28 @@ function presetsEqual(a: Preset, b: Preset): boolean {
   );
 }
 
-export async function exportDiagnostics(baseUrl: string): Promise<unknown> {
+export async function exportDiagnostics(
+  baseUrl: string,
+): Promise<DiagnosticsExport> {
   if (isMockBaseUrl(baseUrl)) {
     const state = getOrCreateMockDevice(baseUrl);
     return {
       schema_version: 1,
       redaction: { psk: true },
-      device: { id: baseUrl, transport: "mock" },
-      wifi: state.wifi,
-      events: [],
+      firmware_version: state.identity.digital_fw_version,
+      wifi: {
+        ...state.wifi,
+        psk: "<redacted>",
+      },
+      link_up: state.status.link_up,
+      last_status: {
+        uptime_ms: state.status.raw.uptime_ms,
+        fault_flags: state.status.raw.fault_flags,
+      },
     };
   }
-  return httpJsonQueued<unknown>(baseUrl, "/api/v1/diagnostics/export");
+  return httpJsonQueued<DiagnosticsExport>(
+    baseUrl,
+    "/api/v1/diagnostics/export",
+  );
 }

@@ -553,7 +553,7 @@ fn finish_rr(buf: &mut [u8], rdlen_pos: usize, rdata_start: usize, offset: usize
 
 fn encode_dns_name(buf: &mut [u8], mut offset: usize, name: &str) -> Option<usize> {
     for label in name.trim_end_matches('.').split('.') {
-        let len = label.as_bytes().len();
+        let len = label.len();
         if len == 0 || len > 63 || offset + 1 + len > buf.len() {
             return None;
         }
@@ -572,7 +572,7 @@ fn encode_dns_name(buf: &mut [u8], mut offset: usize, name: &str) -> Option<usiz
 fn encode_name(buf: &mut [u8], mut offset: usize, hostname: &str) -> Option<usize> {
     // Encode "<hostname>.local"
     for label in [hostname, "local"] {
-        let len = label.as_bytes().len();
+        let len = label.len();
         if len == 0 || len > 63 || offset + 1 + len > buf.len() {
             return None;
         }
@@ -647,7 +647,7 @@ fn parse_query(packet: &[u8]) -> Option<Query<'_>> {
     })
 }
 
-fn decode_name<'a>(packet: &'a [u8], mut offset: usize, out: &mut String<64>) -> Option<usize> {
+fn decode_name(packet: &[u8], mut offset: usize, out: &mut String<64>) -> Option<usize> {
     let mut jumped = false;
     let mut jump_offset = 0usize;
 

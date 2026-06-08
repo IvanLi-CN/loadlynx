@@ -7,11 +7,15 @@ import {
 import type {
   CcControlView,
   CcUpdateRequest,
+  ControlUpdateRequest,
   ControlView,
   FastStatusView,
   Identity,
   Preset,
   PresetId,
+  PresetsResponse,
+  SoftResetReason,
+  SoftResetResponse,
 } from "./types.ts";
 
 export async function mockGetIdentity(baseUrl: string): Promise<Identity> {
@@ -258,7 +262,7 @@ function mockUpdateStatusFromControl(state: MockDeviceState) {
 
 export async function mockGetPresets(
   baseUrl: string,
-): Promise<{ presets: Preset[] }> {
+): Promise<PresetsResponse> {
   const state = getOrCreateMockDevice(baseUrl);
   mockRequireControlReady(state);
   return { presets: structuredClone(state.presets) };
@@ -349,7 +353,7 @@ export async function mockGetControl(baseUrl: string): Promise<ControlView> {
 
 export async function mockUpdateControl(
   baseUrl: string,
-  payload: { output_enabled: boolean },
+  payload: ControlUpdateRequest,
 ): Promise<ControlView> {
   const state = getOrCreateMockDevice(baseUrl);
   if (
@@ -396,8 +400,8 @@ export async function mockDebugSetUvLatched(
 
 export async function mockSoftReset(
   baseUrl: string,
-  reason: string,
-): Promise<{ accepted: boolean; reason: string }> {
+  reason: SoftResetReason,
+): Promise<SoftResetResponse> {
   const state = getOrCreateMockDevice(baseUrl);
   state.calibrationMode = "off";
   if (state.calibration.eeprom) {

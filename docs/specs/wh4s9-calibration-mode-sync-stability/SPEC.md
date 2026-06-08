@@ -136,6 +136,11 @@
 
 ![Calibration route restored current tab](./assets/storybook-calibration-restores-stored-current-tab.png)
 
+- Source: Storybook canvas `Routes/Calibration/Output Control Applied`
+- Evidence note: 当前电流校准页仍保持既有布局与交互层级；本次重构后的草稿工具栏、硬件 I/O 区与输出控制区在 mock state 下正常渲染。
+
+![Calibration route output control applied](./assets/calibration-route-output-control-applied.png)
+
 ## 实现里程碑（Milestones / Delivery checklist）
 
 - [x] M1: 收口 calibration mode 协调入口，移除页面内重复 cleanup `off`，并让 storage hydrate 早于自动 sync。

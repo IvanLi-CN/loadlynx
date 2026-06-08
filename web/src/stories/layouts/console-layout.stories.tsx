@@ -236,7 +236,11 @@ export const CalibrationLarge: Story = {
     initialPath: "/mock-001/calibration",
   },
   play: async ({ canvas, canvasElement }) => {
-    await canvas.findByRole("heading", { name: "Calibration" });
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5000 },
+    );
 
     await waitFor(
       () => {

@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import {
+  validateCurrentTruthDocs,
+  validateHttpSurfaceContracts,
   loadWorkflowMetadata,
   validateWebToolingContracts,
   validateWorkflowHygiene,
@@ -9,7 +11,15 @@ const workflowsDir = new URL("../workflows/", import.meta.url);
 const { failures: workflowFailures, workflows } = await loadWorkflowMetadata(workflowsDir);
 const hygieneFailures = validateWorkflowHygiene({ workflows });
 const toolingFailures = await validateWebToolingContracts();
-const failures = [...workflowFailures, ...hygieneFailures, ...toolingFailures];
+const currentTruthDocFailures = await validateCurrentTruthDocs();
+const httpSurfaceFailures = await validateHttpSurfaceContracts();
+const failures = [
+  ...workflowFailures,
+  ...hygieneFailures,
+  ...toolingFailures,
+  ...currentTruthDocFailures,
+  ...httpSurfaceFailures,
+];
 
 if (failures.length > 0) {
   console.error("workflow hygiene drift detected:");

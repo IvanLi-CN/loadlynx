@@ -5,6 +5,8 @@ import type { StoredDevice } from "../../devices/device-store.ts";
 import { MemoryDeviceStore } from "../../devices/device-store.ts";
 import { DeviceStoreProvider } from "../../devices/store-context.tsx";
 import { createAppRouter } from "../../router.tsx";
+import { MemoryCalibrationStore } from "../../routes/device-calibration/store.ts";
+import { CalibrationStoreProvider } from "../../routes/device-calibration/store-context.tsx";
 
 export const DEFAULT_MOCK_DEVICES: StoredDevice[] = [
   {
@@ -22,13 +24,11 @@ export const DEFAULT_MOCK_DEVICES: StoredDevice[] = [
 export function RouteStoryHarness(props: {
   initialPath: string;
   devices?: StoredDevice[];
-  beforeMount?: () => void;
+  beforeMount?: (stores: {
+    deviceStore: MemoryDeviceStore;
+    calibrationStore: MemoryCalibrationStore;
+  }) => void;
 }) {
-  useState(() => {
-    props.beforeMount?.();
-    return null;
-  });
-
   const [queryClient] = useState(
     () =>
       new QueryClient({
@@ -46,6 +46,12 @@ export function RouteStoryHarness(props: {
   const [deviceStore] = useState(
     () => new MemoryDeviceStore(props.devices ?? DEFAULT_MOCK_DEVICES),
   );
+  const [calibrationStore] = useState(() => new MemoryCalibrationStore());
+
+  useState(() => {
+    props.beforeMount?.({ deviceStore, calibrationStore });
+    return null;
+  });
 
   const [router] = useState(() => {
     const history = createMemoryHistory({
@@ -57,7 +63,9 @@ export function RouteStoryHarness(props: {
   return (
     <QueryClientProvider client={queryClient}>
       <DeviceStoreProvider store={deviceStore}>
-        <RouterProvider router={router} />
+        <CalibrationStoreProvider store={calibrationStore}>
+          <RouterProvider router={router} />
+        </CalibrationStoreProvider>
       </DeviceStoreProvider>
     </QueryClientProvider>
   );

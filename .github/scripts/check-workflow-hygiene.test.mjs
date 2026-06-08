@@ -2,6 +2,8 @@
 import assert from "node:assert/strict";
 import {
   parseWorkflowMetadata,
+  validateCurrentTruthDocs,
+  validateHttpSurfaceContracts,
   validateWebToolingContracts,
   validateWorkflowHygiene,
 } from "./check-quality-gates-lib.mjs";
@@ -464,6 +466,250 @@ jobs:
   );
 } finally {
   await rm(tempDir, { recursive: true, force: true });
+}
+
+{
+  const tempDir = await mkdtemp(join(tmpdir(), "check-current-truth-docs-"));
+
+  try {
+    const networkControlPath = join(tempDir, "network-control.md");
+    const networkHttpApiPath = join(tempDir, "network-http-api.md");
+    const userCalibrationPath = join(tempDir, "user-calibration.md");
+    const currentSensePath = join(tempDir, "current-sense.md");
+    const uartLinkPath = join(tempDir, "uart-link.md");
+    const softwareNotesPath = join(tempDir, "software.md");
+
+    await writeFile(
+      networkControlPath,
+      "current control path is SetMode and output_enabled",
+    );
+    await writeFile(
+      networkHttpApiPath,
+      "effective_i_ma is reflected through unified control path",
+    );
+    await writeFile(
+      userCalibrationPath,
+      "calibration flow uses physical targets and unified UART TX path",
+    );
+    await writeFile(
+      currentSensePath,
+      "SetMode snapshot provides total target current in the active control path",
+    );
+    await writeFile(
+      uartLinkPath,
+      "current implementation uses event-driven SetMode and implicit heartbeat",
+    );
+    await writeFile(
+      softwareNotesPath,
+      "current digital/analog control path uses FastStatus plus SetMode and compatibility-only SetPoint",
+    );
+
+    assert.deepEqual(
+      await validateCurrentTruthDocs({
+        docs: [
+          {
+            label: "docs/interfaces/network-control.md",
+            path: new URL(`file://${networkControlPath}`),
+            requiredSnippets: ["current control path is SetMode and output_enabled"],
+            forbiddenSnippets: [
+              "SetPoint/LimitProfile/SoftReset/SetEnable 控制闭环",
+              "- `PUT /api/v1/control`\n    - 更新统一控制真相源，例如输出开关、活动 preset 或 preset 内容。",
+            ],
+          },
+          {
+            label: "docs/interfaces/network-http-api.md",
+            path: new URL(`file://${networkHttpApiPath}`),
+            requiredSnippets: [
+              "effective_i_ma is reflected through unified control path",
+            ],
+            forbiddenSnippets: [
+              "实际下发 SetPoint.target_i_ma",
+              "### 3.12 `PUT /api/v1/control`（冻结）",
+            ],
+          },
+          {
+            label: "docs/dev-notes/user-calibration.md",
+            path: new URL(`file://${userCalibrationPath}`),
+            forbiddenSnippets: ["Web 调用控制 API 下发对应 CC SetPoint"],
+          },
+          {
+            label: "docs/dev-notes/current-sense-opa2365-v4-2.md",
+            path: new URL(`file://${currentSensePath}`),
+            forbiddenSnippets: ["调增 SetPoint 上限与保护阈值"],
+          },
+          {
+            label: "docs/interfaces/uart-link.md",
+            path: new URL(`file://${uartLinkPath}`),
+            forbiddenSnippets: [
+              "空闲 10 Hz、工作 50–100 Hz 遥测",
+            ],
+          },
+          {
+            label: "docs/dev-notes/software.md",
+            path: new URL(`file://${softwareNotesPath}`),
+            forbiddenSnippets: [
+              "当前链路已实现 `HELLO`、`FAST_STATUS` 与 `SET_POINT + ACK` 的控制闭环。",
+            ],
+          },
+        ],
+      }),
+      [],
+    );
+
+    await writeFile(
+      networkHttpApiPath,
+      "### 3.12 `PUT /api/v1/control`（冻结）",
+    );
+
+    assert.deepEqual(
+      await validateCurrentTruthDocs({
+        docs: [
+          {
+            label: "docs/interfaces/network-http-api.md",
+            path: new URL(`file://${networkHttpApiPath}`),
+            forbiddenSnippets: ["### 3.12 `PUT /api/v1/control`（冻结）"],
+          },
+        ],
+      }),
+      [
+        'docs/interfaces/network-http-api.md: forbidden stale control-path phrase present: "### 3.12 `PUT /api/v1/control`（冻结）"',
+      ],
+    );
+
+    await writeFile(
+      uartLinkPath,
+      "当前项目在空闲期发送 10 Hz `PING` 作为显式心跳。",
+    );
+
+    assert.deepEqual(
+      await validateCurrentTruthDocs({
+        docs: [
+          {
+            label: "docs/interfaces/uart-link.md",
+            path: new URL(`file://${uartLinkPath}`),
+            forbiddenSnippets: [
+              "当前项目在空闲期发送 10 Hz `PING` 作为显式心跳",
+            ],
+          },
+        ],
+      }),
+      [
+        'docs/interfaces/uart-link.md: forbidden stale control-path phrase present: "当前项目在空闲期发送 10 Hz `PING` 作为显式心跳"',
+      ],
+    );
+
+    await writeFile(
+      networkControlPath,
+      "- `GET/PUT /api/v1/pd`",
+    );
+
+    assert.deepEqual(
+      await validateCurrentTruthDocs({
+        docs: [
+          {
+            label: "docs/interfaces/network-control.md",
+            path: new URL(`file://${networkControlPath}`),
+            forbiddenSnippets: ["- `GET/PUT /api/v1/pd`"],
+          },
+        ],
+      }),
+      [
+        'docs/interfaces/network-control.md: forbidden stale control-path phrase present: "- `GET/PUT /api/v1/pd`"',
+      ],
+    );
+
+    await writeFile(networkControlPath, "missing required current truth");
+
+    assert.deepEqual(
+      await validateCurrentTruthDocs({
+        docs: [
+          {
+            label: "docs/interfaces/network-control.md",
+            path: new URL(`file://${networkControlPath}`),
+            requiredSnippets: ["- `POST /api/v1/control`"],
+          },
+        ],
+      }),
+      [
+        'docs/interfaces/network-control.md: required current-truth phrase missing: "- `POST /api/v1/control`"',
+      ],
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+{
+  const tempDir = await mkdtemp(join(tmpdir(), "check-http-surface-contracts-"));
+
+  try {
+    const firmwareNetPath = join(tempDir, "net.rs");
+    const webClientDevicePath = join(tempDir, "client-device.ts");
+    const webClientBackupPath = join(tempDir, "client-backup.ts");
+
+    await writeFile(
+      firmwareNetPath,
+      [
+        '("PUT", "/api/v1/presets") | ("POST", "/api/v1/presets")',
+        '("PUT", "/api/v1/control") | ("POST", "/api/v1/control")',
+        '("PUT", "/api/v1/pd") | ("POST", "/api/v1/pd")',
+        '("GET", "/api/v1/diagnostics") | ("GET", "/api/v1/diagnostics/export")',
+      ].join("\n"),
+    );
+    await writeFile(
+      webClientDevicePath,
+      `export async function postPd(baseUrl: string, payload: PdUpdateRequest): Promise<PdView> {
+  return httpJsonQueued<PdView>(baseUrl, "/api/v1/pd", {
+    method: "POST",
+  });
+}
+export async function updatePreset(baseUrl: string, payload: Preset): Promise<Preset> {
+  return httpJsonQueued<Preset>(baseUrl, "/api/v1/presets", {
+    method: "POST",
+  });
+}
+export async function updateControl(baseUrl: string, payload: ControlUpdateRequest): Promise<ControlView> {
+  return httpJsonQueued<ControlView>(baseUrl, "/api/v1/control", {
+    method: "POST",
+  });
+}`,
+    );
+    await writeFile(
+      webClientBackupPath,
+      `export async function exportDiagnostics(baseUrl: string): Promise<DiagnosticsExport> {
+  return httpJsonQueued<DiagnosticsExport>(baseUrl, "/api/v1/diagnostics/export");
+}`,
+    );
+
+    assert.deepEqual(
+      await validateHttpSurfaceContracts({
+        firmwareNetPath: new URL(`file://${firmwareNetPath}`),
+        webClientDevicePath: new URL(`file://${webClientDevicePath}`),
+        webClientBackupPath: new URL(`file://${webClientBackupPath}`),
+      }),
+      [],
+    );
+
+    await writeFile(
+      webClientBackupPath,
+      `export async function exportDiagnostics(baseUrl: string): Promise<DiagnosticsExport> {
+  return httpJsonQueued<DiagnosticsExport>(baseUrl, "/api/v1/diagnostics");
+}`,
+    );
+
+    assert.deepEqual(
+      await validateHttpSurfaceContracts({
+        firmwareNetPath: new URL(`file://${firmwareNetPath}`),
+        webClientDevicePath: new URL(`file://${webClientDevicePath}`),
+        webClientBackupPath: new URL(`file://${webClientBackupPath}`),
+      }),
+      [
+        'web/src/api/client-backup.ts: exportDiagnostics must keep "/api/v1/diagnostics/export" as the primary client path',
+      ],
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 console.log("workflow hygiene tests passed");

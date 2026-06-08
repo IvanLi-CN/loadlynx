@@ -7,6 +7,8 @@ import { createRoot } from "react-dom/client";
 import { DemoAwareDeviceStore } from "./devices/device-store.ts";
 import { DeviceStoreProvider } from "./devices/store-context.tsx";
 import { createAppRouter } from "./router.tsx";
+import { LocalStorageCalibrationStore } from "./routes/device-calibration/store.ts";
+import { CalibrationStoreProvider } from "./routes/device-calibration/store-context.tsx";
 
 const rootElement = document.getElementById("root");
 
@@ -17,12 +19,15 @@ if (!rootElement) {
 const queryClient = new QueryClient();
 const router = createAppRouter(queryClient);
 const deviceStore = new DemoAwareDeviceStore(window.localStorage);
+const calibrationStore = new LocalStorageCalibrationStore(window.localStorage);
 
 createRoot(rootElement).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
       <DeviceStoreProvider store={deviceStore}>
-        <RouterProvider router={router} />
+        <CalibrationStoreProvider store={calibrationStore}>
+          <RouterProvider router={router} />
+        </CalibrationStoreProvider>
       </DeviceStoreProvider>
     </QueryClientProvider>
   </StrictMode>,

@@ -81,7 +81,9 @@ pub struct TouchPoint {
     pub y: u16,
     pub id: u8,
     pub event: u8,
+    #[allow(dead_code)]
     pub weight: u8,
+    #[allow(dead_code)]
     pub misc: u8,
 }
 

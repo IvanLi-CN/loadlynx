@@ -3,6 +3,7 @@ import {
   type Dispatch,
   type MutableRefObject,
   type SetStateAction,
+  useEffect,
   useMemo,
   useState,
 } from "react";
@@ -13,24 +14,38 @@ import {
 } from "../../api/client.ts";
 import type { CalibrationProfile, FastStatusView } from "../../api/types.ts";
 import { piecewiseLinearDecimal } from "../../calibration/piecewise.ts";
-import {
-  validateAndNormalizeCurrentPoints,
-  validateAndNormalizeVoltagePoints,
-} from "../../calibration/validation.ts";
+import { validateAndNormalizeVoltagePoints } from "../../calibration/validation.ts";
 import { ConfirmDialog } from "../../components/common/confirm-dialog.tsx";
 import {
+  CalibrationDeviceWriteButtons,
+  CalibrationDraftActionsPanel,
+  CalibrationHardwareIoPanel,
+} from "./calibration-action-panels.tsx";
+import {
+  getResetDraftConfirmConfig,
+  getResetVoltageDeviceConfirmConfig,
+} from "./calibration-confirm.ts";
+import { CalibrationDeviceViewPanel } from "./calibration-device-view-panel.tsx";
+import { CalibrationViewTabs } from "./calibration-view-tabs.tsx";
+import {
+  runCalibrationReset,
+  runVoltageCalibrationWrite,
+} from "./device-write.ts";
+import { applyCalibrationPreview } from "./preview-profile.ts";
+import {
   formatMvAsV,
+  formatUvToUnit,
   isDraftEmpty,
   mergeVoltageCandidatesByIndex,
   mergeVoltageCandidatesByMv,
   parseVoltageInputToMv,
+  parseVoltageInputToUv,
   type RefetchProfile,
-  retryDeviceCall,
-  sleep,
   type UndoAction,
   type VoltageInputUnit,
   type WithStatusStreamPaused,
 } from "./shared.ts";
+import { useCalibrationStore } from "./store-context.tsx";
 
 export interface VoltageCalibrationPanelProps {
   baseUrl: string;
@@ -81,12 +96,45 @@ export function VoltageCalibrationPanel({
   onRefetchProfile,
   isOffline,
 }: VoltageCalibrationPanelProps) {
+  const calibrationStore = useCalibrationStore();
   const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
-  const [inputV, setInputV] = useState("12.00");
+  const [inputV, setInputV] = useState("12.000000");
   const inputVUnit: VoltageInputUnit = "V";
+  const [voltageOptionsLoaded, setVoltageOptionsLoaded] = useState(false);
   const [confirmKind, setConfirmKind] = useState<
     "reset_draft" | "reset_device_voltage" | null
   >(null);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    setVoltageOptionsLoaded(false);
+
+    try {
+      const stored = calibrationStore.getVoltageOptions(deviceId, baseUrl);
+      const unit = stored.unit ?? "V";
+      const inputUv = stored.inputUv ?? 12_000_000;
+      setInputV(formatUvToUnit(inputUv, unit));
+    } catch {
+      // ignore
+    } finally {
+      setVoltageOptionsLoaded(true);
+    }
+  }, [baseUrl, calibrationStore, deviceId]);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || !voltageOptionsLoaded) return;
+    const inputUv = parseVoltageInputToUv(inputV, inputVUnit);
+    if (inputUv == null) return;
+
+    try {
+      calibrationStore.setVoltageOptions(deviceId, baseUrl, {
+        inputUv,
+        unit: inputVUnit,
+      });
+    } catch {
+      // ignore
+    }
+  }, [baseUrl, calibrationStore, deviceId, inputV, voltageOptionsLoaded]);
 
   const effectivePreview = previewProfile ?? deviceProfile ?? null;
 
@@ -256,147 +304,68 @@ export function VoltageCalibrationPanel({
   });
 
   const applyToDeviceMutation = useMutation({
-    mutationFn: async () => {
-      await withStatusStreamPaused(async () => {
-        if (draftLocalPoints.length === 0 && draftRemotePoints.length === 0) {
-          throw new Error("Draft is empty. Nothing to sync.");
-        }
-
-        const local = validateAndNormalizeVoltagePoints(
-          "v_local",
-          draftLocalPoints,
-        );
-        const remote = validateAndNormalizeVoltagePoints(
-          "v_remote",
-          draftRemotePoints,
-        );
-        const issues = [...local.issues, ...remote.issues];
-        if (issues.length > 0) {
-          onAlert(
-            "Calibration data cleanup (Apply)",
-            "Draft contains duplicate/conflicting samples. Apply will use a cleaned curve and may drop/merge points.",
-            issues.map((issue) => `${issue.path}: ${issue.message}`),
-          );
-        }
-
-        if (local.normalized.length === 0 && remote.normalized.length === 0) {
-          throw new Error("No valid points after cleanup. Nothing to apply.");
-        }
-
-        if (local.normalized.length > 0) {
-          await retryDeviceCall(() =>
-            postCalibrationApply(baseUrl, {
-              kind: "v_local",
-              points: local.normalized,
-            }),
-          );
-          await sleep(200);
-        }
-        if (remote.normalized.length > 0) {
-          await retryDeviceCall(() =>
-            postCalibrationApply(baseUrl, {
-              kind: "v_remote",
-              points: remote.normalized,
-            }),
-          );
-        }
-      });
-    },
+    mutationFn: async () =>
+      runVoltageCalibrationWrite({
+        action: "Apply",
+        baseUrl,
+        draftLocalPoints,
+        draftRemotePoints,
+        onAlert,
+        postPoints: async ({ baseUrl, kind, points }) =>
+          postCalibrationApply(baseUrl, {
+            kind,
+            points,
+          }),
+        withStatusStreamPaused,
+      }),
     onSuccess: async () => {
       await onRefetchProfile();
     },
   });
 
   const commitToDeviceMutation = useMutation({
-    mutationFn: async () => {
-      await withStatusStreamPaused(async () => {
-        if (draftLocalPoints.length === 0 && draftRemotePoints.length === 0) {
-          throw new Error("Draft is empty. Nothing to sync.");
-        }
-
-        const local = validateAndNormalizeVoltagePoints(
-          "v_local",
-          draftLocalPoints,
-        );
-        const remote = validateAndNormalizeVoltagePoints(
-          "v_remote",
-          draftRemotePoints,
-        );
-        const issues = [...local.issues, ...remote.issues];
-        if (issues.length > 0) {
-          onAlert(
-            "Calibration data cleanup (Commit)",
-            "Draft contains duplicate/conflicting samples. Commit will use a cleaned curve and may drop/merge points.",
-            issues.map((issue) => `${issue.path}: ${issue.message}`),
-          );
-        }
-
-        if (local.normalized.length === 0 && remote.normalized.length === 0) {
-          throw new Error("No valid points after cleanup. Nothing to commit.");
-        }
-
-        if (local.normalized.length > 0) {
-          await retryDeviceCall(() =>
-            postCalibrationCommit(baseUrl, {
-              kind: "v_local",
-              points: local.normalized,
-            }),
-          );
-          await sleep(200);
-        }
-        if (remote.normalized.length > 0) {
-          await retryDeviceCall(() =>
-            postCalibrationCommit(baseUrl, {
-              kind: "v_remote",
-              points: remote.normalized,
-            }),
-          );
-        }
-      });
-    },
+    mutationFn: async () =>
+      runVoltageCalibrationWrite({
+        action: "Commit",
+        baseUrl,
+        draftLocalPoints,
+        draftRemotePoints,
+        onAlert,
+        postPoints: async ({ baseUrl, kind, points }) =>
+          postCalibrationCommit(baseUrl, {
+            kind,
+            points,
+          }),
+        withStatusStreamPaused,
+      }),
     onSuccess: async () => {
       await onRefetchProfile();
     },
   });
 
   const resetDeviceVoltageMutation = useMutation({
-    mutationFn: async () => {
-      await withStatusStreamPaused(async () => {
-        await retryDeviceCall(() =>
-          postCalibrationReset(baseUrl, { kind: "v_local" }),
-        );
-        await sleep(200);
-        await retryDeviceCall(() =>
-          postCalibrationReset(baseUrl, { kind: "v_remote" }),
-        );
-      });
-    },
+    mutationFn: async () =>
+      runCalibrationReset({
+        baseUrl,
+        kinds: ["v_local", "v_remote"],
+        resetKind: async ({ baseUrl, kind }) =>
+          postCalibrationReset(baseUrl, { kind }),
+        withStatusStreamPaused,
+      }),
     onSuccess: async () => {
       await onRefetchProfile();
       onResetDraftToEmpty("Device reset to defaults. Draft cleared.");
     },
   });
 
+  const resetDraftConfirm = getResetDraftConfirmConfig(
+    isDraftEmpty(draftProfile),
+  );
+  const resetDeviceConfirm = getResetVoltageDeviceConfirmConfig();
+
   return (
     <>
-      <div role="tablist" className="ll-tabs">
-        <button
-          type="button"
-          role="tab"
-          className={`ll-tab ${viewTab === "draft" ? "ll-tab-active" : ""}`}
-          onClick={() => setViewTab("draft")}
-        >
-          本地草稿
-        </button>
-        <button
-          type="button"
-          role="tab"
-          className={`ll-tab ${viewTab === "device" ? "ll-tab-active" : ""}`}
-          onClick={() => setViewTab("device")}
-        >
-          设备数据
-        </button>
-      </div>
+      <CalibrationViewTabs activeView={viewTab} onSelectView={setViewTab} />
 
       {viewTab === "draft" ? (
         <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
@@ -410,151 +379,44 @@ export function VoltageCalibrationPanel({
               </h3>
             </div>
 
-            <div className="ll-panel bg-base-200/40 border border-base-200">
-              <div className="ll-panel-body py-4 gap-3">
-                <div className="flex items-start justify-between gap-3">
-                  <h4 className="font-bold text-sm">仅本地（不读写设备）</h4>
-                  <div className="ll-badge ll-badge-neutral whitespace-nowrap shrink-0">
-                    不读写设备
-                  </div>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={() => {
-                      const vLocal = validateAndNormalizeVoltagePoints(
-                        "v_local",
-                        draftProfile.v_local_points,
-                      );
-                      const vRemote = validateAndNormalizeVoltagePoints(
-                        "v_remote",
-                        draftProfile.v_remote_points,
-                      );
-                      const c1 = validateAndNormalizeCurrentPoints(
-                        "current_ch1",
-                        draftProfile.current_ch1_points,
-                      );
-                      const c2 = validateAndNormalizeCurrentPoints(
-                        "current_ch2",
-                        draftProfile.current_ch2_points,
-                      );
-                      const issues = [
-                        ...vLocal.issues,
-                        ...vRemote.issues,
-                        ...c1.issues,
-                        ...c2.issues,
-                      ];
-                      if (issues.length > 0) {
-                        onAlert(
-                          "Calibration data cleanup (Preview)",
-                          "Draft contains duplicate/conflicting samples. Preview will use a cleaned curve and may drop/merge points.",
-                          issues.map(
-                            (issue) => `${issue.path}: ${issue.message}`,
-                          ),
-                        );
-                      }
-                      onSetPreviewProfile({
-                        active: draftProfile.active,
-                        v_local_points: vLocal.normalized,
-                        v_remote_points: vRemote.normalized,
-                        current_ch1_points: c1.normalized,
-                        current_ch2_points: c2.normalized,
-                      });
-                      onSetPreviewAppliedAt(Date.now());
-                    }}
-                    disabled={isDraftEmpty(draftProfile)}
-                  >
-                    Apply Preview
-                  </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={() => setConfirmKind("reset_draft")}
-                    disabled={isDraftEmpty(draftProfile)}
-                  >
-                    Reset Draft
-                  </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={onExportDraft}
-                    disabled={isDraftEmpty(draftProfile)}
-                    title={
-                      isDraftEmpty(draftProfile)
-                        ? "Export is disabled when the draft is empty."
-                        : undefined
-                    }
-                  >
-                    Export
-                  </button>
-                  <label
-                    htmlFor={`calibration-import-${deviceId}-voltage`}
-                    className="ll-button ll-button-sm ll-button-outline"
-                  >
-                    Import
-                  </label>
-                  <input
-                    id={`calibration-import-${deviceId}-voltage`}
-                    type="file"
-                    accept="application/json"
-                    className="hidden"
-                    onChange={(event) => {
-                      const file = event.currentTarget.files?.[0] ?? null;
-                      void onImportDraftFile(file);
-                      event.currentTarget.value = "";
-                    }}
-                  />
-                </div>
-              </div>
-            </div>
+            <CalibrationDraftActionsPanel
+              disableApplyPreview={isDraftEmpty(draftProfile)}
+              disableExport={isDraftEmpty(draftProfile)}
+              disableResetDraft={isDraftEmpty(draftProfile)}
+              exportTitle={
+                isDraftEmpty(draftProfile)
+                  ? "Export is disabled when the draft is empty."
+                  : undefined
+              }
+              importInputId={`calibration-import-${deviceId}-voltage`}
+              onApplyPreview={() =>
+                applyCalibrationPreview({
+                  draftProfile,
+                  onAlert,
+                  onSetPreviewAppliedAt: (value) =>
+                    onSetPreviewAppliedAt(value),
+                  onSetPreviewProfile: (value) => onSetPreviewProfile(value),
+                })
+              }
+              onExportDraft={onExportDraft}
+              onImportDraftFile={onImportDraftFile}
+              onResetDraft={() => setConfirmKind("reset_draft")}
+            />
 
-            <div className="ll-panel bg-base-200/40 border border-base-200">
-              <div className="ll-panel-body py-4 gap-3">
-                <div className="flex items-start justify-between gap-3">
-                  <h4 className="font-bold text-sm">硬件 I/O</h4>
-                  <div className="flex items-center gap-2">
-                    <div className="ll-badge ll-badge-info whitespace-nowrap">
-                      读设备
-                    </div>
-                    <div className="ll-badge ll-badge-warning whitespace-nowrap">
-                      写设备
-                    </div>
-                  </div>
-                </div>
-
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={onReadDeviceToDraft}
-                    disabled={isOffline || readDeviceToDraftPending}
-                  >
-                    Read Device → Draft
-                  </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-outline"
-                    onClick={() => applyToDeviceMutation.mutate()}
-                    disabled={
-                      !canWriteToDevice || applyToDeviceMutation.isPending
-                    }
-                  >
-                    Apply
-                  </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-sm ll-button-secondary"
-                    onClick={() => commitToDeviceMutation.mutate()}
-                    disabled={
-                      !canWriteToDevice || commitToDeviceMutation.isPending
-                    }
-                  >
-                    Commit
-                  </button>
-                </div>
-              </div>
-            </div>
+            <CalibrationHardwareIoPanel
+              actionButtons={
+                <CalibrationDeviceWriteButtons
+                  applyPending={applyToDeviceMutation.isPending}
+                  commitPending={commitToDeviceMutation.isPending}
+                  disableApply={!canWriteToDevice}
+                  disableCommit={!canWriteToDevice}
+                  onApply={() => applyToDeviceMutation.mutate()}
+                  onCommit={() => commitToDeviceMutation.mutate()}
+                />
+              }
+              disableReadDeviceToDraft={isOffline || readDeviceToDraftPending}
+              onReadDeviceToDraft={onReadDeviceToDraft}
+            />
 
             <div className="divider my-0"></div>
 
@@ -695,116 +557,54 @@ export function VoltageCalibrationPanel({
           </div>
         </div>
       ) : (
-        <div className="ll-panel bg-base-100 shadow-xl border border-base-200 mt-4">
-          <div className="ll-panel-body gap-4">
-            <div className="flex items-start justify-between gap-3">
-              <h3 className="ll-panel-title flex flex-col items-start leading-tight">
-                <span>设备数据</span>
-                <span className="text-sm font-normal text-base-content/60">
-                  Hardware
-                </span>
-              </h3>
-              <div className="flex items-center gap-2">
-                <div className="ll-badge ll-badge-info whitespace-nowrap">
-                  读设备
-                </div>
-                <div className="ll-badge ll-badge-warning whitespace-nowrap">
-                  写设备
-                </div>
-              </div>
-            </div>
-
-            <div className="flex flex-wrap gap-2">
-              <button
-                type="button"
-                className="ll-button ll-button-sm ll-button-outline"
-                onClick={() => readMutation.mutate()}
-                disabled={readMutation.isPending}
-              >
-                Read
-              </button>
-              <button
-                type="button"
-                className="ll-button ll-button-sm ll-button-danger"
-                onClick={() => setConfirmKind("reset_device_voltage")}
-                disabled={isOffline || resetDeviceVoltageMutation.isPending}
-              >
-                Reset
-              </button>
-            </div>
-
-            <div className="divider my-0"></div>
-
-            <h4 className="font-bold text-sm">
-              {deviceProfile?.active.source === "factory-default"
-                ? "Device defaults (factory reference, read-only)"
-                : "Device profile (read-only)"}
-            </h4>
-            <div className="overflow-x-auto max-h-64">
-              <table className="ll-table ll-table-xs">
-                <thead>
-                  <tr>
-                    <th>Value (mV)</th>
-                    <th>Raw Local</th>
-                    <th>Raw Remote</th>
+        <CalibrationDeviceViewPanel
+          deviceProfileSource={deviceProfile?.active.source}
+          onReadDeviceProfile={() => readMutation.mutate()}
+          onRequestReset={() => setConfirmKind("reset_device_voltage")}
+          readPending={readMutation.isPending}
+          resetDisabled={isOffline || resetDeviceVoltageMutation.isPending}
+        >
+          <div className="overflow-x-auto max-h-64">
+            <table className="ll-table ll-table-xs">
+              <thead>
+                <tr>
+                  <th>Value (mV)</th>
+                  <th>Raw Local</th>
+                  <th>Raw Remote</th>
+                </tr>
+              </thead>
+              <tbody>
+                {mergedDevice.map((row) => (
+                  <tr key={row.mv}>
+                    <td>{row.mv}</td>
+                    <td>{row.rawLocal ?? "--"}</td>
+                    <td>{row.rawRemote ?? "--"}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {mergedDevice.map((row) => (
-                    <tr key={row.mv}>
-                      <td>{row.mv}</td>
-                      <td>{row.rawLocal ?? "--"}</td>
-                      <td>{row.rawRemote ?? "--"}</td>
-                    </tr>
-                  ))}
-                  {mergedDevice.length === 0 ? (
-                    <tr>
-                      <td
-                        colSpan={3}
-                        className="text-center text-base-content/50"
-                      >
-                        No device profile loaded.
-                      </td>
-                    </tr>
-                  ) : null}
-                </tbody>
-              </table>
-            </div>
+                ))}
+                {mergedDevice.length === 0 ? (
+                  <tr>
+                    <td
+                      colSpan={3}
+                      className="text-center text-base-content/50"
+                    >
+                      No device profile loaded.
+                    </td>
+                  </tr>
+                ) : null}
+              </tbody>
+            </table>
           </div>
-        </div>
+        </CalibrationDeviceViewPanel>
       )}
 
       <ConfirmDialog
         open={confirmKind !== null}
-        title={
-          confirmKind === "reset_draft"
-            ? "Reset Draft (Web only)"
-            : "Reset Device Calibration (Voltage)"
-        }
-        body={
-          confirmKind === "reset_draft"
-            ? "This clears the local draft (user calibration points). The device is unchanged."
-            : "This resets voltage calibration on the device."
-        }
-        details={
-          confirmKind === "reset_draft"
-            ? [
-                "Affects: v_local, v_remote, current_ch1, current_ch2 (local draft only).",
-                "Writes device: No.",
-                "This clears all local draft points (export first if needed).",
-              ]
-            : [
-                "Affects: v_local + v_remote.",
-                "Writes device: Yes.",
-                "Irreversible: Yes (re-calibrate + commit to recover).",
-                "Does not affect: current_ch1/current_ch2.",
-              ]
-        }
-        confirmLabel={confirmKind === "reset_draft" ? "Reset Draft" : "Reset"}
-        destructive={confirmKind === "reset_device_voltage"}
+        {...(confirmKind === "reset_draft"
+          ? resetDraftConfirm
+          : resetDeviceConfirm)}
         confirmDisabled={
           confirmKind === "reset_draft"
-            ? isDraftEmpty(draftProfile)
+            ? resetDraftConfirm.confirmDisabled
             : resetDeviceVoltageMutation.isPending || isOffline
         }
         onCancel={() => setConfirmKind(null)}

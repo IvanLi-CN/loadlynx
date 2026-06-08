@@ -160,6 +160,36 @@ interface WifiCredentials {
 Backup files that include `settings.wifi` are sensitive user artifacts. Diagnostics, status, traces and logs must continue to omit or redact PSK.
 Browser requests to this endpoint are accepted only from local UI origins; non-browser LAN clients do not send `Origin` and may still use the endpoint for explicit backup export.
 
+### 2.1.3 Diagnostics export
+
+`GET /api/v1/diagnostics/export` returns a redacted diagnostics snapshot suitable for Web export or operator capture:
+
+```ts
+interface DiagnosticsLastStatus {
+  uptime_ms: number;
+  fault_flags: number;
+}
+
+interface DiagnosticsExport {
+  schema_version: 1;
+  redaction: {
+    psk: true;
+  };
+  firmware_version: string;
+  wifi: WifiStatus & {
+    psk: "<redacted>";
+  };
+  link_up: boolean;
+  last_status: DiagnosticsLastStatus | null;
+}
+```
+
+Compatibility notes:
+
+- `GET /api/v1/diagnostics` currently remains a compatibility alias of the same payload.
+- Diagnostics must never return plaintext PSK. The only explicit plaintext export path is still `GET /api/v1/wifi/credentials`.
+- `last_status` is `null` until the digital board has received at least one telemetry frame.
+
 ### 2.2 模拟板状态枚举
 
 HTTP API 暴露的 `analog_state` 与数字板内部 `AnalogState` 枚举对应（`firmware/digital/src/ui/mod.rs`）：
@@ -169,10 +199,11 @@ type AnalogState =
   | "offline"     // 无 UART 链路或长期未收到帧
   | "cal_missing" // 模拟板未收到标定数据，禁止出力
   | "faulted"     // 模拟板处于故障状态（过流/过温/过压等）
-  | "ready";      // 模拟板就绪，可正常工作
+  | "ready"       // 模拟板就绪，可正常工作
+  | "measurement_invalid"; // 遥测存在但当前测量结果不可用于控制/展示
 ```
 
-### 2.3 CC 控制相关类型
+### 2.3 CC 兼容视图相关类型
 
 ```ts
 type CcProtectionMode =
@@ -198,7 +229,7 @@ interface CcControlView {
   // “负载开关 + 设置值”模型，不再表示模拟板的 SetEnable 状态。
   enable: boolean;          // 负载开关（load switch）：true=应用设置值，false=生效值为 0
   target_i_ma: number;      // 设置值（setpoint，mA），UI 展示值；enable=false 时也允许为非 0
-  effective_i_ma: number;   // 生效值（effective，mA），实际下发 SetPoint.target_i_ma
+  effective_i_ma: number;   // 生效值（effective，mA），CC convenience view 下的有效目标；最终由 unified control path 反映到 active preset / SetMode
   limit_profile: CcLimitProfile;
   protection: CcProtectionConfig;
 
@@ -306,6 +337,26 @@ interface ControlView {
   "device_id": "llx-1a2b3c",
   "digital_fw_version": "digital 0.1.0 (profile release, v0.1.0-5-gf0393b8, src 0x1234567890abcdef)",
   "analog_fw_version": "analog 0.1.0 (profile release, v0.1.0-3-gdeadbeef, src 0xabcdef0123456789)",
+  "firmware": {
+    "target": "digital_esp32s3",
+    "package_version": "0.1.0",
+    "build_id": "digital 0.1.0 (profile release, v0.1.0-5-gf0393b8, src 0x1234567890abcdef)",
+    "build_profile": "release",
+    "target_triple": "xtensa-esp32s3-none-elf",
+    "source_digest": "src 0x1234567890abcdef",
+    "features": ["net_http", "mdns_dns_sd", "usb_cdc_jsonl"],
+    "protocol": "loadlynx.cdc.v1",
+    "defmt": {
+      "enabled": true,
+      "encoding": "defmt-espflash"
+    }
+  },
+  "usb_bridge": {
+    "transport": "usb_cdc_jsonl",
+    "protocol": "loadlynx.cdc.v1",
+    "lease_required": true,
+    "framing": "lf_json"
+  },
   "protocol_version": 1,
   "uptime_ms": 123456,
   "network": {
@@ -343,7 +394,7 @@ interface ControlView {
 {
   "status": {
     "uptime_ms": 123456,
-    "mode": 0,
+    "mode": 1,
     "state_flags": 3,
     "enable": true,
     "target_value": 1500,
@@ -386,7 +437,7 @@ interface ControlView {
 
 ```text
 event: status
-data: {"status":{"uptime_ms":123456,"mode":0,...},"link_up":true,"hello_seen":true,"analog_state":"ready","fault_flags_decoded":[],"state_flags_decoded":["REMOTE_ACTIVE","LINK_GOOD"]}
+data: {"status":{"uptime_ms":123456,"mode":1,...},"link_up":true,"hello_seen":true,"analog_state":"ready","fault_flags_decoded":[],"state_flags_decoded":["REMOTE_ACTIVE","LINK_GOOD"]}
 
 ```
 
@@ -488,6 +539,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 - `enable` 表示“负载开关”，`target_i_ma` 表示“设置值”；二者语义从 `api_version="2.0.0"` 起生效；
 - **强制规则（A）**：当 `target_i_ma == 0` 时，服务端必须将 `enable` 纠正为 `false`（即使请求传入 `true`）；
 - 软限值与保护模式字段为可选，若省略则保持当前固件中已有配置；
+- `/api/v1/cc` 仍是面向 CC-only 客户端的兼容视图；服务端会先把请求收敛到当前 `ControlState`，再由统一 UART TX 路径派生 `SetMode` / `LimitProfile` / 必要的恢复握手。
 - 固件需对范围进行安全检查，例如：
   - `0 <= target_i_ma <= max_i_ma`；
   - `0 < max_i_ma <= 硬件额定值`；
@@ -523,6 +575,8 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   "pps_pdos": [
     { "pos": 2, "min_mv": 3300, "max_mv": 21000, "max_ma": 5000 }
   ],
+  "epr_active": false,
+  "epr_avs_pdos": [],
   "allow_extended_voltage": false,
   "saved": {
     "mode": "fixed",
@@ -542,6 +596,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 字段说明：
 
 - `fixed_pdos[].pos` 与 `pps_pdos[].pos` 均为 **object position（1-based）**；若模拟板能力列表未携带 `pos`（旧格式），数字板以列表索引 `idx+1` 生成稳定的 `pos`。
+- `epr_active` 表示当前 PD 合同是否处于 EPR 档位；`epr_avs_pdos` 列出当前 Source 报告的 EPR AVS 能力（若无则为空数组）。
 - `fixed_pdos` / `pps_pdos` / `epr_avs_pdos` 只表示**当前 attach Source 的真实能力快照**；固件不得因为 `epr_capable=true`、detached、或 `PD_STATUS` 缺失而向 `fixed_pdos` 合成 28V row。
 - `allow_extended_voltage=false` 表示运行时有效策略被锁定为 Safe5V；即使 `saved` 里保留了更高电压档位，也不会自动离开 Safe5V。
 - `saved.target_mv` 表示当前保存模式下的“活动目标电压”（mV）：`mode="fixed"` 时为所选 PDO 电压，`mode="pps"` 时为 PPS 目标电压（Vreq）。
@@ -561,7 +616,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   - `503 LINK_DOWN`：UART 链路不可用；
   - `409 ANALOG_FAULTED`：模拟板故障。
 
-### 3.6 `POST /api/v1/pd`
+### 3.6 `POST /api/v1/pd`（`PUT /api/v1/pd` 兼容）
 
 更新并应用（Apply）USB‑PD 配置；固件会把配置写入 EEPROM，并触发数字板→模拟板的 `PD_SINK_REQUEST`（ACK/NACK 仅表示“接收/拒绝策略”，最终合同以 `contract_*` 为准）。
 
@@ -569,6 +624,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 - 为避免浏览器私网预检（preflight），Web 端可使用 `POST` 且 `Content-Type: text/plain`，body 为 JSON 字符串；
 - 固件不强制校验 `Content-Type`，只解析 body 内容。
+- 当前 Web 调用方以 `POST /api/v1/pd` 为主路径；firmware 同时兼容接受 `PUT /api/v1/pd` 的同 payload。
 
 - 请求（Fixed）：
 
@@ -605,7 +661,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   - `503 LINK_DOWN`：UART 链路不可用（当请求需要校验/Apply `saved` 配置时）；仅切换 `allow_extended_voltage` 时允许离线持久化并返回 `200`（capabilities 为空）；
   - `503 UNAVAILABLE`：EEPROM 写入失败。
 
-### 3.7 `POST /api/v1/soft-reset`（预留）
+### 3.7 `POST /api/v1/soft-reset`
 
 触发数字板→模拟板的 SoftReset 握手，清除故障并恢复安全状态。
 
@@ -640,7 +696,46 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
   - `503 UNAVAILABLE`：Wi‑Fi/网络未就绪；
   - `409 CONFLICT`：当前已有 SoftReset 操作进行中（若固件实现互斥）。
 
-### 3.6 `GET /api/v1/presets`（冻结）
+### 3.7.1 `GET /api/v1/diagnostics/export`
+
+导出当前设备的 redacted diagnostics 快照，供 Web 控制台或运维抓取。
+
+- 请求：无请求体。
+- 响应（200）：
+
+```jsonc
+{
+  "schema_version": 1,
+  "redaction": {
+    "psk": true
+  },
+  "firmware_version": "digital 0.1.0 (profile release, v0.1.0-5-gf0393b8, src 0x1234567890abcdef)",
+  "wifi": {
+    "ssid": "BenchNet",
+    "source": "user",
+    "state": "configured",
+    "ip": null,
+    "last_error": null,
+    "psk": "<redacted>"
+  },
+  "link_up": true,
+  "last_status": {
+    "uptime_ms": 123456,
+    "fault_flags": 0
+  }
+}
+```
+
+行为约定：
+
+- `GET /api/v1/diagnostics` 目前是同 payload 的兼容别名；新调用方应优先使用 `/api/v1/diagnostics/export`。
+- `wifi.psk` 必须始终为 `"<redacted>"`，不得返回真实凭据。
+- `last_status` 在尚未收到任何遥测帧时为 `null`。
+
+- 典型错误：
+  - `503 UNAVAILABLE`：诊断快照暂时不可生成。
+
+### 3.8 `GET /api/v1/presets`（冻结）
 
 读取 5 组 Preset（必须始终返回 **恰好 5 条**，按 `preset_id` 1..5 排序）。
 
@@ -665,9 +760,11 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 }
 ```
 
-### 3.7 `PUT /api/v1/presets`（冻结）
+### 3.9 `POST /api/v1/presets`（冻结；`PUT` 兼容）
 
 更新单个 Preset。请求体必须包含完整 Preset payload（包括 `preset_id`），固件需对范围做校验；对 CP 关键字段越界应返回 `422 LIMIT_VIOLATION`（不应静默夹紧目标功率）。
+
+- 当前 Web 调用方以 `POST /api/v1/presets` 为主路径；firmware 同时兼容接受 `PUT /api/v1/presets` 的同 payload。
 
 - 请求：
 
@@ -689,7 +786,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 - 约束（CP）：
   - 当 `mode="cp"` 时必须提供 `target_p_mw`（mW），且满足 `target_p_mw <= max_p_mw`；不满足则返回 `422 LIMIT_VIOLATION`。
 
-### 3.8 `POST /api/v1/presets/apply`（冻结）
+### 3.10 `POST /api/v1/presets/apply`（冻结）
 
 应用指定 `preset_id` 作为 active preset，并 **必须强制输出关闭**（`output_enabled=false`），用户需后续通过 `/api/v1/control` 手动开启输出。
 
@@ -701,16 +798,18 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 
 - 响应（200）：返回更新后的 `ControlView`。
 
-### 3.9 `GET /api/v1/control`（冻结）
+### 3.11 `GET /api/v1/control`（冻结）
 
 读取统一的控制视图（active preset + 输出开关 + 欠压锁存）。
 
 - 请求：无请求体。
 - 响应（200）：`ControlView`。
 
-### 3.10 `PUT /api/v1/control`（冻结）
+### 3.12 `POST /api/v1/control`（冻结；`PUT` 兼容）
 
-切换输出开关。
+更新统一控制视图中的可写字段。
+
+- 当前 Web 调用方以 `POST /api/v1/control` 为主路径；firmware 同时兼容接受 `PUT /api/v1/control` 的同 payload。
 
 - 请求：
 
@@ -718,9 +817,29 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 { "output_enabled": true }
 ```
 
+也支持更新当前 active preset 的完整快照，例如：
+
+```jsonc
+{
+  "active_preset_id": 3,
+  "preset": {
+    "preset_id": 3,
+    "mode": "cp",
+    "target_p_mw": 60000,
+    "target_i_ma": 0,
+    "target_v_mv": 12000,
+    "min_v_mv": 0,
+    "max_i_ma_total": 10000,
+    "max_p_mw": 80000
+  }
+}
+```
+
 - 语义（冻结）：
-  - 仅切换输出开关，不修改 preset 内容；
-  - `uv_latched` **仅能通过** `output_enabled` 的 “关→开” 边沿清除（即必须先 `false` 再 `true`）。
+  - 最小写入面仍然是 `output_enabled`，适合只切换输出开关的客户端；
+  - 当请求包含 `active_preset_id` 与/或完整 `preset` 时，固件会先校验 preset 合法性，再更新统一控制真相源；
+  - `uv_latched` **仅能通过** `output_enabled` 的 “关→开” 边沿清除（即必须先 `false` 再 `true`）；
+  - 返回值始终是更新后的完整 `ControlView`。
 - 响应（200）：`ControlView`。
 
 ## 4. 错误码一览表（建议实现）

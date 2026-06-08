@@ -38,6 +38,31 @@ export interface DeviceStore {
   setDevices(devices: StoredDevice[]): void;
 }
 
+function cloneStoredDevice(device: StoredDevice): StoredDevice {
+  return {
+    id: device.id,
+    name: device.name,
+    baseUrl: device.baseUrl,
+    connectionMarks: device.connectionMarks
+      ? [...device.connectionMarks]
+      : undefined,
+    devd: device.devd
+      ? {
+          baseUrl: device.devd.baseUrl,
+          deviceId: device.devd.deviceId,
+          leaseId: device.devd.leaseId,
+        }
+      : undefined,
+    webSerial: device.webSerial
+      ? {
+          identityDeviceId: device.webSerial.identityDeviceId,
+          displayName: device.webSerial.displayName,
+          profileCapturedAt: device.webSerial.profileCapturedAt,
+        }
+      : undefined,
+  };
+}
+
 function isDemoDevice(device: StoredDevice): boolean {
   return device.baseUrl.trim().toLowerCase().startsWith("mock://");
 }
@@ -133,15 +158,15 @@ export class MemoryDeviceStore implements DeviceStore {
   #devices: StoredDevice[];
 
   constructor(initialDevices: StoredDevice[] = []) {
-    this.#devices = [...initialDevices];
+    this.#devices = initialDevices.map(cloneStoredDevice);
   }
 
   getDevices(): StoredDevice[] {
-    return [...this.#devices];
+    return this.#devices.map(cloneStoredDevice);
   }
 
   setDevices(devices: StoredDevice[]): void {
-    this.#devices = [...devices];
+    this.#devices = devices.map(cloneStoredDevice);
   }
 }
 
@@ -166,11 +191,11 @@ export class DemoAwareDeviceStore implements DeviceStore {
         store.setDevices(demoDevices);
       }
       if (demoDevices.length > 0) {
-        return demoDevices;
+        return demoDevices.map(cloneStoredDevice);
       }
 
       store.setDevices(DEMO_DEVICES);
-      return [...DEMO_DEVICES];
+      return DEMO_DEVICES.map(cloneStoredDevice);
     }
 
     return devices;

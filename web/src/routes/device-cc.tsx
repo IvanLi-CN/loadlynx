@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import {
   ENABLE_MOCK_DEVTOOLS,
   isHttpApiError,
@@ -18,32 +18,14 @@ import { SetpointsPanel } from "../components/instrument/setpoints-panel.tsx";
 import { ThermalPanel } from "../components/instrument/thermal-panel.tsx";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
+import { usePageVisibility } from "../lib/page-visibility.ts";
 import { AdvancedControlsPanel } from "./device-cc/advanced-controls-panel.tsx";
 import { useDeviceCcState } from "./device-cc/use-device-cc-state.ts";
 
 export function DeviceCcRoute() {
   const { deviceId, device, baseUrl } = useDeviceContext();
-  const [isPageVisible, setIsPageVisible] = useState(() =>
-    typeof document === "undefined"
-      ? true
-      : document.visibilityState === "visible",
-  );
+  const isPageVisible = usePageVisibility();
   const [advancedCollapsed, setAdvancedCollapsed] = useState(true);
-
-  useEffect(() => {
-    if (typeof document === "undefined") {
-      return undefined;
-    }
-
-    const handleVisibility = () => {
-      setIsPageVisible(document.visibilityState === "visible");
-    };
-
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, []);
 
   const { view, mutation } = useDeviceCcState(deviceId, baseUrl, isPageVisible);
 

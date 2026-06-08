@@ -1,13 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ENABLE_MOCK,
+  getControl,
   getIdentity,
+  getPd,
+  getPresets,
+  getStatus,
+  getWifiStatus,
   HttpApiError,
   isMockBaseUrl,
 } from "../api/client.ts";
 import type { Identity } from "../api/types.ts";
 import { resolveDemoMode } from "../lib/demo-mode.ts";
+import {
+  DEVICE_QUERY_PARTS,
+  type DeviceQueryParts,
+  makeDeviceQueryKey,
+} from "./device-query-key.ts";
 import type { StoredDevice } from "./device-store.ts";
+import { syncDevicesQueryCache } from "./query-cache.ts";
 import { useDeviceStore } from "./store-context.tsx";
 
 function getActiveDemoMode(): boolean {
@@ -20,23 +31,20 @@ function getDevicesQueryKey(isDemoMode: boolean) {
   return ["devices", isDemoMode ? "demo" : "real"] as const;
 }
 
-export function useDevicesQuery() {
-  const store = useDeviceStore();
-  const isDemoMode = getActiveDemoMode();
-  return useQuery({
-    queryKey: getDevicesQueryKey(isDemoMode),
-    queryFn: async () => {
-      return store.getDevices();
-    },
-  });
-}
+const deviceIdentityRetryDelay = () => 200 + Math.random() * 300;
+const deviceStatusRetryDelay = () => 200 + Math.random() * 300;
 
-export function useDeviceIdentity(device: StoredDevice | null | undefined) {
-  const baseUrl = device?.baseUrl;
-  const queryKey = ["device", device?.id ?? "unknown", "identity"] as const;
-  const jitterRetryDelay = () => 200 + Math.random() * 300;
+export function getDeviceIdentityQueryOptions(
+  deviceId: string | undefined,
+  baseUrl: string | undefined,
+) {
+  const queryKey = makeDeviceQueryKey(
+    deviceId,
+    baseUrl,
+    ...DEVICE_QUERY_PARTS.identity,
+  );
 
-  return useQuery<Identity, HttpApiError>({
+  return {
     queryKey,
     enabled: Boolean(baseUrl),
     queryFn: async () => {
@@ -50,7 +58,7 @@ export function useDeviceIdentity(device: StoredDevice | null | undefined) {
       }
       return getIdentity(baseUrl);
     },
-    retry: (failureCount, error) => {
+    retry: (failureCount: number, error: HttpApiError) => {
       if (error instanceof HttpApiError && error.code === "NO_BASE_URL") {
         return false;
       }
@@ -58,8 +66,169 @@ export function useDeviceIdentity(device: StoredDevice | null | undefined) {
         Boolean(baseUrl) && baseUrl !== undefined && !isMockBaseUrl(baseUrl);
       return isRealDevice ? failureCount < 2 : failureCount < 1;
     },
-    retryDelay: jitterRetryDelay,
+    retryDelay: deviceIdentityRetryDelay,
+  } as const;
+}
+
+export function useDevicesQuery() {
+  const store = useDeviceStore();
+  const isDemoMode = getActiveDemoMode();
+  return useQuery({
+    queryKey: getDevicesQueryKey(isDemoMode),
+    queryFn: async () => {
+      return store.getDevices();
+    },
   });
+}
+
+export function useDeviceIdentityByBaseUrl(
+  deviceId: string | undefined,
+  baseUrl: string | undefined,
+) {
+  return useQuery<Identity, HttpApiError>(
+    getDeviceIdentityQueryOptions(deviceId, baseUrl),
+  );
+}
+
+export function useDeviceIdentity(device: StoredDevice | null | undefined) {
+  return useDeviceIdentityByBaseUrl(device?.id, device?.baseUrl);
+}
+
+export function getDevicePdQueryOptions(input: {
+  deviceId: string | undefined;
+  baseUrl: string | undefined;
+  enabled: boolean;
+  refetchInterval: number | false;
+  parts?: DeviceQueryParts;
+  retry?: boolean | number;
+  retryDelay: number | ((attemptIndex: number) => number);
+}) {
+  const {
+    deviceId,
+    baseUrl,
+    enabled,
+    refetchInterval,
+    parts = DEVICE_QUERY_PARTS.pd,
+    retry,
+    retryDelay,
+  } = input;
+  return {
+    queryKey: makeDeviceQueryKey(deviceId, baseUrl, ...parts),
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getPd(baseUrl);
+    },
+    enabled,
+    refetchInterval,
+    refetchIntervalInBackground: false,
+    ...(retry === undefined ? {} : { retry }),
+    retryDelay,
+  } as const;
+}
+
+export function getDeviceStatusQueryOptions(input: {
+  deviceId: string | undefined;
+  baseUrl: string | undefined;
+  enabled: boolean;
+  parts?: DeviceQueryParts;
+  refetchInterval: number | false;
+  refetchOnWindowFocus?: boolean;
+  retry?: boolean | number;
+  retryDelay?: number | ((attemptIndex: number) => number);
+}) {
+  const {
+    deviceId,
+    baseUrl,
+    enabled,
+    parts = DEVICE_QUERY_PARTS.status,
+    refetchInterval,
+    refetchOnWindowFocus,
+    retry = 2,
+    retryDelay = deviceStatusRetryDelay,
+  } = input;
+  return {
+    queryKey: makeDeviceQueryKey(deviceId, baseUrl, ...parts),
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getStatus(baseUrl);
+    },
+    enabled,
+    refetchInterval,
+    refetchIntervalInBackground: false,
+    ...(refetchOnWindowFocus === undefined ? {} : { refetchOnWindowFocus }),
+    retry,
+    retryDelay,
+  } as const;
+}
+
+export function getDeviceControlQueryOptions(input: {
+  deviceId: string | undefined;
+  baseUrl: string | undefined;
+  enabled: boolean;
+  retryDelay: number | ((attemptIndex: number) => number);
+}) {
+  const { deviceId, baseUrl, enabled, retryDelay } = input;
+  return {
+    queryKey: makeDeviceQueryKey(
+      deviceId,
+      baseUrl,
+      ...DEVICE_QUERY_PARTS.control,
+    ),
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getControl(baseUrl);
+    },
+    enabled,
+    retryDelay,
+  } as const;
+}
+
+export function getDevicePresetsQueryOptions(input: {
+  deviceId: string | undefined;
+  baseUrl: string | undefined;
+  enabled: boolean;
+  retryDelay: number | ((attemptIndex: number) => number);
+}) {
+  const { deviceId, baseUrl, enabled, retryDelay } = input;
+  return {
+    queryKey: makeDeviceQueryKey(
+      deviceId,
+      baseUrl,
+      ...DEVICE_QUERY_PARTS.presets,
+    ),
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getPresets(baseUrl);
+    },
+    enabled,
+    retryDelay,
+  } as const;
+}
+
+export function getDeviceWifiQueryOptions(input: {
+  deviceId: string | undefined;
+  baseUrl: string | undefined;
+  enabled: boolean;
+}) {
+  const { deviceId, baseUrl, enabled } = input;
+  return {
+    queryKey: makeDeviceQueryKey(deviceId, baseUrl, ...DEVICE_QUERY_PARTS.wifi),
+    queryFn: () => {
+      if (!baseUrl) {
+        throw new Error("Device base URL is not available");
+      }
+      return getWifiStatus(baseUrl);
+    },
+    enabled,
+  } as const;
 }
 
 export function useAddDeviceMutation() {
@@ -90,7 +259,7 @@ export function useAddDeviceMutation() {
       return next;
     },
     onSuccess: (next) => {
-      queryClient.setQueryData<StoredDevice[]>(queryKey, next);
+      syncDevicesQueryCache(queryClient, next, queryKey);
     },
   });
 }
@@ -124,7 +293,7 @@ export function useAddRealDeviceMutation() {
       return next;
     },
     onSuccess: (next) => {
-      queryClient.setQueryData<StoredDevice[]>(queryKey, next);
+      syncDevicesQueryCache(queryClient, next, queryKey);
     },
   });
 }
