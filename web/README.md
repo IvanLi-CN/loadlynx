@@ -15,7 +15,7 @@ and settings.
 - i18next + react-i18next for `zh-CN` default UI and `en` fallback
 - TanStack Router + TanStack Query
 - Storybook for component/route evidence
-- Bun (>= 1.0) as runtime and package manager
+- Bun 1.3.14 (pinned in the repo-root `.bun-version`) as runtime and package manager
 - Biome for linting/formatting
 - Vitest for unit tests and Storybook story tests
 - Playwright for end-to-end tests
