@@ -4,6 +4,12 @@ export function normalizeScalar(value) {
   return value.trim().replace(/^['"]|['"]$/g, "");
 }
 
+function actionStepIndent(line, usesIndent) {
+  return line.slice(usesIndent).startsWith("- ")
+    ? usesIndent
+    : Math.max(0, usesIndent - 2);
+}
+
 export function parseWorkflowMetadata(source, fileName) {
   const lines = source.split(/\r?\n/);
   const workflow = {
@@ -20,56 +26,85 @@ export function parseWorkflowMetadata(source, fileName) {
   let currentJob = null;
   let inJobsSection = false;
   let inSetupNodeBlock = false;
-  let setupNodeIndent = -1;
+  let setupNodeStepIndent = -1;
+  let setupNodeWithIndent = -1;
   let inSetupBunBlock = false;
-  let setupBunIndent = -1;
+  let setupBunStepIndent = -1;
+  let setupBunWithIndent = -1;
 
   for (const line of lines) {
+    const trimmed = line.trim();
+    const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
+
     const usesSetupNodeMatch = line.match(/^(\s*)(?:-\s*)?uses:\s*actions\/setup-node@.+$/);
     if (usesSetupNodeMatch) {
       inSetupNodeBlock = true;
-      setupNodeIndent = usesSetupNodeMatch[1].length;
+      setupNodeStepIndent = actionStepIndent(line, usesSetupNodeMatch[1].length);
+      setupNodeWithIndent = -1;
     } else if (inSetupNodeBlock) {
-      const trimmed = line.trim();
-      const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
-      if (trimmed.length > 0 && indent <= setupNodeIndent) {
+      if (trimmed.length > 0 && indent <= setupNodeStepIndent) {
         inSetupNodeBlock = false;
-        setupNodeIndent = -1;
+        setupNodeStepIndent = -1;
+        setupNodeWithIndent = -1;
       }
     }
 
     if (inSetupNodeBlock) {
-      const nodeVersionFileMatch = line.match(/^\s*node-version-file:\s*(.+?)\s*$/);
-      if (nodeVersionFileMatch) {
-        workflow.setupNodeUsesVersionFile.push(normalizeScalar(nodeVersionFileMatch[1]));
+      if (/^with:\s*$/.test(trimmed) && indent > setupNodeStepIndent) {
+        setupNodeWithIndent = indent;
+      } else if (
+        setupNodeWithIndent >= 0 &&
+        trimmed.length > 0 &&
+        indent <= setupNodeWithIndent
+      ) {
+        setupNodeWithIndent = -1;
       }
-      const nodeVersionMatch = line.match(/^\s*node-version:\s*(.+?)\s*$/);
-      if (nodeVersionMatch) {
-        workflow.setupNodeUsesInlineVersion.push(normalizeScalar(nodeVersionMatch[1]));
+
+      if (setupNodeWithIndent >= 0 && indent > setupNodeWithIndent) {
+        const nodeVersionFileMatch = line.match(/^\s*node-version-file:\s*(.+?)\s*$/);
+        if (nodeVersionFileMatch) {
+          workflow.setupNodeUsesVersionFile.push(normalizeScalar(nodeVersionFileMatch[1]));
+        }
+        const nodeVersionMatch = line.match(/^\s*node-version:\s*(.+?)\s*$/);
+        if (nodeVersionMatch) {
+          workflow.setupNodeUsesInlineVersion.push(normalizeScalar(nodeVersionMatch[1]));
+        }
       }
     }
 
     const usesSetupBunMatch = line.match(/^(\s*)(?:-\s*)?uses:\s*oven-sh\/setup-bun@.+$/);
     if (usesSetupBunMatch) {
       inSetupBunBlock = true;
-      setupBunIndent = usesSetupBunMatch[1].length;
+      setupBunStepIndent = actionStepIndent(line, usesSetupBunMatch[1].length);
+      setupBunWithIndent = -1;
     } else if (inSetupBunBlock) {
-      const trimmed = line.trim();
-      const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
-      if (trimmed.length > 0 && indent <= setupBunIndent) {
+      if (trimmed.length > 0 && indent <= setupBunStepIndent) {
         inSetupBunBlock = false;
-        setupBunIndent = -1;
+        setupBunStepIndent = -1;
+        setupBunWithIndent = -1;
       }
     }
 
     if (inSetupBunBlock) {
-      const bunVersionFileMatch = line.match(/^\s*bun-version-file:\s*(.+?)\s*$/);
-      if (bunVersionFileMatch) {
-        workflow.setupBunUsesVersionFile.push(normalizeScalar(bunVersionFileMatch[1]));
+      if (/^with:\s*$/.test(trimmed) && indent > setupBunStepIndent) {
+        setupBunWithIndent = indent;
+      } else if (
+        setupBunWithIndent >= 0 &&
+        trimmed.length > 0 &&
+        indent <= setupBunWithIndent
+      ) {
+        setupBunWithIndent = -1;
       }
-      const bunVersionMatch = line.match(/^\s*bun-version:\s*(.+?)\s*$/);
-      if (bunVersionMatch) {
-        workflow.setupBunUsesInlineVersion.push(normalizeScalar(bunVersionMatch[1]));
+
+      if (setupBunWithIndent >= 0 && indent > setupBunWithIndent) {
+        const bunVersionFileMatch = line.match(/^\s*bun-version-file:\s*(.+?)\s*$/);
+        if (bunVersionFileMatch) {
+          workflow.setupBunUsesVersionFile.push(normalizeScalar(bunVersionFileMatch[1]));
+        }
+        const bunVersionMatch = line.match(/^\s*bun-version:\s*(.+?)\s*$/);
+        if (bunVersionMatch) {
+          workflow.setupBunUsesInlineVersion.push(normalizeScalar(bunVersionMatch[1]));
+        }
       }
     }
 
