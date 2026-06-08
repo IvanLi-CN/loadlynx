@@ -6691,11 +6691,9 @@ async fn display_render_task(
         if window_elapsed >= DISPLAY_FPS_WINDOW_MS {
             let presented_total = DISPLAY_PRESENT_COUNT.load(Ordering::Relaxed);
             let presented_frames = presented_total.wrapping_sub(fps_window_presented);
-            let fps = if window_elapsed > 0 {
-                (presented_frames.saturating_mul(1000)) / window_elapsed
-            } else {
-                0
-            };
+            let fps = (presented_frames.saturating_mul(1000))
+                .checked_div(window_elapsed)
+                .unwrap_or(0);
             fps_dirty = fps != last_fps;
             last_fps = fps;
             info!(

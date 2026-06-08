@@ -4376,7 +4376,6 @@ pub fn list_digital_usb_port_candidates() -> Vec<DigitalUsbPortCandidate> {
 }
 
 fn is_espflash_default_port_candidate(port: &serialport::SerialPortInfo) -> bool {
-    #[cfg(target_os = "macos")]
     if port.port_name.starts_with("/dev/tty.") {
         return false;
     }

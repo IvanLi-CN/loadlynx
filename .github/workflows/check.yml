@@ -67,6 +67,9 @@ jobs:
       - name: Install root Node dependencies
         run: npm ci
 
+      - name: Install host system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
       - name: Test release label tooling
         run: node .github/scripts/release-labels.test.mjs
 
