@@ -1,12 +1,5 @@
 # Dashboard Boot Link Recovery（#fqmns）
 
-## 状态
-
-- Status: 已完成（冷上电测量可信性补强）
-- Created: 2026-04-25
-- Last: 2026-05-01
-- Notes: 冷启动 recovery 进一步覆盖“有帧但测量仍为 0”的假正常状态。
-
 ## 背景 / 问题陈述
 
 - 数字板 Dashboard 的生产初始状态复用了 `UiSnapshot::demo()`，当 UART 从未收到模拟板有效帧时，屏幕仍显示一组看似真实的 demo 电压/电流/功率。
@@ -95,29 +88,11 @@
 - Given 冷上电后已收到 `HELLO`/ACK 但没有后续 `FastStatus`，或 `FastStatus` 电压、电流、功率长期为 0，When 超过测量 grace，Then UI 不把 0 当真实读数，且 recovery 以 `no-fast-status` / `zero-measurement` 原因继续重同步。
 - Given 模拟板断开，When watchdog 运行，Then 日志限频且 UI 仍刷新 FPS/状态，不发生 panic 或长时间阻塞。
 
-## 实现前置条件（Definition of Ready / Preconditions）
-
-- 已锁定快车道 `merge-ready`；HIL 仅允许使用当前缓存/已确认 selector。
-
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
 - `cargo test -p loadlynx-protocol` 或受影响 host-testable crate 通过。
 - `just d-build` 通过；如修改模拟板则 `just a-build` 通过。
 - HIL 可用时，flash/monitor digital 与 analog，并比对 `tmp/{digital,analog}-fw-version.txt` 与 boot log。
-
-## 文档更新（Docs to Update）
-
-- `docs/dev-notes/software.md`
-- `docs/specs/README.md`
-- 如形成可复用经验，新增或刷新 `docs/solutions/firmware/**`。
-
-## 实现里程碑（Milestones）
-
-- [x] M1: 生产 UI 初始状态改为 offline/unknown，demo 仅保留给 mock/test。
-- [x] M2: SoftReset ACK 改为本次 seq/baseline 绑定。
-- [x] M3: SetMode TX 增加冷启动/持续 down 的限频恢复握手。
-- [x] M4: 构建与可用 HIL 验证完成，文档同步（HIL selector 缺失，记录为阻断证据）。
-- [x] M5: 增加测量可信性判定，覆盖有帧但全零测量的冷上电假正常状态。
 
 ## 风险 / 开放问题 / 假设
 

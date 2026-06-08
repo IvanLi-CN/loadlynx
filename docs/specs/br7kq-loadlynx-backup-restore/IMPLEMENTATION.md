@@ -47,3 +47,16 @@
 ## Visual Evidence
 
 - Storybook canvas evidence is stored in `SPEC.md` under `## Visual Evidence`.
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: 已完成
+- Prior catalog timestamp: 2026-05-31
+- Prior catalog implementation note: CLI/Web JSON backup restore；恢复前强制关闭负载；WiFi PSK 明文备份
+
+### 状态
+
+- Status: 已完成

@@ -1,19 +1,10 @@
 # Web Console Cyberpunk Redesign
 
-## Metadata
-
-- Spec ID: n9v2q
-- Lifecycle: active
-- Status: implemented
-- Last: 2026-06-01
-
-## Specification
-
-### Background
+## Background
 
 The current Web Console mixes daisyUI defaults, custom instrument CSS and route-level one-off layouts. The result is functional but visually inconsistent, and it does not provide the requested cyberpunk neon direction. The redesign must preserve all existing Web behavior while replacing the UI system and adding bilingual support.
 
-### Goals
+## Goals
 
 - Rebuild the complete Web Console with a product-grade cyberpunk neon style.
 - Remove daisyUI entirely from dependencies, CSS plugins and source class names.
@@ -23,27 +14,27 @@ The current Web Console mixes daisyUI defaults, custom instrument CSS and route-
 - Preserve current API calls, mock backend behavior, devd flows, calibration behavior and firmware dry-run semantics.
 - Provide Storybook and visual evidence across mobile, tablet and desktop.
 
-### Non-goals
+## Non-goals
 
 - No firmware, protocol or HTTP API behavior changes.
 - No real hardware verification requirement for this visual redesign.
 - No automatic PR merge.
 - No daisyUI compatibility layer.
 
-### UI Library Policy
+## UI Library Policy
 
 - Keep: React 19, Tailwind CSS 4, TanStack Router, TanStack Query, Storybook, Playwright.
 - Add: local shadcn-style components, Radix primitives where needed, lucide-react, i18next, react-i18next.
 - Remove: daisyUI and all `@iconify/*` packages.
 
-### i18n Policy
+## i18n Policy
 
 - Default locale: `zh-CN`.
 - Supported fallback locale: `en`.
 - Technical terms may remain English in Chinese copy when they are device-domain terms: CC, CV, CP, USB-PD, PPS, PDO, APDO, Firmware, dry-run, lease, devd, UART.
 - Storybook and E2E tests should use stable translated accessible names or deterministic test ids where translation would create excessive brittleness.
 
-### Visual Direction Probes
+## Visual Direction Probes
 
 The final direction is Probe B: dense bench-console neon. It uses a cyberpunk shell and signal color while keeping data panels low-glare.
 
@@ -51,7 +42,7 @@ The final direction is Probe B: dense bench-console neon. It uses a cyberpunk sh
 - Probe B: [desktop bench console](./assets/probe-desktop-console.svg)
 - Probe C: [calibration data lab](./assets/probe-calibration-lab.svg)
 
-### Acceptance Criteria
+## Acceptance Criteria
 
 - `web/package.json` contains no daisyUI or Iconify dependencies.
 - `web/src/index.css` contains no daisyUI plugin import.
@@ -63,7 +54,7 @@ The final direction is Probe B: dense bench-console neon. It uses a cyberpunk sh
 - Demo mode is a data/API mode on the normal console routes, enabled by `?demo=true` and remembered in `localStorage`; it must not introduce a separate demo route or page.
 - Visual evidence is stored in this spec under `## Visual Evidence`.
 
-### Test Plan
+## Test Plan
 
 - `cd web && bun install`
 - `cd web && bun run check`

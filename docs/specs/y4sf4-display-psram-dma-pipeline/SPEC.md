@@ -1,11 +1,5 @@
 # Digital Display PSRAM/DMA Pipeline（#y4sf4）
 
-## 状态
-
-- Status: 已完成
-- Created: 2026-03-18
-- Last: 2026-03-19
-
 ## 背景 / 问题陈述
 
 - 当前 digital 固件的显示路径仍以单个 render 任务串行完成 UI 绘制与 SPI 推屏。
@@ -117,13 +111,6 @@
   When 查看版本行与运行日志
   Then digital 版本行与 `tmp/digital-fw-version.txt` 一致，且运行中没有 `Illegal cache access`、`Cp0Disabled`、stack guard、DMA alignment panic、PSRAM exception。
 
-## 实现前置条件（Definition of Ready / Preconditions）
-
-- 已冻结“PSRAM 只承载原始 framebuffer 字节”的边界。
-- 已冻结“三缓冲 + latest-wins pending slot + dirty-span present”的实现方向。
-- 已冻结默认 cadence 为 33ms、首选 staging chunk 为 16 rows、回退 chunk 为 8 rows。
-- 已冻结 HIL 对比口径：同板、同 selector、同 analog 30Hz。
-
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
 ### Testing
@@ -141,17 +128,7 @@
 - `cargo fmt --all`
 - 与改动直接相关的 release build / HIL monitor 日志核验
 
-## 文档更新（Docs to Update）
-
-- `docs/specs/README.md`: 记录状态、Last 与 PR 号
-- `docs/specs/y4sf4-display-psram-dma-pipeline/SPEC.md`: 跟踪 milestone、HIL 证据和 review 修复
-
-## 计划资产（Spec assets）
-
-- Directory: `docs/specs/y4sf4-display-psram-dma-pipeline/assets/`
-- PR visual evidence source: 本次如需截图，只能放在该目录并从 `## Visual Evidence (PR)` 引用
-
-## Visual Evidence (PR)
+## Visual Evidence
 
 - Baseline monitor: `.mcu-agentd/monitor/digital/20260318_103504.mon.ndjson`
   - 默认构建仍走旧的单任务整帧 chunked push，日志为 `display: frame ... push complete (dirty_rows=320 dirty_spans=80)`。
@@ -171,17 +148,6 @@
   - 左上角 FPS 改为按真实 `present` 完成数统计，steady-state `fps` 主要落在 `9-13`，与肉眼流畅度一致。
   - 默认实现恢复到 `8192B / 16 rows / 0 yield`，同时通过 finer dirty rects 与 frame-in-flight coalescing 压低了 sweep 和卡顿感。
 
-## 资产晋升（Asset promotion）
-
-None
-
-## 实现里程碑（Milestones / Delivery checklist）
-
-- [x] M1: 建立新 spec，并完成 baseline build/HIL 证据采集。
-- [x] M2: 启用 PSRAM arena 与三 framebuffer 池，删除默认构建的单缓冲退化。
-- [x] M3: 拆分 render/present 任务，接入 dirty-span flush 与 display counters。
-- [x] M4: 完成 baseline/candidate 对比、spec sync、review 修复与 reviewable PR。
-
 ## 方案概述（Approach, high-level）
 
 - 保留现有 `lcd_async + ST7789 + SPI DMA` 组合，不替换控制器初始化与 DCS 流程。
@@ -195,13 +161,6 @@ None
 - 风险：present 落后于 render 时，三缓冲可能出现 free buffer 紧缺；需要显式记录 drop 行为而不是静默覆写。
 - 假设：当前硬件按仓库文档为 `ESP32-S3FH4R2`，片内 2MB PSRAM 可用。
 - 假设：cached selector 可继续用于本轮 digital/analog HIL，不需要切换设备。
-
-## 变更记录（Change log）
-
-- 2026-03-18: 创建 spec，冻结 PSRAM 专用 arena、三缓冲 render/present 管线、dirty-span flush、33ms cadence 与 baseline/candidate HIL 验收口径。
-- 2026-03-18: 实现 PSRAM 三缓冲 + render/present 双任务，默认 chunk 按规格回退到 `4096B / 8 rows`，并补齐 baseline/candidate HIL 证据。
-- 2026-03-18: 创建 reviewable PR #71，spec 状态切换为已完成。
-- 2026-03-19: 继续在同一 PR 上收敛显示正确性与流畅度问题，细化 dirty rect、移除 clone-back、增加 frame-in-flight coalescing，并恢复 `8192B / 16 rows` 默认 chunk。
 
 ## 参考（References）
 

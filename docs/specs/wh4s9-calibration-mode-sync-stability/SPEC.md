@@ -1,12 +1,5 @@
 # Calibration 页面模式同步与状态链路稳定化（#wh4s9）
 
-## 状态
-
-- Status: 已完成
-- Created: 2026-04-16
-- Last: 2026-06-08
-- Notes: 2026-06-08 已完成 calibration route 组件化重构、单测/构建/Storybook 刷新与视觉证据回采；相关实现与视觉证据绑定本地提交 `8b5c785`。
-
 ## 背景 / 问题陈述
 
 - Web 校准页同时依赖设备 `calibration mode`、SSE `status` 流和浏览器本地 draft 存储；其中任一环节抖动都会直接影响 RAW / DAC / Active 读数的展示。
@@ -107,10 +100,6 @@
   When 页面 reload
   Then `电流通道2` 保持激活，`cal_mode` 与 RAW 读数不发生 mismatch。
 
-## 实现前置条件（Definition of Ready / Preconditions）
-
-- 已满足：主人已确认问题表现来自校准页数据/模式偶发错位，并授权直接实现与更新 SPEC。
-
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
 ### Testing
@@ -123,11 +112,6 @@
 
 - 必须提供稳定的 calibration route Storybook canvas story，能复现“恢复已保存 current tab”和“output applied”状态。
 - 视觉证据优先使用 Storybook canvas，而不是临时浏览器截图。
-
-## 文档更新（Docs to Update）
-
-- `docs/specs/README.md`
-- `docs/solutions/web/calibration-mode-single-owner-and-status-fallback.md`
 
 ## Visual Evidence
 
@@ -142,12 +126,6 @@
 - Evidence note: 当前电流校准页仍保持既有布局与交互层级；本次重构后的草稿工具栏、硬件 I/O 区与输出控制区在 mock state 下正常渲染。
 
 ![Calibration route output control applied](./assets/calibration-route-output-control-applied.png)
-
-## 实现里程碑（Milestones / Delivery checklist）
-
-- [x] M1: 收口 calibration mode 协调入口，移除页面内重复 cleanup `off`，并让 storage hydrate 早于自动 sync。
-- [x] M2: 为 calibration 页补齐 last-good status + fallback polling，并对 mismatch 的 RAW / DAC 展示做显式门控。
-- [x] M3: 补齐 Storybook / E2E 回归，保留稳定视觉证据与文档更新。
 
 ## 方案概述（Approach, high-level）
 

@@ -82,3 +82,41 @@ Digital firmware `cargo check` reached the firmware build script and stopped bef
 - Review convergence verification: `cargo fmt --manifest-path tools/loadlynx-devd/Cargo.toml --all`, `cargo test --manifest-path tools/loadlynx-devd/Cargo.toml --locked`, `git diff --check`, and `tools/loadlynx-devd/install/install-loadlynx-host.sh --dry-run` passed. The devd test suite includes regression cases proving legacy HTTP endpoint strings are still accepted by the CLI request path, analog real flashes do not prompt for digital confirmation, and Unix IPC startup refuses live sockets while removing stale sockets.
 
 `cargo +esp test --manifest-path firmware/digital/Cargo.toml mdns --no-run` is not a valid host-side unit path for this ESP target in the current toolchain; it fails inside xtensa test dependencies before reaching LoadLynx code. The firmware build path above is the accepted validation for the digital crate.
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: 已完成
+- Prior catalog timestamp: 2026-05-24
+- Prior catalog implementation note: 首版实现：devd/CLI、Web devd+Firmware、firmware catalog、digital identity/DNS-SD、Storybook/视觉证据
+
+### 状态
+
+- Status: 已完成
+
+### 实现前置条件
+
+- `loadlynx-devd` and `loadlynx` ship as separate binaries from one Rust package.
+- devd uses direct `espflash` for real ESP32-S3 digital firmware flashing after Web lease, artifact hash verification and `.esp32-port` target evidence. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`. Analog/probe operations may use `mcu-agentd` while preserving selector mutation guardrails.
+- ESP32-S3 USB CDC JSONL bridge protocol is defined in `docs/interfaces/usb-cdc-jsonl-bridge.md`.
+- Firmware catalog schema and generator are available under `schemas/` and `tools/firmware-catalog/`.
+- Analog identity is represented through artifact/probe provenance in the first version, with direct analog runtime identity left as a follow-up.
+
+### 文档更新
+
+- Update `docs/dev-notes/mcu-agentd.md` to describe `loadlynx-devd` as owner-facing control plane and `mcu-agentd` as backend/fallback.
+- Update `docs/interfaces/network-http-api.md` with identity/artifact/discovery fields.
+- Update `docs/interfaces/uart-link.md` or a new USB CDC protocol doc with JSONL bridge frames.
+- Update `docs/README.md` and `docs/specs/README.md`.
+
+### 实现里程碑
+
+1. devd/CLI foundation: package scaffold, API envelope, mock devices, scan/list/bind/lease/session tests.
+2. Firmware catalog and artifact generator for digital and analog targets.
+3. ESP32-S3 identity, mDNS/DNS-SD, and USB CDC JSONL bridge contract.
+4. devd hardware backends for digital flash/reset/monitor and analog flash/reset/monitor with dry-run proof.
+5. Web Connect/Firmware/USB session UI with Storybook and visual evidence.
+6. CLI LAN and USB flows with dry-run and JSON output.
+7. HIL validation on approved cached selectors.

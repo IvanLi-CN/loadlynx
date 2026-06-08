@@ -1,20 +1,6 @@
-# CV 模式 + Preset 需求与概要设计
+# CV 模式 + Preset
 
-## Metadata
-
-- Spec ID: exkw2
-- Lifecycle: active
-- Status: 已完成
-- Last: 2026-01-03
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Created: 2026-01-03
-- Last: 2026-01-03
-- Source: migrated from `cv-mode-presets.md` (removed)
+## 概述
 
 本文件冻结“CV（电压钳位）模式 + 5 组预设 Preset + EEPROM 持久化”的需求基线，并给出跨 MCU（ESP32‑S3 ↔ STM32G431）实现边界与接口形状（不包含实现代码）。
 
@@ -28,9 +14,9 @@
 
 ---
 
-### 1. 背景与目标
+## 1. 背景与目标
 
-#### 1.1 背景
+### 1.1 背景
 
 现有系统已经具备：
 
@@ -39,7 +25,7 @@
 
 但 CV 模式仍处于预留状态（协议常量存在，payload/执行逻辑未落地）。
 
-#### 1.2 目标
+### 1.2 目标
 
 - 新增 **CV（电压钳位型电子负载）模式**：当电压高于目标时吸流拉回；低于目标时退流至 0。
 - 引入 **5 组 Preset**（编号 1..5，无名称）：每组包含 `mode + target + limits`，并 **持久化到 EEPROM**。
@@ -48,9 +34,9 @@
 
 ---
 
-### 2. 范围与非目标
+## 2. 范围与非目标
 
-#### 2.1 In scope（本期交付范围）
+### 2.1 In scope（本期交付范围）
 
 - 支持 `CC` 与 `CV` 两种工作模式。
 - 5 组 Preset 的读写、应用、持久化（EEPROM）。
@@ -59,7 +45,7 @@
 - 远端/近端电压的 `V_main` 选择规则（见 §6）。
 - `FastStatus` 与 HTTP/Web/UI 的可观测性：必须能看到当前模式、目标、上限状态与欠压锁存状态。
 
-#### 2.2 Out of scope（明确不做）
+### 2.2 Out of scope（明确不做）
 
 - 本期不引入 `CP/CR`（恒功率/恒阻）。
 - 欠压锁存不进入 `fault_flags`，不要求 SoftReset 才能恢复。
@@ -67,9 +53,9 @@
 
 ---
 
-### 3. 关键约束（冻结）
+## 3. 关键约束（冻结）
 
-#### 3.1 硬件能力与系统硬限制（必须 clamp）
+### 3.1 硬件能力与系统硬限制（必须 clamp）
 
 - 单通道最大电流：`5 A`
 - 双通道合计最大电流：`10 A`
@@ -77,7 +63,7 @@
 
 > 备注：系统级硬限制以固件硬编码为准；Preset 只提供用户层的“软件上限”，不得绕过系统硬限制。
 
-#### 3.2 通道分配策略（精度驱动的小设计）
+### 3.2 通道分配策略（精度驱动的小设计）
 
 为提升低电流区采样精度，冻结如下分配逻辑（对 CC 与 CV 的“总目标电流”一致适用）：
 
@@ -92,9 +78,9 @@
 
 ---
 
-### 4. Preset 数据模型（冻结）
+## 4. Preset 数据模型（冻结）
 
-#### 4.1 Preset 定义（编号 1..5）
+### 4.1 Preset 定义（编号 1..5）
 
 每个 Preset 包含：
 
@@ -105,7 +91,7 @@
 - `max_i_ma_total`: 总电流上限（mA）
 - `max_p_mw`: 总功率上限（mW）
 
-#### 4.2 默认值（EEPROM 空/无效时）
+### 4.2 默认值（EEPROM 空/无效时）
 
 默认上限建议：
 
@@ -117,14 +103,14 @@
 
 ---
 
-### 5. 输出开关与模式切换（冻结）
+## 5. 输出开关与模式切换（冻结）
 
-#### 5.1 输出开关（OutputEnabled）
+### 5.1 输出开关（OutputEnabled）
 
 - `output_enabled=false` 时：等效输出为“0 吸流”（无论 CC/CV）。
 - `output_enabled=true` 时：按 active preset 的 mode/target/limits 执行控制。
 
-#### 5.2 模式切换/应用 Preset 的安全规则
+### 5.2 模式切换/应用 Preset 的安全规则
 
 当发生以下任一事件：
 
@@ -139,7 +125,7 @@
 
 ---
 
-### 6. 电压选择：V_main（控制与保护都用“更高的那路”）
+## 6. 电压选择：V_main（控制与保护都用“更高的那路”）
 
 CV 控制与 `min_v`/功率等保护约束，都统一使用：
 
@@ -154,9 +140,9 @@ V_main_mv = max(V_local_mv, V_remote_mv)
 
 ---
 
-### 7. 欠压锁存（uv_latched，非 fault，冻结）
+## 7. 欠压锁存（uv_latched，非 fault，冻结）
 
-#### 7.1 触发条件
+### 7.1 触发条件
 
 当 `output_enabled=true` 且：
 
@@ -166,13 +152,13 @@ V_main_mv ≤ min_v_mv
 
 触发欠压锁存。
 
-#### 7.2 行为
+### 7.2 行为
 
 - 置位 `uv_latched=true`
 - 强制输出退流（等效 `I_total_target=0`）
 - `uv_latched` 不进入 `fault_flags`，不作为系统故障
 
-#### 7.3 清除条件（冻结）
+### 7.3 清除条件（冻结）
 
 只有当用户执行一次“关→开”（观察到 `output_enabled` 出现新的上升沿）时，才允许清除 `uv_latched` 并重新出力。
 
@@ -180,35 +166,35 @@ V_main_mv ≤ min_v_mv
 
 ---
 
-### 8. CV 控制算法（冻结：运行在 G431）
+## 8. CV 控制算法（冻结：运行在 G431）
 
-#### 8.1 架构
+### 8.1 架构
 
 - 内环：现有硬件恒流环（DAC 设定电流）
 - 外环：CV 逻辑在 G431 周期性运行，通过电压误差调节 **总目标电流** `I_total_target`，再经 §3.2 分配到 CH1/CH2
 
-#### 8.2 基本行为（冻结）
+### 8.2 基本行为（冻结）
 
 - 若 `output_enabled=false` 或 `uv_latched=true`：`I_total_target=0`
 - 否则在 CV 模式下：
   - 若 `V_main_mv ≤ target_v_mv`：`I_total_target → 0`（退流）
   - 若 `V_main_mv > target_v_mv`：增大 `I_total_target` 以拉回电压（受限于 §9 的限值）
 
-#### 8.3 速度要求
+### 8.3 速度要求
 
 CV 外环必须在 G431 侧独立运行，不依赖 S3/HTTP/Web 的更新频率；实现时采用“折中默认值”并保留可调参数（更新周期/死区/限速/PI 增益等），以便硬件实测整定。
 
 ---
 
-### 9. 三限值联动（必须真限）
+## 9. 三限值联动（必须真限）
 
 Preset 中三限值必须对 CC/CV 生效：
 
-#### 9.1 电流上限（max_i_ma_total）
+### 9.1 电流上限（max_i_ma_total）
 
 - 作为总电流上限，并叠加系统硬限制（总 10A、单通道 5A）。
 
-#### 9.2 功率上限（max_p_mw）
+### 9.2 功率上限（max_p_mw）
 
 必须主动限功率（不再仅日志告警）。典型推导：
 
@@ -219,15 +205,15 @@ I_limit_ma    = min(max_i_ma_total, I_by_power_ma, system_i_max_ma)
 
 其中 `V_min_for_div` 为实现细节，用于避免除零与低压异常放大。
 
-#### 9.3 欠压下限（min_v_mv）
+### 9.3 欠压下限（min_v_mv）
 
 按 §7 的欠压锁存语义执行（锁存、需用户关开恢复）。
 
 ---
 
-### 10. 跨模块接口边界（概要）
+## 10. 跨模块接口边界（概要）
 
-#### 10.1 UART：原子下发 Active Control（冻结）
+### 10.1 UART：原子下发 Active Control（冻结）
 
 冻结将 `MSG_SET_MODE (0x21)` 定义为“原子 Active Control”控制帧，以满足：
 
@@ -251,7 +237,7 @@ Payload 形状（示意）：
 
 > 说明：即使 Preset 存在 S3 的 EEPROM 中，analog 仍需要收到“当前生效的 active preset 内容”，以执行 CV/限功率/欠压锁存等逻辑。
 
-#### 10.2 FastStatus / 状态可观测性
+### 10.2 FastStatus / 状态可观测性
 
 需要补齐：
 
@@ -262,7 +248,7 @@ Payload 形状（示意）：
   - `power_limited` / `current_limited`（建议）
   - `voltage_source`（local/remote/max，或 remote_valid 指示，建议）
 
-#### 10.3 HTTP/Web/UI（Web 优先）
+### 10.3 HTTP/Web/UI（Web 优先）
 
 Web/HTTP 必须覆盖：
 
@@ -281,15 +267,15 @@ Web/HTTP 必须覆盖：
 
 ---
 
-### 11. EEPROM 持久化（冻结）
+## 11. EEPROM 持久化（冻结）
 
-#### 11.1 目标
+### 11.1 目标
 
 - 5 组 Preset 必须存入外置 EEPROM。
 - 必须版本化并带校验（CRC32 或等价），并在无效时回退默认值。
 - 不持久化 `output_enabled`（上电默认关闭）。
 
-#### 11.2 EEPROM 地址规划（建议）
+### 11.2 EEPROM 地址规划（建议）
 
 当前 calibration profile 使用：
 
@@ -302,9 +288,9 @@ Web/HTTP 必须覆盖：
 
 ---
 
-### 12. 验收标准（实现阶段）
+## 12. 验收标准（实现阶段）
 
-#### 12.1 功能验收
+### 12.1 功能验收
 
 - 可从 Web 应用 Preset 1..5，并观察到 `output_enabled` 被强制关闭。
 - 用户手动开启输出后：
@@ -314,11 +300,11 @@ Web/HTTP 必须覆盖：
   - 触发后退流并锁存；
   - 仅在用户“关→开”后恢复（无需 SoftReset）。
 
-#### 12.2 安全与上限
+### 12.2 安全与上限
 
 - 单通道不超过 5A、总不超过 10A（被 clamp）。
 - 功率上限为真限：当达到 `max_p_mw` 时会主动限流。
 
-#### 12.3 可观测性
+### 12.3 可观测性
 
 - FastStatus/HTTP 能反映 mode、目标、`uv_latched`、受限原因（建议项）。

@@ -1,22 +1,6 @@
 # Web UI Layout 规范化（Layouts 抽象）
 
-## Metadata
-
-- Spec ID: cqu4e
-- Lifecycle: active
-- Status: 已完成
-- Last: 2025-12-26
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Created: 2025-12-25
-- Last: 2025-12-26
-- Source: migrated from `web-layouts.md` (removed)
-
-### 背景与问题
+## 背景与问题
 
 当前 `web/` 的布局主要由根路由组件（`AppLayout`）提供，但它同时承担了：
 
@@ -26,20 +10,20 @@
 
 这使得 UI 的“布局层”边界不清晰：布局变更会牵连业务逻辑，页面复用也会被迫复制容器/标题/导航结构。
 
-### 目标
+## 目标
 
 - 把 UI 中可复用的布局结构抽象成少量清晰的 layout（路由级布局为主）。
 - 统一页面容器与间距规则，让各页面只关注“内容”，不再各写一套容器样式。
 - 将 calibration mode 等跨页面副作用从纯布局中剥离，放到更贴近业务的布局/路由层级管理。
 - **尽量保持 URL 不变**（通过 TanStack Router 的 pathless layout route 实现）。
 
-### 非目标
+## 非目标
 
 - 不调整视觉主题（Tailwind/DaisyUI 配色、组件风格）与信息架构（导航项命名/层级）本身。
 - 不引入新的路由或状态管理框架；保持 TanStack Router / React Query 现状。
 - 不在本设计阶段提交实现代码（仅定义边界与迁移路径）。
 
-### 方案概述：建议抽象的 Layouts
+## 方案概述：建议抽象的 Layouts
 
 建议将布局拆为 3（必选）+ 1（本次选用）：
 
@@ -60,7 +44,7 @@
    - calibration 仍属于 `/$deviceId/*` 的设备子页面，**必须复用 `DeviceLayout`**（设备查找/错误处理/上下文统一由 DeviceLayout 提供）。
    - 作为“工具模式（tool layout）”的代表页面：内容区 **全宽**，并向 App Shell 请求 **隐藏常驻侧栏/rail**（但保留抽屉入口，见下文的布局变体与响应式侧栏设计）。
 
-### 路由结构（保持 URL 不变）
+## 路由结构（保持 URL 不变）
 
 使用 TanStack Router code-based routing，通过 pathless layout route 把 “Console Shell” 插入到现有 URL 上方：
 
@@ -73,7 +57,7 @@
 
 说明：TanStack Router 会按匹配优先级排序路由，pathless layout 不参与 URL 匹配，仅作为渲染结构的父级。
 
-### 布局变体（工具模式 / 全宽）
+## 布局变体（工具模式 / 全宽）
 
 为避免把 calibration 变成“另一个 App”，本方案仍复用 `ConsoleLayout` 的顶栏，并且 calibration **仍在 `DeviceLayout` 之下**；同时允许 `ConsoleLayout` 基于路由元信息切换布局变体：
 
@@ -88,7 +72,7 @@
 - `ConsoleLayout` 通过 router state / matches 读取当前激活的 `staticData`，据此决定是否渲染侧栏
 - `PageContainer` 提供 `variant="default" | "full"`，在工具页使用 `full`（避免 max width 限制）
 
-### 模块边界与文件建议
+## 模块边界与文件建议
 
 建议新增目录（不强制，但有助于约束边界）：
 
@@ -106,7 +90,7 @@
   - 暴露：`deviceId`, `device`, `baseUrl`, `identityQuery`（或 `identity`）等
   - 子页面通过 `useDeviceContext()` 读取，避免重复的 “find device / not found / baseUrl 判空” 逻辑
 
-### calibration mode 管理（副作用下沉）
+## calibration mode 管理（副作用下沉）
 
 将当前放在 `AppLayout` 的“非 calibration 页面强制 off”逻辑下沉到更贴近业务的层级：
 
@@ -117,7 +101,7 @@
 
 这样 `ConsoleLayout` 可以保持纯布局，不再承担跨页面业务副作用。
 
-### 页面容器规范（统一宽度/间距）
+## 页面容器规范（统一宽度/间距）
 
 建议引入 `PageContainer` 作为页面内容的统一“外层容器”：
 
@@ -127,7 +111,7 @@
 
 迁移时优先把各页面里分散的 `max-w-* mx-auto` 收敛到 `PageContainer`，减少视觉不一致。
 
-### 兼容性与迁移策略
+## 兼容性与迁移策略
 
 - **URL 不变**：通过 pathless layout route 插入 `ConsoleLayout`。
 - **增量迁移**：
@@ -136,7 +120,7 @@
   3. 最后重构 calibration mode 副作用的归属（从纯布局移出）。
 - 迁移期间允许短期并存：未迁移页面仍可直接渲染在 `ConsoleLayout` 下。
 
-### 测试计划（实现阶段）
+## 测试计划（实现阶段）
 
 - 静态检查：`bun run check` / `bun run lint`
 - E2E：`bun run test:e2e`（覆盖基础导航与 device 子页面打开）
@@ -145,12 +129,12 @@
   - 从 Devices 打开 CC/Status/Settings/Calibration；
   - 在 Calibration 与其它页面之间切换，确认 calibration mode 能可靠退出（设备端不残留）。
 
-### 已确认决策
+## 已确认决策
 
 - Calibration：选择 **工具模式（B）**（隐藏侧栏 + 全宽内容）
 - 默认内容宽度基线：`max-w-5xl`
 
-### 风险点与待确认
+## 风险点与待确认
 
 1. DeviceLayout 提供上下文的粒度：
    - 只提供 `device/baseUrl`，还是把 `identityQuery` 也上移统一管理？

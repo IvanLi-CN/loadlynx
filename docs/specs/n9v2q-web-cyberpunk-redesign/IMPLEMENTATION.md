@@ -26,3 +26,18 @@ Key implementation points:
 - `cd web && bun run test:storybook:ci`
 - `cd web && bun run test:e2e`
 - `rg` self-check confirmed no daisyUI package/plugin/Iconify references in Web source/dependency files and no old daisyUI semantic class tokens in `web/src`/`web/tests`.
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: implemented
+- Prior catalog timestamp: 2026-06-01
+- Prior catalog implementation note: 全 Web Console 赛博朋克重做；移除 daisyUI/Iconify；新增 shadcn 风格组件与 i18n
+
+### SPEC Metadata Context
+- Spec ID: n9v2q
+- Lifecycle: active
+- Status: implemented
+- Last: 2026-06-01

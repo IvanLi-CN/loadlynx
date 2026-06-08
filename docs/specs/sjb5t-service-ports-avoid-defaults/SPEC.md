@@ -1,22 +1,6 @@
 # 服务端口规范化
 
-## Metadata
-
-- Spec ID: sjb5t
-- Lifecycle: active
-- Status: 已完成
-- Last: 2026-01-21
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Created: 2026-01-20
-- Last: 2026-01-21
-- Notes: PR #62
-
-### 背景 / 问题陈述
+## 背景 / 问题陈述
 
 当前仓库内存在多类“会监听端口”的本地开发服务与测试服务，其中部分使用默认端口、部分在端口被占用时会自动换端口。结果是：
 
@@ -26,9 +10,9 @@
 
 本计划要把这些端口**固定化、抬高到高位端口、并禁止自动换端口**；同时允许通过环境变量显式覆盖。
 
-### 目标 / 非目标
+## 目标 / 非目标
 
-#### Goals
+### Goals
 
 - 端口规范化遵循**最小变更原则**：只修正“默认端口/动态端口/会自动漂移的端口”。对已经是高位且稳定的端口，不做无意义的迁移。
 - 为仓库内“开发服务/测试服务”建立统一的端口分配表（Port registry）。
@@ -37,27 +21,27 @@
 - 任一服务在端口被占用时必须**直接失败退出**（非零退出码 + 明确错误信息），不得自动选择其他端口。
 - 消除配置漂移：Playwright、脚本、文档等引用同一份端口来源。
 
-#### Non-goals
+### Non-goals
 
 - 不承诺“默认端口在所有机器上都绝对不冲突”（只提供显式覆盖与清晰失败）。
 - 不引入新的端口探测/自动恢复机制（例如“扫描可用端口”“自动 +1”），避免隐式行为。
 - 不改变 mDNS UDP 5353（协议固定端口）。
 - 不迁移设备端（firmware）监听端口（HTTP 80、mDNS 5353 等）。
 
-### 范围（Scope）
+## 范围（Scope）
 
-#### In scope
+### In scope
 
 - `web/` 本机开发/测试相关端口：
   - Vite dev / preview
   - Storybook dev
   - Storybook 静态站点测试服务器（`http-server`）
 
-#### Out of scope
+### Out of scope
 
 - 设备端（firmware）监听端口（HTTP 80、mDNS 5353 等）。
 
-### 用户与场景
+## 用户与场景
 
 **用户**
 - 固件/前端开发者：本机运行 `web/` 开发服务、Storybook、E2E/组件测试。
@@ -68,9 +52,9 @@
 - 同时打开多个仓库/多个 Vite 项目开发，要求端口互不干扰且失败可见。
 - 在 CI 中启动一次性服务（Storybook static server / Vite webServer），要求端口确定、失败即报。
 
-### 需求（Requirements）
+## 需求（Requirements）
 
-#### MUST
+### MUST
 
 - 端口分配覆盖以下“服务类别”，并给出唯一默认端口：
   - `web/` Vite dev server（本地开发）
@@ -83,26 +67,26 @@
   - 必须以非零退出码退出，并在日志中提示“端口被占用”与对应端口号。
 - 移除/禁止使用“自动选端口”实现（例如脚本中的 `get-port`）。
 
-### 接口契约（Interfaces & Contracts）
+## 接口契约（Interfaces & Contracts）
 
-#### 接口清单（Inventory）
+### 接口清单（Inventory）
 
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | 端口环境变量（`LOADLYNX_*_PORT`） | Config | internal | New | `./contracts/config.md` | web | 开发者、CI、脚本 | 统一端口来源，显式覆盖 |
 | Web/Storybook 脚本命令（`bun run ...`） | CLI | internal | Modify | `./contracts/cli.md` | web | 开发者、CI | 禁止自动换端口；固定端口 |
 
-#### 契约文档
+### 契约文档
 
 - [contracts/config.md](./contracts/config.md)
 - [contracts/cli.md](./contracts/cli.md)
 
-### 约束与风险
+## 约束与风险
 
 - **协议约束**：mDNS 使用 UDP 5353（固定），不在端口规范化范围内。
 - **行为风险**：Playwright `webServer.reuseExistingServer` 可能在端口被其他进程占用时“误复用”；需要在实现阶段明确策略（契约里要求失败可见）。
 
-### 端口分配表（Port registry）
+## 端口分配表（Port registry）
 
 > 说明：默认端口为高位端口；如有冲突，必须通过环境变量显式覆盖。
 
@@ -114,9 +98,9 @@
 | Web：Storybook 静态站点（测试用） | 动态（`get-port`） | 34033 | `LOADLYNX_STORYBOOK_TEST_PORT` |
 | 设备：mDNS | 5353（固定） | 5353（固定） | N/A |
 
-### 验收标准（Acceptance Criteria）
+## 验收标准（Acceptance Criteria）
 
-#### Core path
+### Core path
 
 - Given 端口未被占用
   When 运行 `web/` 的 dev 服务
@@ -130,40 +114,24 @@
   When 运行对应服务
   Then 服务监听端口等于覆盖值，且 Playwright/脚本引用的 URL 与之同步。
 
-#### Edge cases
+### Edge cases
 
 - Given `LOADLYNX_*_PORT` 为非数字或超出范围
   When 启动服务
   Then 进程在启动阶段失败，并提示变量名与非法值（不回退到默认端口、不自动找端口）。
 
-### 实现前置条件（Definition of Ready / Preconditions）
+## 非功能性验收 / 质量门槛（Quality Gates）
 
-（本计划已冻结：前置条件已满足。）
-
-### 非功能性验收 / 质量门槛（Quality Gates）
-
-#### Testing
+### Testing
 
 - `web/` Playwright E2E：`bun run test:e2e`
 - Storybook 测试：`bun run test:storybook:ci`（固定端口，不使用动态端口）
 
-#### Quality checks
+### Quality checks
 
 - `web/`：`bun run lint`
 
-### 文档更新（Docs to Update）
-
-- `web/README.md`：补充端口环境变量与“端口占用即失败”的约定。
-- （如需要）仓库根 `README.md`/`WORKFLOW.md`：仅在已有入口处追加链接，避免重复说明。
-
-### 实现里程碑（Milestones）
-
-- [x] M1: Vite dev/preview 端口契约化 + strict port（占用即失败）
-- [x] M2: Storybook dev 端口契约化 + exact port（占用即失败）
-- [x] M3: Storybook CI 静态站点改为固定端口（移除 `get-port`）
-- [x] M4: Playwright baseURL/webServer.url 与端口来源一致；补齐文档与 CI 断言
-
-### 方案概述（Approach, high-level）
+## 方案概述（Approach, high-level）
 
 - Vite：
   - `server.port` / `preview.port` 读 env（默认值来自本计划 Port registry）。
@@ -173,7 +141,7 @@
 - Storybook CI 静态站点：
   - 用固定端口运行 `http-server`，删除 `get-port` 路径，避免端口漂移。
 
-### Repo reconnaissance（最小必要事实核查）
+## Repo reconnaissance（最小必要事实核查）
 
 实现阶段需要改动/对齐的入口点：
 
@@ -183,14 +151,10 @@
 - `web/README.md`
 - `web/scripts/ports.ts`
 
-### 开放问题（需要主人回答）
+## 开放问题（需要主人回答）
 
 None.
 
-### 假设（需主人确认）
+## 假设（需主人确认）
 
 None.
-
-### 变更记录 / Change log
-
-- 2026-01-21: 修复 `web/scripts/ports.ts` CLI key 校验，避免 `toString` 等原型属性被误判为有效 key；并按 Biome 要求格式化以通过 CI `bun run check`（PR #62 review fix）。

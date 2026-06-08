@@ -1,29 +1,13 @@
 # Web：USB‑PD 设置页（对接 /api/v1/pd）
 
-## Metadata
-
-- Spec ID: rbcuw
-- Lifecycle: active
-- Status: 已完成
-- Last: 2026-01-13
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Design: 已冻结（效果图 + 文字规格已确认）
-- Created: 2026-01-09
-- Last: 2026-01-13
-
-### 背景 / 问题陈述
+## 背景 / 问题陈述
 
 - 目前 `web/` 已有可用的设备状态与控制页面（例如 CC、Presets、Calibration），但缺少对 USB‑PD Sink 的“可视化状态 + 可控配置”入口。
 - 现有 PD 交互仍偏验证性质（例如两态切换），不满足“Web 端读写 PD Sink 功能模块”的长期需求（选择 PDO/APDO、设定 Ireq、观察合同与能力）。
 
-### 目标 / 非目标
+## 目标 / 非目标
 
-#### Goals
+### Goals
 
 - Web UI 提供一个“USB‑PD”设置页，能对设备的 USB‑PD Sink 功能进行**读写**：
   - 读取：Attach、当前合同（V/I）、Source 能力列表（Fixed/PPS）、已保存配置；
@@ -31,15 +15,15 @@
 - UI 的越界策略与设备端一致：前端阻止越界，服务端越界返回明确错误（不夹紧）。
 - 复用现有 Web 技术栈与交互模式（TanStack Router/Query + `HttpApiError` 展示 + mock:// 设备）。
 
-#### Non-goals
+### Non-goals
 
 - 不在本计划内实现固件侧的 PD 协议增强与 HTTP API（见 `docs/specs/j24my-usb-pd-pps-and-fixed-settings/SPEC.md`）。
 - 不实现账号体系/远程云访问；默认局域网直连设备。
 - 不实现自动 APDO 选择、推荐 Ireq 等策略型功能（未来可扩展）。
 
-### 范围（Scope）
+## 范围（Scope）
 
-#### In scope
+### In scope
 
 - Web 路由/页面：新增设备级 USB‑PD 设置页（入口：status 页二级入口）。
 - Web API client：
@@ -51,12 +35,12 @@
   - Storybook：为 USB‑PD 设置页的关键状态补齐 stories；
   - E2E：新增至少 1 个用例覆盖“读取 + 修改 + Apply + 错误态”。
 
-#### Out of scope
+### Out of scope
 
 - 不修改主界面（其它页面）来“强制展示 PD 信息”；仅在需要时做最小的入口与摘要。
 - 不引入新测试框架/新 UI 组件库；只复用仓库现有工具链（Biom/Playwright/Storybook）。
 
-### 界面效果图（Design mock，实施需高度还原）
+## 界面效果图（Design mock，实施需高度还原）
 
 本节效果图为 **高保真目标**：实现阶段应以其作为 UI 规格，做到“高度还原”。
 
@@ -65,7 +49,7 @@
 - **以“主人确认通过”的效果图为准**：在主人明确确认效果图可作为实现规格之前，不允许进入实现阶段。
 - **瑕疵必须在设计阶段消除**：发现瑕疵时，先修正效果图与本节文字规格，再进入实现；不允许“实现时顺手修、事后补文档”。
 
-#### 还原度要求（Freeze）
+### 还原度要求（Freeze）
 
 - 信息架构与导航层级必须一致：
   - Status 页存在 USB‑PD 区块，且提供二级入口（按钮文案与交互一致）。
@@ -82,14 +66,14 @@
   - 文案：可在不改变语义的前提下做微调（例如 “Open settings” vs “Open PD settings”），但交互意图必须一致。
   - 视觉层级：允许减少过多的 “card 边框/阴影” 层级，优先用扁平分区（背景块）收口；但不改变信息架构与栅格分区。
 
-#### 验收方式（实施阶段）
+### 验收方式（实施阶段）
 
 - 必须提供对照验证：
   - Storybook：为 Status 内 USB‑PD 区块、PD Settings（Fixed/PPS/Unsupported）各提供 story；
   - E2E：至少 1 个用例覆盖从 Status 二级入口进入 PD Settings，并能看到关键区块（tabs/列表/配置/Apply）。
 - 若实现中需要改变该 UI 规格：必须先更新本节效果图并在计划中说明变更点（不允许“实现先改、再事后补文档”）。
 
-#### 瑕疵清单（Must fix before impl）
+### 瑕疵清单（Must fix before impl）
 
 （主人指出的瑕疵请在此列出并打勾关闭；未关闭前不进入实现阶段。）
 
@@ -116,7 +100,7 @@
 - [x] M0.21: Desktop（两栏）布局：在“选项列表”与“右侧配置区”之间增加竖向分隔线，明确两栏边界（不影响移动端单栏布局）。
 - [x] M0.22: PD Settings 顶部状态区与下方两栏应有整体分区感：统一到同一个容器内，并使用分隔线（水平/竖向）组织层次，避免“分裂成三块各自为政”。
 
-#### 界面规格（冻结，实施需遵循）
+### 界面规格（冻结，实施需遵循）
 
 > 目的：避免“高度还原”把瑕疵也复制到成品；本节以可量化的 UI 规则描述关键对齐与尺寸。
 
@@ -144,31 +128,31 @@
   - badge 尺寸：`28×24`，圆角 `rx=12`；内部数字使用 `text-anchor="middle"` + `dominant-baseline="middle"`。
   - 未选中项 badge 使用弱化样式（可通过 `opacity=0.7`），选中项 badge 与选中描边一致（复用 `sel` 风格）。
 
-#### 与现有布局的组合（ConsoleLayout + DeviceLayout）
+### 与现有布局的组合（ConsoleLayout + DeviceLayout）
 
 ![Console integrated desktop](assets/console-integrated-desktop.svg)
 
 ![Console integrated mobile](assets/console-integrated-mobile.svg)
 
-#### Status 页二级入口
+### Status 页二级入口
 
 ![Status secondary entry](assets/status-entry.svg)
 
-#### USB‑PD 设置页：Fixed
+### USB‑PD 设置页：Fixed
 
 ![PD settings fixed](assets/pd-settings-fixed.svg)
 
-#### USB‑PD 设置页：PPS
+### USB‑PD 设置页：PPS
 
 ![PD settings pps](assets/pd-settings-pps.svg)
 
-#### 不支持（缺少 /api/v1/pd 文档或端点）
+### 不支持（缺少 /api/v1/pd 文档或端点）
 
 ![PD settings unsupported](assets/pd-settings-unsupported.svg)
 
-### 需求（Requirements）
+## 需求（Requirements）
 
-#### MUST
+### MUST
 
 - 读（Read path）：
   - 展示 Attach 状态、合同电压/电流（unknown 时明确显示未知）；
@@ -186,16 +170,16 @@
 - CORS/私网预检约束：
   - PD 写入接口必须沿用既有模式：`POST` + `Content-Type: text/plain`，避免触发浏览器私网预检导致无法访问设备。
 
-#### SHOULD
+### SHOULD
 
 - 轮询/刷新策略：PD 信息变化频率低，采用低频轮询（例如 1–2 Hz）或事件触发（如用户操作后主动刷新），避免与 Fast Status SSE 争抢连接资源。
 - 易诊断性：在 UI 中展示 “source capabilities 更新时间戳 / 最近一次 Apply 的结果”。
 
-#### COULD
+### COULD
 
 - 在设备状态页增加一行 PD 摘要（例如 `Contract: 9V@2A`），并链接到 USB‑PD 设置页。
 
-### 接口文档优先（Freeze）
+## 接口文档优先（Freeze）
 
 > 说明：在我们发布 `1.0` 之前，不做有成本的向前兼容。本计划冻结以下策略：
 >
@@ -203,17 +187,17 @@
 > 2) **按文档实现**：Web 与固件只实现并消费“一个”当前口径，不做解析器/适配层来兼容多个 schema；
 > 3) **接口不够用就改接口**：当业务需要超出当前文档能力时，直接更新文档与固件实现，再更新 Web；不通过 Web 侧兼容来兜底历史版本。
 
-#### 实现阶段的接口确认流程（强制）
+### 实现阶段的接口确认流程（强制）
 
 - 1) 检查 `docs/interfaces/network-http-api.md` 是否已定义 `/api/v1/pd`（端点、请求/响应字段、错误码与状态码映射）。
 - 2) 若缺失或不完整：先补齐文档（以文档为准冻结字段），再进入固件与 Web 实现。
 - 3) 若实现中发现接口不够用：先改文档，再改固件与 Web（同步演进），不增加兼容分支。
 
-#### 写入约束（冻结）
+### 写入约束（冻结）
 
 - `/api/v1/pd` 的写入必须可通过 `POST` 完成，且 `Content-Type: text/plain`（body 为 JSON 字符串），以遵循现有“避免私网预检”的约定（见 `web/src/api/client.ts`）。
 
-#### 错误语义（冻结）
+### 错误语义（冻结）
 
 - 统一错误包裹：`{ "error": { code, message, retryable, details } }`（见 `docs/interfaces/network-http-api.md`）。
 - Web 必须至少正确处理以下错误码/状态（并给出可理解提示）：
@@ -224,7 +208,7 @@
   - `404 UNSUPPORTED_OPERATION`（端点不存在/未启用）：视为“固件不支持 PD 设置”
   - `409 NOT_ATTACHED`（未 attach / PD 状态不可用）：视为“当前不可 Apply”，但不影响读取页面展示。
 
-### 验收标准（Acceptance Criteria）
+## 验收标准（Acceptance Criteria）
 
 - Given Web 端已选中一个真实设备（非 `mock://`）且设备实现了 `/api/v1/pd`
   When 打开 USB‑PD 设置页
@@ -242,34 +226,21 @@
   When Web 端 Apply
   Then 页面展示错误码与可诊断信息，并保持用户输入不被静默修改。
 
-### 非功能性验收 / 质量门槛（Quality Gates）
+## 非功能性验收 / 质量门槛（Quality Gates）
 
-#### Testing
+### Testing
 
 - Web E2E：`bun run test:e2e`
   - 增加 1 个用例覆盖：打开页面 → 读取 → 修改配置 → Apply → 展示成功/错误。
 - Storybook：`bun run test:storybook`（或 CI 版 `bun run test:storybook:ci`）
   - 覆盖：link down、能力为空、Fixed 列表、PPS 列表、越界错误提示。
 
-#### Quality checks
+### Quality checks
 
 - `bun run check`（Biome check）
 -（必要时）`bun run lint` / `bun run format`
 
-### 文档更新（Docs to Update）
-
-- `web/README.md`：补齐 USB‑PD 设置页的入口、依赖的 HTTP API 端点与开发/测试命令提示。
-- `docs/interfaces/network-http-api.md`：新增/更新 `/api/v1/pd` 端点文档（按“接口文档优先（Freeze）”流程先补齐再实现）。
-
-### 里程碑（Milestones）
-
-- [x] M1: Web 端 API 契约对齐（TypeScript types + 错误码映射规则）
-- [x] M2: mock:// 设备补齐 PD 读写与错误路径（支撑 Storybook/E2E）
-- [x] M3: USB‑PD 设置页 UI（Fixed/PPS 切换 + 列表 + 编辑 + Apply）
-- [x] M4: Storybook stories + E2E 用例落地
-- [x] M5: 与真实设备联调验收（至少 1 个支持 PPS 的 Source）
-
-### 方案概述（Approach, high-level）
+## 方案概述（Approach, high-level）
 
 - Web UI 分层沿用现有模式：
   - `web/src/api/*`：只做 HTTP 封装与错误映射；
@@ -277,23 +248,23 @@
   - 复杂显示逻辑（如能力列表排序/格式化）抽到纯函数，方便 story 与单测复用（若仓库已有单测框架则用现有）。
 - 刷新策略优先选低频轮询，避免占用设备端稀缺连接资源（设备端 SSE 已用于 Fast Status）。
 
-### 风险与开放问题（Risks & Open Questions）
+## 风险与开放问题（Risks & Open Questions）
 
 - 风险：设备端 HTTP worker 数量有限；若 Web 端额外开长连接或高频轮询，可能影响现有 SSE/控制稳定性。
 - 风险：不同 PD Source 行为差异大；UI 需要把“应用成功/协商失败/能力不支持”明确区分，避免误导用户。
 - 开放问题：
   - 无（在实现阶段通过“先补齐接口文档”的流程消除不确定性。）
 
-### 假设（需主人确认）
+## 假设（需主人确认）
 
 - 假设：固件最终会提供可用的 PD HTTP API（目标为 `/api/v1/pd`）；若某固件版本不提供，则 Web 端在该设备上只能展示“不支持”，不保证读写能力。
 
-### 冻结条件（从 `待设计` → `待实现`）
+## 冻结条件（从 `待设计` → `待实现`）
 
 - [x] 主人确认 Web 导航入口为 status 页二级入口（已决策）。
 - [x] 主人接受“接口文档优先（Freeze）”：不做兼容；实现时先确认/补齐接口文档；接口不够用就更新接口文档与实现。
 
-### 参考（References）
+## 参考（References）
 
 - `docs/specs/j24my-usb-pd-pps-and-fixed-settings/SPEC.md`（固件/UI/UART/HTTP 的 PD 能力与控制契约）
 - `web/src/api/client.ts`（HTTP 封装、错误映射、`POST text/plain` 约定）

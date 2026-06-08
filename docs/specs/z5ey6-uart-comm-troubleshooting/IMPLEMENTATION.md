@@ -15,3 +15,25 @@ This canonical companion document was initialized from the legacy plan migration
 No explicit milestones were recorded in the legacy plan.
 
 ## Remaining Gaps
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: 已完成
+- Prior catalog timestamp: 2026-01-05
+- Prior catalog origin: legacy planning taxonomy import.
+
+### SPEC Metadata Context
+- Spec ID: z5ey6
+- Lifecycle: active
+- Status: 已完成
+- Last: 2026-01-05
+
+### 状态
+
+- Status: 已完成
+- Created: 2025-11-16
+- Last: 2026-01-05
+- Source: migrated from `uart-comm-troubleshooting.md` (removed)

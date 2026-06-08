@@ -21,3 +21,24 @@
 - `cd web && bun run check:bundle:app`
 - `cd web && bun run build-storybook --quiet`
 - `cd web && bun run check:bundle:storybook`
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: 已完成
+- Prior catalog timestamp: 2026-06-07
+- Prior catalog implementation note: 显式 app/Storybook bundle budget、Storybook framework runtime 单独验收、CI 门禁
+
+### SPEC Metadata Context
+- Spec ID: m8k2v
+- Lifecycle: active
+- Status: 已完成
+- Last: 2026-06-07
+
+### Docs to Update
+
+- `web/README.md`
+- `.github/workflows/web-check.yml`
+- `.github/workflows/web-pages.yml`

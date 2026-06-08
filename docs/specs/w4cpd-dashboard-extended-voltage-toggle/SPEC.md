@@ -1,12 +1,5 @@
 # Dashboard「扩展电压」开关与 PD 设置入口重构（#w4cpd）
 
-## 状态
-
-- Status: 已完成
-- Created: 2026-03-09
-- Last: 2026-03-10
-- Notes: PR #70；HIL 可选（Safe5V 起步、开关开/关重协商、红态锁存）
-
 ## 背景 / 问题陈述
 
 - 当前主界面左侧 `PD` 按钮用于显示/进入 PD 相关状态，右侧圆形按钮用于 on-screen LOAD 开关。
@@ -146,11 +139,6 @@
   When 点击右侧原位圆形按钮
   Then 进入现有 `PD settings` 页面，而不是切换 LOAD。
 
-## 实现前置条件（Definition of Ready / Preconditions）
-
-- 已满足：主人确认当前 mock 的控件布局、左侧 `PD` 文案、右侧设置入口图标与灰/蓝/红三态语义。
-- 进入实现前无需再做新的主界面设计决策。
-
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
 ### Testing
@@ -169,35 +157,9 @@
 - 与改动直接相关的 host/unit tests
 - `just d-build`（至少覆盖 digital firmware build）
 
-## 文档更新（Docs to Update）
-
-- `docs/interfaces/main-display-ui.md`: 主界面 control row 下方两个按钮的语义与布局说明。
-- `docs/specs/h3gz5-usb-pd-sink-toggle/SPEC.md`: 作为历史方案引用时补充指向新 spec 的说明（如仍保留）。
-- `docs/specs/wjhba-dashboard-pd-button-label/SPEC.md`: 作为历史设计依据时补充指向新 spec 的说明（如仍保留）。
-
-## 计划资产（Spec assets）
-
-- Directory: `docs/specs/w4cpd-dashboard-extended-voltage-toggle/assets/`
-- In-plan references:
-  - `![states](./assets/dashboard-extended-voltage-states-v1.png)`
-  - `![safe5v](./assets/dashboard-safe5v-only-v1.png)`
-  - `![extended](./assets/dashboard-extended-voltage-on-v1.png)`
-  - `![error](./assets/dashboard-extended-voltage-error-v1.png)`
-- PR visual evidence source: 待实现阶段补充。
-
-## Visual Evidence (PR)
+## Visual Evidence
 
 待实现阶段补充真实证据图。
-
-## 资产晋升（Asset promotion）
-
-None
-
-## 实现里程碑（Milestones / Delivery checklist）
-
-- [x] M1: 数字侧引入 `allow_extended_voltage` 持久化字段，并完成旧 EEPROM blob 迁移默认值。
-- [x] M2: 主界面左右两个按钮完成语义重排与三态渲染，移除 on-screen LOAD hit-test。
-- [x] M3: `PD settings` Apply、attach/link 自动下发、以及 `GET/PUT /api/v1/pd` 全部接入 Safe5V 门控，并完成验证。
 
 ## 方案概述（Approach, high-level）
 
@@ -209,18 +171,6 @@ None
 
 - 风险：27 px 圆形设置入口在实机亮度/视角下的辨识度仍需在实现后做一次真机回看。
 - 假设：主界面不再保留 on-screen LOAD 控制不会影响当前操作流，因为触摸弹簧/物理 LOAD 控制仍然可用。
-
-## 变更记录（Change log）
-
-- 2026-03-09: 创建新 spec，冻结“左侧扩展电压开关 + 右侧 PD 设置入口”的初版设计边界。
-- 2026-03-09: 根据主人反馈，右侧设置入口改为无蓝色外边框的深色圆底 + 白色滑杆图标。
-- 2026-03-09: 根据主人反馈，左侧按钮恢复为原有 `PD` 顶部文案，不再额外引入 `EXT` / `FIXED` 之类的新标签。
-- 2026-03-09: 主人确认当前设计稿，可进入实现阶段。
-- 2026-03-10: 数字侧已完成 `allow_extended_voltage` 持久化、Dashboard 语义重排、Safe5V 门控与 `/api/v1/pd` 最小对齐；本地 `cargo fmt` 与 `just d-build` 已通过。
-- 2026-03-10: 根据 review 修复 Safe5V 门控的电流语义：关闭“允许扩展电压”时仍保留保存的 `i_req_ma`，并按 5V PDO `max_ma` 做 clamp，避免回退到 3A 默认值。
-- 2026-03-10: Web 端 `USB‑PD Settings` 在 `allow_extended_voltage=false` 时明确提示 Safe5V 锁定语义，避免 “Apply succeeded” 与实际合同停留 5V 的误解。
-- 2026-03-10: 修复 Web mock PD 初始化的类型标注问题，确保 `bun run build` 的类型检查通过。
-- 2026-03-10: UART link-down 被视为新 PD 会话开始时，同步清除扩展电压失败锁存，避免红态跨会话残留。
 
 ## 参考（References）
 

@@ -1,9 +1,5 @@
 # LoadLynx Backup & Restore（#br7kq）
 
-## 状态
-
-- Status: 已完成
-
 ## 背景 / 问题陈述
 
 LoadLynx 已经通过 CLI、devd USB bridge、LAN HTTP API 和 Web Settings 暴露了 preset、校准、WiFi 与 USB-PD 设置的分片读写能力，但缺少一个面向备份和恢复的 owner-facing 工作流。用户更换设备、重刷固件或迁移设置时，需要手动导出多类数据，恢复时也容易在负载仍开启的状态下写入 preset、校准或电源设置。

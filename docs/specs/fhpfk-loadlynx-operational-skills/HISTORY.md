@@ -36,3 +36,7 @@ Real ESP32-S3 flash instructions now require first-flash/non-project gates acros
 ## Obsolete host tools gate
 
 The v0.3.0 stable release shipped before the IPC host-tools boundary and originally missed `SHA256SUMS`, which broke the installer path. The release checksum was backfilled without replacing binaries, but the user skill does not support the old `--devd http://...` CLI surface. Installed host tools must expose `loadlynx --ipc` and `loadlynx-devd bridge-http`; otherwise the correct user action is to upgrade to an IPC-capable stable release or escalate to release maintenance.
+
+## Documentation Model
+
+`SPEC.md` is the active topic contract. Historical rationale, evolution notes, and records moved out of the topic contract are kept here.

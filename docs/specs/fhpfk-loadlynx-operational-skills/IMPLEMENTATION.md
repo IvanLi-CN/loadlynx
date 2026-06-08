@@ -29,3 +29,31 @@
 - Release workflow validation includes local host-tools release build and YAML/diff checks.
 - `cargo test --manifest-path tools/loadlynx-devd/Cargo.toml --locked` covers CLI hardware registry parsing, schema migration, default hardware, transport selection, bind-probe lease restriction, saved USB identity confirmation, fresh devd scan-before-lease retry, path selection, IPC/CLI behavior, lease handling and flash gates.
 - Review convergence validation passed with `cargo fmt --manifest-path tools/loadlynx-devd/Cargo.toml --all`, `cargo test --manifest-path tools/loadlynx-devd/Cargo.toml`, `git diff --check`, and `tools/loadlynx-devd/install/install-loadlynx-host.sh --dry-run`. PowerShell parser validation was not available in the local environment.
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: 已更新
+- Prior catalog timestamp: 2026-05-28
+- Prior catalog implementation note: PR #78；用户/开发者 skill 场景拆分、CLI-only 硬件操作、USB 优先、硬件记忆门禁、vercel-labs/skills 安装验证
+
+### 状态
+
+- Status: 已更新；用户侧硬件操作仅允许 CLI。CLI 硬件记忆已实现为用户级配置，CLI WiFi 配置仍是实现门槛，不能在 skill 中伪装成已发布能力。
+
+### 文档更新
+
+- 更新 `AGENTS.md` 中的 skill 路由。
+- 更新 `README.md` 的 released host-tools、用户/开发路径与 CLI 能力边界。
+- 新增本规格，并在 `docs/specs/README.md` 登记。
+
+### 实现里程碑
+
+- [x] M1: 保持两个 skill，改为用户版 / 开发者版。
+- [x] M2: 用户版写入 released host-tools 安装、USB 优先 / HTTP fallback、GitHub 固件下载、CLI 烧录、CLI WiFi 能力自检与 CLI 硬件记忆流程。
+- [x] M3: 开发者版写入 checkout 检测、必要时 clone、`just` 本地 devd/CLI/固件工作流。
+- [x] M4: 补齐 `agents/openai.yaml` 与 `vercel-labs/skills` 安装验证。
+- [ ] M5: 若要真正开放用户 CLI WiFi 配置，先实现并发布 `loadlynx wifi ...`、devd/firmware协议与持久化。
+- [x] M6: 实现 CLI 用户级硬件记忆：保存、列出可连接设备、列出最近连接设备、列出已记住设备、选择、更新、遗忘 USB 与 HTTP 设备，并保存到用户配置目录。

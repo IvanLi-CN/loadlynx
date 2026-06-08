@@ -1,44 +1,29 @@
 # 音频迁移：蜂鸣器 → 扬声器
 
-## Metadata
-
-- Spec ID: shkmx
-- Lifecycle: active
-- Status: 已完成
-- Last: 2026-02-05
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Created: 2026-02-01
-- Last: 2026-02-05
-
-### 背景 / 问题陈述
+## 背景 / 问题陈述
 
 - 当前数字板固件的提示音/告警音输出依赖 `GPIO21=BUZZER`（LEDC PWM；`firmware/digital/src/prompt_tone.rs`）。
 - 本计划前提：**蜂鸣器相关器件不贴装**（蜂鸣器本体及其驱动链路 DNP），导致提示音/告警音在实际设备上“无声”，影响可用性与安全提示。仓库内的 `BUZZER` 网络名/引脚分配属于原理图/连线层信息，不能推导“实际已装配”。
 - 术语：本文所称“当前硬件版本”指本计划覆盖的装配版本（不做 `hw_rev` 区分）。
 - 数字板原理图/网表已包含 I²S 数字音频功放 `MAX98357AETE+T`（`docs/power/netlists/digital-board-netlist.enet`：`U6`），可驱动扬声器；因此需要把所有“原本通过蜂鸣器输出的音频”迁移到扬声器上。
 
-### 目标 / 非目标
+## 目标 / 非目标
 
-#### Goals
+### Goals
 
 - 在当前硬件版本上，通过扬声器提供与现有 `prompt_tone` 语义一致的 UI 反馈音与连续告警音。
 - 统一“音频输出后端”，让 `prompt_tone` 不再依赖蜂鸣器 PWM。
 - 文档明确声明：当前硬件版本不贴装蜂鸣器相关器件，并更新控制板外设说明（不更改引脚分配）。
 
-#### Non-goals
+### Non-goals
 
 - 不在本计划中实现语音播报的“内容体系/资源管线”（仅保证能发声并覆盖现有提示音/告警音语义）。
 - 不新增静音/音量调节 UI 或远程接口。
 - 不改变现有告警策略（优先级、抑制、清除需本地确认等），除非为扬声器输出所必需且经确认。
 
-### 范围（Scope）
+## 范围（Scope）
 
-#### In scope
+### In scope
 
 - 数字侧固件 `firmware/digital/`：
   - 扬声器音频输出路径（I²S + MAX98357A），支持短促提示音与连续告警音的“可控播放/停止/静音”能力。
@@ -48,16 +33,16 @@
   - 更新控制板外设清单等说明文档，明确当前硬件无蜂鸣器贴装。
   - 不更改既有引脚分配（pinmap 保持不变）。
 
-#### Out of scope
+### Out of scope
 
 - 模拟板（STM32G431）控制策略变更。
 - 新增或修改 HTTP API / UART 协议。
 - 音频压缩格式（MP3/Opus）与复杂混音/优先级系统（只覆盖现有提示音/告警音）。
 - 不包含 Spec #swzqu 的语音播放功能测试（#swzqu 为独立功能测试项）。
 
-### 需求（Requirements）
+## 需求（Requirements）
 
-#### MUST
+### MUST
 
 - 当前硬件版本上：
   - 本地交互（触摸/旋钮 detent/按键）产生可辨识的低音量反馈音（等价于现有 `UiOk/UiFail/UiTick`）。
@@ -66,11 +51,11 @@
 - 需要有“硬静音”能力：进入错误路径/重启/任务退出时能确保功放/扬声器停止输出（避免卡在持续鸣叫）。
 - 文档必须明确声明：当前装配默认不贴装蜂鸣器相关器件（蜂鸣器链路 DNP）；同时说明 pinmap/网表的 `BUZZER` 仅代表“网络与引脚分配”，不代表实际装配。
 
-### 接口契约（Interfaces & Contracts）
+## 接口契约（Interfaces & Contracts）
 
 None
 
-### 验收标准（Acceptance Criteria）
+## 验收标准（Acceptance Criteria）
 
 - Given 当前硬件版本（不贴装蜂鸣器相关器件）并连接扬声器
   When 用户在屏幕上触摸一次
@@ -88,51 +73,26 @@ None
   When 查阅 `docs/boards/control-board.md`
   Then 明确说明当前硬件版本不贴装蜂鸣器相关器件，且音频输出使用扬声器（MAX98357A/I²S）。
 
-### 实现前置条件（Definition of Ready / Preconditions）
+## 非功能性验收 / 质量门槛（Quality Gates）
 
-- 已冻结：仅支持扬声器输出；不做硬件版本区分；不引入蜂鸣器回退路径。
-- 引脚分配为既定事实：不得改动既有引脚分配与网络命名；实现只按现有分配使用 `I2S_*` 与 `AMP_SD_MODE`，且不得试图复用/重映射 `GPIO21=BUZZER`。
-
-### 非功能性验收 / 质量门槛（Quality Gates）
-
-#### Testing
+### Testing
 
 - Unit tests: 若可行，将“提示音/告警音调度策略”抽出为纯逻辑单元并添加 host-side 单测，覆盖优先级与 ack 语义。
 - Integration tests: `just d-build`（或等价命令）可通过，且不引入新的警告级错误（按仓库既有约定）。
 - HIL: 在当前硬件上 `just agentd flash digital` + `just agentd monitor digital` 验证可听到 UI 反馈音与告警音（记录日志片段与结论）。
 
-#### Quality checks
+### Quality checks
 
 - `just fmt`（或逐 crate `cargo fmt --manifest-path ... --all`）
 - （如仓库已有）`cargo clippy ...` 不新增 warnings
 
-### 文档更新（Docs to Update）
-
-说明：计划阶段不修改 `docs/` 下非本 spec 目录的文档；以下更新在实现阶段随代码一起落地并作为验收的一部分。
-
-- `docs/boards/control-board.md`: 明确声明当前硬件版本已经没贴装蜂鸣器相关器件；音频提示走扬声器（MAX98357A/I²S）。
-
-### 计划资产（Spec assets）
-
-- None
-
-### 资产晋升（Asset promotion）
-
-None
-
-### 实现里程碑（Milestones）
-
-- [x] M1: 数字板：新增扬声器音频输出后端（I²S + MAX98357A），提供 play/stop/mute 的最小接口
-- [x] M2: 数字板：`prompt_tone` 输出从蜂鸣器迁移到扬声器（保持既有告警/ack 语义）
-- [x] M3: HIL：在当前硬件验证可听到 UI 反馈音与告警音，并记录日志/结论
-
-### 方案概述（Approach, high-level）
+## 方案概述（Approach, high-level）
 
 - 使用 I²S (TX master) 向 MAX98357A 输出 PCM；提示音用简单正弦/方波合成或预置 PCM 片段实现；告警音用可循环片段实现。
 - 将 `prompt_tone` 的“调度/语义”与“实际音频输出”解耦：调度层只决定“播放哪种 sound”，输出层负责把 sound 渲染成 PCM 并发送到 I²S。
 - Pop/静音：利用 `AMP_SD_MODE` 或“先送零样本再开声”的策略，减少启停 pop；并保证任何错误路径最终能静音。
 
-### 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
+## 风险 / 开放问题 / 假设（Risks, Open Questions, Assumptions）
 
 - 风险：
   - I²S DMA/播放任务可能与 UI/网络/串口争用 CPU；需控制 buffer 大小与优先级。
@@ -140,13 +100,7 @@ None
 - 需要决策的问题：None
 - 假设（需主人确认）：None
 
-### 变更记录（Change log）
-
-- 2026-02-01: 创建规格 #shkmx
-- 2026-02-03: digital: 将 `prompt_tone` 从蜂鸣器迁移到扬声器（MAX98357A/I²S），并更新控制板文档说明（待 HIL 声音验收）。
-- 2026-02-05: HIL: 设备实测确认触摸/旋钮反馈音与连续告警音均可正常从扬声器输出；固件通过 `just d-build` + `just agentd flash/monitor digital` 验证。
-
-### 参考（References）
+## 参考（References）
 
 - `firmware/digital/src/prompt_tone.rs`
 - `docs/power/netlists/digital-board-netlist.enet`（U6=MAX98357A）
