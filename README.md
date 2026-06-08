@@ -31,7 +31,7 @@
 - probe-rs（由 `mcu-agentd` 作为 STM32 后端调用）
 - ESP32‑S3 `esp` Rust toolchain（`espup`）与 `espflash`
 - Bun 1.3.14（见仓库根 `.bun-version`；用于 Web UI、Storybook、Playwright 与 bundle budget checks）
-- Node.js 20（根目录 workflow / release-label / quality-gate tooling）
+- Node.js 20（见仓库根 `.node-version`；用于根目录 workflow / release-label / quality-gate tooling）
 
 推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；固件烧录/复位/监视通过 `mcu-agentd`（见下文 `MCU Agent`）。CLI/devd 的 USB CDC 验证不使用 `mcu-agentd` selector。
 

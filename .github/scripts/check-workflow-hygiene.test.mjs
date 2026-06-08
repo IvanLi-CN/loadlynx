@@ -27,6 +27,8 @@ jobs:
     fileName: "example.yml",
     name: "Example",
     hasPermissions: true,
+    setupNodeUsesVersionFile: [],
+    setupNodeUsesInlineVersion: [],
     setupBunUsesVersionFile: [],
     setupBunUsesInlineVersion: [],
     jobs: [
@@ -39,6 +41,8 @@ const healthyWorkflow = {
   fileName: "healthy.yml",
   name: "Healthy",
   hasPermissions: true,
+  setupNodeUsesVersionFile: [],
+  setupNodeUsesInlineVersion: [],
   setupBunUsesVersionFile: [],
   setupBunUsesInlineVersion: [],
   jobs: [
@@ -78,6 +82,67 @@ assert.deepEqual(
 
 assert.deepEqual(
   parseWorkflowMetadata(
+    `name: Node
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".node-version"
+`,
+    "node.yml",
+  ),
+  {
+    fileName: "node.yml",
+    name: "Node",
+    hasPermissions: true,
+    setupNodeUsesVersionFile: [".node-version"],
+    setupNodeUsesInlineVersion: [],
+    setupBunUsesVersionFile: [],
+    setupBunUsesInlineVersion: [],
+    jobs: [
+      { id: "build", name: null, hasTimeoutMinutes: true },
+    ],
+  },
+);
+
+assert.deepEqual(
+  validateWorkflowHygiene({
+    workflows: [
+      {
+        ...healthyWorkflow,
+        fileName: "inline-node.yml",
+        setupNodeUsesVersionFile: [],
+        setupNodeUsesInlineVersion: ["20"],
+      },
+    ],
+  }),
+  [
+    "workflow inline-node.yml: setup-node must use node-version-file=.node-version instead of inline node-version",
+  ],
+);
+
+assert.deepEqual(
+  validateWorkflowHygiene({
+    workflows: [
+      {
+        ...healthyWorkflow,
+        fileName: "wrong-node-file.yml",
+        setupNodeUsesVersionFile: [".nvmrc"],
+        setupNodeUsesInlineVersion: [],
+      },
+    ],
+  }),
+  ['workflow wrong-node-file.yml: setup-node node-version-file must be ".node-version"'],
+);
+
+assert.deepEqual(
+  parseWorkflowMetadata(
     `name: Bun
 permissions:
   contents: read
@@ -97,6 +162,8 @@ jobs:
     fileName: "bun.yml",
     name: "Bun",
     hasPermissions: true,
+    setupNodeUsesVersionFile: [],
+    setupNodeUsesInlineVersion: [],
     setupBunUsesVersionFile: [".bun-version"],
     setupBunUsesInlineVersion: [],
     jobs: [

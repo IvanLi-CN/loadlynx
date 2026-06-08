@@ -21,6 +21,9 @@
 ## 当前质量门
 
 - README 保留“主入口 + 关键前置条件”；本文件保留“入口分层 + CI 对应关系 + 操作员说明”。
+- 版本真相源：
+  - Bun：仓库根 `.bun-version`
+  - Node.js：仓库根 `.node-version`
 - 依赖准备：
   - `just deps-root`：根目录 Node.js 依赖（release-label / quality-gates / workflow hygiene）
   - `just deps-web`：`web/bun.lock` 对应的 Web 依赖

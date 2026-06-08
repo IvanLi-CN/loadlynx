@@ -26,6 +26,7 @@
 - Added a fail-fast guard for the digital Wi-Fi compile-time config so `just d-build` now points operators to `.env.example` before compilation instead of failing late inside the firmware build script.
 - Aligned local `check-root` with CI by including the release-label regression test, and added the same `third_party/embassy` submodule guard to the embedded build path so `check-embedded` fails fast with the same actionable hint as `lint-embedded`.
 - Closed the remaining digital firmware lint gap by adding repo-local `just d-clippy`, wiring `lint-embedded` through it, and making the `Code Check` workflow's `digital-firmware` job fail on `cargo +esp clippy -- -D warnings` before the release build step.
+- Centralized the GitHub Actions Node.js runtime version into repo-root `.node-version` and switched every `actions/setup-node` callsite to `node-version-file`, so workflow runtime upgrades no longer require editing four separate inline literals.
 
 ## Verification
 
@@ -36,5 +37,6 @@
 - `Code Check` now also re-triggers when the root `package-lock.json` changes, so CI dependency bootstrap changes cannot drift silently past the workflow that consumes them.
 - `.github/quality-gates.json` now declares only the surviving informational checks (`check`, `web-check`), while digital firmware remains verified via the `Code Check` workflow's `digital-firmware` job.
 - Local embedded lint verification now includes digital firmware clippy under dummy Wi-Fi compile-time config, matching CI's `digital-firmware` lint semantics without requiring operators to create a real `.env` just to run the lint gate.
+- Workflow hygiene now rejects inline `setup-node` versions and requires `node-version-file: ".node-version"` whenever GitHub Actions provisions Node.js.
 - Release intent dry-run confirms `v0.1.0` plus `type:patch` resolves to `v0.1.1`.
 - Full release validation completes after this PR merges and the automatic `Release (LoadLynx)` run finishes.

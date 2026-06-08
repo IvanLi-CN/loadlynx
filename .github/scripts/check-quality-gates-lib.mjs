@@ -11,16 +11,44 @@ export function parseWorkflowMetadata(source, fileName) {
     name: null,
     hasPermissions: false,
     jobs: [],
+    setupNodeUsesVersionFile: [],
+    setupNodeUsesInlineVersion: [],
     setupBunUsesVersionFile: [],
     setupBunUsesInlineVersion: [],
   };
 
   let currentJob = null;
   let inJobsSection = false;
+  let inSetupNodeBlock = false;
+  let setupNodeIndent = -1;
   let inSetupBunBlock = false;
   let setupBunIndent = -1;
 
   for (const line of lines) {
+    const usesSetupNodeMatch = line.match(/^(\s*)(?:-\s*)?uses:\s*actions\/setup-node@.+$/);
+    if (usesSetupNodeMatch) {
+      inSetupNodeBlock = true;
+      setupNodeIndent = usesSetupNodeMatch[1].length;
+    } else if (inSetupNodeBlock) {
+      const trimmed = line.trim();
+      const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
+      if (trimmed.length > 0 && indent <= setupNodeIndent) {
+        inSetupNodeBlock = false;
+        setupNodeIndent = -1;
+      }
+    }
+
+    if (inSetupNodeBlock) {
+      const nodeVersionFileMatch = line.match(/^\s*node-version-file:\s*(.+?)\s*$/);
+      if (nodeVersionFileMatch) {
+        workflow.setupNodeUsesVersionFile.push(normalizeScalar(nodeVersionFileMatch[1]));
+      }
+      const nodeVersionMatch = line.match(/^\s*node-version:\s*(.+?)\s*$/);
+      if (nodeVersionMatch) {
+        workflow.setupNodeUsesInlineVersion.push(normalizeScalar(nodeVersionMatch[1]));
+      }
+    }
+
     const usesSetupBunMatch = line.match(/^(\s*)(?:-\s*)?uses:\s*oven-sh\/setup-bun@.+$/);
     if (usesSetupBunMatch) {
       inSetupBunBlock = true;
@@ -206,6 +234,21 @@ export function validateWorkflowHygiene({ workflows }) {
     ) {
       failures.push(
         `workflow ${workflow.fileName}: setup-bun bun-version-file must be ".bun-version"`,
+      );
+    }
+
+    if (workflow.setupNodeUsesInlineVersion.length > 0) {
+      failures.push(
+        `workflow ${workflow.fileName}: setup-node must use node-version-file=.node-version instead of inline node-version`,
+      );
+    }
+
+    if (
+      workflow.setupNodeUsesVersionFile.length > 0 &&
+      workflow.setupNodeUsesVersionFile.some((value) => value !== ".node-version")
+    ) {
+      failures.push(
+        `workflow ${workflow.fileName}: setup-node node-version-file must be ".node-version"`,
       );
     }
   }
