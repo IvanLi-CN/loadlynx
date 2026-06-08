@@ -218,9 +218,7 @@ jobs:
         run: cargo install espflash --locked
 
       - name: Build digital firmware
-        run: |
-          . "$HOME/export-esp.sh"
-          just d-build
+        run: just d-build
 
       - name: Package firmware artifacts
         run: |

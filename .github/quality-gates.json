@@ -21,7 +21,7 @@
     }
   },
   "required_checks": ["Label Gate"],
-  "informational_checks": ["check", "digital-check", "web-check"],
+  "informational_checks": ["check", "web-check"],
   "waivers": [],
   "expected_pr_workflows": [
     {
@@ -30,11 +30,12 @@
     },
     {
       "workflow": "Code Check",
-      "jobs": ["check"]
-    },
-    {
-      "workflow": "Digital Check",
-      "jobs": ["digital-check"]
+      "jobs": [
+        "host-rust",
+        "analog-firmware",
+        "digital-firmware",
+        "check"
+      ]
     },
     {
       "workflow": "Web Check",

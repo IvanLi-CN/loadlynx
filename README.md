@@ -1,9 +1,9 @@
 # LoadLynx — STM32G431 + ESP32‑S3 便携式电子负载
 
-本仓库采用分体式架构：由 STM32G431 执行快速电流/功率闭环与保护，ESP32‑S3 负责 UI / Wi‑Fi / OTA / 记录与标定，以及与上位机工具的桥接。
+本仓库采用分体式架构：由 STM32G431 执行快速电流/功率闭环与保护，ESP32‑S3 负责本地 UI、USB/Wi‑Fi 控制面、标定与 preset 持久化，以及与 host tools / Web 的桥接。
 
 - 核心回路（G431，Rust + Embassy）：`firmware/analog/`
-- 宿主桥（S3，Rust + esp-hal + Embassy）：`firmware/digital/`
+- 数字控制板（S3，Rust + esp-hal + Embassy）：`firmware/digital/`
 - 共享库与协议：`libs/`
 - 文档与脚本：`docs/`, `scripts/`
 
@@ -15,20 +15,23 @@
   - 热传感上报（FET、散热片、远/近端电压电流）
   - 与 S3 通过 UART 帧通信（建议 CBOR/SLIP）
 - ESP32‑S3
-  - 本地 UI 与 Web UI，Wi‑Fi / OTA
-  - 数据记录、标定流程与上位机桥接
-  - 风扇 PWM / Tach 直接控制与温控策略
-  - 与 G431 的可靠链路与升级/诊断工具
+  - 本地 UI、HTTP/Web 控制面、USB CDC/host-tools bridge
+  - EEPROM-backed calibration / presets / PD policy 持久化
+  - 与 G431 的可靠 UART 控制链（SoftReset、CalWrite、SetEnable、LimitProfile、SetMode、PD request）
+  - 本地风扇 PWM 控制（`FAN_TACH` 与跨 MCU `thermal_derate` 联动仍在后续阶段）
+  - Wi‑Fi、mDNS、release Web / CLI / devd 控制入口
 
 ## 构建快速开始
 
-本仓库仅提供最小可编译脚手架（占位代码）。实际硬件驱动、管脚、控制环参数需根据原理图与 PCB 定稿同步更新。
+本仓库不是“最小脚手架”。当前仓库同时承载可构建的 analog / digital firmware、共享协议与校准库、`loadlynx-devd` / `loadlynx` host tools，以及 Web Console / Storybook / Playwright 验证入口。仍会持续演进的部分主要是硬件定型后的参数、校准数据与真机联调细节，而不是空壳占位代码。
 
 ### 环境
 
-- Rust nightly（embedded） + `thumbv7em-none-eabihf` 目标
+- Rust 1.90+（host tooling / analog checks）与 `thumbv7em-none-eabihf` 目标
 - probe-rs（由 `mcu-agentd` 作为 STM32 后端调用）
-- ESP32‑S3 Xtensa 工具链（`espup`）与 `espflash`（由 `mcu-agentd` 作为 ESP32 后端调用）
+- ESP32‑S3 `esp` Rust toolchain（`espup`）与 `espflash`
+- Bun 1.3.14（见仓库根 `.bun-version`；用于 Web UI、Storybook、Playwright 与 bundle budget checks）
+- Node.js 20（根目录 workflow / release-label / quality-gate tooling）
 
 推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；固件烧录/复位/监视通过 `mcu-agentd`（见下文 `MCU Agent`）。CLI/devd 的 USB CDC 验证不使用 `mcu-agentd` selector。
 
@@ -50,7 +53,7 @@ just agentd monitor analog --reset
 备用：直接在子 crate 下构建：
 
 ```sh
-(cd firmware/analog && cargo build --release)
+(cd firmware/analog && cargo build --release --target thumbv7em-none-eabihf)
 ```
 
 ### ESP32‑S3（digital）
@@ -71,6 +74,7 @@ just agentd monitor digital --reset
 备用：直接在子 crate 下构建：
 
 ```sh
+. "$HOME/export-esp.sh"
 (cd firmware/digital && cargo +esp build --release)
 ```
 
@@ -131,6 +135,37 @@ just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors
 
 真机验证应证明 devd 对指定串口完成 USB CDC JSONL 通信，例如收到 `hello` 或成功执行 `get_identity` / `get_status`。仅证明串口能打开、出现候选设备、创建 lease/session，或只完成 firmware dry-run，不足以说明 CLI/devd 真机链路可用。
 
+## 质量门与日常验证
+
+- 推荐顺序：
+
+```sh
+just deps
+git submodule update --init --recursive   # 若需要 analog / embedded 检查
+just deps-web-browsers   # 仅当需要 Playwright / Storybook 浏览器检查
+just check               # 日常快速自检
+just check-full          # 更接近 CI 的全量检查
+```
+
+常用入口：
+
+- `just deps`：安装根目录 Node.js 依赖与 `web/bun.lock` 对应的 Web 依赖。
+- `just deps-web-browsers`：只为 `just check-web-full` / Playwright / Storybook 浏览器检查安装浏览器二进制。
+- `just fmt` / `just fmt-check`：统一的 Rust + Web 格式化入口。
+- `just check`：本地快速质量门，覆盖格式检查、release-label / workflow 契约、host-side tests 和 Web 快速检查。
+- `just check-full`：在 `just check` 基础上增加 host static checks、embedded clippy/build、Storybook / Playwright 浏览器检查，更接近 CI，但仍不触发 release、deploy 或硬件 HIL。
+
+关键前置条件：
+
+- analog / embedded 相关检查依赖 `third_party/embassy` 子模块；若 worktree 里只有空目录，先执行 `git submodule update --init --recursive`。
+- digital / ESP32 相关入口（`just fmt*` 中的 digital 格式检查、`just d-clippy`、`just d-build`、`just check-embedded`）依赖 `cargo +esp` 与 `$HOME/export-esp.sh`；缺失时命令会直接提示先完成 `espup` 安装，而不是把错误留给底层构建链。
+- `just d-build` 还要求 digital Wi-Fi 编译配置可用：优先从仓库根 `.env` 读取 `DIGITAL_WIFI_SSID` / `DIGITAL_WIFI_PSK`，也可在命令前临时注入同名环境变量；缺失时会先给出 `.env.example` 提示再退出。
+- `just d-clippy` 使用临时 dummy Wi-Fi 编译配置，因此不要求仓库根 `.env` 存在；它的目标是把 digital lint gate 对齐到 CI，而不是验证真实网络配置。
+- `just check-root` / `just check-web*` 在缺少依赖时会直接报出对应的 `deps-*` 提示，而不是把错误延迟到下层工具。
+- `just fmt` 现在会在任一 crate / Web 格式化失败时直接报错，不再吞掉失败。
+
+更细的入口分层、CI 对应关系和操作员视角说明放在 `WORKFLOW.md`；Web 专项矩阵继续看 `web/README.md`。
+
 ## 目录结构
 
 - `firmware/analog/` — G431 上运行的 Embassy 应用（控制环路 + 遥测流）
@@ -138,6 +173,13 @@ just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors
 - `libs/` — 共享驱动与协议约定（当前包含无分配的 MCU↔MCU 协议 crate `loadlynx-protocol`）
 - `docs/` — 控制环路 / 热设计 / 接口协议与板级文档
 - `scripts/` — 开发辅助脚本
+
+规范与当前实现状态优先查看：
+
+- 项目入口与操作约定：`README.md`、`WORKFLOW.md`
+- 设计与产品边界：`DESIGN.md`、`PRODUCT.md`
+- 可复用结论：`docs/solutions/**`
+- 长期 topic-level specs：`docs/specs/**`
 
 ## 发布流程
 

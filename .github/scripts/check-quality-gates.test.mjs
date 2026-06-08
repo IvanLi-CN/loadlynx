@@ -18,7 +18,7 @@ const qualityGates = {
     },
   },
   required_checks: ["Label Gate"],
-  informational_checks: ["check", "digital-check", "web-check"],
+  informational_checks: ["check", "web-check"],
   expected_pr_workflows: [
     {
       workflow: "Label Gate",
@@ -26,11 +26,7 @@ const qualityGates = {
     },
     {
       workflow: "Code Check",
-      jobs: ["check"],
-    },
-    {
-      workflow: "Digital Check",
-      jobs: ["digital-check"],
+      jobs: ["host-rust", "analog-firmware", "digital-firmware", "check"],
     },
     {
       workflow: "Web Check",
@@ -72,12 +68,17 @@ const validWorkflows = [
   {
     fileName: "label-gate.yml",
     name: "Label Gate",
+    hasPermissions: true,
+    setupBunUsesVersionFile: [],
+    setupBunUsesInlineVersion: [],
     jobs: [{ id: "label-gate", name: "Label Gate" }],
   },
   {
     fileName: "check.yml",
     name: "Code Check",
     hasPermissions: true,
+    setupBunUsesVersionFile: [],
+    setupBunUsesInlineVersion: [],
     jobs: [
       { id: "host-rust", name: null, hasTimeoutMinutes: true },
       { id: "analog-firmware", name: null, hasTimeoutMinutes: true },
@@ -86,15 +87,11 @@ const validWorkflows = [
     ],
   },
   {
-    fileName: "digital-check.yml",
-    name: "Digital Check",
-    hasPermissions: true,
-    jobs: [{ id: "digital-check", name: null, hasTimeoutMinutes: true }],
-  },
-  {
     fileName: "web-check.yml",
     name: "Web Check",
     hasPermissions: true,
+    setupBunUsesVersionFile: [],
+    setupBunUsesInlineVersion: [],
     jobs: [{ id: "web-check", name: null, hasTimeoutMinutes: true }],
   },
 ];
@@ -104,9 +101,8 @@ assert.deepEqual(validateQualityGates({ qualityGates, workflows: validWorkflows 
 assert.deepEqual(validateQualityGates({ qualityGates, workflows: [] }), [
   "expected workflow missing locally: Label Gate",
   "expected workflow missing locally: Code Check",
-  "expected workflow missing locally: Digital Check",
   "expected workflow missing locally: Web Check",
-  'declared checks not backed by expected_pr_workflows: ["Label Gate","check","digital-check","web-check"]',
+  'declared checks not backed by expected_pr_workflows: ["Label Gate","check","web-check"]',
 ]);
 
 assert.deepEqual(
@@ -125,9 +121,23 @@ assert.deepEqual(
 
 assert.deepEqual(
   validateQualityGates({
+    qualityGates,
+    workflows: validWorkflows.map((workflow) =>
+      workflow.name === "Code Check"
+        ? { ...workflow, jobs: workflow.jobs.filter((job) => (job.name ?? job.id) !== "digital-firmware") }
+        : workflow,
+    ),
+  }),
+  [
+    'workflow Code Check missing declared job "digital-firmware"; actual jobs: ["host-rust","analog-firmware","check"]',
+  ],
+);
+
+assert.deepEqual(
+  validateQualityGates({
     qualityGates: {
       ...qualityGates,
-      informational_checks: ["check", "digital-check", "web-check", "ghost-check"],
+      informational_checks: ["check", "web-check", "ghost-check"],
     },
     workflows: validWorkflows,
   }),
