@@ -55,8 +55,7 @@ test.describe("Demo mode", () => {
     await expect(
       page.getByRole("button", { name: "Scan current network..." }),
     ).toBeDisabled();
-    await page.waitForTimeout(250);
-    expect(realProbeCount).toBe(0);
+    await expect.poll(() => realProbeCount).toBe(0);
 
     await page.getByRole("link", { name: "Open CC Control" }).first().click();
     await expect(page).toHaveURL(/\/mock-001\/cc$/);
