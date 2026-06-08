@@ -209,8 +209,14 @@ test("status SSE stream drives CC page without extra polling", async ({
     { timeout: 2000 },
   );
 
-  // Ensure polling isn't hammering /status once the stream is active.
-  await page.waitForTimeout(600);
+  // Wait for several additional stream ticks so any fallback polling would
+  // have a chance to fire before we sample the fetch count.
+  await page.waitForFunction(
+    () =>
+      (window as unknown as { __statusMessages: number }).__statusMessages >= 7,
+    undefined,
+    { timeout: 2000 },
+  );
   const fetchCount = await page.evaluate(
     () =>
       (window as unknown as { __statusFetchCount: number }).__statusFetchCount,

@@ -34,6 +34,7 @@ test.describe("Demo mode", () => {
 
     await page.goto("/devices?demo=false");
     await expect(page.getByText("Cached Real Device")).toBeVisible();
+    await expect(page.getByText("Offline")).toBeVisible();
     realProbeCount = 0;
 
     await page.goto("/devices?demo=true");
