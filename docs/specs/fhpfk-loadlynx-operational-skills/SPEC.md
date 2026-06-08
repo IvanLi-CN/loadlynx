@@ -1,9 +1,5 @@
 # LoadLynx operational skills packaging and workflow boundary（#fhpfk）
 
-## 状态
-
-- Status: 已更新；用户侧硬件操作仅允许 CLI。CLI 硬件记忆已实现为用户级配置，CLI WiFi 配置仍是实现门槛，不能在 skill 中伪装成已发布能力。
-
 ## 背景 / 问题陈述
 
 LoadLynx 需要两份 agent skill。用户版面向没有源码工程的普通用户机器，必须围绕 GitHub Releases 发布的程序和固件资产组织；开发者版是用户版的超集，面向源码工程、工具链、发布维护与 HIL 调试，必须先继承用户版的 CLI-only 业务操作边界，再确认或准备 checkout。
@@ -226,21 +222,6 @@ cd loadlynx
 - `git diff --check` 通过。
 - 仓库不保留旧 USB/devd skill 路径引用。
 - skill 不得把未实现的 CLI WiFi 配置或缺失的 Release firmware catalog 写成已可用功能。
-
-## 文档更新
-
-- 更新 `AGENTS.md` 中的 skill 路由。
-- 更新 `README.md` 的 released host-tools、用户/开发路径与 CLI 能力边界。
-- 新增本规格，并在 `docs/specs/README.md` 登记。
-
-## 实现里程碑
-
-- [x] M1: 保持两个 skill，改为用户版 / 开发者版。
-- [x] M2: 用户版写入 released host-tools 安装、USB 优先 / HTTP fallback、GitHub 固件下载、CLI 烧录、CLI WiFi 能力自检与 CLI 硬件记忆流程。
-- [x] M3: 开发者版写入 checkout 检测、必要时 clone、`just` 本地 devd/CLI/固件工作流。
-- [x] M4: 补齐 `agents/openai.yaml` 与 `vercel-labs/skills` 安装验证。
-- [ ] M5: 若要真正开放用户 CLI WiFi 配置，先实现并发布 `loadlynx wifi ...`、devd/firmware协议与持久化。
-- [x] M6: 实现 CLI 用户级硬件记忆：保存、列出可连接设备、列出最近连接设备、列出已记住设备、选择、更新、遗忘 USB 与 HTTP 设备，并保存到用户配置目录。
 
 ## 风险与开放问题
 

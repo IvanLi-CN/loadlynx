@@ -1,29 +1,14 @@
 # 触摸弹簧（GPIO14）负载开关 + RGB 指示 + 语音播放（MAX98357A / I²S）
 
-## Metadata
-
-- Spec ID: swzqu
-- Lifecycle: active
-- Status: 已完成
-- Last: 2026-02-03
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Created: 2026-01-19
-- Last: 2026-02-03
-
-### 背景 / 问题陈述
+## 背景 / 问题陈述
 
 - 需要一个“无需旋钮按压”的本地交互入口，用于快速切换数字板（ESP32‑S3）CC 负载开关（load switch）。
 - 希望利用 3 个未占用 GPIO 输出 PWM，驱动一颗离散 RGB LED，用于提供“无需看屏幕”的状态提示。
 - 新版数字板增加语音播放能力：通过 I²S 数字音频功放 **MAX98357AETE+T** 驱动扬声器，用于语音提示/播报。
 
-### 目标 / 非目标
+## 目标 / 非目标
 
-#### Goals
+### Goals
 
 - 在 ESP32‑S3 的 `GPIO14` 上接入触摸弹簧，作为**电容触摸按键**输入，用于切换负载开关（`load_enabled`）。
 - 使用 3 个未占用 GPIO 通过 `LEDC` 输出 PWM，驱动离散 RGB LED，并用颜色/闪烁表达关键状态。
@@ -31,16 +16,16 @@
 - 与既有“负载开关语义”保持一致：复用 #y5ztx 的控制模型（`set_*` 与 `load_enabled` 分离；`effective_*` 派生）。
 - 不引入新的对外协议与对外 API（除非后续明确需要）。
 
-#### Non-goals
+### Non-goals
 
 - 不替代/重做屏幕触控（FT6336U）与旋钮交互；本计划只新增“触摸弹簧”这一入口（不改变既有旋钮输入；触摸弹簧作为额外入口）。
 - 不增加 deep sleep / wakeup（esp-hal `touch` 目前不覆盖 deep sleep 唤醒）。
 - 不修改模拟板（STM32G431）控制闭环与功率链路；负载开关仍按 #y5ztx 通过“下发生效值=0”实现。
 - 不做 TTS/语音识别/流媒体播放；仅覆盖本机固件触发的“短语音片段”播放（可预置资源）。
 
-### 范围（Scope）
+## 范围（Scope）
 
-#### In scope
+### In scope
 
 - 数字板固件（ESP32‑S3）：
   - 新增 `GPIO14` 触摸按键输入（使用 ESP32‑S3 Touch Sensor 外设 `TOUCH`）。
@@ -56,17 +41,17 @@
   - `docs/interfaces/touch-switch-and-rgb-led.md`：触摸开关 + RGB 直驱的行为与电气/布局约束汇总。
   - 更新 `docs/interfaces/pinmaps/esp32-s3.md`：标注 `GPIO14`、RGB 三路 PWM 与 I²S（三线）占用，并注明“连续封装引脚：I²S=Pin 40/41/42、RGB=Pin 43/44/45”约束。
 
-#### Out of scope
+### Out of scope
 
 - Web/HTTP 控制语义变更（默认不改；如需远程控制 LED 或触摸开关策略，再另开计划）。
 - 新增/修改 UART 协议字段（默认不改）。
 - 硬件 BOM 调整（如需外置触摸 IC/LED 驱动 IC，再另开计划）。
 
-### 需求（Requirements）
+## 需求（Requirements）
 
-#### MUST
+### MUST
 
-##### 触摸按键（GPIO14）
+#### 触摸按键（GPIO14）
 
 - 使用 ESP32‑S3 Touch Sensor 外设实现电容触摸读取：`GPIO14` 对应 `TouchPad14`（见 esp-hal 的 `touch`/`TouchPad` 与芯片 GPIO 映射）。
 - 触摸输入采用直连触摸方案（不引入外置触摸 IC / 数字电平输入）。
@@ -85,7 +70,7 @@
   - 当“设置值=0”时不得触发开启（仍遵循 #y5ztx 的强制安全规则）。
   - 与既有入口（旋钮按键、HTTP `/api/v1/cc` 写入）同模型：均通过更新 digital-side CC 模型（setpoint + `load_enabled`）实现；仲裁规则为“最后写入生效（last-writer-wins）”，且始终受 `set_*==0 => load_enabled=false` 约束。
 
-##### RGB LED（3 路 PWM）
+#### RGB LED（3 路 PWM）
 
 - 使用 ESP32‑S3 `LEDC` 输出 3 路 PWM，驱动离散 RGB LED：
   - PWM 频率与分辨率需固定（建议与背光/风扇/蜂鸣器不同 timer，避免互相牵连）。
@@ -107,7 +92,7 @@
   - 异常状态（黄色），用于提示“用户认为应该开启但被系统阻止/故障”等情况（见“状态 → 颜色/闪烁（冻结）”）
 - 不能影响现有 LEDC 用途（背光、风扇 PWM、蜂鸣器）；需要明确占用的 timer/channel 编号与 GPIO。
 
-###### 状态 → 颜色/闪烁（冻结）
+##### 状态 → 颜色/闪烁（冻结）
 
 - 优先级（高→低）：**异常（黄）** > **load_enabled=ON（绿）** > **load_enabled=OFF（红）**。
 - 颜色定义：
@@ -119,12 +104,12 @@
   - 或“本次触摸/用户操作尝试开启但被阻止”的窗口内（TTL=3s）：`set_*==0` 或 `current_load_enable_block_abbrev(min_v_mv).is_some()`。
 - 闪烁建议：黄 `2Hz`（实现时允许在 `1–4Hz` 内微调）。
 
-##### 可观测性与安全默认
+#### 可观测性与安全默认
 
 - 上电默认 `load_enabled=false`（保持现状）；RGB LED 默认处于“安全/不误导”的初始状态（例如 OFF 或 standby 色）。
 - 需要提供最小日志与计数器：触摸原始值范围、baseline/阈值、触发次数、抖动/被抑制次数（用于快速调参）。
 
-##### 语音播放（MAX98357A / I²S）
+#### 语音播放（MAX98357A / I²S）
 
 - 采用 MAX98357A 的 I²S 数字输入：仅需要 `BCLK`、`LRCLK`、`DIN` 三线；不需要外部 `MCLK`。
 - I²S 三线必须分配到 **3 个连续封装引脚**（便于布线与走线长度控制）：
@@ -141,11 +126,11 @@
   - 若后续需要 (L+R)/2 混音输入，可按 datasheet 用电阻分压把 `SD_MODE` 拉到对应档位；本计划先不引入该复杂度。
 - `GAIN_SLOT` 等其它配置脚允许用硬件 strap 固定；默认不额外占用 GPIO。
 
-### 接口契约（Interfaces & Contracts）
+## 接口契约（Interfaces & Contracts）
 
 None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格式或 CLI）。
 
-### 验收标准（Acceptance Criteria）
+## 验收标准（Acceptance Criteria）
 
 - Given 设备上电且 `set_* > 0` 且 `load_enabled=false`，
   When 触摸弹簧被一次“短触”触发，
@@ -166,9 +151,9 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
   When 触发一次“语音测试播放”（最小可验证入口），
   Then 扬声器可以稳定播放出可辨识的语音片段，且播放期间系统不掉线/不卡死（不会影响主 UI 刷新到不可用）。
 
-### 非功能性验收 / 质量门槛（Quality Gates）
+## 非功能性验收 / 质量门槛（Quality Gates）
 
-#### Testing / HIL
+### Testing / HIL
 
 - Build：
   - `just d-build`
@@ -182,24 +167,12 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
     - RGB LED 行为与定义一致
     - 语音播放测试可触发，I²S 初始化与播放日志正常（不出现持续 underrun/重启）
 
-#### Quality checks
+### Quality checks
 
 - `just fmt`
 -（可选）`cargo clippy --all-targets --all-features -D warnings`（若当前工具链可用且不引入额外噪声）
 
-### 文档更新（Docs to Update）
-
-- `docs/interfaces/pinmaps/esp32-s3.md`：将 `GPIO14` 标注为 `TOUCH_SPRING`（或等价网络名），并写明上电毛刺/触摸抗扰建议；新增/更新 RGB 三路 PWM 的 GPIO 占用与注意事项。
-- `docs/interfaces/pinmaps/esp32-s3.md`：新增/更新 `I2S_BCLK/I2S_LRCLK/I2S_DIN` 与 `RGB_R/G/B` 的 GPIO 占用，并注明“连续封装引脚：I²S=Pin 40/41/42、RGB=Pin 43/44/45”约束。
-
-### 实现里程碑（Milestones）
-
-- [x] M1: 数字板：接入 `GPIO14` TouchPad，完成校准+去抖，并能稳定切换 `load_enabled`
-- [x] M2: 数字板：接入 RGB 三路 LEDC PWM + 状态映射（颜色/闪烁）并通过 HIL 验证
-- [x] M3: 数字板：接入 I²S（MAX98357A）语音播放最小闭环（可触发播放 + 基础日志 + 不影响主循环）
-- [x] M4: 文档：更新 ESP32‑S3 pinmap 与 HIL 验证记录（日志片段/结论）
-
-### 方案概述（Approach, high-level）
+## 方案概述（Approach, high-level）
 
 - 触摸按键：
   - 使用 `esp-hal` 的 `touch` 驱动（`Touch::continuous_mode` + `TouchPad::<GPIO14>`）。
@@ -214,7 +187,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
   - 使用 ESP32‑S3 I²S（TX master）输出标准 I²S 到 MAX98357A；不引入外部 MCLK。
   - 语音片段以“预置 PCM 资源 + 简单播放队列”的方式落地（后续若需要压缩格式/更复杂调度再扩展）。
 
-### 风险与开放问题（Risks & Open Questions）
+## 风险与开放问题（Risks & Open Questions）
 
 - 风险：
   - 电容触摸对布线/人体/环境非常敏感，阈值需要在硬件上实测调参；ESD 与手触噪声可能导致误触发。
@@ -229,7 +202,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 - 仍存在的不确定性（不阻塞固件实现，但可能影响“最终观感/调参时间”）：
   - 图标透光/扩散工艺会决定均匀性（是否“中心热点”）。本计划把“图标可见被照亮”作为最低验收；若后续需要“均匀背光”视觉指标，再单独开硬件/结构计划。
 
-### 触摸弹簧 + 指示灯布局建议（Mechanical notes）
+## 触摸弹簧 + 指示灯布局建议（Mechanical notes）
 
 - 面板**不允许开孔**时：触摸必须通过面板介质实现（finger→panel→electrode）。
 - 已确认面板为**亚克力 0.8–1.0 mm**，且弹簧顶端**顶到背面**：这对灵敏度是利好，但也要求弹簧固定更稳（避免微动导致读数漂移）。
@@ -241,7 +214,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 - 软件兜底（若仍受 PWM 干扰）：允许在触摸采样窗口短暂“冻结/关闭”RGB PWM（人眼不可见的短窗），以降低触摸测量抖动。
 - 共阳 + 无三极管：建议 COM 接 `3V3`；R/G/B 各自串联限流电阻，GPIO 只做灌电流（active-low）。绿/蓝在 3V3 供电下亮度可能偏低，需接受或改硬件方案（加三极管/改供电）。
 
-### 假设（Assumptions）
+## 假设（Assumptions）
 
 - GPIO 分配（待原理图确认）：
   - MAX98357A `SD_MODE`：`GPIO34`（封装 Pin 39，`AMP_SD_MODE`，用于 AMP_EN/Shutdown）
@@ -249,18 +222,7 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
   - RGB PWM：`GPIO38/GPIO39/GPIO40`（封装 Pin 43/44/45，连续；顺序为 `R/G/B`；实际以 PCB 网络名与装配方向为准）
 - 光学假设：面板图标区域具备基本透光/扩散条件；允许一定中心热点（无开孔前提下以低成本方案优先）。
 
-### 变更记录（Change log）
-
-- 2026-01-19: 创建规格 #swzqu
-- 2026-01-19: 补齐硬件约束：亚克力 0.8–1.0mm、弹簧顶到背面、RGB 共阳端接 3V3
-- 2026-01-19: 冻结范围与验收：状态映射（绿/红/黄）、异常判定与闪烁优先级
-- 2026-01-21: 扩充语音播放（MAX98357A / I²S），并按“连续封装引脚”重排 GPIO（AMP_SD_MODE=GPIO34；I²S=GPIO35/36/37；RGB=GPIO38/39/40）
-- 2026-02-01: HIL：触摸弹簧 + RGB 已跑通；新增 I²S/MAX98357A 输出任务与启动自检音（用于后续语音片段落地）
-- 2026-02-01: HIL：降低“未触碰即触发”的误触风险（提高阈值 + 连续采样判定）
-- 2026-02-02: 数字板：扬声器启动自检改为 WAV(PCM16LE mono, 8kHz) 资产播放（I²S=8kHz, mono→stereo duplication；固件侧 PCM digital gain +6dB）；boot playlist: 440/554/659/880 + test melody；PC 可直接预览 `firmware/digital/assets/audio/*.wav`
-- 2026-02-03: 数字板：扬声器播放尾部等待改为按 playlist 时长（避免 UI 音效额外阻塞多秒）
-
-### 参考（References）
+## 参考（References）
 
 - `docs/interfaces/pinmaps/esp32-s3.md`
 - `docs/specs/y5ztx-cc-load-switch-toggle/SPEC.md`

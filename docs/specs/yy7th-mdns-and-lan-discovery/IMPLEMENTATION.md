@@ -15,3 +15,25 @@ This canonical companion document was initialized from the legacy plan migration
 No explicit milestones were recorded in the legacy plan.
 
 ## Remaining Gaps
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: 已完成
+- Prior catalog timestamp: 2025-12-11
+- Prior catalog origin: legacy planning taxonomy import.
+
+### SPEC Metadata Context
+- Spec ID: yy7th
+- Lifecycle: active
+- Status: 已完成
+- Last: 2025-12-11
+
+### 状态
+
+- Status: 已完成
+- Created: 2025-12-11
+- Last: 2025-12-11
+- Source: migrated from `mdns-and-lan-discovery.md` (removed)

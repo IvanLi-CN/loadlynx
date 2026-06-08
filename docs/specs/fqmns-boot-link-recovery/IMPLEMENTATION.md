@@ -31,3 +31,37 @@
 - `just d-build` passed after creating a temporary ignored `.env` from `.env.example` for compile-time Wi-Fi variables; the placeholder `.env` was removed afterwards and was not committed.
 - HIL flash/monitor was not run because both `digital` and `analog` selectors are missing in this worktree, and `mcu-agentd config validate` also reported the analog artifact missing before analog build.
 - `just a-build` was attempted for preflight but is blocked by missing `third_party/embassy/embassy-embedded-hal` in this worktree; analog firmware was not modified.
+
+## Specification Companion Notes
+
+`SPEC.md` owns the long-lived topic contract. Implementation progress, rollout records, documentation maintenance notes, and prior catalog state live in this companion document.
+
+### Catalog Context
+- Prior catalog status: 已完成
+- Prior catalog timestamp: 2026-04-25
+- Prior catalog implementation note: 软件实现与构建验证完成；HIL 因当前 worktree 缺失 selector 阻断
+
+### 状态
+
+- Status: 已完成（冷上电测量可信性补强）
+- Created: 2026-04-25
+- Last: 2026-05-01
+- Notes: 冷启动 recovery 进一步覆盖“有帧但测量仍为 0”的假正常状态。
+
+### 实现前置条件（Definition of Ready / Preconditions）
+
+- 已锁定快车道 `merge-ready`；HIL 仅允许使用当前缓存/已确认 selector。
+
+### 文档更新（Docs to Update）
+
+- `docs/dev-notes/software.md`
+- `docs/specs/README.md`
+- 如形成可复用经验，新增或刷新 `docs/solutions/firmware/**`。
+
+### 实现里程碑（Milestones）
+
+- [x] M1: 生产 UI 初始状态改为 offline/unknown，demo 仅保留给 mock/test。
+- [x] M2: SoftReset ACK 改为本次 seq/baseline 绑定。
+- [x] M3: SetMode TX 增加冷启动/持续 down 的限频恢复握手。
+- [x] M4: 构建与可用 HIL 验证完成，文档同步（HIL selector 缺失，记录为阻断证据）。
+- [x] M5: 增加测量可信性判定，覆盖有帧但全零测量的冷上电假正常状态。

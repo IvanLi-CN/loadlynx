@@ -1,29 +1,14 @@
 # USB‑PD 设置面板：Fixed PDO / PPS APDO（UI + UART 协议 + HTTP API）
 
-## Metadata
-
-- Spec ID: j24my
-- Lifecycle: active
-- Status: 已完成
-- Last: 2026-01-12
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Created: 2026-01-09
-- Last: 2026-01-12
-
-### 背景 / 问题陈述
+## 背景 / 问题陈述
 
 - 当前硬件已验证 USB‑PD Sink 功能可用，但仍属于“验证性质”的最小交互。
 - 需要提供正式的 USB‑PD 设置界面（Fixed / PPS），并补齐模拟板↔数字板的 PD 能力/合同信息闭环，以及数字板 HTTP API（供未来 Web 端使用）。
 - 本阶段还希望保留“负载与 PD 独立”的特性，以便在不同 Source 上观察其保护行为（限流/掉电/重启等）。
 
-### 目标 / 非目标
+## 目标 / 非目标
 
-#### Goals
+### Goals
 
 - 数字板（ESP32‑S3）提供“USB‑PD 设置”界面：
   - 选择 `Fixed` 或 `PPS`；
@@ -38,16 +23,16 @@
 - 完整打通：数字板 UI/HTTP → UART → 模拟板（STM32G431）PD 协商 → 模拟板回传能力/合同 → 数字板展示。
 - PD 与负载控制暂不联动：PD 配置变更不会自动改变负载开关/设定值；负载行为可独立触发 Source 保护，用于实验与诊断。
 
-#### Non-goals
+### Non-goals
 
 - Web 前端实现（仅做数字板 HTTP API）。
 - PPS 的自动 APDO 选择（未来可扩展为可选项，本计划不实现）。
 - 负载电流与 PD 合同电流的联动策略（例如自动夹紧/自动禁用负载）。
 - EPR/AVS（48V/可调供电）支持（除非后续单独开计划）。
 
-### 范围（Scope）
+## 范围（Scope）
 
-#### In scope
+### In scope
 
 - 数字板 UI：新增 USB‑PD 设置面板（Fixed/PPS + 选择/编辑/应用）。
 - UI 入口（已决策）：主界面 PD 按钮 **短按** 进入 USB‑PD 设置；在该面板内完成 Fixed/PPS 选择与 Apply；`Back` 返回主界面。
@@ -60,14 +45,14 @@
 - 数字板 HTTP API：提供读取 PD 能力/合同/配置、写入 PD 配置并应用的端点。
 - 持久化：数字板将 PD 配置保存到 EEPROM；重启/断电后保持。
 
-#### Out of scope
+### Out of scope
 
 - 不新增外部 discovery 服务；不引入新网络协议栈或新 Web 技术栈。
 - 不新增“自动回退/自动纠错”类策略（例如选择不可用档位自动跳到最接近档位）。
 
-### 需求（Requirements）
+## 需求（Requirements）
 
-#### MUST
+### MUST
 
 - **入口（已决策）**：
   - 主界面 PD 按钮短按进入 USB‑PD 设置面板；`Back` 返回主界面。
@@ -88,45 +73,45 @@
   - UI 必须显示：Attach 状态、当前合同电压/电流、当前选中 PDO/APDO 的范围与 Imax、应用成功/失败状态。
   - 保留日志证据用于复现（例如打印所选 object position 与目标 V/I）。
 
-#### SHOULD
+### SHOULD
 
 - 明确区分“已保存配置”与“已应用到当前 Source 的合同”（例如：Saved vs Active/Contract）。
 - 当链路不可用或模拟板未就绪时，UI 与 HTTP 提供稳定一致的错误语义（`LINK_DOWN`/`ANALOG_NOT_READY` 等）。
 - UI 对 Fixed 与 PPS 的信息架构一致（同一位置显示“范围 + Imax + Ireq”）。
 
-#### COULD
+### COULD
 
 - 在后续版本加入“自动选择 APDO”选项（与当前“手动选择”并存）。
 - 增加更丰富的 PD 诊断信息（例如协商阶段、Reject/Wait 计数、PPS keep-alive 状态）。
 
-### UI 效果图（UI mock）
+## UI 效果图（UI mock）
 
 > 说明：以下效果图用于冻结“信息架构 / 状态 / 控件分区 / 文案口径”。像素级对齐与最终渲染细节，以实现阶段的真实 UI 渲染输出为准。
 
 UI mock（320×240 PNG）：
 
-#### Fixed 模式（全量 Fixed PDO 列表 + Ireq）
+### Fixed 模式（全量 Fixed PDO 列表 + Ireq）
 
 ![PD settings (Fixed)](../../assets/usb-pd-settings-panel/pd-settings-fixed.png)
 
-#### PPS 模式（全量 PPS APDO 列表 + Vreq/Ireq）
+### PPS 模式（全量 PPS APDO 列表 + Vreq/Ireq）
 
 ![PD settings (PPS)](../../assets/usb-pd-settings-panel/pd-settings-pps.png)
 
-#### PPS 模式（选择并编辑 Ireq）
+### PPS 模式（选择并编辑 Ireq）
 
 ![PD settings (PPS, Ireq selected)](../../assets/usb-pd-settings-panel/pd-settings-pps-ireq-selected.png)
 
-#### 所选能力不可用（Apply 禁用）
+### 所选能力不可用（Apply 禁用）
 
 ![PD settings (Unavailable)](../../assets/usb-pd-settings-panel/pd-settings-unavailable.png)
 
-##### UI mock 资产一致性（冻结）
+#### UI mock 资产一致性（冻结）
 
 - 资产目录：`docs/assets/usb-pd-settings-panel/*.png`。
 - 若本文修改了字段名/状态/布局分区，导致效果图表达不再准确，应在同一次推进中同步更新对应 PNG（实现阶段可替换为来自真实 UI 渲染的 mock）。
 
-### 验收标准（Acceptance Criteria）
+## 验收标准（Acceptance Criteria）
 
 - Given 连接一个支持多档 Fixed PDO 的 PD Source，且 UART 链路健康
   When 在设备 UI 进入 USB‑PD 设置，选择 `Fixed`，从列表中选择某个 Fixed PDO，并设置 Ireq（≤ Imax）
@@ -152,9 +137,9 @@ UI mock（320×240 PNG）：
   When 用户仅修改 PD 配置（不触碰负载开关/设定值）
   Then 负载功能保持独立，不因 PD 配置变更而自动改变；允许负载行为触发 Source 保护（用于实验），系统以状态/日志可诊断呈现。
 
-### 非功能性验收 / 质量门槛（Quality Gates）
+## 非功能性验收 / 质量门槛（Quality Gates）
 
-#### Testing
+### Testing
 
 - Unit tests（Host）：
   - `libs/protocol`：新增/更新 `PD_STATUS` 与 `PD_SINK_REQUEST` 的编解码 round-trip 测试（覆盖 object position、范围字段、越界/错误路径）。
@@ -162,28 +147,14 @@ UI mock（320×240 PNG）：
   - 至少使用 2 个不同 PD Source（含 1 个支持 PPS）+ 至少 2 根不同线缆进行矩阵测试。
   - 记录关键日志：Source Capabilities 摘要、所选 object position、请求 V/I、合同 V/I、NACK/超时计数。
 
-#### Quality checks
+### Quality checks
 
 - Rust fmt：`just fmt`（或 `cargo fmt --all`）。
 -（可选）在不引入新工具前提下，按仓库已有约定运行现有 lint/check。
 
-### 文档更新（Docs to Update）
+## HIL 记录（摘要）
 
-- `docs/interfaces/uart-link.md`：补齐 PD 设置面板所需的 UART 消息契约（字段与语义更新）。
-- `docs/interfaces/network-http-api.md`：新增 PD 相关端点与 JSON 类型（`/api/v1/pd` 等）。
-- `docs/interfaces/main-display-ui.md`：补齐“USB‑PD 设置面板”UI 交互与视觉规范。
-
-### 里程碑（Milestones）
-
-- [x] M1: UART 协议契约冻结（含 object position 与 Ireq）+ `libs/protocol` 单测补齐
-- [x] M2: 模拟板 PD：支持按 object position 请求 Fixed/PPS（含 Ireq）+ PPS keep-alive + `PD_STATUS` 完整上报
-- [x] M3: 数字板 UI：USB‑PD 设置面板（全量列表 + 越界阻止 + Apply/错误态 + EEPROM 持久化）
-- [x] M4: 数字板 HTTP API：读写 PD 配置 + 状态输出（与 UI 同口径错误码）
-- [x] M5: HIL 验收：多 Source/线缆矩阵验证 + 记录日志/结论
-
-### HIL 记录（摘要）
-
-#### Setup
+### Setup
 
 - Date: 2026-01-12
 - Source: IP6557（支持 PPS）
@@ -191,12 +162,12 @@ UI mock（320×240 PNG）：
 - Digital HTTP: `http://192.168.31.216/api/v1/pd`（同网段访问）
 - Digital FW: `digital 0.1.0 (profile release, dev-20260112-122259-27a9de1-2-ga1b2e1d)`
 
-#### Capabilities（/api/v1/pd）
+### Capabilities（/api/v1/pd）
 
 - Fixed PDOs: 5/9/12/15 V（各 3 A），20 V（5 A）
 - PPS APDOs: 3.3–11 V（3 A），3.3–21 V（3 A）
 
-#### Apply Matrix（/api/v1/pd，i_req_ma=500）
+### Apply Matrix（/api/v1/pd，i_req_ma=500）
 
 - Fixed pos=1 → 5 V / 0.5 A（电压从 15V 降到 5V 时观察到更新延迟，约 6s 内收敛）
 - Fixed pos=4 → 15 V / 0.5 A
@@ -204,14 +175,14 @@ UI mock（320×240 PNG）：
 - PPS pos=6 target=9000 → 9 V / 0.5 A
 - PPS pos=7 target=15000 → 15 V / 0.5 A
 
-#### Logs（关键点）
+### Logs（关键点）
 
 - 请求/ACK：`pd_sink_request sent` 与 `pd_sink_request ACK received` 成对出现
 - 本次 session 未观察到 `NACK` / `timeout`
 
-### 方案概述（Approach, high-level）
+## 方案概述（Approach, high-level）
 
-#### A) “object position” 作为跨板稳定标识
+### A) “object position” 作为跨板稳定标识
 
 - USB‑PD 的 Request 需要携带 **Object Position** 来选择目标 PDO/APDO。
 - 因为数字板需要让用户“选 PDO/APDO”，因此 `PD_STATUS` 必须上报每个条目的 object position（不能只上报电压/范围）。
@@ -221,7 +192,7 @@ UI mock（320×240 PNG）：
 - Fixed PDO item：`[pos, mv, max_ma]`
 - PPS APDO item：`[pos, min_mv, max_mv, max_ma]`
 
-#### B) `PD_SINK_REQUEST` 字段形状（示意）
+### B) `PD_SINK_REQUEST` 字段形状（示意）
 
 - Fixed：
   - `mode = fixed`
@@ -233,30 +204,30 @@ UI mock（320×240 PNG）：
   - `v_req_mv`（用户设置，20mV 步进）
   - `i_req_ma`（用户设置，50mA 步进）
 
-#### C) UI 步进与越界策略（已冻结）
+### C) UI 步进与越界策略（已冻结）
 
 - PPS 电压：20mV/step（与 PPS 电压单位对齐）。
 - 电流（Fixed/PPS）：50mA/step（与 PPS 电流单位对齐；Fixed 内部可量化到 10mA，但 UI 保持一致性与可操作性）。
 - 越界：阻止越界（调节到边界即停止）。
 
-#### D) “拒绝 Apply”策略（已冻结）
+### D) “拒绝 Apply”策略（已冻结）
 
 - 当所选 PDO/APDO 在当前能力列表中不存在：
   - UI：禁用 Apply 并提示原因；
   - HTTP：返回明确错误；
   - UART：不下发请求（若仍下发，模拟板应 NACK）。
 
-#### E) PPS keep-alive
+### E) PPS keep-alive
 
 - PPS 模式需要周期性维持（keep-alive）。实现上以 PD 协议栈/状态机的周期计时为准，保证在持续连接场景不因缺少 keep-alive 退出。
 
-### 风险与开放问题（Risks & Open Questions）
+## 风险与开放问题（Risks & Open Questions）
 
 - 风险：不同 PD Source 对 PPS/请求电流的容忍差异很大；需要通过矩阵测试收敛“推荐 Ireq”与错误呈现策略。
 - 风险：若能力列表不携带 object position，将无法可靠实现“用户选 APDO”的跨板协议；该点必须优先冻结。
 - 开放问题：无（已决策：UI 入口选 A；Ireq 默认值为上次保存值）。
 
-### 参考（References）
+## 参考（References）
 
 - `docs/specs/h3gz5-usb-pd-sink-toggle/SPEC.md`（PD 最小验证范围，作为演进基础）
 - `docs/interfaces/uart-link.md`（MCU↔MCU 通信协议与消息集）

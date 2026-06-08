@@ -1,22 +1,6 @@
-# 本机 Preset UI（触屏 + 旋钮）需求与概要设计
+# 本机 Preset UI（触屏 + 旋钮）
 
-## Metadata
-
-- Spec ID: mq8ht
-- Lifecycle: active
-- Status: 已完成
-- Last: 2026-01-07
-
-## Specification
-
-### 状态
-
-- Status: 已完成
-- Created: 2026-01-01
-- Last: 2026-01-07
-- Source: migrated from `on-device-preset-ui.md` (removed)
-
-### 背景
+## 背景
 
 当前系统存在 Web/HTTP 入口与板间协议能力，但在“只有硬件面板”的使用场景下，无法完成预设（Preset）的完整配置与切换。需要在 ESP32‑S3（digital）侧提供一套本机 UI 与交互，使用户在无外设/无网络时也能完成 Preset 的编辑、保存与明确激活生效。
 
@@ -26,7 +10,7 @@
 - Preset UI 保护字段命名与三线约束：`docs/specs/trrw7-preset-ui-protection-labels/SPEC.md`
 - HTTP API（现有控制/预设接口）：`docs/interfaces/network-http-api.md`
 
-### 目标
+## 目标
 
 - 仅通过触屏 + 旋钮完成 Preset（1..5）的：
   - 查看/编辑全部字段；
@@ -37,12 +21,12 @@
 - 保存失败必须阻塞，直到保存成功（量产保留）。
 - 提升设置面板可操作性：tabs 左侧纵向排列、数值字号与主界面 Setpoint 一致、值区域支持触屏选位；无改动时禁止写 EEPROM 以保护寿命。
 
-### 非目标（Out of scope）
+## 非目标（Out of scope）
 
 - 不做 Wi‑Fi/网络配置、校准、SoftReset 等非 preset 相关功能。
 - 不扩展 preset 数量与字段（固定 5 组，字段集以现有协议/固件模型为准）。
 
-### 术语
+## 术语
 
 - **激活 preset**（`active_preset`）：当前实际用于控制的 preset。
 - **编辑 preset**（`editing_preset`）：设置面板中当前被编辑/显示的 preset（不一定激活）。
@@ -51,7 +35,7 @@
 - **未保存改动**（dirty）：working 与 saved 不一致。
 - **安全关断负载**：将负载置为安全关闭态（例如 `load_enabled=false` / `output_enabled=false` 或等价语义），不要求 toast/弹窗提示。
 
-### UI 信息架构
+## UI 信息架构
 
 UI mock（320×240 PNG）：
 
@@ -82,7 +66,7 @@ UI mock（320×240 PNG）：
 - `dashboard-blocked-lnk.png`：链路已建立后掉线，LOAD 无法启用；右下角状态行显示 `LNK`。
 - `dashboard-blocked-uv.png`：欠压保护触发（`UVLO`），LOAD 被强制关断；右下角状态行显示 `UVLO`。
 
-##### UI mock 资产一致性（冻结）
+#### UI mock 资产一致性（冻结）
 
 - 文档中的 UI mock PNG（`docs/assets/on-device-preset-ui/*.png`）必须与本文字段命名/顺序一致；当本文修改布局/字段名/行数时，应在实现阶段同步更新对应 PNG（推荐以 `tools/ui-mock` 的生成结果为准）。
 - 与 Preset “保护字段命名（UVLO/OCP/OPP）”相关的 PNG 清单：
@@ -92,7 +76,7 @@ UI mock（320×240 PNG）：
   - `docs/assets/on-device-preset-ui/preset-preview-panel-cv.png`
 - 验收：上述 PNG 中字段标签必须显示为 `UVLO / OCP / OPP`，且字段顺序为 `TARGET → UVLO → OCP → OPP`。
 
-#### 1) 主界面（Main）
+### 1) 主界面（Main）
 
 - 将当前界面中“CC/CV 选择区域”替换为两个**独立**的圆角按钮（control row）：
   - 左侧 **Preset/Mode**：两行显示 `M#` / `CC|CV`（作为进入 Preset Panel / 快速切换 preset 的入口）。
@@ -100,7 +84,7 @@ UI mock（320×240 PNG）：
 - 主界面上显示“当前激活 preset 编号 + 其 mode”，作为用户确认当前工作状态的唯一真值来源。
 - 主界面保持 Preset/Mode 与 Setpoint 为两个独立按钮（避免误触与死区）；但 Setpoint 按钮内部支持“按字符选编辑位 + 横向滑动选位（一次手势一位）”，用于直接选择旋钮调节的数字位（见 A2）。旋钮在主界面用于对 active preset 的 target 做小步进微调；完整字段编辑仍在设置面板完成。
 
-##### Dashboard：LOAD 开关（主界面，必须）
+#### Dashboard：LOAD 开关（主界面，必须）
 
 - 主界面（Dashboard）必须提供一个**可点击**的 `LOAD` 开关（不得出现 `OUTPUT` 文案），用于快速启用/关闭负载；该控件在视觉上应接近“电源按钮（power button）”，作为重要状态指示更醒目。
 - 电源按钮图标形状：断开的圆环（顶部留缺口）+ 中央竖线（典型 power symbol）；必须为像素级图形，粗细足够在 320×240 下清晰辨认（见 `dashboard*.png`）。
@@ -116,7 +100,7 @@ UI mock（320×240 PNG）：
 - 该开关与设置面板底部的 `LOAD` 滑动开关绑定到同一真值（`load_enabled`），两处 UI 必须同步显示。
 - 位置与外观以 UI mock 为准（见 `dashboard*.png`）；LOAD 行位于右侧 status block 中部：在电压能量条（REMOTE/LOCAL 下方的条形图）**下方**，并与能量条保持明显间隔（约 22 px）；左侧为 `LOAD` 文本，右侧为电源按钮图标。
 
-##### Dashboard：为何无法启用 / 强制关断（右下角状态行复用）
+#### Dashboard：为何无法启用 / 强制关断（右下角状态行复用）
 
 当 `LOAD` 不能被启用（或在运行期间被保护强制关断）时，右下角 **status line #5（最后一行）**必须显示“原因缩写”，不新增任何 UI widget：
 
@@ -148,7 +132,7 @@ UI mock（320×240 PNG）：
 > - `FLT/LNK` 属于“最高级别故障”：故障未消失前不提供消音；故障消失后仍需一次本地确认才停止告警音。
 > - 当上述条件均不存在时，status line #5 恢复显示常规状态文本（例如 `RDY/CAL/...`），不需要额外视觉“确认”控件。
 
-##### Dashboard：连续告警（蜂鸣器）策略（按告警分级冻结）
+#### Dashboard：连续告警（蜂鸣器）策略（按告警分级冻结）
 
 - 最高级别（Critical）：
   - `LNK`：链路持续故障（持续掉线达到阈值，默认：连续无有效帧 `≥3s`）
@@ -167,14 +151,14 @@ UI mock（320×240 PNG）：
 - Critical（链路，`LNK`）：双短鸣（与默认 Critical 可盲听区分）。
 - Trip（`UVLO/OCP/OPP`）：短鸣节奏（与 `LNK`/`FLT` 均可盲听区分），持续到本地确认。
 
-#### 2) 预设设置面板（Preset Settings Panel）
+### 2) 预设设置面板（Preset Settings Panel）
 
 - 触发方式：点击主界面 `<PRESET><MODE>` 按钮打开；可关闭返回主界面。
 - 左侧：tabs（M1..M5）在面板内贴边纵向排列，用于选择 **editing_preset**（单击只切换编辑对象，不激活）。
 - 中部：字段编辑区（见“字段与格式”）。
 - 底部：左侧为 **LOAD** 滑动开关（负载开关，非 preset 字段）；右侧为 `SAVE` 按钮（无 `Apply` 按钮）。
 
-##### MODE 字段：双选按钮（CV / CC）
+#### MODE 字段：双选按钮（CV / CC）
 
 - 表现形式：分段控件（segmented control），直接显示两个选项 `CV` 与 `CC`。
 - 交互：点击某一段立即设置 `mode`（无需进入“字段编辑态”再旋钮切换）。
@@ -183,7 +167,7 @@ UI mock（320×240 PNG）：
 - 视觉：延续主界面语义色：`CC` 红 `#FF5252`、`CV` 橙 `#FFB24A`；未选中项用灰 `#7A7F8C`。
 - 尺寸：分段控件高度建议 ≤ **12 px**（与 UI mock 一致），并与下一行选中高亮保持 ≥ **1 px** 间隙，避免视觉粘连。
 
-##### LOAD 滑动开关（视觉规范；Dashboard 与 Preset Panel 通用）
+#### LOAD 滑动开关（视觉规范；Dashboard 与 Preset Panel 通用）
 
 > 需要在 UI mock 与实现中保持一致：像素级渲染，避免缩放造成的模糊或形变。
 
@@ -196,9 +180,9 @@ UI mock（320×240 PNG）：
   - `DISABLED`：track 使用中性底色（推荐 `bar-track #1C2638`），thumb 使用灰色（`#555F75`）；交互应被拒绝并无状态变化。
 - 渲染：thumb 必须为严格正圆（在 320×240 的像素网格下可清晰辨认），不得用“类圆形位图”糊弄。
 
-### 核心交互规范
+## 核心交互规范
 
-#### A. 快速切换（主界面按住滑动，松手激活）
+### A. 快速切换（主界面按住滑动，松手激活）
 
 - 手势：在主界面 **Preset/Mode** 区域（左侧 `M# / CC|CV` 按钮）**按住**；按住后可继续**左右滑动**以快速切换。
 - 长按阈值：`HOLD_PREVIEW_MS = 300ms`（达到后触发“预览面板”显示；不产生任何提示音）。
@@ -220,7 +204,7 @@ UI mock（320×240 PNG）：
   - 内容：按统一字段集合展示字段和值（见“字段集合（按 mode）”）；`mode` 仅影响 `TARGET` 的单位（A/V）与 `MODE` 行的语义色。
   - 字体：字段“值”使用主界面 Setpoint 目标值的数字字体与字号；字段名可使用 SmallFont。
 
-#### A1. 预设预览信息面板（Preset preview info panel）
+### A1. 预设预览信息面板（Preset preview info panel）
 
 > 生成 mock：`(cd tools/ui-mock && cargo run)`，输出为 `docs/assets/on-device-preset-ui/preset-preview-panel-{cc,cv}.png`。
 
@@ -232,13 +216,13 @@ UI mock（320×240 PNG）：
 
   ![Preset preview panel CV](../../assets/on-device-preset-ui/preset-preview-panel-cv.png)
 
-##### 字段与顺序（冻结）
+#### 字段与顺序（冻结）
 
 - `row0`：`PRESET`（预览 preset 的编号），值为 `M#`（例如 `M2`）
 - `row1`：`MODE`（预览 preset 的模式），值为 `CC` / `CV`
 - `mode=CC|CV`：`row2..row5` = `TARGET` → `UVLO` → `OCP` → `OPP`
 
-##### 几何（冻结；逻辑坐标 320×240）
+#### 几何（冻结；逻辑坐标 320×240）
 
 - 外框（圆角矩形）：
   - `x=154, y=44, w=160`
@@ -255,7 +239,7 @@ UI mock（320×240 PNG）：
   - `label_x = x + pad_x`
   - `value_right = x + w - pad_x`（右对齐）
 
-##### 颜色（冻结）
+#### 颜色（冻结）
 
 - 背景：`#1C2638`（与主界面 control-row pill 背景同色系）
 - 外框/分隔线：`#1C2A3F`（divider）
@@ -263,7 +247,7 @@ UI mock（320×240 PNG）：
 - 数字：`#DFE7FF`
 - `MODE` 值语义色：`CC=#FF5252`，`CV=#FFB24A`
 
-##### 字体与对齐（冻结）
+#### 字体与对齐（冻结）
 
 - 字段名（含 `PRESET`/`MODE`/`TARGET`/`UVLO`/`OCP`/`OPP`）：`SmallFont`（8×12），左对齐。
 - `PRESET` 值（例如 `M2`）：`SmallFont`（8×12），右对齐。
@@ -273,7 +257,7 @@ UI mock（320×240 PNG）：
   - 单位字符（末尾 1 字符，例如 `V/A/W`）：使用 `SmallFont`，与数字部分做**底边对齐**（参考主界面 Setpoint 的单位对齐方式）。
   - 数字与单位之间 `unit_gap=1 px`；整体在 `value_right` 处右对齐。
 
-#### A2. 目标值设置（主界面 Setpoint 按钮）
+### A2. 目标值设置（主界面 Setpoint 按钮）
 
 - 目标：通过触屏直接选择“旋钮将要调节的数字位”（编辑位），替代原来的“循环切换步进档位”交互。
 - 点击选位：
@@ -287,7 +271,7 @@ UI mock（320×240 PNG）：
   - 到达最左/最右可选位后继续向外并触发“将要越界的步进”：播放 **UI fail**，且同一次手势最多播放一次。
 - 可选位限制（降低误操作风险）：电流/电压仅允许 `ones/tenths/hundredths/thousandths`（不允许直接选中十位）。
 
-#### B. 设置面板 tabs：单击仅编辑，双击当前 tab 才激活
+### B. 设置面板 tabs：单击仅编辑，双击当前 tab 才激活
 
 - 布局：tabs（`M1..M5`）位于设置面板内部左侧贴边，纵向排列（增加字段区可用宽度）。
 - 单击任一 tab：
@@ -301,7 +285,7 @@ UI mock（320×240 PNG）：
   - 切换 `active_preset` 为该 tab 对应 preset；
   - 强制执行“安全关断负载”。
 
-#### C. 字段选择与旋钮调值
+### C. 字段选择与旋钮调值
 
 - 触屏负责选择“当前正在编辑的字段”，并可直接调整当前编辑位（光标位）：
   - 点击字段行：仅选择字段（不改变编辑位）。
@@ -312,7 +296,7 @@ UI mock（320×240 PNG）：
   - 电流/电压：仅允许选中 `ones/tenths/hundredths/thousandths`（不允许直接选中十位）。
   - 功率：允许选中 `tens/ones/tenths/hundredths`（允许十位；不允许直接选中百位）。
 
-#### D. 保存（无改动禁用；失败阻塞；同一按钮重试）
+### D. 保存（无改动禁用；失败阻塞；同一按钮重试）
 
 - `保存`只保存当前 `editing_preset`。
 - 当当前 preset 无改动时：按钮置灰禁用；点击仅播放 **UI fail**，且不触发保存尝试（不写 EEPROM，避免磨损）。
@@ -323,11 +307,11 @@ UI mock（320×240 PNG）：
   - 保存成功后解除阻塞态。
   - 阻塞态必须显示一条**持续可见**的解释文案（不依赖 toast），推荐两行（SmallFont）：`SAVE FAILED` + `RETRY SAVE`。
 
-### 字段与格式（固定宽度显示）
+## 字段与格式（固定宽度显示）
 
 > 显示格式要求固定宽度（含前导 0），以保证光标位稳定且可预测。
 
-#### 字段集合（按 mode）
+### 字段集合（按 mode）
 
 > `UVLO` / `OCP` / `OPP` 对应 `docs/specs/exkw2-cv-mode-presets/SPEC.md` 的字段语义；命名与约束详见 `docs/specs/trrw7-preset-ui-protection-labels/SPEC.md`。
 
@@ -343,20 +327,20 @@ UI mock（320×240 PNG）：
   - `OCP`：总电流上限（`max_i_ma_total`），显示 `DD.dddA`
   - `OPP`：功率上限（`max_p_mw`），显示 `DDD.ddW`
 
-#### 显示格式（冻结：固定长度对齐）
+### 显示格式（冻结：固定长度对齐）
 
 - 目标值与各 `*-LIM` 的“值字符串”固定为 **7 字符**（单位紧贴，无空格），用于右对齐与行对齐：
   - 电流/电压：`DD.dddX`（例如 `01.200A`、`24.500V`）
   - 功率：`DDD.ddW`（例如 `300.00W`）
 
-### 状态模型（概要）
+## 状态模型（概要）
 
-#### UI 状态
+### UI 状态
 
 - `view = Main | PresetPanel | PresetPanelBlocked`
   - `PresetPanelBlocked` 仅由“保存失败”进入，保存成功退出。
 
-#### Preset 数据状态
+### Preset 数据状态
 
 建议在 RAM 中维护以下概念（具体结构由实现阶段决定）：
 
@@ -367,7 +351,7 @@ UI mock（320×240 PNG）：
 - `editing_preset_id`：面板当前编辑 preset
 - `active_preset` 始终绑定 `working[active_preset_id]`（激活 dirty 时直接使用 working 生效；无需先保存）。
 
-#### 未保存改动的丢弃规则（冻结）
+### 未保存改动的丢弃规则（冻结）
 
 - 关闭设置面板：丢弃所有**非激活 preset** 的未保存改动（回退到 `saved`）。
 - 切换激活 preset 时：
@@ -377,7 +361,7 @@ UI mock（320×240 PNG）：
   - 不因关闭面板而回退；
   - 仅在“该 preset 不再激活”时回退（见上）。
 
-### 安全关断负载（触发条件）
+## 安全关断负载（触发条件）
 
 必须触发安全关断负载的事件：
 
@@ -386,7 +370,7 @@ UI mock（320×240 PNG）：
 
 注：其他字段（`target/min_v/max_i_total/max_p`）的调整不额外要求强制关断；若底层保护（如欠压锁存/限功率等）导致等效退流属于正常行为。
 
-### 验收标准（实现阶段基线）
+## 验收标准（实现阶段基线）
 
 - 主界面按住滑动仅预览；松手才激活并关断负载。
 - 主界面快速切换：预览不循环；按住 >= `HOLD_PREVIEW_MS` 显示预览面板（无提示音）；拖动每步 tick 可数；越界 UI fail（每手势最多一次）；预览面板在按住/拖动期间显示，松手立即消失；若未切换到其他 preset 则松手不触发任何动作；松手提交激活不额外播放 UI ok。
