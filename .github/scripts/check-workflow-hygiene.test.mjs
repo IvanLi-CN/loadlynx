@@ -114,6 +114,38 @@ jobs:
 );
 
 assert.deepEqual(
+  parseWorkflowMetadata(
+    `name: Named Node
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".node-version"
+`,
+    "named-node.yml",
+  ),
+  {
+    fileName: "named-node.yml",
+    name: "Named Node",
+    hasPermissions: true,
+    setupNodeUsesVersionFile: [".node-version"],
+    setupNodeUsesInlineVersion: [],
+    setupBunUsesVersionFile: [],
+    setupBunUsesInlineVersion: [],
+    jobs: [
+      { id: "build", name: null, hasTimeoutMinutes: true },
+    ],
+  },
+);
+
+assert.deepEqual(
   validateWorkflowHygiene({
     workflows: [
       {
@@ -163,6 +195,38 @@ jobs:
   {
     fileName: "bun.yml",
     name: "Bun",
+    hasPermissions: true,
+    setupNodeUsesVersionFile: [],
+    setupNodeUsesInlineVersion: [],
+    setupBunUsesVersionFile: [".bun-version"],
+    setupBunUsesInlineVersion: [],
+    jobs: [
+      { id: "build", name: null, hasTimeoutMinutes: true },
+    ],
+  },
+);
+
+assert.deepEqual(
+  parseWorkflowMetadata(
+    `name: Named Bun
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version-file: ".bun-version"
+`,
+    "named-bun.yml",
+  ),
+  {
+    fileName: "named-bun.yml",
+    name: "Named Bun",
     hasPermissions: true,
     setupNodeUsesVersionFile: [],
     setupNodeUsesInlineVersion: [],
