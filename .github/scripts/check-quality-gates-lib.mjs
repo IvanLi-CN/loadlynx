@@ -231,12 +231,19 @@ export async function runQualityGatesCheck({
 
 export async function validateWebToolingContracts({
   webPackageJsonPath = new URL("../../web/package.json", import.meta.url),
+  webPackageLockPath = new URL("../../web/package-lock.json", import.meta.url),
   webCheckWorkflowPath = new URL("../workflows/web-check.yml", import.meta.url),
+  webPagesWorkflowPath = new URL("../workflows/web-pages.yml", import.meta.url),
+  releaseWorkflowPath = new URL("../workflows/release.yml", import.meta.url),
 } = {}) {
   const failures = [];
   const webPackage = JSON.parse(await readFile(webPackageJsonPath, "utf8"));
   const scripts = webPackage.scripts ?? {};
   const webCheckWorkflow = await readFile(webCheckWorkflowPath, "utf8");
+  const webPagesWorkflow = await readFile(webPagesWorkflowPath, "utf8");
+  const releaseWorkflow = await readFile(releaseWorkflowPath, "utf8");
+  const webInstallGuard =
+    'if [ -f package-lock.json ]; then\n            echo "ERROR: web/package-lock.json is not supported. Use Bun and web/bun.lock only." >&2\n            exit 1\n          fi\n          bun ci';
 
   if (scripts["test:e2e"] !== "node scripts/run-playwright.mjs test") {
     failures.push(
@@ -260,6 +267,29 @@ export async function validateWebToolingContracts({
     failures.push(
       ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
     );
+  }
+
+  try {
+    await readFile(webPackageLockPath, "utf8");
+    failures.push("web/package-lock.json must not exist; use web/bun.lock as the only lockfile");
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      throw error;
+    }
+  }
+
+  const bunOnlyWorkflows = [
+    [".github/workflows/web-check.yml", webCheckWorkflow],
+    [".github/workflows/web-pages.yml", webPagesWorkflow],
+    [".github/workflows/release.yml", releaseWorkflow],
+  ];
+
+  for (const [label, source] of bunOnlyWorkflows) {
+    if (!source.includes(webInstallGuard)) {
+      failures.push(
+        `${label}: web install step must reject web/package-lock.json and run bun ci`,
+      );
+    }
   }
 
   return failures;

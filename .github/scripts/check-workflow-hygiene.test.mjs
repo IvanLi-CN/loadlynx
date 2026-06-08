@@ -138,7 +138,10 @@ assert.deepEqual(
 const tempDir = await mkdtemp(join(tmpdir(), "loadlynx-workflow-hygiene-"));
 try {
   const webPackagePath = join(tempDir, "package.json");
+  const webPackageLockPath = join(tempDir, "package-lock.json");
   const workflowPath = join(tempDir, "web-check.yml");
+  const webPagesWorkflowPath = join(tempDir, "web-pages.yml");
+  const releaseWorkflowPath = join(tempDir, "release.yml");
   await writeFile(
     webPackagePath,
     JSON.stringify(
@@ -162,16 +165,63 @@ jobs:
     steps: []
 `,
   );
+  await writeFile(
+    webPagesWorkflowPath,
+    `name: Web Pages
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps: []
+`,
+  );
+  await writeFile(
+    releaseWorkflowPath,
+    `name: Release
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps: []
+`,
+  );
 
   assert.deepEqual(
     await validateWebToolingContracts({
       webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webPackageLockPath: new URL(`file://${webPackageLockPath}`),
       webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+      webPagesWorkflowPath: new URL(`file://${webPagesWorkflowPath}`),
+      releaseWorkflowPath: new URL(`file://${releaseWorkflowPath}`),
     }),
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
+      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
+      ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );
+
+  await writeFile(webPackageLockPath, "{}\n");
+
+  assert.deepEqual(
+    await validateWebToolingContracts({
+      webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webPackageLockPath: new URL(`file://${webPackageLockPath}`),
+      webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+      webPagesWorkflowPath: new URL(`file://${webPagesWorkflowPath}`),
+      releaseWorkflowPath: new URL(`file://${releaseWorkflowPath}`),
+    }),
+    [
+      ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      "web/package-lock.json must not exist; use web/bun.lock as the only lockfile",
+      ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
+      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
+      ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
+    ],
+  );
+
+  await rm(webPackageLockPath, { force: true });
 
   await writeFile(
     webPackagePath,
@@ -190,12 +240,18 @@ jobs:
   assert.deepEqual(
     await validateWebToolingContracts({
       webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webPackageLockPath: new URL(`file://${webPackageLockPath}`),
       webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+      webPagesWorkflowPath: new URL(`file://${webPagesWorkflowPath}`),
+      releaseWorkflowPath: new URL(`file://${releaseWorkflowPath}`),
     }),
     [
       'web/package.json: scripts["test:e2e"] must be "node scripts/run-playwright.mjs test"',
       'web/package.json: scripts["test:e2e:ui"] must be "node scripts/run-playwright.mjs test --ui"',
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
+      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
+      ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );
 
@@ -209,6 +265,47 @@ jobs:
     steps:
       - name: Install Playwright browsers
         run: node scripts/run-playwright.mjs install --with-deps
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "ERROR: web/package-lock.json is not supported. Use Bun and web/bun.lock only." >&2
+            exit 1
+          fi
+          bun ci
+`,
+  );
+  await writeFile(
+    webPagesWorkflowPath,
+    `name: Web Pages
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "ERROR: web/package-lock.json is not supported. Use Bun and web/bun.lock only." >&2
+            exit 1
+          fi
+          bun ci
+`,
+  );
+  await writeFile(
+    releaseWorkflowPath,
+    `name: Release
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "ERROR: web/package-lock.json is not supported. Use Bun and web/bun.lock only." >&2
+            exit 1
+          fi
+          bun ci
 `,
   );
 
@@ -229,7 +326,10 @@ jobs:
   assert.deepEqual(
     await validateWebToolingContracts({
       webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webPackageLockPath: new URL(`file://${webPackageLockPath}`),
       webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+      webPagesWorkflowPath: new URL(`file://${webPagesWorkflowPath}`),
+      releaseWorkflowPath: new URL(`file://${releaseWorkflowPath}`),
     }),
     [],
   );
@@ -244,17 +344,55 @@ jobs:
     steps:
       - name: Install Playwright browsers
         run: bunx playwright install --with-deps
+      - name: Install dependencies
+        run: |
+          if [ -f package-lock.json ]; then
+            echo "ERROR: web/package-lock.json is not supported. Use Bun and web/bun.lock only." >&2
+            exit 1
+          fi
+          bun ci
 `,
   );
 
   assert.deepEqual(
     await validateWebToolingContracts({
       webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webPackageLockPath: new URL(`file://${webPackageLockPath}`),
       webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+      webPagesWorkflowPath: new URL(`file://${webPagesWorkflowPath}`),
+      releaseWorkflowPath: new URL(`file://${releaseWorkflowPath}`),
     }),
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+    ],
+  );
+
+  await writeFile(
+    webPagesWorkflowPath,
+    `name: Web Pages
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install dependencies
+        run: bun ci
+`,
+  );
+
+  assert.deepEqual(
+    await validateWebToolingContracts({
+      webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webPackageLockPath: new URL(`file://${webPackageLockPath}`),
+      webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+      webPagesWorkflowPath: new URL(`file://${webPagesWorkflowPath}`),
+      releaseWorkflowPath: new URL(`file://${releaseWorkflowPath}`),
+    }),
+    [
+      ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );
 } finally {
