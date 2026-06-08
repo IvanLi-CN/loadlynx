@@ -59,6 +59,8 @@ jobs:
     fileName: "check.yml",
     name: "Code Check",
     hasPermissions: false,
+    setupBunUsesVersionFile: [],
+    setupBunUsesInlineVersion: [],
     jobs: [
       { id: "host-rust", name: null, hasTimeoutMinutes: false },
       { id: "check", name: "check", hasTimeoutMinutes: false },
