@@ -7,10 +7,14 @@ const playwrightCli = require.resolve("@playwright/test/cli");
 const env = { ...process.env };
 delete env.NO_COLOR;
 
-const child = spawn(process.execPath, [playwrightCli, ...process.argv.slice(2)], {
-  stdio: "inherit",
-  env,
-});
+const child = spawn(
+  process.execPath,
+  [playwrightCli, ...process.argv.slice(2)],
+  {
+    stdio: "inherit",
+    env,
+  },
+);
 
 child.on("error", (error) => {
   console.error("[playwright] failed to start:", error);
