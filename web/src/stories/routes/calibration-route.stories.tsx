@@ -1,57 +1,44 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
+import { waitFor } from "storybook/test";
 import type { StoredDevice } from "../../devices/device-store.ts";
+import type { MemoryCalibrationStore } from "../../routes/device-calibration/store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 type CalibrationRouteStoryProps = {
-  beforeMount?: () => void;
+  beforeMount?: (stores: { calibrationStore: MemoryCalibrationStore }) => void;
   devices?: StoredDevice[];
 };
 
-function getCalibrationDraftStorageKey(
+function clearCalibrationDraftStorage(
+  calibrationStore: MemoryCalibrationStore,
   deviceId: string,
   baseUrl: string,
-  version = 4,
-): string {
-  return `loadlynx:calibration-draft:v${version}:${deviceId}:${encodeURIComponent(baseUrl)}`;
+) {
+  calibrationStore.setDraft(deviceId, baseUrl, null);
 }
 
-function clearCalibrationDraftStorage(deviceId: string, baseUrl: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-  for (const version of [2, 3, 4]) {
-    window.localStorage.removeItem(
-      getCalibrationDraftStorageKey(deviceId, baseUrl, version),
-    );
-  }
-}
-
-function seedCurrentCh2Draft(deviceId: string, baseUrl: string) {
-  if (typeof window === "undefined") {
-    return;
-  }
-  clearCalibrationDraftStorage(deviceId, baseUrl);
-  window.localStorage.setItem(
-    getCalibrationDraftStorageKey(deviceId, baseUrl),
-    JSON.stringify({
-      version: 4,
-      saved_at: "2026-04-16T00:00:00.000Z",
-      device_id: deviceId,
-      base_url: baseUrl,
-      active_tab: "current_ch2",
-      draft_profile: {
-        v_local_points: [],
-        v_remote_points: [],
-        current_ch1_points: [],
-        current_ch2_points: [
-          [[5300, 685], 989600],
-          [[10680, 1375], 1984700],
-        ],
-      },
-    }),
-  );
+function seedCurrentCh2Draft(
+  calibrationStore: MemoryCalibrationStore,
+  deviceId: string,
+  baseUrl: string,
+) {
+  clearCalibrationDraftStorage(calibrationStore, deviceId, baseUrl);
+  calibrationStore.setDraft(deviceId, baseUrl, {
+    version: 4,
+    saved_at: "2026-04-16T00:00:00.000Z",
+    device_id: deviceId,
+    base_url: baseUrl,
+    active_tab: "current_ch2",
+    draft_profile: {
+      v_local_points: [],
+      v_remote_points: [],
+      current_ch1_points: [],
+      current_ch2_points: [
+        [[5300, 685], 989600],
+        [[10680, 1375], 1984700],
+      ],
+    },
+  });
 }
 
 function findCalModeBadge(canvasElement: HTMLElement): HTMLElement | null {
@@ -80,9 +67,13 @@ function CalibrationRouteStory(props: CalibrationRouteStoryProps) {
     <RouteStoryHarness
       initialPath="/mock-001/calibration"
       devices={props.devices}
-      beforeMount={() => {
-        clearCalibrationDraftStorage("mock-001", "mock://demo-1");
-        props.beforeMount?.();
+      beforeMount={({ calibrationStore }) => {
+        clearCalibrationDraftStorage(
+          calibrationStore,
+          "mock-001",
+          "mock://demo-1",
+        );
+        props.beforeMount?.({ calibrationStore });
       }}
     />
   );
@@ -106,10 +97,12 @@ const DEVICE_CAL_OUTPUT_APPLIED: StoredDevice[] = [
 ];
 
 export const Default: Story = {
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByRole("heading", { name: "Calibration" });
+  play: async ({ canvas, userEvent }) => {
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5_000 },
+    );
 
     const currentCh1Tab = canvas.getByRole("tab", { name: "电流通道1" });
     await userEvent.click(currentCh1Tab);
@@ -123,10 +116,12 @@ export const Default: Story = {
 
 export const OutputControlApplied: Story = {
   render: () => <CalibrationRouteStory devices={DEVICE_CAL_OUTPUT_APPLIED} />,
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByRole("heading", { name: "Calibration" });
+  play: async ({ canvas, canvasElement, userEvent }) => {
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5_000 },
+    );
     await userEvent.click(canvas.getByRole("tab", { name: "电流通道1" }));
     await canvas.findByText("Output control (CC)");
 
@@ -153,13 +148,17 @@ export const OutputControlApplied: Story = {
 export const RestoresStoredCurrentTab: Story = {
   render: () => (
     <CalibrationRouteStory
-      beforeMount={() => seedCurrentCh2Draft("mock-001", "mock://demo-1")}
+      beforeMount={({ calibrationStore }) =>
+        seedCurrentCh2Draft(calibrationStore, "mock-001", "mock://demo-1")
+      }
     />
   ),
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-
-    await canvas.findByRole("heading", { name: "Calibration" });
+  play: async ({ canvas, canvasElement }) => {
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5_000 },
+    );
 
     const currentCh2Tab = canvas.getByRole("tab", { name: "电流通道2" });
     if (!(currentCh2Tab as HTMLElement).classList.contains("ll-tab-active")) {

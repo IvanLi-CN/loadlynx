@@ -34,6 +34,7 @@ test.describe("Demo mode", () => {
 
     await page.goto("/devices?demo=false");
     await expect(page.getByText("Cached Real Device")).toBeVisible();
+    await expect(page.getByText("Offline")).toBeVisible();
     realProbeCount = 0;
 
     await page.goto("/devices?demo=true");
@@ -54,8 +55,7 @@ test.describe("Demo mode", () => {
     await expect(
       page.getByRole("button", { name: "Scan current network..." }),
     ).toBeDisabled();
-    await page.waitForTimeout(250);
-    expect(realProbeCount).toBe(0);
+    await expect.poll(() => realProbeCount).toBe(0);
 
     await page.getByRole("link", { name: "Open CC Control" }).first().click();
     await expect(page).toHaveURL(/\/mock-001\/cc$/);

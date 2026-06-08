@@ -28,6 +28,7 @@
 ## GitHub Integration
 
 - `Label Gate` is declared in `.github/quality-gates.json` as the required check.
+- `Code Check` and `Web Check` remain informational PR checks; embedded digital firmware coverage is consolidated into `Code Check` instead of a separate `Digital Check` workflow.
 - The default branch is protected through GitHub branch protection as a PR-only branch: direct pushes are disallowed, admins are still enforced, and the PR review requirement remains at `0` approvals.
 - The release workflow comments on the source PR after a successful release with version, release URL, asset list, workflow run URL, and merge commit.
 - Telegram notification scope remains release failures only.

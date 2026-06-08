@@ -68,8 +68,8 @@ impl Preset {
 
         // Non-negative invariants.
         self.target_i_ma = self.target_i_ma.max(0);
-        self.target_v_mv = self.target_v_mv.max(0).min(HARD_MAX_V_MV);
-        self.min_v_mv = self.min_v_mv.max(0).min(HARD_MAX_V_MV);
+        self.target_v_mv = self.target_v_mv.clamp(0, HARD_MAX_V_MV);
+        self.min_v_mv = self.min_v_mv.clamp(0, HARD_MAX_V_MV);
         self.max_i_ma_total = self.max_i_ma_total.max(0);
 
         // Hard clamps.
@@ -291,10 +291,10 @@ pub const fn supported_epr_fixed_selection(object_pos: u8) -> Option<(u32, u32)>
 }
 
 pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Option<u32> {
-    if let Some((mv, _max_ma)) = supported_epr_fixed_selection(object_pos) {
-        if target_mv == mv {
-            return Some(mv);
-        }
+    if let Some((mv, _max_ma)) = supported_epr_fixed_selection(object_pos)
+        && target_mv == mv
+    {
+        return Some(mv);
     }
     None
 }
@@ -302,6 +302,7 @@ pub const fn supported_epr_fixed_target(object_pos: u8, target_mv: u32) -> Optio
 /// USB PD R3.2 v1.1 Tables 10.12 / 10.13 make 28V Fixed the baseline EPR fixed rail once the
 /// source advertises the SPR-side EPR-capable bit. We keep this helper for request-path logic so
 /// a persisted 28V target can still be interpreted before the real EPR Fixed PDOs become visible.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn can_advertise_synthetic_epr_fixed(status: Option<&PdStatus>) -> bool {
     status.map(|s| !s.attached || s.epr_capable).unwrap_or(true)
 }
@@ -343,9 +344,7 @@ pub fn effective_pdo_i_req_limit(
     if !status.attached || target_mv == 0 {
         return None;
     }
-    if supported_epr_fixed_target(object_pos, target_mv).is_none() {
-        return None;
-    }
+    supported_epr_fixed_target(object_pos, target_mv)?;
 
     let max_power_uw = source_max_power_uw(status);
     if max_power_uw == 0 {
@@ -483,8 +482,7 @@ impl ControlState {
 
     pub fn set_calibration_cc_override(&mut self, target_i_ma: i32, output_enabled: bool) {
         let target_i_ma = target_i_ma
-            .max(0)
-            .min(crate::LIMIT_PROFILE_DEFAULT.max_i_ma)
+            .clamp(0, crate::LIMIT_PROFILE_DEFAULT.max_i_ma)
             .min(HARD_MAX_I_MA_TOTAL);
         let effective_output_enabled = output_enabled && target_i_ma != 0;
         self.calibration_cc_restore_output_enabled
@@ -587,10 +585,10 @@ impl ControlState {
     pub fn clear_calibration_cc_override(&mut self, restore_normal_output: bool) -> bool {
         let had_override = self.calibration_cc_override.take().is_some();
         if !had_override {
-            if restore_normal_output {
-                if let Some(output_enabled) = self.calibration_cc_restore_output_enabled.take() {
-                    self.set_live_output_enabled(output_enabled);
-                }
+            if restore_normal_output
+                && let Some(output_enabled) = self.calibration_cc_restore_output_enabled.take()
+            {
+                self.set_live_output_enabled(output_enabled);
             }
             return false;
         }

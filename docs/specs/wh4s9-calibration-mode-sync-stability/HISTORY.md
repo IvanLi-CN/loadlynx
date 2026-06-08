@@ -7,3 +7,4 @@
 ## Key Decisions
 
 - Preserve the existing spec ID `wh4s9` and canonical spec directory.
+- 2026-06-08: Refreshed local verification and Storybook visual evidence after the calibration route refactor; kept the existing spec scope and recorded the evidence binding for local commit `8b5c785`.

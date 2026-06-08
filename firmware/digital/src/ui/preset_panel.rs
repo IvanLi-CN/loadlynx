@@ -124,7 +124,7 @@ pub fn render_preset_panel(frame: &mut RawFrameBuf<Rgb565, &mut [u8]>, vm: &Pres
 }
 
 pub fn hit_test_preset_panel(x: i32, y: i32, vm: &PresetPanelVm) -> Option<PresetPanelHit> {
-    if x < PANEL_LEFT || x >= PANEL_RIGHT || y < PANEL_TOP || y >= PANEL_BOTTOM {
+    if !(PANEL_LEFT..PANEL_RIGHT).contains(&x) || !(PANEL_TOP..PANEL_BOTTOM).contains(&y) {
         return None;
     }
 
@@ -430,22 +430,20 @@ fn draw_value_row(
         0,
     );
 
-    if selected {
-        if let Some(idx) = selected_digit_index(digit, is_power) {
-            let glyph_w = SETPOINT_FONT.width() as i32;
-            let cell_x = value_x0 + idx as i32 * glyph_w;
-            let underline_top = (num_y + num_h + 1).min(row_top + ROW_H - 3);
-            let underline_bottom = underline_top + 2;
-            canvas.fill_rect(
-                Rect::new(
-                    cell_x + 1,
-                    underline_top,
-                    cell_x + glyph_w - 1,
-                    underline_bottom,
-                ),
-                rgb(COLOR_THEME),
-            );
-        }
+    if selected && let Some(idx) = selected_digit_index(digit, is_power) {
+        let glyph_w = SETPOINT_FONT.width() as i32;
+        let cell_x = value_x0 + idx as i32 * glyph_w;
+        let underline_top = (num_y + num_h + 1).min(row_top + ROW_H - 3);
+        let underline_bottom = underline_top + 2;
+        canvas.fill_rect(
+            Rect::new(
+                cell_x + 1,
+                underline_top,
+                cell_x + glyph_w - 1,
+                underline_bottom,
+            ),
+            rgb(COLOR_THEME),
+        );
     }
 }
 

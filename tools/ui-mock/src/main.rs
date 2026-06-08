@@ -12,6 +12,7 @@ mod pd_settings_mock;
 mod preset_panel_mock;
 mod preset_preview_panel;
 
+#[allow(dead_code)]
 mod control {
     pub const UNKNOWN_PDO_MAX_MA: u32 = 0;
 
@@ -49,6 +50,7 @@ mod control {
     }
 }
 
+#[allow(dead_code)]
 mod touch {
     #[derive(Clone, Copy, Debug)]
     pub struct TouchMarker {
@@ -59,6 +61,7 @@ mod touch {
     }
 }
 
+#[allow(dead_code)]
 #[path = "../../../firmware/digital/src/ui/mod.rs"]
 mod ui;
 

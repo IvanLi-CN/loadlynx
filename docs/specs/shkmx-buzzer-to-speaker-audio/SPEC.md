@@ -103,7 +103,7 @@ None
 
 #### Quality checks
 
-- `just fmt`（或 `cargo fmt --all`）
+- `just fmt`（或逐 crate `cargo fmt --manifest-path ... --all`）
 - （如仓库已有）`cargo clippy ...` 不新增 warnings
 
 ### 文档更新（Docs to Update）

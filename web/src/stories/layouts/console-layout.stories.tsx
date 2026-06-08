@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
+import { waitFor, within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function ConsoleLayoutStory(props: { initialPath: string }) {
@@ -100,7 +99,7 @@ export const Medium: Story = {
   globals: {
     viewport: { value: "loadlynxMedium", isRotated: false },
   },
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     let aside: HTMLElement | null = null;
     await waitFor(
       () => {
@@ -155,8 +154,7 @@ export const Small: Story = {
   globals: {
     viewport: { value: "loadlynxSmall", isRotated: false },
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
+  play: async ({ canvas, userEvent }) => {
     const hamburger = canvas.getByRole("button", {
       name: "打开导航抽屉",
     });
@@ -237,9 +235,12 @@ export const CalibrationLarge: Story = {
   args: {
     initialPath: "/mock-001/calibration",
   },
-  play: async ({ canvasElement }) => {
-    const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: "Calibration" });
+  play: async ({ canvas, canvasElement }) => {
+    await canvas.findByRole(
+      "heading",
+      { name: "Calibration" },
+      { timeout: 5000 },
+    );
 
     await waitFor(
       () => {

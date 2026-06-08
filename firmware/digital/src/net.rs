@@ -175,7 +175,7 @@ fn netmask_to_prefix(mask: Ipv4Address) -> Option<u8> {
     let reconstructed = if prefix == 0 {
         0
     } else {
-        u32::MAX.checked_shl((32 - prefix as u32) as u32)?
+        u32::MAX.checked_shl(32 - prefix as u32)?
     };
     if reconstructed == value {
         Some(prefix)
@@ -197,10 +197,10 @@ fn build_net_config_from_env() -> (NetConfig, bool) {
                 let cidr = Ipv4Cidr::new(ip, prefix);
                 let mut dns_servers: Vec<Ipv4Address, 3> = Vec::new();
 
-                if let Some(dns_s) = WIFI_DNS {
-                    if let Some(dns_ip) = parse_ipv4(dns_s) {
-                        let _ = dns_servers.push(dns_ip);
-                    }
+                if let Some(dns_s) = WIFI_DNS
+                    && let Some(dns_ip) = parse_ipv4(dns_s)
+                {
+                    let _ = dns_servers.push(dns_ip);
                 }
 
                 let static_cfg = StaticConfigV4 {
@@ -683,14 +683,14 @@ async fn handle_http_connection(
             } else if lower.starts_with("origin:") {
                 // Echo Origin when present. This improves compatibility with
                 // browser preflight checks (including Private Network Access).
-                let rest = line.splitn(2, ':').nth(1).unwrap_or("").trim();
+                let rest = line.split_once(':').map(|x| x.1).unwrap_or("").trim();
                 if !rest.is_empty() {
                     origin_s = Some(String::from(rest));
                 }
-            } else if let Some(rest) = lower.strip_prefix("accept:") {
-                if rest.contains("text/event-stream") {
-                    accept_event_stream = true;
-                }
+            } else if let Some(rest) = lower.strip_prefix("accept:")
+                && rest.contains("text/event-stream")
+            {
+                accept_event_stream = true;
             }
         }
 
@@ -1481,7 +1481,7 @@ async fn write_http_response(
         CORS_ALLOW_METHODS,
         CORS_ALLOW_HEADERS,
         CORS_ALLOW_PRIVATE_NETWORK,
-        body.as_bytes().len()
+        body.len()
     );
     socket_write_all(socket, head.as_bytes()).await?;
     socket_write_all(socket, body.as_bytes()).await?;
@@ -1617,12 +1617,12 @@ async fn render_identity_json(
     // protocol_version
     buf.push_str("\"protocol_version\":");
     let _ = core::write!(buf, "{}", PROTOCOL_VERSION);
-    buf.push_str(",");
+    buf.push(',');
 
     // uptime_ms
     buf.push_str("\"uptime_ms\":");
     let _ = core::write!(buf, "{}", timestamp_ms());
-    buf.push_str(",");
+    buf.push(',');
 
     // network block
     buf.push_str("\"network\":{");
@@ -1734,7 +1734,7 @@ async fn render_status_json_inner(
     // "status": { ... FastStatusJson ... }
     buf.push_str("\"status\":");
     write_fast_status_json(buf, &status);
-    buf.push_str(",");
+    buf.push(',');
 
     // link_up / hello_seen
     buf.push_str("\"link_up\":");
@@ -1759,7 +1759,7 @@ async fn render_status_json_inner(
     write_json_string_escaped(buf, ui_reason.as_str());
     buf.push_str("\",\"ui_reason_blink\":");
     buf.push_str(if ui_reason_blink { "true" } else { "false" });
-    buf.push_str(",");
+    buf.push(',');
 
     // fault_flags_decoded
     buf.push_str("\"fault_flags_decoded\":[");
@@ -1998,7 +1998,7 @@ fn write_preset_json(buf: &mut String, preset: &control::Preset) {
     let _ = core::write!(buf, "\"preset_id\":{}", preset.preset_id);
     buf.push_str(",\"mode\":\"");
     write_json_string_escaped(buf, mode_to_json_str(preset.mode));
-    buf.push_str("\"");
+    buf.push('"');
     let _ = core::write!(buf, ",\"target_p_mw\":{}", preset.target_p_mw);
     let _ = core::write!(buf, ",\"target_i_ma\":{}", preset.target_i_ma);
     let _ = core::write!(buf, ",\"target_v_mv\":{}", preset.target_v_mv);
@@ -2130,7 +2130,7 @@ fn parse_json_str<'a>(body: &'a str, key: &str) -> Result<&'a str, &'static str>
 
 fn parse_preset_json(body: &str) -> Result<control::Preset, &'static str> {
     let preset_id = parse_json_i64(body, "\"preset_id\"")?;
-    if preset_id < 1 || preset_id > 5 {
+    if !(1..=5).contains(&preset_id) {
         return Err("preset_id out of range (1..=5)");
     }
     let mode_s = parse_json_str(body, "\"mode\"")?;
@@ -2287,7 +2287,7 @@ struct PresetsApplyRequest {
 
 fn parse_presets_apply_json(body: &str) -> Result<PresetsApplyRequest, &'static str> {
     let preset_id = parse_json_i64(body, "\"preset_id\"")?;
-    if preset_id < 1 || preset_id > 5 {
+    if !(1..=5).contains(&preset_id) {
         return Err("preset_id out of range (1..=5)");
     }
     Ok(PresetsApplyRequest {
@@ -2784,9 +2784,8 @@ async fn render_pd_view_json(
 
     // Capabilities
     buf.push_str(",\"fixed_pdos\":[");
-    let mut fixed_count = 0usize;
     for (i, pdo) in status.fixed_pdos.iter().enumerate() {
-        if fixed_count != 0 {
+        if i != 0 {
             buf.push(',');
         }
         let pos = if pdo.pos != 0 { pdo.pos } else { (i + 1) as u8 };
@@ -2797,7 +2796,6 @@ async fn render_pd_view_json(
             pdo.mv,
             pdo.max_ma
         );
-        fixed_count += 1;
     }
     buf.push(']');
 
@@ -3415,13 +3413,9 @@ async fn handle_pd_update(
         let effective = control::PdConfig::effective(cfg, allow_extended_voltage);
         let allows_non_safe5v = effective.allows_non_safe5v();
         let analog_state = AnalogState::from_u8(crate::ANALOG_STATE.load(Ordering::Relaxed));
-        let may_force_send = if !allow_extended_voltage {
-            true
-        } else if !allows_non_safe5v {
-            true
-        } else {
-            !matches!(analog_state, AnalogState::Faulted | AnalogState::Offline)
-        };
+        let may_force_send = !allow_extended_voltage
+            || !allows_non_safe5v
+            || !matches!(analog_state, AnalogState::Faulted | AnalogState::Offline);
         if may_force_send {
             crate::PD_FORCE_SEND.store(true, Ordering::Release);
         }
@@ -3560,36 +3554,36 @@ fn parse_cc_update_json(body: &str) -> Result<CcUpdateRequest, &'static str> {
     // Very small hand-written JSON parser: looks for `"enable"` and
     // `"target_i_ma"` keys and extracts their values. This keeps the firmware
     // free from heavy JSON dependencies.
-    if let Some(idx) = body.find("\"enable\"") {
-        if let Some(colon_idx) = body[idx..].find(':') {
-            let value_str = body[idx + colon_idx + 1..].trim_start();
-            if value_str.starts_with("true") {
-                enable = Some(true);
-            } else if value_str.starts_with("false") {
-                enable = Some(false);
-            } else {
-                return Err("enable must be true or false");
-            }
+    if let Some(idx) = body.find("\"enable\"")
+        && let Some(colon_idx) = body[idx..].find(':')
+    {
+        let value_str = body[idx + colon_idx + 1..].trim_start();
+        if value_str.starts_with("true") {
+            enable = Some(true);
+        } else if value_str.starts_with("false") {
+            enable = Some(false);
+        } else {
+            return Err("enable must be true or false");
         }
     }
 
-    if let Some(idx) = body.find("\"target_i_ma\"") {
-        if let Some(colon_idx) = body[idx..].find(':') {
-            let mut value_str = body[idx + colon_idx + 1..].trim_start();
-            // Strip leading sign/digits until we hit a delimiter.
-            let mut end = 0usize;
-            for ch in value_str.chars() {
-                if ch == '-' || ch.is_ascii_digit() {
-                    end += ch.len_utf8();
-                } else {
-                    break;
-                }
+    if let Some(idx) = body.find("\"target_i_ma\"")
+        && let Some(colon_idx) = body[idx..].find(':')
+    {
+        let mut value_str = body[idx + colon_idx + 1..].trim_start();
+        // Strip leading sign/digits until we hit a delimiter.
+        let mut end = 0usize;
+        for ch in value_str.chars() {
+            if ch == '-' || ch.is_ascii_digit() {
+                end += ch.len_utf8();
+            } else {
+                break;
             }
-            value_str = &value_str[..end];
-            match value_str.parse::<i32>() {
-                Ok(v) => target_i_ma = Some(v),
-                Err(_) => return Err("target_i_ma must be an integer"),
-            }
+        }
+        value_str = &value_str[..end];
+        match value_str.parse::<i32>() {
+            Ok(v) => target_i_ma = Some(v),
+            Err(_) => return Err("target_i_ma must be an integer"),
         }
     }
 
@@ -4267,10 +4261,10 @@ fn parse_points_for_kind(kind: CurveKind, body: &str) -> Result<Vec<CalPoint, 24
     // Enforce strictly increasing meas by dropping non-monotonic points.
     let mut cleaned: Vec<CalPoint, 24> = Vec::new();
     for p in by_raw.into_iter() {
-        if let Some(last) = cleaned.last() {
-            if p.meas_physical <= last.meas_physical {
-                continue;
-            }
+        if let Some(last) = cleaned.last()
+            && p.meas_physical <= last.meas_physical
+        {
+            continue;
         }
         let _ = cleaned.push(p);
     }

@@ -34,6 +34,21 @@ use tower_http::{
     services::ServeDir,
 };
 
+mod compat_response;
+mod serial_response;
+
+use compat_response::{
+    expand_compact_calibration_profile, identity_data_from_serial_response,
+    merge_presets_from_data, pd_post_response_data, pd_response_data, presets_data_from_map,
+    serial_response_data, serial_response_data_required, status_data_from_serial_response,
+};
+use serial_response::{
+    ExtractedSerialFrame, SerialProtocolFrame, SerialProtocolProbe, extract_serial_json_frames,
+    infer_serial_response_from_fragments, infer_serial_response_from_text, sanitize_trace_text,
+    serial_probe_has_mismatched_response, serial_request_id_matches_op,
+    serial_response_for_request,
+};
+
 pub const DEFAULT_BIND: &str = "127.0.0.1:30180";
 pub const DEFAULT_DEVD_URL: &str = "http://127.0.0.1:30180";
 pub const DEFAULT_IPC_IDLE_TIMEOUT_SECS: u64 = 30;
@@ -67,17 +82,16 @@ const LOADLYNX_PRESET_COUNT: usize = 5;
 pub fn default_ipc_endpoint() -> String {
     #[cfg(windows)]
     {
-        return r"\\.\pipe\loadlynx-devd".to_string();
+        r"\\.\pipe\loadlynx-devd".to_string()
     }
     #[cfg(not(windows))]
     {
         let base = env::var_os("XDG_RUNTIME_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(env::temp_dir);
-        return base
-            .join("loadlynx-devd.sock")
+        base.join("loadlynx-devd.sock")
             .to_string_lossy()
-            .into_owned();
+            .into_owned()
     }
 }
 
@@ -493,7 +507,7 @@ pub async fn serve_ipc(config: IpcConfig) -> Result<(), Box<dyn std::error::Erro
     }
     #[cfg(not(windows))]
     {
-        return serve_ipc_unix(config, http_base).await;
+        serve_ipc_unix(config, http_base).await
     }
 }
 
@@ -2088,73 +2102,6 @@ async fn compat_usb_json_request(
     ))
 }
 
-fn serial_response_data_required(
-    response: Option<Value>,
-    operation: &str,
-) -> Result<Value, HttpError> {
-    let response = response.ok_or_else(|| {
-        HttpError::retryable(
-            "serial_response_missing",
-            format!("{operation} did not return a protocol response"),
-        )
-    })?;
-    serial_response_data(response, operation)
-}
-
-fn merge_preset_value(merged: &mut HashMap<u64, Value>, preset: &Value) -> bool {
-    let Some(id) = preset.get("preset_id").and_then(Value::as_u64) else {
-        return false;
-    };
-    merged.insert(id, preset.clone());
-    true
-}
-
-fn merge_presets_from_data(merged: &mut HashMap<u64, Value>, data: &Value) -> bool {
-    if is_preset_fragment(data) {
-        return merge_preset_value(merged, data);
-    }
-    if let Some(preset) = data.get("preset")
-        && is_preset_fragment(preset)
-    {
-        return merge_preset_value(merged, preset);
-    }
-    let Some(presets) = data.get("presets").and_then(Value::as_array) else {
-        return false;
-    };
-    let mut merged_any = false;
-    for preset in presets {
-        merged_any |= merge_preset_value(merged, preset);
-    }
-    merged_any
-}
-
-fn presets_data_from_map(
-    merged: &HashMap<u64, Value>,
-    recovered: bool,
-    recovered_by_control: bool,
-) -> Value {
-    let mut presets = merged
-        .iter()
-        .map(|(id, preset)| (*id, preset.clone()))
-        .collect::<Vec<_>>();
-    presets.sort_by_key(|(id, _)| *id);
-    let mut data = json!({
-        "presets": presets
-            .into_iter()
-            .map(|(_, preset)| preset)
-            .collect::<Vec<_>>()
-    });
-    if recovered && let Some(object) = data.as_object_mut() {
-        object.insert("recovered_from_fragments".to_string(), json!(true));
-        object.insert("recovered_by_retry".to_string(), json!(true));
-    }
-    if recovered_by_control && let Some(object) = data.as_object_mut() {
-        object.insert("recovered_from_fragments".to_string(), json!(true));
-        object.insert("recovered_by_control".to_string(), json!(true));
-    }
-    data
-}
-
 async fn compat_wifi_get(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
@@ -2593,181 +2540,6 @@ fn select_serial_port_for_compat(
             )
         })?;
     Ok((device.id.clone(), port_path))
-}
-
-fn pd_response_data(response: Value) -> Result<Value, HttpError> {
-    serial_response_data(response, "USB PD")
-}
-
-fn pd_post_response_data(response: Option<Value>) -> Result<Value, HttpError> {
-    response.map(pd_response_data).unwrap_or_else(|| {
-        Err(HttpError::retryable(
-            "serial_response_missing",
-            "USB PD POST did not return a protocol response",
-        ))
-    })
-}
-
-fn identity_data_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
-    let response = response.ok_or_else(|| {
-        HttpError::retryable(
-            "serial_response_missing",
-            "USB identity did not return a protocol response",
-        )
-    })?;
-    let data = serial_response_data(response, "USB identity")?;
-    if data.get("device_id").is_none() {
-        return Err(HttpError::retryable(
-            "serial_response_invalid",
-            "USB identity response did not include device_id",
-        ));
-    }
-    Ok(data)
-}
-
-fn status_data_from_serial_response(response: Option<Value>) -> Result<Value, HttpError> {
-    let response = response.ok_or_else(|| {
-        HttpError::retryable(
-            "serial_response_missing",
-            "USB status did not return a protocol response",
-        )
-    })?;
-    if response.get("ok").and_then(Value::as_bool) != Some(true) {
-        return serial_response_data(response, "USB status");
-    }
-    let data = response
-        .get("data")
-        .cloned()
-        .unwrap_or_else(|| response.clone());
-    if data.get("status").is_none() {
-        return Err(HttpError::retryable(
-            "serial_response_invalid",
-            "USB status response did not include status",
-        ));
-    }
-    Ok(data)
-}
-
-fn expand_compact_calibration_profile(data: Value) -> Result<Value, HttpError> {
-    let Some(compact) = data.as_object() else {
-        return Ok(data);
-    };
-    if compact.get("compact").and_then(Value::as_str) != Some("cal_profile_v1") {
-        return Ok(data);
-    }
-
-    let active = compact_array(compact, "a")?;
-    if active.len() != 3 {
-        return Err(compact_calibration_error("active tuple must have 3 items"));
-    }
-    let source = active[0]
-        .as_str()
-        .ok_or_else(|| compact_calibration_error("active source must be a string"))?;
-    let fmt_version = compact_u64(&active[1], "fmt_version")?;
-    let hw_rev = compact_u64(&active[2], "hw_rev")?;
-
-    Ok(json!({
-        "active": {
-            "source": source,
-            "fmt_version": fmt_version,
-            "hw_rev": hw_rev,
-        },
-        "current_ch1_points": expand_compact_current_curve(compact, "c1")?,
-        "current_ch2_points": expand_compact_current_curve(compact, "c2")?,
-        "v_local_points": expand_compact_voltage_curve(compact, "vl")?,
-        "v_remote_points": expand_compact_voltage_curve(compact, "vr")?,
-    }))
-}
-
-fn compact_array<'a>(
-    compact: &'a serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<&'a Vec<Value>, HttpError> {
-    compact.get(key).and_then(Value::as_array).ok_or_else(|| {
-        compact_calibration_error(format!("compact calibration field {key} missing"))
-    })
-}
-
-fn expand_compact_current_curve(
-    compact: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<Value, HttpError> {
-    let mut points = Vec::new();
-    for point in compact_array(compact, key)? {
-        let tuple = point
-            .as_array()
-            .ok_or_else(|| compact_calibration_error("current point must be an array"))?;
-        if tuple.len() != 3 {
-            return Err(compact_calibration_error(
-                "current point tuple must have 3 items",
-            ));
-        }
-        points.push(json!({
-            "raw_100uv": compact_i64(&tuple[0], "raw_100uv")?,
-            "raw_dac_code": compact_u64(&tuple[1], "raw_dac_code")?,
-            "meas_ma": compact_i64(&tuple[2], "meas_ma")?,
-        }));
-    }
-    Ok(Value::Array(points))
-}
-
-fn expand_compact_voltage_curve(
-    compact: &serde_json::Map<String, Value>,
-    key: &str,
-) -> Result<Value, HttpError> {
-    let mut points = Vec::new();
-    for point in compact_array(compact, key)? {
-        let tuple = point
-            .as_array()
-            .ok_or_else(|| compact_calibration_error("voltage point must be an array"))?;
-        if tuple.len() != 2 {
-            return Err(compact_calibration_error(
-                "voltage point tuple must have 2 items",
-            ));
-        }
-        points.push(json!({
-            "raw_100uv": compact_i64(&tuple[0], "raw_100uv")?,
-            "meas_mv": compact_i64(&tuple[1], "meas_mv")?,
-        }));
-    }
-    Ok(Value::Array(points))
-}
-
-fn compact_i64(value: &Value, field: &str) -> Result<i64, HttpError> {
-    value
-        .as_i64()
-        .ok_or_else(|| compact_calibration_error(format!("{field} must be an integer")))
-}
-
-fn compact_u64(value: &Value, field: &str) -> Result<u64, HttpError> {
-    value
-        .as_u64()
-        .ok_or_else(|| compact_calibration_error(format!("{field} must be a non-negative integer")))
-}
-
-fn compact_calibration_error(message: impl Into<String>) -> HttpError {
-    HttpError::retryable("serial_response_invalid", message)
-}
-
-fn serial_response_data(response: Value, operation: &str) -> Result<Value, HttpError> {
-    if response.get("ok").and_then(Value::as_bool) == Some(true) {
-        return response.get("data").cloned().ok_or_else(|| {
-            HttpError::retryable(
-                "serial_response_invalid",
-                format!("{operation} response did not include data"),
-            )
-        });
-    }
-
-    let code = response
-        .pointer("/error/code")
-        .and_then(Value::as_str)
-        .unwrap_or("serial_request_failed");
-    let message = response
-        .pointer("/error/message")
-        .and_then(Value::as_str)
-        .unwrap_or("USB request failed");
-    Err(HttpError::conflict(code, message))
 }
 
 fn cached_pd_view(state: &AppState, device_id: &str) -> Option<Value> {
@@ -4240,19 +4012,6 @@ fn record_serial_protocol_probe(
     }
 }
 
-#[derive(Debug)]
-struct SerialProtocolFrame {
-    direction: &'static str,
-    frame: Value,
-}
-
-#[derive(Debug)]
-struct SerialProtocolProbe {
-    frames: Vec<SerialProtocolFrame>,
-    non_protocol_bytes: usize,
-    non_protocol_text: String,
-}
-
 fn read_serial_jsonl_until(
     port: &mut dyn serialport::SerialPort,
     deadline: Instant,
@@ -4324,53 +4083,6 @@ fn read_serial_jsonl_until(
             Err(error) => return Err(error),
         }
     }
-}
-
-struct ExtractedSerialFrame {
-    frame: Value,
-    non_protocol_bytes: usize,
-}
-
-fn extract_serial_json_frames(line: &str) -> Vec<ExtractedSerialFrame> {
-    if let Ok(frame) = serde_json::from_str::<Value>(line) {
-        return vec![ExtractedSerialFrame {
-            frame,
-            non_protocol_bytes: 0,
-        }];
-    }
-
-    let mut frames = Vec::new();
-    let mut search_offset = 0;
-    while let Some(start_rel) = line[search_offset..].find('{') {
-        let start = search_offset + start_rel;
-        let mut end_search = start + 1;
-        let mut matched = None;
-        while let Some(end_rel) = line[end_search..].find('}') {
-            let end = end_search + end_rel + 1;
-            if let Ok(frame) = serde_json::from_str::<Value>(&line[start..end]) {
-                matched = Some((end, frame));
-            }
-            end_search = end;
-        }
-
-        match matched {
-            Some((end, frame)) => {
-                frames.push(ExtractedSerialFrame {
-                    frame,
-                    non_protocol_bytes: start.saturating_sub(search_offset),
-                });
-                search_offset = end;
-            }
-            None => {
-                search_offset = start + 1;
-            }
-        }
-    }
-
-    if let Some(last) = frames.last_mut() {
-        last.non_protocol_bytes += line.len().saturating_sub(search_offset);
-    }
-    frames
 }
 
 fn write_serial_request(
@@ -4605,485 +4317,6 @@ fn open_serial_port(port_path: &str) -> io::Result<Box<dyn serialport::SerialPor
         .open()?)
 }
 
-fn serial_response_for_request(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
-    probe
-        .frames
-        .iter()
-        .rev()
-        .find(|event| {
-            event.direction == "rx"
-                && event
-                    .frame
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == request_id)
-        })
-        .map(|event| event.frame.clone())
-}
-
-fn serial_probe_has_mismatched_response(probe: &SerialProtocolProbe, request_id: &str) -> bool {
-    probe.frames.iter().any(|event| {
-        event.direction == "rx"
-            && event
-                .frame
-                .get("request_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id != request_id)
-    })
-}
-
-fn serial_request_id_matches_op(request_id: &str, legacy_id: &str) -> bool {
-    request_id == legacy_id
-        || request_id
-            .strip_prefix(legacy_id)
-            .is_some_and(|suffix| suffix.starts_with('-'))
-}
-
-fn infer_serial_response_from_text(probe: &SerialProtocolProbe, request_id: &str) -> Option<Value> {
-    let text = &probe.non_protocol_text;
-    if serial_request_id_matches_op(request_id, "devd-get-calibration-profile")
-        && let Some(response) = infer_calibration_profile_response_from_text(text, request_id)
-    {
-        return Some(response);
-    }
-    if serial_request_id_matches_op(request_id, "devd-get-wifi-status")
-        && let Some(response) = infer_wifi_status_response_from_text(text, request_id)
-    {
-        return Some(response);
-    }
-    if is_output_control_request_id(request_id)
-        && text.contains(request_id)
-        && text.contains("\"ok\":true")
-    {
-        let requested_enable = probe.frames.iter().find_map(|event| {
-            (event.direction == "tx"
-                && event
-                    .frame
-                    .get("request_id")
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| id == request_id))
-            .then(|| event.frame.get("enable").and_then(Value::as_bool))
-            .flatten()
-        });
-        let output_enabled = if text.contains("\"output_enabled\":false") {
-            Some(false)
-        } else if text.contains("\"output_enabled\":true") {
-            Some(true)
-        } else {
-            requested_enable
-        };
-        let changed = if text.contains("\"changed\":false") {
-            Some(false)
-        } else if text.contains("\"changed\":true") {
-            Some(true)
-        } else {
-            None
-        };
-        let mut data = serde_json::Map::new();
-        if let Some(output_enabled) = output_enabled {
-            data.insert("output_enabled".to_string(), json!(output_enabled));
-        }
-        if let Some(changed) = changed {
-            data.insert("changed".to_string(), json!(changed));
-        }
-        return Some(json!({
-            "type": "response",
-            "request_id": request_id,
-            "ok": true,
-            "data": Value::Object(data),
-            "recovered_from_text": true
-        }));
-    }
-    None
-}
-
-fn infer_calibration_profile_response_from_text(text: &str, request_id: &str) -> Option<Value> {
-    if !text.contains("\"a\":[")
-        || !text.contains("\"c1\":")
-        || !text.contains("\"c2\":")
-        || !text.contains("\"vl\":")
-        || !text.contains("\"vr\":")
-    {
-        return None;
-    }
-    let start = text.find("\"a\":[")?;
-    let vr_key = text[start..].find("\"vr\":")? + start;
-    let vr_array = text[vr_key..].find('[')? + vr_key;
-    let end = json_array_end(text, vr_array)?;
-    let candidate = format!("{{\"compact\":\"cal_profile_v1\",{}}}", &text[start..end]);
-    let data = serde_json::from_str::<Value>(&candidate).ok()?;
-    Some(json!({
-        "type": "response",
-        "request_id": request_id,
-        "ok": true,
-        "data": data,
-        "recovered_from_text": true
-    }))
-}
-
-fn infer_wifi_status_response_from_text(text: &str, request_id: &str) -> Option<Value> {
-    let state = json_string_after_any(text, &["\"state\":\"", "tate\":\""])?;
-    let ip = json_string_after_any(text, &["\"ip\":\""]);
-    let ssid = json_string_after_any(text, &["\"ssid\":\""]);
-    let source = json_string_after_any(text, &["\"source\":\""]);
-    let last_error = json_string_after_any(text, &["\"last_error\":\""]);
-    let data = json!({
-        "ssid": ssid,
-        "source": source,
-        "state": state,
-        "ip": ip,
-        "last_error": last_error,
-        "recovered_from_text": true
-    });
-    Some(json!({
-        "type": "response",
-        "request_id": request_id,
-        "ok": true,
-        "data": data,
-        "recovered_from_text": true
-    }))
-}
-
-fn json_string_after_any(text: &str, markers: &[&str]) -> Option<String> {
-    for marker in markers {
-        if let Some(value) = json_string_after(text, marker) {
-            return Some(value);
-        }
-    }
-    None
-}
-
-fn json_string_after(text: &str, marker: &str) -> Option<String> {
-    let start = text.find(marker)? + marker.len();
-    let mut out = String::new();
-    let mut escaped = false;
-    for ch in text[start..].chars() {
-        if escaped {
-            out.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else if ch == '"' {
-            return Some(out);
-        } else {
-            out.push(ch);
-        }
-    }
-    None
-}
-
-fn json_array_end(text: &str, array_start: usize) -> Option<usize> {
-    let mut depth = 0usize;
-    let mut in_string = false;
-    let mut escaped = false;
-    for (offset, ch) in text[array_start..].char_indices() {
-        if in_string {
-            if escaped {
-                escaped = false;
-            } else if ch == '\\' {
-                escaped = true;
-            } else if ch == '"' {
-                in_string = false;
-            }
-            continue;
-        }
-        match ch {
-            '"' => in_string = true,
-            '[' => depth += 1,
-            ']' => {
-                depth = depth.checked_sub(1)?;
-                if depth == 0 {
-                    return Some(array_start + offset + ch.len_utf8());
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn infer_serial_response_from_fragments(
-    probe: &SerialProtocolProbe,
-    request_id: &str,
-) -> Option<Value> {
-    if serial_request_id_matches_op(request_id, "devd-get-identity") {
-        return infer_identity_response_from_fragments(probe, request_id);
-    }
-    if serial_request_id_matches_op(request_id, "devd-get-control") {
-        return infer_control_response_from_fragments(probe, request_id);
-    }
-    if serial_request_id_matches_op(request_id, "devd-get-presets") {
-        return infer_presets_response_from_fragments(probe, request_id);
-    }
-    if !serial_request_id_matches_op(request_id, "devd-get-status") {
-        return None;
-    }
-    let tx_index = probe.frames.iter().position(|event| {
-        event.direction == "tx"
-            && event
-                .frame
-                .get("request_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id == request_id)
-    })?;
-    let mut control = None;
-    let mut status = None;
-    for event in probe.frames.iter().skip(tx_index + 1) {
-        if event.direction != "rx" || event.frame.get("request_id").is_some() {
-            continue;
-        }
-        let frame = &event.frame;
-        if frame.get("status").is_some() {
-            let mut data = frame.clone();
-            data.as_object_mut()?
-                .insert("recovered_from_fragments".to_string(), json!(true));
-            return Some(json!({
-                "type": "response",
-                "request_id": request_id,
-                "ok": true,
-                "data": data,
-                "recovered_from_fragments": true
-            }));
-        }
-        if frame.get("active_preset_id").is_some()
-            && frame.get("mode").is_some()
-            && frame.get("output_enabled").is_some()
-        {
-            control = Some(frame.clone());
-        }
-        if frame.get("state_flags").is_some()
-            && frame.get("fault_flags").is_some()
-            && frame.get("v_local_mv").is_some()
-            && frame.get("i_local_ma").is_some()
-        {
-            status = Some(frame.clone());
-        }
-        if control.is_some() && status.is_some() {
-            break;
-        }
-    }
-    let status = status?;
-    let mut data = serde_json::Map::new();
-    data.insert("status".to_string(), status);
-    if let Some(control) = control {
-        data.insert("control".to_string(), control);
-    }
-    data.insert("link_up".to_string(), json!(true));
-    data.insert("hello_seen".to_string(), json!(true));
-    data.insert("recovered_from_fragments".to_string(), json!(true));
-    Some(json!({
-        "type": "response",
-        "request_id": request_id,
-        "ok": true,
-        "data": Value::Object(data),
-        "recovered_from_fragments": true
-    }))
-}
-
-fn is_stable_hardware_id(id: &str) -> bool {
-    id.strip_prefix("loadlynx-").is_some_and(is_hex_short_id) || id.starts_with("mock-")
-}
-
-fn is_hex_short_id(value: &str) -> bool {
-    value.len() == 6
-        && value
-            .bytes()
-            .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
-}
-
-fn is_preset_fragment(frame: &Value) -> bool {
-    frame.get("preset_id").is_some()
-        && frame.get("mode").is_some()
-        && frame.get("max_i_ma_total").is_some()
-        && frame.get("max_p_mw").is_some()
-}
-
-fn infer_control_response_from_fragments(
-    probe: &SerialProtocolProbe,
-    request_id: &str,
-) -> Option<Value> {
-    let tx_index = probe.frames.iter().position(|event| {
-        event.direction == "tx"
-            && event
-                .frame
-                .get("request_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id == request_id)
-    })?;
-    for event in probe.frames.iter().skip(tx_index + 1) {
-        if event.direction != "rx" || event.frame.get("request_id").is_some() {
-            continue;
-        }
-        let frame = &event.frame;
-        if frame.get("active_preset_id").is_some()
-            && frame.get("preset").is_some()
-            && frame.get("output_enabled").is_some()
-        {
-            let mut data = frame.clone();
-            data.as_object_mut()?
-                .insert("recovered_from_fragments".to_string(), json!(true));
-            return Some(json!({
-                "type": "response",
-                "request_id": request_id,
-                "ok": true,
-                "data": data,
-                "recovered_from_fragments": true
-            }));
-        }
-        if is_preset_fragment(frame) {
-            let active_preset_id = frame.get("preset_id").cloned().unwrap_or(json!(1));
-            return Some(json!({
-                "type": "response",
-                "request_id": request_id,
-                "ok": true,
-                "data": {
-                    "active_preset_id": active_preset_id,
-                    "output_enabled": false,
-                    "uv_latched": false,
-                    "preset": frame,
-                    "recovered_from_fragments": true
-                },
-                "recovered_from_fragments": true
-            }));
-        }
-    }
-    None
-}
-
-fn infer_presets_response_from_fragments(
-    probe: &SerialProtocolProbe,
-    request_id: &str,
-) -> Option<Value> {
-    let tx_index = probe.frames.iter().position(|event| {
-        event.direction == "tx"
-            && event
-                .frame
-                .get("request_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id == request_id)
-    })?;
-    let mut presets = probe
-        .frames
-        .iter()
-        .skip(tx_index + 1)
-        .filter_map(|event| {
-            if event.direction == "rx"
-                && event.frame.get("request_id").is_none()
-                && is_preset_fragment(&event.frame)
-            {
-                Some(event.frame.clone())
-            } else {
-                None
-            }
-        })
-        .collect::<Vec<_>>();
-    if presets.is_empty() {
-        return None;
-    }
-    presets.sort_by_key(|preset| {
-        preset
-            .get("preset_id")
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
-    Some(json!({
-        "type": "response",
-        "request_id": request_id,
-        "ok": true,
-        "data": {
-            "presets": presets,
-            "recovered_from_fragments": true
-        },
-        "recovered_from_fragments": true
-    }))
-}
-
-fn infer_identity_response_from_fragments(
-    probe: &SerialProtocolProbe,
-    request_id: &str,
-) -> Option<Value> {
-    let tx_index = probe.frames.iter().position(|event| {
-        event.direction == "tx"
-            && event
-                .frame
-                .get("request_id")
-                .and_then(Value::as_str)
-                .is_some_and(|id| id == request_id)
-    })?;
-    let mut firmware_frame = None;
-    let mut stable_identity = None;
-    for event in probe.frames.iter().skip(tx_index + 1) {
-        if event.direction != "rx" || event.frame.get("request_id").is_some() {
-            continue;
-        }
-        let frame = &event.frame;
-        if stable_identity.is_none()
-            && let Some(id) = frame.get("device_id").and_then(Value::as_str)
-            && is_stable_hardware_id(id)
-        {
-            stable_identity = Some(frame.clone());
-        }
-        if firmware_frame.is_none()
-            && frame.get("build_id").is_some()
-            && frame.get("target").and_then(Value::as_str) == Some("digital_esp32s3")
-        {
-            firmware_frame = Some(frame.clone());
-        }
-        if stable_identity.is_some() && firmware_frame.is_some() {
-            break;
-        }
-    }
-    let stable_identity = stable_identity?;
-    let firmware = firmware_frame.unwrap_or_else(|| json!({"target": "digital_esp32s3"}));
-    let device_id = stable_identity
-        .get("device_id")
-        .and_then(Value::as_str)
-        .filter(|id| is_stable_hardware_id(id))?;
-    let build_id = firmware
-        .get("build_id")
-        .and_then(Value::as_str)
-        .unwrap_or("digital unknown");
-    let protocol = firmware
-        .get("protocol")
-        .and_then(Value::as_str)
-        .unwrap_or("loadlynx.cdc.v1");
-    Some(json!({
-        "type": "response",
-        "request_id": request_id,
-        "ok": true,
-        "data": {
-            "device_id": device_id,
-            "target": "digital",
-            "mcu": "esp32s3",
-            "protocol": protocol,
-            "firmware_version": build_id,
-            "digital_fw_version": build_id,
-            "firmware": firmware,
-            "recovered_from_fragments": true,
-            "stable_identity": stable_identity
-        },
-        "recovered_from_fragments": true
-    }))
-}
-
-fn is_output_control_request_id(request_id: &str) -> bool {
-    request_id.starts_with("devd-output-")
-        || serial_request_id_matches_op(request_id, "devd-set-output-enabled")
-}
-
-fn sanitize_trace_text(text: &str) -> String {
-    let mut out = String::new();
-    for ch in text.chars() {
-        if ch.is_control() {
-            use std::fmt::Write as _;
-            let _ = write!(out, "\\x{:02x}", ch as u32);
-        } else {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 pub fn default_digital_usb_port_path(repo_root: &std::path::Path) -> PathBuf {
     repo_root.join(DEFAULT_DIGITAL_USB_PORT_FILE)
 }
@@ -5143,7 +4376,6 @@ pub fn list_digital_usb_port_candidates() -> Vec<DigitalUsbPortCandidate> {
 }
 
 fn is_espflash_default_port_candidate(port: &serialport::SerialPortInfo) -> bool {
-    #[cfg(target_os = "macos")]
     if port.port_name.starts_with("/dev/tty.") {
         return false;
     }

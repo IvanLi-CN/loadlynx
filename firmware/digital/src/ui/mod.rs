@@ -177,11 +177,11 @@ pub fn hit_test_control_row(x: i32, y: i32) -> Option<ControlRowHit> {
     const HIT_PAD_X: i32 = 2;
     const HIT_PAD_Y: i32 = 8;
 
-    if y < CONTROL_ROW_TOP - HIT_PAD_Y || y > CONTROL_ROW_BOTTOM + HIT_PAD_Y {
+    if !(CONTROL_ROW_TOP - HIT_PAD_Y..=CONTROL_ROW_BOTTOM + HIT_PAD_Y).contains(&y) {
         return None;
     }
 
-    if x < CONTROL_MODE_PILL_LEFT - HIT_PAD_X || x > CONTROL_VALUE_PILL_RIGHT + HIT_PAD_X {
+    if !(CONTROL_MODE_PILL_LEFT - HIT_PAD_X..=CONTROL_VALUE_PILL_RIGHT + HIT_PAD_X).contains(&x) {
         return None;
     }
 
@@ -227,7 +227,7 @@ pub fn pick_control_row_setpoint_digit(x: i32, unit: char) -> SetpointDigitPick 
 
     let digit = if unit == 'W' {
         match cell_idx {
-            0 | 1 | 2 => AdjustDigit::Ones, // hundreds/tens are non-selectable; snap to ones
+            0..=2 => AdjustDigit::Ones, // hundreds/tens are non-selectable; snap to ones
             3 => {
                 // Decimal point: snap to nearest adjacent selectable digit.
                 if cell_off < glyph_w / 2 {
@@ -1025,7 +1025,7 @@ fn draw_control_row(canvas: &mut Canvas, data: &UiSnapshot) {
         }
     };
     let glyph_w = SETPOINT_FONT.width() as i32;
-    let cell_x = value_x0 + idx as i32 * glyph_w;
+    let cell_x = value_x0 + idx * glyph_w;
     // Place a short underline inside the pill, below the digit baseline.
     let underline_top = (num_y + num_h + 1).min(CONTROL_ROW_BOTTOM - 3);
     let underline_bottom = underline_top + 2;
@@ -1268,7 +1268,7 @@ pub fn hit_test_dashboard_load_button(x: i32, y: i32) -> bool {
 }
 
 pub fn hit_test_dashboard_pd_button(x: i32, y: i32) -> bool {
-    x >= PD_BUTTON_LEFT && x < PD_BUTTON_RIGHT && y >= LOAD_ROW_TOP && y < PD_BUTTON_BOTTOM
+    (PD_BUTTON_LEFT..PD_BUTTON_RIGHT).contains(&x) && (LOAD_ROW_TOP..PD_BUTTON_BOTTOM).contains(&y)
 }
 
 fn draw_dashboard_load_row(canvas: &mut Canvas, data: &UiSnapshot) {
@@ -1367,47 +1367,6 @@ fn overlay_pd_button_corner_highlights(canvas: &mut Canvas, rect: Rect, color: R
     canvas.set_pixel(right - 3, bottom - 3, color);
 }
 
-fn overlay_round_rect_corner_outline(canvas: &mut Canvas, rect: Rect, radius: i32, color: Rgb565) {
-    let w = rect.right - rect.left;
-    let h = rect.bottom - rect.top;
-    if w <= 0 || h <= 0 {
-        return;
-    }
-    let mut r = radius.max(0);
-    r = r.min(w / 2).min(h / 2);
-    if r == 0 {
-        return;
-    }
-
-    let left_r = rect.left + r;
-    let right_r = rect.right - r;
-    let top_r = rect.top + r;
-    let bottom_r = rect.bottom - r;
-
-    for y in rect.top..rect.bottom {
-        for x in rect.left..rect.right {
-            let in_corner = (x < left_r && y < top_r)
-                || (x >= right_r && y < top_r)
-                || (x < left_r && y >= bottom_r)
-                || (x >= right_r && y >= bottom_r);
-            if !in_corner {
-                continue;
-            }
-            if !point_in_round_rect(rect, radius, x, y) {
-                continue;
-            }
-            // Single-outline highlight (avoid the "double arc" look from inner/outer rings).
-            let edge = !point_in_round_rect(rect, radius, x - 1, y)
-                || !point_in_round_rect(rect, radius, x + 1, y)
-                || !point_in_round_rect(rect, radius, x, y - 1)
-                || !point_in_round_rect(rect, radius, x, y + 1);
-            if edge {
-                canvas.set_pixel(x, y, color);
-            }
-        }
-    }
-}
-
 fn draw_settings_button(canvas: &mut Canvas, left: i32, top: i32) {
     let border = rgb(0x1c2a3f);
     let shadow = rgb(0x19243a);
@@ -1434,12 +1393,12 @@ fn draw_settings_button(canvas: &mut Canvas, left: i32, top: i32) {
                 px = Some(fill);
             }
 
-            let line1 = dx == -4 && dy >= -5 && dy <= 5;
-            let line2 = dx == 0 && dy >= -5 && dy <= 5;
-            let line3 = dx == 4 && dy >= -5 && dy <= 5;
-            let knob1 = dy >= -3 && dy <= -1 && dx >= -5 && dx <= -3;
-            let knob2 = dy >= 0 && dy <= 2 && dx >= -1 && dx <= 1;
-            let knob3 = dy >= 2 && dy <= 4 && dx >= 3 && dx <= 5;
+            let line1 = dx == -4 && (-5..=5).contains(&dy);
+            let line2 = dx == 0 && (-5..=5).contains(&dy);
+            let line3 = dx == 4 && (-5..=5).contains(&dy);
+            let knob1 = (-3..=-1).contains(&dy) && (-5..=-3).contains(&dx);
+            let knob2 = (0..=2).contains(&dy) && (-1..=1).contains(&dx);
+            let knob3 = (2..=4).contains(&dy) && (3..=5).contains(&dx);
             if line1 || line2 || line3 || knob1 || knob2 || knob3 {
                 px = Some(icon);
             }
@@ -1713,8 +1672,8 @@ fn append_frac<const N: usize>(buf: &mut String<N>, mut value: u32, digits: u8) 
         tmp[i] = b'0' + (value % 10) as u8;
         value /= 10;
     }
-    for i in 0..(digits as usize) {
-        let _ = buf.push(tmp[i] as char);
+    for ch in tmp.iter().take(digits as usize) {
+        let _ = buf.push(*ch as char);
     }
 }
 
@@ -1723,67 +1682,6 @@ fn rgb(hex: u32) -> Rgb565 {
     let g = ((hex >> 8) & 0xFF) as u8;
     let b = (hex & 0xFF) as u8;
     embedded_graphics::pixelcolor::Rgb888::new(r, g, b).into()
-}
-
-fn rgb888(r: u8, g: u8, b: u8) -> Rgb565 {
-    embedded_graphics::pixelcolor::Rgb888::new(r, g, b).into()
-}
-
-fn lerp_u8(a: u8, b: u8, t255: u32) -> u8 {
-    let a = a as u32;
-    let b = b as u32;
-    ((a * (255 - t255) + b * t255 + 127) / 255) as u8
-}
-
-fn point_in_round_rect(rect: Rect, radius: i32, x: i32, y: i32) -> bool {
-    if x < rect.left || x >= rect.right || y < rect.top || y >= rect.bottom {
-        return false;
-    }
-    let w = rect.right - rect.left;
-    let h = rect.bottom - rect.top;
-    if w <= 0 || h <= 0 {
-        return false;
-    }
-    let mut r = radius.max(0);
-    r = r.min(w / 2).min(h / 2);
-    if r == 0 {
-        return true;
-    }
-    let r2 = r * r;
-
-    let tl_cx = rect.left + r;
-    let tl_cy = rect.top + r;
-    let tr_cx = rect.right - r - 1;
-    let tr_cy = rect.top + r;
-    let bl_cx = rect.left + r;
-    let bl_cy = rect.bottom - r - 1;
-    let br_cx = rect.right - r - 1;
-    let br_cy = rect.bottom - r - 1;
-
-    let left_r = rect.left + r;
-    let right_r = rect.right - r;
-    let top_r = rect.top + r;
-    let bottom_r = rect.bottom - r;
-
-    if x < left_r && y < top_r {
-        let dx = x - tl_cx;
-        let dy = y - tl_cy;
-        dx * dx + dy * dy <= r2
-    } else if x >= right_r && y < top_r {
-        let dx = x - tr_cx;
-        let dy = y - tr_cy;
-        dx * dx + dy * dy <= r2
-    } else if x < left_r && y >= bottom_r {
-        let dx = x - bl_cx;
-        let dy = y - bl_cy;
-        dx * dx + dy * dy <= r2
-    } else if x >= right_r && y >= bottom_r {
-        let dx = x - br_cx;
-        let dy = y - br_cy;
-        dx * dx + dy * dy <= r2
-    } else {
-        true
-    }
 }
 
 struct Canvas<'a> {
@@ -1802,7 +1700,7 @@ impl<'a> Canvas<'a> {
     }
 
     fn set_pixel(&mut self, x: i32, y: i32, color: Rgb565) {
-        if x < 0 || x >= LOGICAL_WIDTH || y < 0 || y >= LOGICAL_HEIGHT {
+        if !(0..LOGICAL_WIDTH).contains(&x) || !(0..LOGICAL_HEIGHT).contains(&y) {
             return;
         }
         let actual_x = y as usize;
@@ -1817,32 +1715,6 @@ impl<'a> Canvas<'a> {
         for yy in rect.top..rect.bottom {
             for xx in rect.left..rect.right {
                 self.set_pixel(xx, yy, color);
-            }
-        }
-    }
-
-    fn fill_round_rect_vgradient(
-        &mut self,
-        rect: Rect,
-        radius: i32,
-        top_rgb: (u8, u8, u8),
-        bottom_rgb: (u8, u8, u8),
-    ) {
-        let h = (rect.bottom - rect.top).max(1) as u32;
-        for y in rect.top..rect.bottom {
-            let t = if h <= 1 {
-                0
-            } else {
-                ((y - rect.top) as u32 * 255) / (h - 1)
-            };
-            let r = lerp_u8(top_rgb.0, bottom_rgb.0, t);
-            let g = lerp_u8(top_rgb.1, bottom_rgb.1, t);
-            let b = lerp_u8(top_rgb.2, bottom_rgb.2, t);
-            let row = rgb888(r, g, b);
-            for x in rect.left..rect.right {
-                if point_in_round_rect(rect, radius, x, y) {
-                    self.set_pixel(x, y, row);
-                }
             }
         }
     }
@@ -2107,6 +1979,7 @@ impl UiSnapshot {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn set_control_overlay(
         &mut self,
         calibration_mode: CalibrationUiMode,

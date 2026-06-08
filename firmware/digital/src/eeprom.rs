@@ -52,7 +52,7 @@ pub fn decode_wifi_blob(blob: &[u8; EEPROM_WIFI_LEN]) -> Option<WifiBlobParts<'_
     }
     let ssid_len = blob[8] as usize;
     let psk_len = blob[9] as usize;
-    if ssid_len == 0 || ssid_len > WIFI_MAX_SSID_LEN || psk_len < 8 || psk_len > WIFI_MAX_PSK_LEN {
+    if ssid_len == 0 || ssid_len > WIFI_MAX_SSID_LEN || !(8..=WIFI_MAX_PSK_LEN).contains(&psk_len) {
         return None;
     }
     let ssid_start = 10;

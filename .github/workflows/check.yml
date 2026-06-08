@@ -8,10 +8,13 @@ on:
       - 'firmware/digital/**'
       - 'third_party/embassy'
       - 'libs/**'
+      - 'tools/loadlynx-devd/**'
+      - 'tools/ui-mock/**'
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
       - 'package.json'
+      - 'package-lock.json'
       - '.github/release-label-policy.json'
       - '.github/quality-gates.json'
       - '.github/scripts/**'
@@ -23,18 +26,158 @@ on:
       - 'firmware/digital/**'
       - 'third_party/embassy'
       - 'libs/**'
+      - 'tools/loadlynx-devd/**'
+      - 'tools/ui-mock/**'
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
       - 'package.json'
+      - 'package-lock.json'
       - '.github/release-label-policy.json'
       - '.github/quality-gates.json'
       - '.github/scripts/**'
       - '.github/workflows/**'
 
+permissions:
+  contents: read
+
 jobs:
-  check:
+  host-rust:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (host)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.90
+          components: rustfmt, clippy
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: ".node-version"
+          cache: 'npm'
+
+      - name: Install root Node dependencies
+        run: npm ci
+
+      - name: Install host system dependencies
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+
+      - name: Test release label tooling
+        run: node .github/scripts/release-labels.test.mjs
+
+      - name: Run quality-gates contract tests
+        run: npm run test:quality-gates
+
+      - name: Run workflow hygiene tests
+        run: npm run test:workflow-hygiene
+
+      - name: Cache host cargo registry and targets
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            libs/protocol/target
+            libs/calibration-format/target
+            libs/led-effects/target
+            libs/screen-power/target
+            tools/loadlynx-devd/target
+            tools/ui-mock/target
+          key: ${{ runner.os }}-host-cargo-${{ hashFiles('libs/**/Cargo.lock', 'tools/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-host-cargo-
+
+      - name: Check code formatting (protocol lib)
+        working-directory: libs/protocol
+        run: cargo fmt --all -- --check
+
+      - name: Check code formatting (calibration-format lib)
+        working-directory: libs/calibration-format
+        run: cargo fmt --all -- --check
+
+      - name: Check code formatting (led-effects lib)
+        working-directory: libs/led-effects
+        run: cargo fmt --all -- --check
+
+      - name: Check code formatting (screen-power lib)
+        working-directory: libs/screen-power
+        run: cargo fmt --all -- --check
+
+      - name: Check code formatting (loadlynx-devd)
+        run: cargo fmt --manifest-path tools/loadlynx-devd/Cargo.toml --all -- --check
+
+      - name: Check code formatting (ui-mock)
+        run: cargo fmt --manifest-path tools/ui-mock/Cargo.toml --all -- --check
+
+      - name: Test protocol lib
+        working-directory: libs/protocol
+        run: cargo test --locked
+
+      - name: Test calibration-format lib
+        working-directory: libs/calibration-format
+        run: cargo test --locked
+
+      - name: Test led-effects lib
+        working-directory: libs/led-effects
+        run: cargo test --locked
+
+      - name: Test screen-power lib
+        working-directory: libs/screen-power
+        run: cargo test --locked
+
+      - name: Test loadlynx-devd
+        run: cargo test --manifest-path tools/loadlynx-devd/Cargo.toml --locked
+
+      - name: Test ui-mock
+        run: cargo test --manifest-path tools/ui-mock/Cargo.toml --locked
+
+      - name: Run clippy for protocol lib (deny warnings)
+        run: cargo clippy --manifest-path libs/protocol/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
+      - name: Run clippy for calibration-format lib (deny warnings)
+        run: cargo clippy --manifest-path libs/calibration-format/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
+      - name: Run clippy for led-effects lib (deny warnings)
+        run: cargo clippy --manifest-path libs/led-effects/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
+      - name: Run clippy for screen-power lib (deny warnings)
+        run: cargo clippy --manifest-path libs/screen-power/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
+      - name: Run clippy for loadlynx-devd (deny warnings)
+        run: cargo clippy --manifest-path tools/loadlynx-devd/Cargo.toml --all-targets --all-features --locked -- -D warnings
+
+      - name: Validate loadlynx host installer (dry-run)
+        run: tools/loadlynx-devd/install/install-loadlynx-host.sh --dry-run
+
+      - name: Check loadlynx host installer shell syntax
+        run: bash -n tools/loadlynx-devd/install/install-loadlynx-host.sh
+
+      - name: Check loadlynx host installer PowerShell syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [void][System.Management.Automation.Language.Parser]::ParseFile(
+            "tools/loadlynx-devd/install/install-loadlynx-host.ps1",
+            [ref]$tokens,
+            [ref]$errors
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_.Message }
+            exit 1
+          }
+
+  analog-firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout code (with submodules)
@@ -49,38 +192,28 @@ jobs:
           components: rustfmt, clippy, rust-src, llvm-tools-preview
           targets: thumbv7em-none-eabihf
 
-      - name: Test release label tooling
-        run: node .github/scripts/release-labels.test.mjs
-
-      - name: Validate quality-gates declaration
-        run: node .github/scripts/check-quality-gates.mjs
-
-      - name: Cache cargo registry and target
+      - name: Cache analog cargo registry and target
         uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             firmware/analog/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-analog-cargo-${{ hashFiles('firmware/analog/Cargo.lock', 'libs/protocol/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-analog-cargo-
 
       - name: Check code formatting (analog)
         working-directory: firmware/analog
         run: cargo fmt --all -- --check
 
-      - name: Check code formatting (protocol lib)
-        working-directory: libs/protocol
-        run: cargo fmt --all -- --check
-
       - name: Run clippy for analog (deny warnings)
         working-directory: firmware/analog
-        run: cargo clippy --bins --no-deps --target thumbv7em-none-eabihf -- -D warnings
+        run: cargo clippy --locked --bins --no-deps --target thumbv7em-none-eabihf -- -D warnings
 
       - name: Build analog firmware (release)
         working-directory: firmware/analog
-        run: cargo build --release --target thumbv7em-none-eabihf
+        run: cargo build --locked --release --target thumbv7em-none-eabihf
 
       - name: Check analog ELF artifact
         run: |
@@ -89,6 +222,33 @@ jobs:
             echo "Build failed: ELF not found at $ARTIFACT" && exit 1
           fi
           echo "Build successful: size $(stat -c%s "$ARTIFACT" 2>/dev/null || stat -f%z "$ARTIFACT") bytes"
+
+  digital-firmware:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Rust toolchain (digital fmt helper)
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.90
+          components: rustfmt
+
+      - name: Cache digital cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            firmware/digital/target
+          key: ${{ runner.os }}-digital-cargo-${{ hashFiles('firmware/digital/Cargo.lock', 'libs/**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-digital-cargo-
 
       - name: Check code formatting (digital)
         working-directory: firmware/digital
@@ -104,10 +264,35 @@ jobs:
       - name: Install just
         run: cargo install just --locked
 
+      - name: Run clippy for digital (deny warnings)
+        env:
+          DIGITAL_WIFI_SSID: codex_dummy
+          DIGITAL_WIFI_PSK: codex_dummy
+        run: just d-clippy
+
       - name: Build digital firmware (release)
         env:
           DIGITAL_WIFI_SSID: codex_dummy
           DIGITAL_WIFI_PSK: codex_dummy
+        run: just d-build
+
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: ${{ always() }}
+    needs:
+      - host-rust
+      - analog-firmware
+      - digital-firmware
+
+    steps:
+      - name: Require all Code Check jobs to pass
+        env:
+          HOST_RUST_RESULT: ${{ needs.host-rust.result }}
+          ANALOG_RESULT: ${{ needs.analog-firmware.result }}
+          DIGITAL_RESULT: ${{ needs.digital-firmware.result }}
         run: |
-          . "$HOME/export-esp.sh"
-          just d-build
+          set -euo pipefail
+          [ "$HOST_RUST_RESULT" = "success" ] || { echo "host-rust failed: $HOST_RUST_RESULT"; exit 1; }
+          [ "$ANALOG_RESULT" = "success" ] || { echo "analog-firmware failed: $ANALOG_RESULT"; exit 1; }
+          [ "$DIGITAL_RESULT" = "success" ] || { echo "digital-firmware failed: $DIGITAL_RESULT"; exit 1; }

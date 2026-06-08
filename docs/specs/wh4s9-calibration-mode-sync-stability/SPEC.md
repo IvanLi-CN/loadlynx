@@ -4,8 +4,8 @@
 
 - Status: 已完成
 - Created: 2026-04-16
-- Last: 2026-04-16
-- Notes: 本地校准页稳定性修复已完成；本地验证通过；待主人决定后续提交/推送。
+- Last: 2026-06-08
+- Notes: 2026-06-08 已完成 calibration route 组件化重构、单测/构建/Storybook 刷新与视觉证据回采；相关实现与视觉证据绑定本地提交 `8b5c785`。
 
 ## 背景 / 问题陈述
 
@@ -131,10 +131,17 @@
 
 ## Visual Evidence
 
+- Bound SHA: `8b5c785`
+
 - Source: Storybook canvas `Routes/Calibration/Restores Stored Current Tab`
-- Bound SHA: `484b965`
+- Evidence note: 已验证保存的 `current_ch2` 草稿会在页面加载时恢复，且页面直接展示对应的 `CURRENT_CH2` 状态与 current tab 内容。
 
 ![Calibration route restored current tab](./assets/storybook-calibration-restores-stored-current-tab.png)
+
+- Source: Storybook canvas `Routes/Calibration/Output Control Applied`
+- Evidence note: 当前电流校准页仍保持既有布局与交互层级；本次重构后的草稿工具栏、硬件 I/O 区与输出控制区在 mock state 下正常渲染。
+
+![Calibration route output control applied](./assets/calibration-route-output-control-applied.png)
 
 ## 实现里程碑（Milestones / Delivery checklist）
 

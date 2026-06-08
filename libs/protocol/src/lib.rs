@@ -160,8 +160,9 @@ pub struct FastStatus {
 ///
 /// CC, CV and CP are currently defined for protocol v1; other values are reserved.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum LoadMode {
+    #[default]
     Cc,
     Cv,
     Cp,
@@ -187,12 +188,6 @@ impl From<LoadMode> for u8 {
             LoadMode::Cp => LOAD_MODE_CP,
             LoadMode::Reserved(raw) => raw,
         }
-    }
-}
-
-impl Default for LoadMode {
-    fn default() -> Self {
-        LoadMode::Cc
     }
 }
 
@@ -293,8 +288,9 @@ pub struct LimitProfile {
 
 /// Reason codes for a soft-reset request initiated by the digital side.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum SoftResetReason {
+    #[default]
     Manual,
     FirmwareUpdate,
     UiRecover,
@@ -323,12 +319,6 @@ impl From<SoftResetReason> for u8 {
             SoftResetReason::LinkRecover => 3,
             SoftResetReason::Unknown(raw) => raw,
         }
-    }
-}
-
-impl Default for SoftResetReason {
-    fn default() -> Self {
-        SoftResetReason::Manual
     }
 }
 
@@ -386,8 +376,9 @@ pub struct SetEnable {
 }
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum PdSinkMode {
+    #[default]
     Fixed,
     Pps,
     Avs,
@@ -413,12 +404,6 @@ impl From<PdSinkMode> for u8 {
             PdSinkMode::Avs => 2,
             PdSinkMode::Unknown(raw) => raw,
         }
-    }
-}
-
-impl Default for PdSinkMode {
-    fn default() -> Self {
-        PdSinkMode::Fixed
     }
 }
 
@@ -567,7 +552,7 @@ impl<'b, C> Decode<'b, C> for PpsPdo {
                 out.max_ma = d.u32()?;
                 3
             }
-            0 | 1 | 2 => {
+            0..=2 => {
                 return Err(minicbor::decode::Error::message(
                     "invalid PpsPdo array length",
                 ));
@@ -633,7 +618,7 @@ impl<'b, C> Decode<'b, C> for EprAvsPdo {
                 out.pdp_w = d.u16()?;
                 3
             }
-            0 | 1 | 2 => {
+            0..=2 => {
                 return Err(minicbor::decode::Error::message(
                     "invalid EprAvsPdo array length",
                 ));
@@ -793,8 +778,9 @@ fn decode_pps_pdo_list<'b, C>(
 /// Unknown kinds received over the wire are mapped to `Off` to keep decoding
 /// forward compatible while defaulting to a safe "no raw telemetry" state.
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum CalKind {
+    #[default]
     Off,
     Voltage,
     CurrentCh1,
@@ -821,12 +807,6 @@ impl From<CalKind> for u8 {
             CalKind::CurrentCh1 => 2,
             CalKind::CurrentCh2 => 3,
         }
-    }
-}
-
-impl Default for CalKind {
-    fn default() -> Self {
-        CalKind::Off
     }
 }
 
@@ -1714,6 +1694,12 @@ impl<const N: usize> SlipDecoder<N> {
     pub fn reset(&mut self) {
         self.buffer.clear();
         self.escaping = false;
+    }
+}
+
+impl<const N: usize> Default for SlipDecoder<N> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 

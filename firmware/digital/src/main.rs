@@ -66,11 +66,11 @@ use loadlynx_protocol::{
     HEADER_LEN, LimitProfile, LoadMode, MSG_CAL_MODE, MSG_CAL_WRITE, MSG_FAST_STATUS, MSG_HELLO,
     MSG_LIMIT_PROFILE, MSG_PD_SINK_REQUEST, MSG_PD_STATUS, MSG_SET_MODE, MSG_SET_POINT,
     MSG_SOFT_RESET, PdSinkMode, PdSinkRequest, PdStatus, STATE_FLAG_UV_LATCHED, SetEnable, SetMode,
-    SetPoint, SlipDecoder, SoftReset, SoftResetReason, decode_cal_mode_frame,
-    decode_fast_status_frame, decode_frame, decode_hello_frame, decode_pd_status_frame,
-    decode_soft_reset_frame, encode_cal_mode_frame, encode_cal_write_frame,
-    encode_limit_profile_frame, encode_pd_sink_request_frame, encode_set_enable_frame,
-    encode_set_mode_frame, encode_set_point_frame, encode_soft_reset_frame, slip_encode,
+    SlipDecoder, SoftReset, SoftResetReason, decode_cal_mode_frame, decode_fast_status_frame,
+    decode_frame, decode_hello_frame, decode_pd_status_frame, decode_soft_reset_frame,
+    encode_cal_mode_frame, encode_cal_write_frame, encode_limit_profile_frame,
+    encode_pd_sink_request_frame, encode_set_enable_frame, encode_set_mode_frame,
+    encode_soft_reset_frame, slip_encode,
 };
 use loadlynx_screen_power::{ScreenPowerConfig, ScreenPowerModel, ScreenPowerState};
 use static_cell::StaticCell;
@@ -78,7 +78,6 @@ use {esp_backtrace as _, esp_println as _}; // panic handler + defmt logger over
 
 pub(crate) const STATE_FLAG_REMOTE_ACTIVE: u32 = 1 << 0;
 const STATE_FLAG_LINK_GOOD: u32 = 1 << 1;
-const STATE_FLAG_ENABLED: u32 = 1 << 2;
 const STATE_FLAG_POWER_LIMITED: u32 = 1 << 4;
 const STATE_FLAG_CURRENT_LIMITED: u32 = 1 << 5;
 
@@ -264,8 +263,6 @@ const UART_RX_TIMEOUT_SYMS: u8 = 12;
 const FAST_STATUS_SLIP_CAPACITY: usize = 1536; // 更大 SLIP 缓冲降低分段/截断
 // UART DMA 环形缓冲长度（同时作为 UHCI chunk_limit），与 SLIP 容量对齐以减少分段。
 const UART_DMA_BUF_LEN: usize = 1536;
-// SetPoint 发送频率：降到 10Hz（100ms）以减轻模拟侧 UART 压力
-const SETPOINT_TX_PERIOD_MS: u32 = 100; // used in encoder-driven mode
 pub(crate) const ENCODER_STEP_MA: i32 = 100; // 每个编码器步进 100mA
 pub(crate) const TARGET_I_MIN_MA: i32 = 0;
 pub(crate) const TARGET_I_MAX_MA: i32 = 5_000;
@@ -281,9 +278,6 @@ pub(crate) const LIMIT_PROFILE_DEFAULT: LimitProfile = LimitProfile {
     thermal_derate_pct: 100,
 };
 const ENABLE_UART_UHCI_DMA: bool = true;
-// SetPoint 可靠传输：ACK 等待与退避重传（最新值优先）。
-const SETPOINT_ACK_TIMEOUT_MS: u32 = 40;
-const SETPOINT_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
 // SetMode 可靠传输：与 SetPoint 类似的 ACK 等待与退避重传（最新值优先）。
 const SETMODE_ACK_TIMEOUT_MS: u32 = 40;
 const SETMODE_RETRY_BACKOFF_MS: [u32; 3] = [40, 80, 160];
@@ -484,20 +478,12 @@ static PD_EXTENDED_FAILURE_LATCH: AtomicBool = AtomicBool::new(false);
 static SOFT_RESET_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SOFT_RESET_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static CAL_MODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
-static SETPOINT_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
-static SETPOINT_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
-static SETPOINT_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
-static SETPOINT_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
-static SETPOINT_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
-static SETPOINT_ACK_PENDING: AtomicBool = AtomicBool::new(false);
-
 static SETMODE_TX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETMODE_ACK_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETMODE_RETX_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETMODE_TIMEOUT_TOTAL: AtomicU32 = AtomicU32::new(0);
 static SETMODE_LAST_ACK_SEQ: AtomicU8 = AtomicU8::new(0);
 static SETMODE_ACK_PENDING: AtomicBool = AtomicBool::new(false);
-pub(crate) static LAST_TARGET_VALUE_FROM_STATUS: AtomicI32 = AtomicI32::new(0);
 pub(crate) static LAST_I_TOTAL_MA: AtomicI32 = AtomicI32::new(0);
 pub(crate) static LAST_CALC_P_MW: AtomicU32 = AtomicU32::new(0);
 pub(crate) static LAST_V_MAIN_MV: AtomicI32 = AtomicI32::new(0);
@@ -523,7 +509,7 @@ pub fn now_ms32() -> u32 {
 }
 
 pub fn timestamp_ms() -> u64 {
-    HalInstant::now().duration_since_epoch().as_millis() as u64
+    HalInstant::now().duration_since_epoch().as_millis()
 }
 
 defmt::timestamp!("{=u64:ms}", timestamp_ms());
@@ -540,11 +526,6 @@ fn screen_power_state_to_u8(state: ScreenPowerState) -> u8 {
 #[inline]
 fn screen_power_state_is_off() -> bool {
     SCREEN_POWER_STATE.load(Ordering::Relaxed) == SCREEN_POWER_STATE_OFF
-}
-
-#[inline]
-fn store_desired_output_enabled(enabled: bool) {
-    DESIRED_OUTPUT_ENABLED.store(enabled, Ordering::Relaxed);
 }
 
 #[inline]
@@ -2901,26 +2882,24 @@ async fn encoder_task(
         }
 
         // Long press: cycle active preset once per press, force output OFF.
-        if pressed {
-            if let Some(start) = down_since_ms {
-                let now = now_ms32();
-                if !long_action_fired && now.wrapping_sub(start) >= LONG_PRESS_MS {
-                    let mut guard = control.lock().await;
-                    if guard.ui_view == control::UiView::Main {
-                        let next = if guard.active_preset_id >= 5 {
-                            1
-                        } else {
-                            guard.active_preset_id + 1
-                        };
-                        guard.activate_preset(next);
-                        bump_control_rev();
-                        prompt_tone::enqueue_ui_ok();
-                        long_action_fired = true;
-                        info!(
-                            "encoder long-press: active_preset_id -> {} (output forced OFF)",
-                            guard.active_preset_id
-                        );
-                    }
+        if pressed && let Some(start) = down_since_ms {
+            let now = now_ms32();
+            if !long_action_fired && now.wrapping_sub(start) >= LONG_PRESS_MS {
+                let mut guard = control.lock().await;
+                if guard.ui_view == control::UiView::Main {
+                    let next = if guard.active_preset_id >= 5 {
+                        1
+                    } else {
+                        guard.active_preset_id + 1
+                    };
+                    guard.activate_preset(next);
+                    bump_control_rev();
+                    prompt_tone::enqueue_ui_ok();
+                    long_action_fired = true;
+                    info!(
+                        "encoder long-press: active_preset_id -> {} (output forced OFF)",
+                        guard.active_preset_id
+                    );
                 }
             }
         }
@@ -3141,7 +3120,7 @@ async fn touch_spring_task(
         cooperative_delay_ms(TOUCH_SPRING_POLL_MS).await;
     }
     let baseline0 = (sum / samples.max(1) as u64) as u32;
-    let noise_span = max.saturating_sub(min) as u32;
+    let noise_span = max.saturating_sub(min);
     // Heuristic: threshold based on observed noise + a small baseline fraction.
     //
     // IMPORTANT (HIL): Touch delta direction can be board/layout dependent, so
@@ -3306,21 +3285,22 @@ async fn touch_spring_task(
             #[cfg(feature = "audio_menu")]
             {
                 // Long press while touched: toggle audio menu.
-                if let Some(p) = press.as_mut() {
-                    if !p.long_fired && now.wrapping_sub(p.start_ms) >= POWER_LONG_PRESS_MS {
-                        let mut guard = control.lock().await;
-                        if guard.ui_view == control::UiView::AudioMenu {
-                            guard.ui_view = control::UiView::Main;
-                            info!("touch_spring: long-press -> close audio menu");
-                        } else {
-                            guard.ui_view = control::UiView::AudioMenu;
-                            info!("touch_spring: long-press -> open audio menu");
-                        }
-                        bump_control_rev();
-                        // UI-only confirmation; avoid playing an extra clip from the audio menu itself.
-                        prompt_tone::enqueue_ui_ok();
-                        p.long_fired = true;
+                if let Some(p) = press.as_mut()
+                    && !p.long_fired
+                    && now.wrapping_sub(p.start_ms) >= POWER_LONG_PRESS_MS
+                {
+                    let mut guard = control.lock().await;
+                    if guard.ui_view == control::UiView::AudioMenu {
+                        guard.ui_view = control::UiView::Main;
+                        info!("touch_spring: long-press -> close audio menu");
+                    } else {
+                        guard.ui_view = control::UiView::AudioMenu;
+                        info!("touch_spring: long-press -> open audio menu");
                     }
+                    bump_control_rev();
+                    // UI-only confirmation; avoid playing an extra clip from the audio menu itself.
+                    prompt_tone::enqueue_ui_ok();
+                    p.long_fired = true;
                 }
             }
 
@@ -3332,59 +3312,59 @@ async fn touch_spring_task(
                 {
                     // Short press: if we did not fire the long action, fall back to the legacy
                     // behaviour (toggle LOAD), unless we are currently in the audio menu.
-                    if let Some(p) = press.take() {
-                        if !p.long_fired {
-                            let view = { control.lock().await.ui_view };
-                            if view != control::UiView::AudioMenu {
-                                let cal_mode = { calibration.lock().await.cal_mode };
-                                let mut guard = control.lock().await;
-                                let preset = guard.effective_output_command(cal_mode).preset;
-                                let setpoint_zero = match preset.mode {
-                                    LoadMode::Cp => preset.target_p_mw == 0,
-                                    LoadMode::Cv => preset.target_v_mv == 0,
-                                    LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
-                                };
+                    if let Some(p) = press.take()
+                        && !p.long_fired
+                    {
+                        let view = { control.lock().await.ui_view };
+                        if view != control::UiView::AudioMenu {
+                            let cal_mode = { calibration.lock().await.cal_mode };
+                            let mut guard = control.lock().await;
+                            let preset = guard.effective_output_command(cal_mode).preset;
+                            let setpoint_zero = match preset.mode {
+                                LoadMode::Cp => preset.target_p_mw == 0,
+                                LoadMode::Cv => preset.target_v_mv == 0,
+                                LoadMode::Cc | LoadMode::Reserved(_) => preset.target_i_ma == 0,
+                            };
 
-                                if guard.output_enabled {
-                                    guard.disable_output_for_mode(cal_mode);
-                                    bump_control_rev();
-                                    prompt_tone::enqueue_load_off_ok();
-                                    info!(
-                                        "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
-                                        guard.active_preset_id, preset.mode
-                                    );
-                                } else if setpoint_zero {
-                                    TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                                    last_touch_block_ms = Some(now);
-                                    prompt_tone::enqueue_ui_fail();
-                                    info!(
-                                        "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
-                                        guard.active_preset_id, preset.mode
-                                    );
-                                } else if let Some(reason) =
-                                    current_load_enable_block_abbrev(preset.min_v_mv)
-                                {
-                                    TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                                    last_touch_block_ms = Some(now);
-                                    prompt_tone::enqueue_ui_fail();
-                                    record_enable_block(reason);
-                                    info!("touch_spring: LOAD enable blocked (reason={})", reason);
-                                } else if !guard.enable_output_for_mode(cal_mode) {
-                                    TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
-                                    last_touch_block_ms = Some(now);
-                                    prompt_tone::enqueue_ui_fail();
-                                    info!(
-                                        "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
-                                        guard.active_preset_id, preset.mode
-                                    );
-                                } else {
-                                    bump_control_rev();
-                                    prompt_tone::enqueue_load_on_ok();
-                                    info!(
-                                        "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
-                                        guard.active_preset_id, preset.mode
-                                    );
-                                }
+                            if guard.output_enabled {
+                                guard.disable_output_for_mode(cal_mode);
+                                bump_control_rev();
+                                prompt_tone::enqueue_load_off_ok();
+                                info!(
+                                    "touch_spring: LOAD ON -> OFF (preset_id={}, mode={:?})",
+                                    guard.active_preset_id, preset.mode
+                                );
+                            } else if setpoint_zero {
+                                TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                                last_touch_block_ms = Some(now);
+                                prompt_tone::enqueue_ui_fail();
+                                info!(
+                                    "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                    guard.active_preset_id, preset.mode
+                                );
+                            } else if let Some(reason) =
+                                current_load_enable_block_abbrev(preset.min_v_mv)
+                            {
+                                TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                                last_touch_block_ms = Some(now);
+                                prompt_tone::enqueue_ui_fail();
+                                record_enable_block(reason);
+                                info!("touch_spring: LOAD enable blocked (reason={})", reason);
+                            } else if !guard.enable_output_for_mode(cal_mode) {
+                                TOUCH_SPRING_ENABLE_BLOCK_TOTAL.fetch_add(1, Ordering::Relaxed);
+                                last_touch_block_ms = Some(now);
+                                prompt_tone::enqueue_ui_fail();
+                                info!(
+                                    "touch_spring: LOAD enable blocked (reason=SETPOINT_ZERO, preset_id={}, mode={:?})",
+                                    guard.active_preset_id, preset.mode
+                                );
+                            } else {
+                                bump_control_rev();
+                                prompt_tone::enqueue_load_on_ok();
+                                info!(
+                                    "touch_spring: LOAD OFF -> ON (preset_id={}, mode={:?})",
+                                    guard.active_preset_id, preset.mode
+                                );
                             }
                         }
                     }
@@ -3592,10 +3572,11 @@ async fn touch_ui_task(
     ) -> bool {
         const TAP_DEDUP_WINDOW_MS: u32 = 220;
 
-        if let Some((last_kind, last_ms)) = *last_action {
-            if last_kind == action && now.wrapping_sub(last_ms) <= TAP_DEDUP_WINDOW_MS {
-                return true;
-            }
+        if let Some((last_kind, last_ms)) = *last_action
+            && last_kind == action
+            && now.wrapping_sub(last_ms) <= TAP_DEDUP_WINDOW_MS
+        {
+            return true;
         }
 
         *last_action = Some((action, now));
@@ -3622,21 +3603,20 @@ async fn touch_ui_task(
             down_ms,
             hold_preview_shown: false,
         }) = quick_switch
+            && now_ms32().wrapping_sub(down_ms) >= HOLD_PREVIEW_MS
         {
-            if now_ms32().wrapping_sub(down_ms) >= HOLD_PREVIEW_MS {
-                let view = { control.lock().await.ui_view };
-                if view == control::UiView::Main {
-                    PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
-                    quick_switch = Some(ControlRowTouch::PresetSwitch {
-                        start_x,
-                        base_id,
-                        dragging: false,
-                        preview_id,
-                        boundary_fail_fired,
-                        down_ms,
-                        hold_preview_shown: true,
-                    });
-                }
+            let view = { control.lock().await.ui_view };
+            if view == control::UiView::Main {
+                PRESET_PREVIEW_ID.store(preview_id, Ordering::Relaxed);
+                quick_switch = Some(ControlRowTouch::PresetSwitch {
+                    start_x,
+                    base_id,
+                    dragging: false,
+                    preview_id,
+                    boundary_fail_fired,
+                    down_ms,
+                    hold_preview_shown: true,
+                });
             }
         }
 
@@ -3932,7 +3912,7 @@ async fn touch_ui_task(
                         }
 
                         if preview_id != last_preview_id {
-                            let steps = (preview_id as i32 - last_preview_id as i32).abs() as u32;
+                            let steps = (preview_id as i32 - last_preview_id as i32).unsigned_abs();
                             prompt_tone::enqueue_ticks(steps);
                             need_state_update = true;
                         }
@@ -3989,7 +3969,7 @@ async fn touch_ui_task(
                                 control::AdjustDigit::Thousandths => 3,
                             };
                             let raw_rank = cur_rank + dir;
-                            let attempted_oob = raw_rank < 0 || raw_rank > 3;
+                            let attempted_oob = !(0..=3).contains(&raw_rank);
 
                             if attempted_oob {
                                 if !next_boundary_fail_fired {
@@ -4069,7 +4049,7 @@ async fn touch_ui_task(
                                     _ => 1,
                                 };
                                 let raw_rank = cur_rank + dir;
-                                let attempted_oob = raw_rank < 0 || raw_rank > 2;
+                                let attempted_oob = !(0..=2).contains(&raw_rank);
                                 if attempted_oob {
                                     if !next_boundary_fail_fired {
                                         prompt_tone::enqueue_ui_fail();
@@ -4209,75 +4189,74 @@ async fn touch_ui_task(
                     // Fallback: if we missed both down and contact arming, infer a tap from the up
                     // location for the control row. This keeps the Preset pill responsive even under
                     // marker sample loss.
-                    if matches!(view, control::UiView::Main | control::UiView::PresetPanel) {
-                        if let Some(hit) = ui::hit_test_control_row(marker.x, marker.y) {
-                            match hit {
-                                ui::ControlRowHit::PresetEntry => match view {
-                                    control::UiView::Main => {
-                                        let mut guard = control.lock().await;
-                                        guard.ui_view = control::UiView::PresetPanel;
-                                        guard.editing_preset_id = guard.active_preset_id;
-                                        guard.panel_selected_field =
-                                            ui::preset_panel::PresetPanelField::Target;
-                                        guard.panel_selected_digit =
-                                            ui::preset_panel::PresetPanelDigit::Tenths;
+                    if matches!(view, control::UiView::Main | control::UiView::PresetPanel)
+                        && let Some(hit) = ui::hit_test_control_row(marker.x, marker.y)
+                    {
+                        match hit {
+                            ui::ControlRowHit::PresetEntry => match view {
+                                control::UiView::Main => {
+                                    let mut guard = control.lock().await;
+                                    guard.ui_view = control::UiView::PresetPanel;
+                                    guard.editing_preset_id = guard.active_preset_id;
+                                    guard.panel_selected_field =
+                                        ui::preset_panel::PresetPanelField::Target;
+                                    guard.panel_selected_digit =
+                                        ui::preset_panel::PresetPanelDigit::Tenths;
+                                    bump_control_rev();
+                                    speaker::enqueue(speaker::SpeakerSound::UiTouch);
+                                    info!(
+                                        "touch: preset entry tap (fallback) -> open preset panel (editing preset_id={})",
+                                        guard.editing_preset_id
+                                    );
+                                }
+                                control::UiView::PresetPanel => {
+                                    let mut guard = control.lock().await;
+                                    guard.close_panel_discard();
+                                    guard.ui_view = control::UiView::Main;
+                                    bump_control_rev();
+                                    speaker::enqueue(speaker::SpeakerSound::UiTouch);
+                                    info!(
+                                        "touch: preset entry tap (fallback) -> close preset panel (discard non-active)"
+                                    );
+                                }
+                                control::UiView::PresetPanelBlocked => {}
+                                control::UiView::PdSettings => {}
+                                #[cfg(feature = "audio_menu")]
+                                control::UiView::AudioMenu => {}
+                            },
+                            ui::ControlRowHit::TargetEntry => {
+                                if view == control::UiView::Main {
+                                    let mut guard = control.lock().await;
+                                    let preset = guard.active_preset();
+                                    let mode = match preset.mode {
+                                        LoadMode::Cv => LoadMode::Cv,
+                                        LoadMode::Cp => LoadMode::Cp,
+                                        _ => LoadMode::Cc,
+                                    };
+                                    let unit = match mode {
+                                        LoadMode::Cv => 'V',
+                                        LoadMode::Cp => 'W',
+                                        _ => 'A',
+                                    };
+                                    let pick = ui::pick_control_row_setpoint_digit(marker.x, unit);
+                                    let digit = coerce_adjust_digit_for_mode(mode, pick.digit);
+                                    if digit != guard.adjust_digit {
+                                        guard.adjust_digit = digit;
                                         bump_control_rev();
                                         speaker::enqueue(speaker::SpeakerSound::UiTouch);
                                         info!(
-                                            "touch: preset entry tap (fallback) -> open preset panel (editing preset_id={})",
-                                            guard.editing_preset_id
+                                            "touch: setpoint entry tap (fallback) -> select adjust_digit ({:?})",
+                                            guard.adjust_digit
                                         );
-                                    }
-                                    control::UiView::PresetPanel => {
-                                        let mut guard = control.lock().await;
-                                        guard.close_panel_discard();
-                                        guard.ui_view = control::UiView::Main;
-                                        bump_control_rev();
-                                        speaker::enqueue(speaker::SpeakerSound::UiTouch);
-                                        info!(
-                                            "touch: preset entry tap (fallback) -> close preset panel (discard non-active)"
-                                        );
-                                    }
-                                    control::UiView::PresetPanelBlocked => {}
-                                    control::UiView::PdSettings => {}
-                                    #[cfg(feature = "audio_menu")]
-                                    control::UiView::AudioMenu => {}
-                                },
-                                ui::ControlRowHit::TargetEntry => {
-                                    if view == control::UiView::Main {
-                                        let mut guard = control.lock().await;
-                                        let preset = guard.active_preset();
-                                        let mode = match preset.mode {
-                                            LoadMode::Cv => LoadMode::Cv,
-                                            LoadMode::Cp => LoadMode::Cp,
-                                            _ => LoadMode::Cc,
-                                        };
-                                        let unit = match mode {
-                                            LoadMode::Cv => 'V',
-                                            LoadMode::Cp => 'W',
-                                            _ => 'A',
-                                        };
-                                        let pick =
-                                            ui::pick_control_row_setpoint_digit(marker.x, unit);
-                                        let digit = coerce_adjust_digit_for_mode(mode, pick.digit);
-                                        if digit != guard.adjust_digit {
-                                            guard.adjust_digit = digit;
-                                            bump_control_rev();
-                                            speaker::enqueue(speaker::SpeakerSound::UiTouch);
-                                            info!(
-                                                "touch: setpoint entry tap (fallback) -> select adjust_digit ({:?})",
-                                                guard.adjust_digit
-                                            );
-                                        }
                                     }
                                 }
                             }
-
-                            PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
-                            last_tab_tap = None;
-                            yield_now().await;
-                            continue;
                         }
+
+                        PRESET_PREVIEW_ID.store(0, Ordering::Relaxed);
+                        last_tab_tap = None;
+                        yield_now().await;
+                        continue;
                     }
 
                     if view == control::UiView::Main
@@ -4329,13 +4308,12 @@ async fn touch_ui_task(
                             }
                             // Only attempt a non-Safe5V renegotiation while the analog side is
                             // healthy; Safe5V requests may still be sent to lock back down.
-                            let may_live_apply = if !allow_extended_voltage {
-                                true
-                            } else if !allows_non_safe5v {
-                                true
-                            } else {
-                                !matches!(analog_state, AnalogState::Faulted | AnalogState::Offline)
-                            };
+                            let may_live_apply = !allow_extended_voltage
+                                || !allows_non_safe5v
+                                || !matches!(
+                                    analog_state,
+                                    AnalogState::Faulted | AnalogState::Offline
+                                );
                             if attached {
                                 start_pd_extended_voltage_retry_window(apply_ms);
                                 PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
@@ -4462,16 +4440,12 @@ async fn touch_ui_task(
                                         if !allow_extended_voltage {
                                             clear_pd_extended_voltage_failure();
                                         }
-                                        let may_live_apply = if !allow_extended_voltage {
-                                            true
-                                        } else if !allows_non_safe5v {
-                                            true
-                                        } else {
-                                            !matches!(
+                                        let may_live_apply = !allow_extended_voltage
+                                            || !allows_non_safe5v
+                                            || !matches!(
                                                 analog_state,
                                                 AnalogState::Faulted | AnalogState::Offline
-                                            )
-                                        };
+                                            );
                                         if attached {
                                             start_pd_extended_voltage_retry_window(apply_ms);
                                             PD_UI_APPLY_MS.store(apply_ms, Ordering::Relaxed);
@@ -5441,16 +5415,15 @@ pub(crate) fn pd_fixed_target_mv(cfg: control::PdConfig, status: Option<&PdStatu
     }
 
     if let Some(status) = status {
-        if cfg.fixed_object_pos != 0 {
-            if let Some(pdo) = status
+        if cfg.fixed_object_pos != 0
+            && let Some(pdo) = status
                 .fixed_pdos
                 .iter()
                 .enumerate()
                 .find(|(idx, pdo)| pdo_pos(pdo.pos, *idx) == cfg.fixed_object_pos)
                 .map(|(_idx, pdo)| *pdo)
-            {
-                return pdo.mv;
-            }
+        {
+            return pdo.mv;
         }
 
         if let Some(pdo) = status
@@ -5973,13 +5946,7 @@ impl DisplayPipelineState {
             return Some(self.displayed_idx);
         }
 
-        for idx in 0..DISPLAY_BUFFER_COUNT {
-            if !self.is_reserved(idx) {
-                return Some(idx);
-            }
-        }
-
-        None
+        (0..DISPLAY_BUFFER_COUNT).find(|&idx| !self.is_reserved(idx))
     }
 }
 
@@ -6027,6 +5994,7 @@ impl DisplayPsramArena {
         unsafe { slice::from_raw_parts(self.slot_ptr(idx), FRAMEBUFFER_LEN) }
     }
 
+    #[allow(clippy::mut_from_ref)]
     fn framebuffer_mut(&self, idx: usize) -> &mut [u8] {
         unsafe { slice::from_raw_parts_mut(self.slot_ptr(idx), FRAMEBUFFER_LEN) }
     }
@@ -6339,11 +6307,7 @@ async fn fan_task(
         };
 
         let target_duty_pct = compute_fan_duty_pct(core_temp_c, main_power_w);
-        let diff = if target_duty_pct > last_duty_pct {
-            target_duty_pct - last_duty_pct
-        } else {
-            last_duty_pct - target_duty_pct
-        };
+        let diff = target_duty_pct.abs_diff(last_duty_pct);
 
         if diff >= FAN_DUTY_UPDATE_THRESHOLD_PCT {
             fan_channel
@@ -6351,11 +6315,7 @@ async fn fan_task(
                 .expect("fan duty update");
 
             let now = now_ms32();
-            let log_diff = if target_duty_pct > last_log_duty_pct {
-                target_duty_pct - last_log_duty_pct
-            } else {
-                last_log_duty_pct - target_duty_pct
-            };
+            let log_diff = target_duty_pct.abs_diff(last_log_duty_pct);
             let high_temp = core_temp_c >= FAN_LOG_HIGH_TEMP_C;
             if high_temp
                 || (log_diff >= FAN_LOG_DUTY_DELTA_LARGE_PCT
@@ -6501,7 +6461,6 @@ async fn apply_fast_status(
 
     let mut guard = telemetry.lock().await;
     guard.update_from_status(status);
-    LAST_TARGET_VALUE_FROM_STATUS.store(status.target_value, Ordering::Relaxed);
 
     if fault_flags != 0 {
         let now = now_ms32();
@@ -6602,8 +6561,8 @@ fn display_dirty_row_count(rects: &ui::DirtyRects) -> u16 {
     for rect in rects.iter() {
         let start = rect.y as usize;
         let end = (start + rect.height as usize).min(DISPLAY_HEIGHT);
-        for row in start..end {
-            rows[row] = true;
+        for dirty in rows.iter_mut().take(end).skip(start) {
+            *dirty = true;
         }
     }
     rows.iter().filter(|&&dirty| dirty).count() as u16
@@ -6674,8 +6633,10 @@ where
             )
             .await?;
 
-        for _ in 0..DISPLAY_CHUNK_YIELD_LOOPS {
+        let mut yields = DISPLAY_CHUNK_YIELD_LOOPS;
+        while yields > 0 {
             yield_now().await;
+            yields -= 1;
         }
         row_offset += rows;
     }
@@ -6720,7 +6681,7 @@ async fn display_render_task(
         let frame_idx = DISPLAY_FRAME_COUNT
             .fetch_add(1, Ordering::Relaxed)
             .wrapping_add(1);
-        let log_this_frame = frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx % 32 == 0;
+        let log_this_frame = frame_idx <= FRAME_SAMPLE_FRAMES || frame_idx.is_multiple_of(32);
         if log_this_frame {
             info!("display: rendering frame {} (dt_ms={})", frame_idx, dt_ms);
         }
@@ -6730,11 +6691,9 @@ async fn display_render_task(
         if window_elapsed >= DISPLAY_FPS_WINDOW_MS {
             let presented_total = DISPLAY_PRESENT_COUNT.load(Ordering::Relaxed);
             let presented_frames = presented_total.wrapping_sub(fps_window_presented);
-            let fps = if window_elapsed > 0 {
-                (presented_frames.saturating_mul(1000)) / window_elapsed
-            } else {
-                0
-            };
+            let fps = (presented_frames.saturating_mul(1000))
+                .checked_div(window_elapsed)
+                .unwrap_or(0);
             fps_dirty = fps != last_fps;
             last_fps = fps;
             info!(
@@ -7059,13 +7018,13 @@ async fn display_render_task(
             if panel_dirty {
                 ui::preset_panel::push_panel_dirty_rect(&mut dirty_rects);
             }
-            if let Some(plan) = pending_plan {
-                if merge_pending_dirty_rects(&mut dirty_rects, plan) {
-                    dirty_rects.clear();
-                    ui::push_full_screen_dirty_rect(&mut dirty_rects);
-                    full_refresh = true;
-                    overlay_dirty = true;
-                }
+            if let Some(plan) = pending_plan
+                && merge_pending_dirty_rects(&mut dirty_rects, plan)
+            {
+                dirty_rects.clear();
+                ui::push_full_screen_dirty_rect(&mut dirty_rects);
+                full_refresh = true;
+                overlay_dirty = true;
             }
             if dirty_rects.len() >= DISPLAY_DIRTY_RECT_FALLBACK {
                 dirty_rects.clear();
@@ -7613,7 +7572,7 @@ async fn feed_decoder(
                                 apply_fast_status(control, calibration, telemetry, &status).await;
                                 let total =
                                     FAST_STATUS_OK_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
-                                if total % 32 == 0 {
+                                if total.is_multiple_of(32) {
                                     let display_running =
                                         DISPLAY_TASK_RUNNING.load(Ordering::Relaxed);
                                     info!(
@@ -7635,13 +7594,7 @@ async fn feed_decoder(
                             }
                         },
                         MSG_SET_POINT => {
-                            if header.flags & FLAG_IS_ACK != 0 {
-                                record_link_activity();
-                                handle_setpoint_ack(&header);
-                            } else {
-                                // For now we do not expect SetPoint requests on the digital side.
-                                rate_limited_proto_warn("unexpected setpoint frame", None);
-                            }
+                            rate_limited_proto_warn("unexpected setpoint frame", None);
                         }
                         MSG_SET_MODE => {
                             if header.flags & FLAG_IS_ACK != 0 {
@@ -7809,16 +7762,6 @@ fn link_recovery_reason(
     }
 
     None
-}
-
-fn handle_setpoint_ack(header: &FrameHeader) {
-    SETPOINT_LAST_ACK_SEQ.store(header.seq, Ordering::Relaxed);
-    SETPOINT_ACK_PENDING.store(false, Ordering::Release);
-    let total = SETPOINT_ACK_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
-    info!(
-        "setpoint ack received: seq={} flags=0x{:02x} len={} (ack_total={})",
-        header.seq, header.flags, header.len, total
-    );
 }
 
 fn handle_setmode_ack(header: &FrameHeader) {
@@ -8606,10 +8549,6 @@ async fn stats_task(telemetry: &'static TelemetryMutex) {
             let de = PROTO_DECODE_ERRS.load(Ordering::Relaxed);
             let df = PROTO_FRAMING_DROPS.load(Ordering::Relaxed);
             let ut = UART_RX_ERR_TOTAL.load(Ordering::Relaxed);
-            let sp_tx = SETPOINT_TX_TOTAL.load(Ordering::Relaxed);
-            let sp_ack = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
-            let sp_retx = SETPOINT_RETX_TOTAL.load(Ordering::Relaxed);
-            let sp_timeout = SETPOINT_TIMEOUT_TOTAL.load(Ordering::Relaxed);
             let touch_int = touch::TOUCH_INT_COUNT.load(Ordering::Relaxed);
             let touch_i2c = touch::TOUCH_I2C_READ_COUNT.load(Ordering::Relaxed);
             let touch_parse_fail = touch::TOUCH_PARSE_FAIL_COUNT.load(Ordering::Relaxed);
@@ -8633,7 +8572,7 @@ async fn stats_task(telemetry: &'static TelemetryMutex) {
             let display_present_dirty_rows = DISPLAY_PRESENT_DIRTY_ROWS.load(Ordering::Relaxed);
             let display_pending_drops = DISPLAY_PENDING_DROPS.load(Ordering::Relaxed);
             info!(
-                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, display_render_ms={}, display_clone_ms={}, display_present_ms={}, display_present_full_count={}, display_present_dirty_rows={}, display_pending_drops={}, setpoint_tx={}, ack={}, retx={}, timeout={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}, tick_enq={}, tick_play={}, tick_pending={}",
+                "stats: fast_status_ok={}, decode_errs={}, framing_drops={}, uart_rx_err_total={}, display_render_ms={}, display_clone_ms={}, display_present_ms={}, display_present_full_count={}, display_present_dirty_rows={}, display_pending_drops={}, touch_int={}, touch_i2c_reads={}, touch_parse_fail={}, touch_spring_reads={}, touch_spring_down={}, touch_spring_suppress={}, touch_spring_block={}, touch_spring_meas_timeout={}, touch_spring_raw={}, touch_spring_baseline={}, touch_spring_delta_abs={}, speaker_play={}, speaker_drop={}, tick_enq={}, tick_play={}, tick_pending={}",
                 ok,
                 de,
                 df,
@@ -8644,10 +8583,6 @@ async fn stats_task(telemetry: &'static TelemetryMutex) {
                 display_present_full_count,
                 display_present_dirty_rows,
                 display_pending_drops,
-                sp_tx,
-                sp_ack,
-                sp_retx,
-                sp_timeout,
                 touch_int,
                 touch_i2c,
                 touch_parse_fail,
@@ -8761,551 +8696,6 @@ async fn load_guard_task(control: &'static ControlMutex) {
             }
         }
         cooperative_delay_ms(50).await;
-    }
-}
-
-/// SetPoint 发送任务：20 Hz（或按需要），带 ACK 等待与退避重传，最新值优先。
-#[embassy_executor::task]
-async fn setpoint_tx_task(
-    mut uhci_tx: uhci::UhciTx<'static, Async>,
-    calibration: &'static CalibrationMutex,
-) {
-    info!(
-        "SetPoint TX task starting (ack_timeout={} ms, backoff={:?})",
-        SETPOINT_ACK_TIMEOUT_MS, SETPOINT_RETRY_BACKOFF_MS
-    );
-
-    #[derive(Clone, Copy)]
-    struct Pending {
-        seq: u8,
-        target_i_ma: i32,
-        attempts: u8, // includes initial send
-        ack_total_at_send: u32,
-        deadline_ms: u32,
-    }
-
-    let mut raw = [0u8; 64];
-    let mut slip = [0u8; 192];
-
-    // Soft-reset handshake (fixed seq=0); proceed even if ACK arrives late.
-    let soft_reset_seq: u8 = 0;
-    let soft_reset_acked =
-        send_soft_reset_handshake(&mut uhci_tx, soft_reset_seq, &mut raw, &mut slip).await;
-    if !soft_reset_acked {
-        warn!("soft_reset ack missing within retry window; continuing after quiet gap");
-    }
-
-    // 更长的静默让模拟侧 UART 启动稳定，避免一上电被突发刷屏。
-    cooperative_delay_ms(300).await;
-
-    let mut seq: u8 = 1;
-
-    // Cold boot: send the full 4-curve calibration set so the analog side can
-    // reach CAL_READY (empty curves are rejected on G431).
-    let profile = { calibration.lock().await.profile.clone() };
-    send_all_calibration_curves(
-        &mut uhci_tx,
-        &mut seq,
-        &profile,
-        &mut raw,
-        &mut slip,
-        "boot",
-    )
-    .await;
-
-    // 启动链路后发送一次 SetEnable(true)，用于拉起模拟侧输出 gating。
-    let enable_cmd = SetEnable { enable: true };
-    match encode_set_enable_frame(seq, &enable_cmd, &mut raw) {
-        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
-            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-                Ok(written) if written == slip_len => {
-                    let _ = uhci_tx.uart_tx.flush_async().await;
-                    info!(
-                        "SetEnable(true) frame sent seq={} len={} slip_len={}",
-                        seq, frame_len, slip_len
-                    );
-                }
-                Ok(written) => {
-                    warn!(
-                        "SetEnable(true) short write {} < {} (seq={})",
-                        written, slip_len, seq
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        "SetEnable(true) uart write error for seq={}: {:?}",
-                        seq, err
-                    );
-                }
-            },
-            Err(err) => {
-                warn!("SetEnable(true) slip_encode error: {:?}", err);
-            }
-        },
-        Err(err) => {
-            warn!("SetEnable(true) encode_set_enable_frame error: {:?}", err);
-        }
-    }
-    seq = seq.wrapping_add(1);
-
-    // 在握手完成后发送一次静态 LimitProfile v0，供模拟板建立软件软限。
-    match encode_limit_profile_frame(seq, &LIMIT_PROFILE_DEFAULT, &mut raw) {
-        Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
-            Ok(slip_len) => match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-                Ok(written) if written == slip_len => {
-                    let _ = uhci_tx.uart_tx.flush_async().await;
-                    info!(
-                        "LimitProfile v0 sent (msg=0x{:02x}): max_i={}mA max_p={}mW ovp={}mV temp_trip={}mC derate={}%, seq={} len={} slip_len={}",
-                        MSG_LIMIT_PROFILE,
-                        LIMIT_PROFILE_DEFAULT.max_i_ma,
-                        LIMIT_PROFILE_DEFAULT.max_p_mw,
-                        LIMIT_PROFILE_DEFAULT.ovp_mv,
-                        LIMIT_PROFILE_DEFAULT.temp_trip_mc,
-                        LIMIT_PROFILE_DEFAULT.thermal_derate_pct,
-                        seq,
-                        frame_len,
-                        slip_len
-                    );
-                }
-                Ok(written) => {
-                    warn!(
-                        "LimitProfile v0 short write {} < {} (seq={})",
-                        written, slip_len, seq
-                    );
-                }
-                Err(err) => {
-                    warn!(
-                        "LimitProfile v0 uart write error for seq={}: {:?}",
-                        seq, err
-                    );
-                }
-            },
-            Err(err) => {
-                warn!("LimitProfile v0 slip_encode error: {:?}", err);
-            }
-        },
-        Err(err) => {
-            warn!(
-                "LimitProfile v0 encode_limit_profile_frame error: {:?}",
-                err
-            );
-        }
-    }
-    seq = seq.wrapping_add(1);
-
-    let mut pending: Option<Pending> = None;
-    let mut last_sent_target: Option<i32> = None;
-    let mut last_sent_ms: u32 = now_ms32();
-    let mut mismatch_streak: u8 = 0;
-    // Track how long we've been stuck in AnalogState::CalMissing so we can
-    // log and opportunistically retry the CalWrite/SetEnable handshake.
-    let mut calmissing_since_ms: Option<u32> = None;
-    let mut last_calmissing_warn_ms: u32 = 0;
-    let mut last_calmissing_handshake_ms: u32 = 0;
-    let mut prev_link_up: bool = LINK_UP.load(Ordering::Relaxed);
-
-    loop {
-        yield_now().await;
-
-        // Drain at most one pending soft-reset request per loop iteration.
-        if let Some(reason) = crate::dequeue_soft_reset() {
-            let soft_seq = seq;
-            seq = seq.wrapping_add(1);
-            send_soft_reset_one_shot(&mut uhci_tx, soft_seq, &mut raw, &mut slip, reason).await;
-        }
-
-        // Handle low-frequency calibration UART commands from the HTTP API.
-        #[cfg(feature = "net_http")]
-        if let Some(cmd) = crate::dequeue_cal_uart() {
-            match cmd {
-                CalUartCommand::SendAllCurves => {
-                    let profile = { calibration.lock().await.profile.clone() };
-                    send_all_calibration_curves(
-                        &mut uhci_tx,
-                        &mut seq,
-                        &profile,
-                        &mut raw,
-                        &mut slip,
-                        "http-cal",
-                    )
-                    .await;
-                }
-                CalUartCommand::SendCurve(kind) => {
-                    let profile = { calibration.lock().await.profile.clone() };
-                    send_calibration_curve(
-                        &mut uhci_tx,
-                        &mut seq,
-                        &profile,
-                        kind,
-                        &mut raw,
-                        &mut slip,
-                        "http-cal",
-                    )
-                    .await;
-                }
-                CalUartCommand::SetMode(kind) => {
-                    let seq_now = seq;
-                    seq = seq.wrapping_add(1);
-                    let _ = send_cal_mode_frame(
-                        &mut uhci_tx,
-                        seq_now,
-                        kind,
-                        &mut raw,
-                        &mut slip,
-                        "http-cal",
-                    )
-                    .await;
-                }
-            }
-        }
-
-        // On link recovery, re-send the full calibration set.
-        let link_up_now = LINK_UP.load(Ordering::Relaxed);
-        if link_up_now && !prev_link_up {
-            prev_link_up = true;
-            let profile = { calibration.lock().await.profile.clone() };
-            send_all_calibration_curves(
-                &mut uhci_tx,
-                &mut seq,
-                &profile,
-                &mut raw,
-                &mut slip,
-                "link-recover",
-            )
-            .await;
-        } else if !link_up_now && prev_link_up {
-            prev_link_up = false;
-        }
-
-        let now = now_ms32();
-        let setpoint_ma = clamp_target_ma(ENCODER_VALUE.load(Ordering::SeqCst) * ENCODER_STEP_MA);
-        if setpoint_ma == 0 {
-            LOAD_SWITCH_ENABLED.store(false, Ordering::SeqCst);
-        }
-        let desired_target = if LOAD_SWITCH_ENABLED.load(Ordering::SeqCst) {
-            setpoint_ma
-        } else {
-            0
-        };
-        let observed_target = LAST_TARGET_VALUE_FROM_STATUS.load(Ordering::Relaxed);
-
-        if observed_target == desired_target {
-            mismatch_streak = 0;
-        } else {
-            mismatch_streak = mismatch_streak.saturating_add(1);
-        }
-
-        // Check for ACK arrival on the current pending seq.
-        let ack_hit = if let Some(p) = pending.as_ref() {
-            let ack_total = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
-            let ack_seq = SETPOINT_LAST_ACK_SEQ.load(Ordering::Relaxed);
-            ack_total != p.ack_total_at_send && ack_seq == p.seq
-        } else {
-            false
-        };
-        if ack_hit {
-            if let Some(p) = pending.take() {
-                SETPOINT_ACK_PENDING.store(false, Ordering::Release);
-                last_sent_target = Some(p.target_i_ma);
-                last_sent_ms = now;
-            }
-            continue;
-        }
-
-        // Pre-empt with latest value if target changed while waiting.
-        let mut should_send_new = false;
-        let mut send_reason = "periodic";
-        if let Some(p) = pending.as_ref() {
-            if p.target_i_ma != desired_target {
-                should_send_new = true;
-                send_reason = "latest-value-preempt";
-                pending = None; // drop old pending; latest值优先
-            }
-        } else if now.saturating_sub(last_sent_ms) >= SETPOINT_TX_PERIOD_MS {
-            should_send_new = true;
-            if last_sent_target
-                .map(|t| t != desired_target)
-                .unwrap_or(true)
-            {
-                send_reason = "target-change";
-            } else {
-                send_reason = "periodic";
-            }
-        } else if mismatch_streak >= 3 {
-            should_send_new = true;
-            send_reason = "telemetry-mismatch";
-        }
-
-        if should_send_new {
-            // Gate 新 SetPoint：仅在链路就绪时才允许发送；HELLO 仅作附加信息。
-            if !LINK_UP.load(Ordering::Relaxed) {
-                let now_ms = now;
-                let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
-                if now_ms.wrapping_sub(last_gate) >= 1_000 {
-                    LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
-                    warn!(
-                        "SetPoint TX gated (link_up=false, hello_seen={}, target={} mA)",
-                        HELLO_SEEN.load(Ordering::Relaxed),
-                        desired_target
-                    );
-                }
-                // 保留现有 pending/ACK 状态，仅抑制新指令。
-                continue;
-            }
-
-            let analog_state = AnalogState::from_u8(ANALOG_STATE.load(Ordering::Relaxed));
-            match analog_state {
-                AnalogState::Faulted => {
-                    // Leaving CalMissing; reset stuck timer.
-                    calmissing_since_ms = None;
-
-                    let now_ms = now;
-                    let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
-                    if now_ms.wrapping_sub(last_gate) >= 1_000 {
-                        LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
-                        warn!("SetPoint TX gated: analog fault (state=FAULTED)");
-                    }
-                    continue;
-                }
-                AnalogState::CalMissing => {
-                    let now_ms = now;
-                    let last_gate = LAST_SETPOINT_GATE_WARN_MS.load(Ordering::Relaxed);
-                    if now_ms.wrapping_sub(last_gate) >= 1_000 {
-                        LAST_SETPOINT_GATE_WARN_MS.store(now_ms, Ordering::Relaxed);
-                        warn!("SetPoint TX gated: analog not ready (calibration missing?)");
-                    }
-
-                    // Record when we first entered CalMissing.
-                    let since = calmissing_since_ms.get_or_insert(now_ms);
-                    let stuck_ms = now_ms.wrapping_sub(*since);
-
-                    // After a short grace period, emit a rate-limited diagnostic and
-                    // retry the SoftReset + CalWrite + SetEnable handshake to recover
-                    // from a potentially dropped calibration write.
-                    if stuck_ms >= 2_000 {
-                        if now_ms.wrapping_sub(last_calmissing_warn_ms) >= 5_000 {
-                            last_calmissing_warn_ms = now_ms;
-                            warn!(
-                                "analog stuck in CalMissing (link_up=true, fault_flags=0, enable=false, stuck_ms={})",
-                                stuck_ms
-                            );
-                        }
-
-                        if now_ms.wrapping_sub(last_calmissing_handshake_ms) >= 5_000 {
-                            last_calmissing_handshake_ms = now_ms;
-                            warn!(
-                                "retrying SoftReset + CalWrite + SetEnable handshake due to CalMissing"
-                            );
-
-                            // SoftReset re-handshake: use a fresh seq to keep framing sane.
-                            let soft_reset_seq = seq;
-                            seq = seq.wrapping_add(1);
-                            let soft_reset_acked = send_soft_reset_handshake(
-                                &mut uhci_tx,
-                                soft_reset_seq,
-                                &mut raw,
-                                &mut slip,
-                            )
-                            .await;
-                            if !soft_reset_acked {
-                                warn!(
-                                    "soft_reset re-handshake: ack missing; continuing with CalWrite+SetEnable"
-                                );
-                            }
-
-                            // Re-send the full calibration set (multi-chunk CalWrite) to unlock
-                            // CAL_READY on the analog side.
-                            let profile = { calibration.lock().await.profile.clone() };
-                            send_all_calibration_curves(
-                                &mut uhci_tx,
-                                &mut seq,
-                                &profile,
-                                &mut raw,
-                                &mut slip,
-                                "calmissing-recover",
-                            )
-                            .await;
-
-                            // Re-send SetEnable(true) to re-arm ENABLE_REQUESTED on analog.
-                            let enable_seq = seq;
-                            let enable_cmd = SetEnable { enable: true };
-                            match encode_set_enable_frame(enable_seq, &enable_cmd, &mut raw) {
-                                Ok(frame_len) => match slip_encode(&raw[..frame_len], &mut slip) {
-                                    Ok(slip_len) => {
-                                        match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-                                            Ok(written) if written == slip_len => {
-                                                let _ = uhci_tx.uart_tx.flush_async().await;
-                                                info!(
-                                                    "SetEnable(true) frame re-sent seq={} len={} slip_len={}",
-                                                    enable_seq, frame_len, slip_len
-                                                );
-                                            }
-                                            Ok(written) => {
-                                                warn!(
-                                                    "SetEnable(true) re-send short write {} < {} (seq={})",
-                                                    written, slip_len, enable_seq
-                                                );
-                                            }
-                                            Err(err) => {
-                                                warn!(
-                                                    "SetEnable(true) re-send uart write error for seq={}: {:?}",
-                                                    enable_seq, err
-                                                );
-                                            }
-                                        }
-                                    }
-                                    Err(err) => {
-                                        warn!(
-                                            "SetEnable(true) re-send slip_encode error: {:?}",
-                                            err
-                                        );
-                                    }
-                                },
-                                Err(err) => {
-                                    warn!(
-                                        "SetEnable(true) re-send encode_set_enable_frame error: {:?}",
-                                        err
-                                    );
-                                }
-                            }
-                            seq = seq.wrapping_add(1);
-                        }
-                    }
-
-                    continue;
-                }
-                AnalogState::Offline | AnalogState::MeasurementInvalid | AnalogState::Ready => {
-                    // Leaving CalMissing; reset stuck timer.
-                    calmissing_since_ms = None;
-                }
-            }
-
-            let send_seq = seq;
-            seq = seq.wrapping_add(1);
-            let ack_baseline = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
-            if send_setpoint_frame(
-                &mut uhci_tx,
-                send_seq,
-                desired_target,
-                &mut raw,
-                &mut slip,
-                send_reason,
-            )
-            .await
-            {
-                SETPOINT_TX_TOTAL.fetch_add(1, Ordering::Relaxed);
-                let deadline = now.saturating_add(SETPOINT_ACK_TIMEOUT_MS);
-                last_sent_target = Some(desired_target);
-                last_sent_ms = now;
-                pending = Some(Pending {
-                    seq: send_seq,
-                    target_i_ma: desired_target,
-                    attempts: 1,
-                    ack_total_at_send: ack_baseline,
-                    deadline_ms: deadline,
-                });
-            } else {
-                SETPOINT_ACK_PENDING.store(false, Ordering::Release);
-            }
-        } else if let Some(mut p) = pending.take() {
-            // Timeout + retry path
-            if now >= p.deadline_ms {
-                if (p.attempts as usize) <= SETPOINT_RETRY_BACKOFF_MS.len() {
-                    let backoff_ms = SETPOINT_RETRY_BACKOFF_MS[(p.attempts - 1) as usize];
-                    let ack_baseline = SETPOINT_ACK_TOTAL.load(Ordering::Relaxed);
-                    let send_seq = p.seq;
-                    if send_setpoint_frame(
-                        &mut uhci_tx,
-                        send_seq,
-                        p.target_i_ma,
-                        &mut raw,
-                        &mut slip,
-                        "retx",
-                    )
-                    .await
-                    {
-                        SETPOINT_RETX_TOTAL.fetch_add(1, Ordering::Relaxed);
-                        p.attempts = p.attempts.saturating_add(1);
-                        p.ack_total_at_send = ack_baseline;
-                        p.deadline_ms = now.saturating_add(backoff_ms);
-                        last_sent_ms = now;
-                        pending = Some(p);
-                    } else {
-                        SETPOINT_ACK_PENDING.store(false, Ordering::Release);
-                        pending = None;
-                    }
-                } else {
-                    SETPOINT_TIMEOUT_TOTAL.fetch_add(1, Ordering::Relaxed);
-                    warn!(
-                        "setpoint ack timeout after {} attempts (seq={}, target={} mA)",
-                        p.attempts, p.seq, p.target_i_ma
-                    );
-                    SETPOINT_ACK_PENDING.store(false, Ordering::Release);
-                    pending = None;
-                }
-            } else {
-                pending = Some(p);
-            }
-        }
-
-        cooperative_delay_ms(10).await;
-    }
-}
-
-fn clamp_target_ma(v: i32) -> i32 {
-    v.clamp(TARGET_I_MIN_MA, TARGET_I_MAX_MA)
-}
-
-async fn send_setpoint_frame(
-    uhci_tx: &mut uhci::UhciTx<'static, Async>,
-    seq: u8,
-    target_i_ma: i32,
-    raw: &mut [u8; 64],
-    slip: &mut [u8; 192],
-    ctx: &str,
-) -> bool {
-    let setpoint = SetPoint { target_i_ma };
-
-    let frame_len = match encode_set_point_frame(seq, &setpoint, raw) {
-        Ok(len) => len,
-        Err(err) => {
-            warn!("{}: encode_set_point_frame error: {:?}", ctx, err);
-            return false;
-        }
-    };
-
-    let slip_len = match slip_encode(&raw[..frame_len], slip) {
-        Ok(len) => len,
-        Err(err) => {
-            warn!("{}: slip_encode error: {:?}", ctx, err);
-            return false;
-        }
-    };
-
-    match uhci_tx.uart_tx.write_async(&slip[..slip_len]).await {
-        Ok(written) if written == slip_len => {
-            let _ = uhci_tx.uart_tx.flush_async().await;
-            SETPOINT_ACK_PENDING.store(true, Ordering::Release);
-            info!(
-                "{}: setpoint frame sent seq={} target={} mA len={} slip_len={}",
-                ctx, seq, target_i_ma, frame_len, slip_len
-            );
-            true
-        }
-        Ok(written) => {
-            warn!(
-                "{}: short write {} < {} (seq={}, target={} mA)",
-                ctx, written, slip_len, seq, target_i_ma
-            );
-            false
-        }
-        Err(err) => {
-            warn!(
-                "{}: uart write error for setpoint seq={}: {:?}",
-                ctx, seq, err
-            );
-            false
-        }
     }
 }
 
@@ -9551,16 +8941,15 @@ async fn setmode_tx_task(
             last_fast_status,
             MEASUREMENT_UNTRUSTED.load(Ordering::Relaxed),
         );
-        if recovery_reason.is_some()
+        if let Some(reason) = recovery_reason
             && pending.is_none()
             && pd_pending.is_none()
             && now.wrapping_sub(last_boot_link_recovery_ms) >= LINK_RECOVERY_RETRY_MS
         {
             last_boot_link_recovery_ms = now;
-            let reason = recovery_reason.unwrap().as_str();
             warn!(
                 "link recovery handshake starting (reason={}, last_good_frame_ms={}, last_fast_status_ms={}, last_trusted_measurement_ms={}, hello_seen={}, link_up={})",
-                reason,
+                reason.as_str(),
                 last_good,
                 last_fast_status,
                 LAST_TRUSTED_MEASUREMENT_MS.load(Ordering::Relaxed),
@@ -9573,7 +8962,7 @@ async fn setmode_tx_task(
                 calibration,
                 &mut raw,
                 &mut slip,
-                reason,
+                reason.as_str(),
             )
             .await;
             force_send = true;
@@ -9824,12 +9213,11 @@ async fn setmode_tx_task(
                     PD_LAST_RESULT_CODE.store(code, Ordering::Relaxed);
                     PD_LAST_RESULT_MS.store(now, Ordering::Relaxed);
                 }
-                if !matches!(p.key.mode, control::PdMode::Fixed)
-                    || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV
+                if (!matches!(p.key.mode, control::PdMode::Fixed)
+                    || p.key.target_mv != control::PdConfig::DEFAULT_TARGET_MV)
+                    && (flags & FLAG_IS_NACK) != 0
                 {
-                    if (flags & FLAG_IS_NACK) != 0 {
-                        PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
-                    }
+                    PD_EXTENDED_FAILURE_LATCH.store(true, Ordering::Relaxed);
                 }
                 pd_pending = None;
                 PD_REQ_ACK_PENDING.store(false, Ordering::Release);
@@ -10107,7 +9495,7 @@ fn sanitize_setmode(mut cmd: SetMode) -> SetMode {
     cmd.target_i_ma = cmd.target_i_ma.max(0);
     cmd.target_v_mv = cmd.target_v_mv.max(0);
     cmd.min_v_mv = cmd.min_v_mv.max(0);
-    cmd.max_i_ma_total = cmd.max_i_ma_total.max(0).min(control::HARD_MAX_I_MA_TOTAL);
+    cmd.max_i_ma_total = cmd.max_i_ma_total.clamp(0, control::HARD_MAX_I_MA_TOTAL);
     let hard_max_p = LIMIT_PROFILE_DEFAULT.max_p_mw;
     cmd.max_p_mw = cmd.max_p_mw.min(hard_max_p);
     if let Some(v) = cmd.target_p_mw {

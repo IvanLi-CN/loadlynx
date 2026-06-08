@@ -298,7 +298,7 @@ pub fn hit_test_pd_settings(x: i32, y: i32, vm: &PdSettingsVm) -> Option<PdSetti
     };
     if row_count > 0 {
         let list_bottom = row_top + row_count * (row_h + row_gap) - row_gap;
-        if x >= LIST_LEFT && x < LIST_RIGHT && y >= row_top && y < list_bottom {
+        if (LIST_LEFT..LIST_RIGHT).contains(&x) && (row_top..list_bottom).contains(&y) {
             let rel = y - row_top;
             let stride = row_h + row_gap;
             let idx = rel / stride;
@@ -726,11 +726,7 @@ fn draw_value_pill_text(
     focused: bool,
     focused_digit: AdjustDigit,
 ) {
-    let inner = if focused {
-        Rect::new(rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom - 2)
-    } else {
-        Rect::new(rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom - 2)
-    };
+    let inner = Rect::new(rect.left + 2, rect.top + 2, rect.right - 2, rect.bottom - 2);
 
     let cell_w = SETPOINT_CELL_W as i32;
     let num_w = (digits.chars().count() as i32) * cell_w;
@@ -796,7 +792,7 @@ fn draw_value_pill_text(
             _ => None,
         };
         if let Some(idx) = idx {
-            let cell_x = num_x0 + idx as i32 * cell_w;
+            let cell_x = num_x0 + idx * cell_w;
             // The frozen mock uses a 1px underline, aligned ~2px above the outer border.
             let underline_top = rect.bottom - 3;
             let ul_pad = ((SETPOINT_CELL_W - SETPOINT_PILL_DIGIT_W) / 2) as i32;
@@ -1516,7 +1512,7 @@ fn draw_small_aa_clipped(
     }
 
     let needed_bits = w.saturating_mul(h);
-    let needed = (needed_bits + 7) / 8;
+    let needed = needed_bits.div_ceil(8);
     if needed == 0 || needed > MASK_MAX {
         return false;
     }
@@ -1541,8 +1537,8 @@ fn draw_small_aa_clipped(
         &mut target,
     );
 
-    let out_w = (w + (TEXT_AA_SCALE - 1)) / TEXT_AA_SCALE;
-    let out_h = (h + (TEXT_AA_SCALE - 1)) / TEXT_AA_SCALE;
+    let out_w = w.div_ceil(TEXT_AA_SCALE);
+    let out_h = h.div_ceil(TEXT_AA_SCALE);
     let denom = (TEXT_AA_SCALE * TEXT_AA_SCALE) as u16;
 
     for oy in 0..out_h {
@@ -1617,6 +1613,7 @@ fn draw_label_with_step(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_label_two_line(
     canvas: &mut Canvas,
     x: i32,
@@ -1731,6 +1728,7 @@ fn draw_round_rect_2px_border_accent_button(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn draw_round_rect_2px_border_accent_core(
     canvas: &mut Canvas,
     rect: Rect,
@@ -1933,7 +1931,7 @@ fn format_a_contract_1dp(ma: u32) -> String<8> {
 
 fn format_v_short(mv: u32) -> String<8> {
     let mut out = String::<8>::new();
-    if mv % 1000 == 0 {
+    if mv.is_multiple_of(1000) {
         let _ = write!(&mut out, "{}V", mv / 1000);
     } else {
         let v10 = mv / 100;
@@ -1965,7 +1963,7 @@ fn format_v_range(min_mv: u32, max_mv: u32) -> String<16> {
 
 fn format_v_end(mv: u32) -> String<8> {
     let mut out = String::<8>::new();
-    if mv % 1000 == 0 {
+    if mv.is_multiple_of(1000) {
         let _ = write!(&mut out, "{}", mv / 1000);
     } else {
         let v10 = mv / 100;
@@ -1976,7 +1974,7 @@ fn format_v_end(mv: u32) -> String<8> {
 
 fn format_a_short(ma: u32) -> String<8> {
     let mut out = String::<8>::new();
-    if ma % 1000 == 0 {
+    if ma.is_multiple_of(1000) {
         let _ = write!(&mut out, "{}A", ma / 1000);
     } else {
         let a10 = ma / 100;
@@ -2115,7 +2113,7 @@ trait CanvasAaExt {
 
 impl CanvasAaExt for Canvas<'_> {
     fn get_pixel_raw(&self, x: i32, y: i32) -> Option<u16> {
-        if x < 0 || x >= super::LOGICAL_WIDTH || y < 0 || y >= super::LOGICAL_HEIGHT {
+        if !(0..super::LOGICAL_WIDTH).contains(&x) || !(0..super::LOGICAL_HEIGHT).contains(&y) {
             return None;
         }
         let actual_x = y as usize;

@@ -100,6 +100,7 @@ pub fn set_prompt_tone_alarm_active(active: bool) {
 /// Force the amplifier into a hard mute/shutdown state.
 ///
 /// This is a safety valve to ensure we don't get stuck in an audible alarm.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn set_hard_mute(mute: bool) {
     SPEAKER_HARD_MUTE.store(mute, Ordering::Relaxed);
 }
@@ -823,7 +824,7 @@ pub async fn speaker_task(
 
     // Keep SD_MODE asserted (HIGH = "Left") and send silence when needed.
     // We also support a hard mute by pulling SD_MODE LOW.
-    let _ = amp.set_high();
+    amp.set_high();
 
     // Start with a boot self-test playlist queued once (Spec #swzqu). Prompt tones
     // can overlay on top; continuous alarms will suppress voice output.
@@ -885,13 +886,13 @@ pub async fn speaker_task(
             last_hard_mute = hard_mute;
             if hard_mute {
                 info!("speaker: hard mute ON (AMP_SD_MODE=LOW)");
-                let _ = amp.set_low();
+                amp.set_low();
                 // Drop pending clips immediately.
                 voice = None;
                 while SPEAKER_QUEUE.try_receive().is_ok() {}
             } else {
                 info!("speaker: hard mute OFF (AMP_SD_MODE=HIGH)");
-                let _ = amp.set_high();
+                amp.set_high();
             }
         }
 
@@ -906,35 +907,37 @@ pub async fn speaker_task(
         }
 
         // Start next queued clip when idle.
-        if !hard_mute && !alarm_active && voice.is_none() {
-            if let Ok(sound) = SPEAKER_QUEUE.try_receive() {
-                let kind = match sound {
-                    SpeakerSound::BootChirp => PlaylistKind::BootChirp,
-                    SpeakerSound::AlarmPrimary => PlaylistKind::AlarmPrimary,
-                    SpeakerSound::AlarmSecondary => PlaylistKind::AlarmSecondary,
-                    SpeakerSound::AlarmTrip => PlaylistKind::AlarmTrip,
-                    SpeakerSound::UiOk => PlaylistKind::UiOk,
-                    SpeakerSound::LoadOnOk => PlaylistKind::LoadOnOk,
-                    SpeakerSound::UiOkOff => PlaylistKind::UiOkOff,
-                    SpeakerSound::UiFail => PlaylistKind::UiFail,
-                    SpeakerSound::UiWarn => PlaylistKind::UiWarn,
-                    SpeakerSound::UiTouch => PlaylistKind::UiTouch,
-                    SpeakerSound::UiTick => PlaylistKind::UiTick,
-                    SpeakerSound::Test => PlaylistKind::Test,
-                };
-                let play_id = SPEAKER_PLAY_TOTAL
-                    .fetch_add(1, Ordering::Relaxed)
-                    .wrapping_add(1);
-                debug!("speaker: play #{} ({=?})", play_id, sound);
-                voice = Some(VoicePlayer {
-                    kind,
-                    state: StreamState {
-                        idx: 0,
-                        cur: None,
-                        done: false,
-                    },
-                });
-            }
+        if !hard_mute
+            && !alarm_active
+            && voice.is_none()
+            && let Ok(sound) = SPEAKER_QUEUE.try_receive()
+        {
+            let kind = match sound {
+                SpeakerSound::BootChirp => PlaylistKind::BootChirp,
+                SpeakerSound::AlarmPrimary => PlaylistKind::AlarmPrimary,
+                SpeakerSound::AlarmSecondary => PlaylistKind::AlarmSecondary,
+                SpeakerSound::AlarmTrip => PlaylistKind::AlarmTrip,
+                SpeakerSound::UiOk => PlaylistKind::UiOk,
+                SpeakerSound::LoadOnOk => PlaylistKind::LoadOnOk,
+                SpeakerSound::UiOkOff => PlaylistKind::UiOkOff,
+                SpeakerSound::UiFail => PlaylistKind::UiFail,
+                SpeakerSound::UiWarn => PlaylistKind::UiWarn,
+                SpeakerSound::UiTouch => PlaylistKind::UiTouch,
+                SpeakerSound::UiTick => PlaylistKind::UiTick,
+                SpeakerSound::Test => PlaylistKind::Test,
+            };
+            let play_id = SPEAKER_PLAY_TOTAL
+                .fetch_add(1, Ordering::Relaxed)
+                .wrapping_add(1);
+            debug!("speaker: play #{} ({=?})", play_id, sound);
+            voice = Some(VoicePlayer {
+                kind,
+                state: StreamState {
+                    idx: 0,
+                    cur: None,
+                    done: false,
+                },
+            });
         }
 
         let avail = match transfer.available() {
@@ -973,5 +976,5 @@ pub async fn speaker_task(
     }
 
     // Safety: ensure we exit with the amp disabled.
-    let _ = amp.set_low();
+    amp.set_low();
 }

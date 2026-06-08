@@ -1,8 +1,9 @@
 import { useQueryClient } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { Outlet, useRouterState } from "@tanstack/react-router";
-import { TanStackRouterDevtools } from "@tanstack/router-devtools";
+import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { useEffect } from "react";
+import { invalidateDevicesQueryCache } from "../devices/query-cache.ts";
 import {
   parseDemoModeParam,
   resolveDemoMode,
@@ -33,7 +34,7 @@ export function RootLayout() {
     }
 
     if (hadDemoModeParam) {
-      void queryClient.invalidateQueries();
+      void invalidateDevicesQueryCache(queryClient);
     }
   }, [locationHref, queryClient, storybookRuntime]);
 

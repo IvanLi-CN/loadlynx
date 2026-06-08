@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { within } from "@testing-library/dom";
+import { within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function DeviceLayoutStory(props: { initialPath: string }) {

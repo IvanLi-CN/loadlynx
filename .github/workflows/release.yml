@@ -28,6 +28,7 @@ jobs:
   intent:
     name: Resolve release intent
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     outputs:
       pr_number: ${{ steps.resolve.outputs.pr_number }}
       type: ${{ steps.resolve.outputs.type }}
@@ -75,6 +76,7 @@ jobs:
     needs: intent
     if: needs.intent.outputs.should_release == 'true'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -165,6 +167,7 @@ jobs:
     needs: intent
     if: needs.intent.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     env:
       LOADLYNX_RELEASE_VERSION: ${{ needs.intent.outputs.version }}
       LOADLYNX_RELEASE_TAG: ${{ needs.intent.outputs.tag }}
@@ -215,9 +218,7 @@ jobs:
         run: cargo install espflash --locked
 
       - name: Build digital firmware
-        run: |
-          . "$HOME/export-esp.sh"
-          just d-build
+        run: just d-build
 
       - name: Package firmware artifacts
         run: |
@@ -280,6 +281,7 @@ jobs:
     needs: intent
     if: needs.intent.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     env:
       APP_EFFECTIVE_VERSION: ${{ needs.intent.outputs.version }}
       VITE_APP_VERSION: ${{ needs.intent.outputs.version }}
@@ -295,12 +297,12 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version-file: ".node-version"
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "latest"
+          bun-version-file: ".bun-version"
 
       - name: Install dependencies
         working-directory: web
@@ -337,6 +339,7 @@ jobs:
       - web
     if: needs.intent.outputs.should_release == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     env:
       RELEASE_TAG: ${{ needs.intent.outputs.tag }}
       RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.intent.outputs.tag }}

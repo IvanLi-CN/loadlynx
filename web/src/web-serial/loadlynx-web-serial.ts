@@ -1,10 +1,12 @@
+import type { FirmwareIdentity } from "../api/types.ts";
+
 export const WEB_SERIAL_FLASH_CONFIRMATION_TEXT = "yes";
 
 export interface WebSerialIdentityProfile {
   deviceId: string;
   displayName?: string;
   product?: string;
-  firmware?: unknown;
+  firmware?: FirmwareIdentity;
   capturedAt: string;
 }
 
@@ -266,12 +268,57 @@ async function tryCaptureIdentity(
           : undefined,
       product:
         typeof identity.product === "string" ? identity.product : undefined,
-      firmware: identity.firmware,
+      firmware: parseFirmwareIdentity(identity.firmware),
       capturedAt: new Date().toISOString(),
     };
   } catch {
     return undefined;
   }
+}
+
+export function parseFirmwareIdentity(
+  value: unknown,
+): FirmwareIdentity | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    candidate.target !== "digital_esp32s3" ||
+    typeof candidate.package_version !== "string" ||
+    typeof candidate.build_id !== "string" ||
+    typeof candidate.build_profile !== "string" ||
+    typeof candidate.target_triple !== "string" ||
+    typeof candidate.source_digest !== "string" ||
+    candidate.protocol !== "loadlynx.cdc.v1" ||
+    !Array.isArray(candidate.features) ||
+    !candidate.features.every((feature) => typeof feature === "string") ||
+    !candidate.defmt ||
+    typeof candidate.defmt !== "object"
+  ) {
+    return undefined;
+  }
+  const defmt = candidate.defmt as Record<string, unknown>;
+  if (
+    typeof defmt.enabled !== "boolean" ||
+    typeof defmt.encoding !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    target: "digital_esp32s3",
+    package_version: candidate.package_version,
+    build_id: candidate.build_id,
+    build_profile: candidate.build_profile,
+    target_triple: candidate.target_triple,
+    source_digest: candidate.source_digest,
+    features: [...candidate.features],
+    protocol: "loadlynx.cdc.v1",
+    defmt: {
+      enabled: defmt.enabled,
+      encoding: defmt.encoding,
+    },
+  };
 }
 
 async function jsonlRequest(

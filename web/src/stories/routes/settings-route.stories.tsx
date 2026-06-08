@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
+import { waitFor, within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function SettingsRouteStory() {
@@ -33,7 +32,7 @@ type Story = StoryObj<typeof meta>;
 export const Default: Story = {};
 
 export const SoftResetDialog: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
@@ -58,7 +57,7 @@ export const SoftResetDialog: Story = {
 };
 
 export const WifiAndDiagnostics: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
@@ -85,7 +84,7 @@ export const WifiAndDiagnostics: Story = {
 };
 
 export const BackupRestorePreview: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
@@ -140,7 +139,7 @@ export const BackupRestorePreview: Story = {
 };
 
 export const BackupRestoreCompleted: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
@@ -178,7 +177,7 @@ export const BackupRestoreCompleted: Story = {
 
 export const BackupRestoreSafetyBlocked: Story = {
   render: () => <SafetyBlockedSettingsRouteStory />,
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
     await waitFor(() => {

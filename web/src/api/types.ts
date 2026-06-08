@@ -29,6 +29,26 @@ export interface WifiSetRequest {
   wait?: boolean;
 }
 
+export type WifiStatusResponse = WifiStatus | { wifi: WifiStatus };
+
+export interface DiagnosticsLastStatus {
+  uptime_ms: number;
+  fault_flags: number;
+}
+
+export interface DiagnosticsExport {
+  schema_version: 1;
+  redaction: {
+    psk: true;
+  };
+  firmware_version: string;
+  wifi: WifiStatus & {
+    psk: "<redacted>";
+  };
+  link_up: boolean;
+  last_status: DiagnosticsLastStatus | null;
+}
+
 export interface DeviceCapabilities {
   cc_supported: boolean;
   cv_supported: boolean;
@@ -36,6 +56,28 @@ export interface DeviceCapabilities {
   presets_supported?: boolean;
   preset_count?: number; // 固定为 5（见 docs/interfaces/network-http-api.md）
   api_version: string;
+}
+
+export interface FirmwareIdentity {
+  target: "digital_esp32s3";
+  package_version: string;
+  build_id: string;
+  build_profile: string;
+  target_triple: string;
+  source_digest: string;
+  features: string[];
+  protocol: "loadlynx.cdc.v1";
+  defmt: {
+    enabled: boolean;
+    encoding: string;
+  };
+}
+
+export interface UsbBridgeIdentity {
+  transport: "usb_cdc_jsonl";
+  protocol: "loadlynx.cdc.v1";
+  lease_required: true;
+  framing: "lf_json";
 }
 
 export interface Identity {
@@ -46,6 +88,8 @@ export interface Identity {
   uptime_ms: number;
   network: NetworkInfo;
   capabilities: DeviceCapabilities;
+  firmware?: FirmwareIdentity;
+  usb_bridge?: UsbBridgeIdentity;
 
   // Added fields in digital firmware /api/v1/identity
   // -----------------------------------------------------------------------
@@ -56,13 +100,26 @@ export interface Identity {
   short_id?: string;
 }
 
-export type AnalogState = "offline" | "cal_missing" | "faulted" | "ready";
+export type AnalogState =
+  | "offline"
+  | "cal_missing"
+  | "faulted"
+  | "ready"
+  | "measurement_invalid";
 
 export type FaultFlag =
   | "OVERCURRENT"
   | "OVERVOLTAGE"
   | "MCU_OVER_TEMP"
   | "SINK_OVER_TEMP";
+
+export type StateFlag =
+  | "REMOTE_ACTIVE"
+  | "LINK_GOOD"
+  | "ENABLED"
+  | "UV_LATCHED"
+  | "POWER_LIMITED"
+  | "CURRENT_LIMITED";
 
 export interface FastStatusJson {
   uptime_ms: number;
@@ -195,6 +252,16 @@ export interface FastStatusView {
   hello_seen: boolean;
   analog_state: AnalogState;
   fault_flags_decoded: FaultFlag[];
+  state_flags_decoded: StateFlag[];
+}
+
+export interface FastStatusResponse {
+  status: FastStatusJson;
+  link_up: boolean;
+  hello_seen: boolean;
+  analog_state: AnalogState;
+  fault_flags_decoded: FaultFlag[];
+  state_flags_decoded?: StateFlag[];
 }
 
 export type CcProtectionMode = "off" | "protect" | "maintain";
@@ -263,6 +330,33 @@ export interface ControlView {
   preset: Preset; // snapshot of active preset
 }
 
+export interface ApplyPresetRequest {
+  preset_id: number;
+}
+
+export interface ControlUpdateRequest {
+  output_enabled: boolean;
+}
+
+export interface PresetsResponse {
+  presets: Preset[];
+}
+
+export type SoftResetReason =
+  | "manual"
+  | "firmware_update"
+  | "ui_recover"
+  | "link_recover";
+
+export interface SoftResetRequest {
+  reason: SoftResetReason;
+}
+
+export interface SoftResetResponse {
+  accepted: boolean;
+  reason: SoftResetReason;
+}
+
 // USB-PD (docs/interfaces/network-http-api.md §3.5..§3.6)
 
 export interface PdFixedPdo {
@@ -276,6 +370,13 @@ export interface PdPpsPdo {
   min_mv: number;
   max_mv: number;
   max_ma: number;
+}
+
+export interface PdEprAvsPdo {
+  pos: number; // object position (1-based)
+  min_mv: number;
+  max_mv: number;
+  pdp_w: number;
 }
 
 export type PdSavedMode = "fixed" | "pps";
@@ -310,28 +411,38 @@ export interface PdView {
   contract_ma: number | null;
   fixed_pdos: PdFixedPdo[];
   pps_pdos: PdPpsPdo[];
+  epr_active?: boolean;
+  epr_avs_pdos?: PdEprAvsPdo[];
   // Safe5V gate; older firmware may omit this field.
   allow_extended_voltage?: boolean;
   saved: PdSavedConfig;
   apply: PdApplyState;
 }
 
+export interface PdFixedUpdateRequest {
+  mode: "fixed";
+  object_pos: number;
+  target_mv?: number;
+  i_req_ma: number;
+  allow_extended_voltage?: boolean;
+}
+
+export interface PdPpsUpdateRequest {
+  mode: "pps";
+  object_pos: number;
+  target_mv: number;
+  i_req_ma: number;
+  allow_extended_voltage?: boolean;
+}
+
+export interface PdVoltageGateUpdateRequest {
+  allow_extended_voltage: boolean;
+}
+
 export type PdUpdateRequest =
-  | {
-      mode: "fixed";
-      object_pos: number;
-      target_mv?: number;
-      i_req_ma: number;
-      allow_extended_voltage?: boolean;
-    }
-  | {
-      mode: "pps";
-      object_pos: number;
-      target_mv: number;
-      i_req_ma: number;
-      allow_extended_voltage?: boolean;
-    }
-  | { allow_extended_voltage: boolean };
+  | PdFixedUpdateRequest
+  | PdPpsUpdateRequest
+  | PdVoltageGateUpdateRequest;
 
 export type BackupSectionKey =
   | "presets"

@@ -2,18 +2,41 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { HttpApiError } from "../api/client.ts";
-import { getIdentity, getPd, isHttpApiError, postPd } from "../api/client.ts";
+import { isHttpApiError, postPd } from "../api/client.ts";
 import {
   findFixedPdo,
   findPpsPdo,
   findVisibleSavedFixedPdo,
 } from "../api/pd-display.ts";
-import type { Identity, PdView } from "../api/types.ts";
+import type {
+  PdFixedUpdateRequest,
+  PdPpsUpdateRequest,
+  PdView,
+} from "../api/types.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
+import { setDeviceQueryData } from "../devices/device-query-cache.ts";
+import { DEVICE_QUERY_PARTS } from "../devices/device-query-key.ts";
+import {
+  getDevicePdQueryOptions,
+  useDeviceIdentityByBaseUrl,
+} from "../devices/hooks.ts";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
+import { requireDeviceBaseUrl } from "../lib/device-base-url.ts";
+import {
+  formatHttpApiErrorSummary,
+  getNetworkErrorHint,
+  isAnalogNotReadyError,
+  isLinkUnavailableError,
+  isUnsupportedOperationError,
+} from "../lib/http-error.ts";
+import { usePageVisibility } from "../lib/page-visibility.ts";
 
 const PD_REFETCH_MS = 1200;
 const RETRY_DELAY_MS = 500;
+type PdApplyTab = "fixed" | "pps";
+interface PdApplyRequest {
+  tab: PdApplyTab;
+}
 
 function formatMilliAmps(ma: number | null): string {
   if (ma == null || !Number.isFinite(ma)) return "unknown";
@@ -36,56 +59,22 @@ function formatContract(pd: PdView | null | undefined): string {
 export function DevicePdRoute() {
   const { deviceId, device, baseUrl } = useDeviceContext();
   const queryClient = useQueryClient();
+  const isPageVisible = usePageVisibility();
+  const identityQuery = useDeviceIdentityByBaseUrl(deviceId, baseUrl);
 
-  const [isPageVisible, setIsPageVisible] = useState(() =>
-    typeof document === "undefined"
-      ? true
-      : document.visibilityState === "visible",
+  const pdQuery = useQuery<PdView, HttpApiError>(
+    getDevicePdQueryOptions({
+      deviceId,
+      baseUrl,
+      enabled: Boolean(baseUrl) && identityQuery.isSuccess,
+      refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
+      retryDelay: RETRY_DELAY_MS,
+    }),
   );
-
-  useEffect(() => {
-    if (typeof document === "undefined") {
-      return undefined;
-    }
-
-    const handleVisibility = () => {
-      setIsPageVisible(document.visibilityState === "visible");
-    };
-
-    document.addEventListener("visibilitychange", handleVisibility);
-    return () => {
-      document.removeEventListener("visibilitychange", handleVisibility);
-    };
-  }, []);
-
-  const identityQuery = useQuery<Identity, HttpApiError>({
-    queryKey: ["device", deviceId, "identity"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getIdentity(baseUrl);
-    },
-    enabled: Boolean(baseUrl),
-  });
-
-  const pdQuery = useQuery<PdView, HttpApiError>({
-    queryKey: ["device", deviceId, "pd"],
-    queryFn: () => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
-      return getPd(baseUrl);
-    },
-    enabled: Boolean(baseUrl) && identityQuery.isSuccess,
-    refetchInterval: isPageVisible ? PD_REFETCH_MS : false,
-    refetchIntervalInBackground: false,
-    retryDelay: RETRY_DELAY_MS,
-  });
 
   const pd = pdQuery.data;
 
-  const [tab, setTab] = useState<"fixed" | "pps">("fixed");
+  const [tab, setTab] = useState<PdApplyTab>("fixed");
 
   const [selectedFixedPos, setSelectedFixedPos] = useState<number | null>(null);
   const [selectedPpsPos, setSelectedPpsPos] = useState<number | null>(null);
@@ -121,10 +110,8 @@ export function DevicePdRoute() {
   }, [pd, pdDraftSeed]);
 
   const applyMutation = useMutation({
-    mutationFn: async (payload: { tab: "fixed" | "pps" }) => {
-      if (!baseUrl) {
-        throw new Error("Device base URL is not available");
-      }
+    mutationFn: async (payload: PdApplyRequest) => {
+      const requiredBaseUrl = requireDeviceBaseUrl(baseUrl);
 
       if (!pd) {
         throw new Error("PD view is not available");
@@ -134,51 +121,58 @@ export function DevicePdRoute() {
         if (selectedFixedPos == null) {
           throw new Error("No Fixed PDO selected");
         }
-        return postPd(baseUrl, {
+        const request: PdFixedUpdateRequest = {
           mode: "fixed",
           object_pos: selectedFixedPos,
           i_req_ma: fixedIReqMa,
-        });
+        };
+        return postPd(requiredBaseUrl, request);
       }
 
       if (selectedPpsPos == null) {
         throw new Error("No PPS APDO selected");
       }
 
-      return postPd(baseUrl, {
+      const request: PdPpsUpdateRequest = {
         mode: "pps",
         object_pos: selectedPpsPos,
         target_mv: ppsTargetMv,
         i_req_ma: ppsIReqMa,
-      });
+      };
+      return postPd(requiredBaseUrl, request);
     },
     onSuccess: (next) => {
-      queryClient.setQueryData<PdView>(["device", deviceId, "pd"], next);
+      setDeviceQueryData(
+        queryClient,
+        deviceId,
+        baseUrl,
+        DEVICE_QUERY_PARTS.pd,
+        next,
+      );
     },
   });
 
   const isUnsupported = (() => {
     const err = pdQuery.error;
     if (!err || !isHttpApiError(err)) return false;
-    return err.status === 404 && err.code === "UNSUPPORTED_OPERATION";
+    return isUnsupportedOperationError(err);
   })();
 
   const topError = (() => {
     const err = pdQuery.error;
     if (!err || !isHttpApiError(err) || isUnsupported) return null;
 
-    const code = err.code ?? "HTTP_ERROR";
-    const summary = `${code} — ${err.message}`;
+    const summary = formatHttpApiErrorSummary(err);
 
-    if (err.status === 0 && code === "NETWORK_ERROR") {
-      const hint =
-        "无法连接设备" +
-        (baseUrl ? `（baseUrl=${baseUrl}）` : "") +
-        "，请检查网络与 IP 设置。";
-      return { summary, hint, kind: "error" } as const;
+    if (err.status === 0 && err.code === "NETWORK_ERROR") {
+      return {
+        summary,
+        hint: getNetworkErrorHint(baseUrl),
+        kind: "error",
+      } as const;
     }
 
-    if (code === "LINK_DOWN" || code === "UNAVAILABLE") {
+    if (isLinkUnavailableError(err)) {
       return {
         summary,
         hint: "UART link is down / PD status unavailable — try again later.",
@@ -186,7 +180,7 @@ export function DevicePdRoute() {
       } as const;
     }
 
-    if (code === "ANALOG_NOT_READY" || code === "NOT_ATTACHED") {
+    if (isAnalogNotReadyError(err)) {
       return { summary, hint: null, kind: "warning" } as const;
     }
 

@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
+import { waitFor, within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function PdRouteDefaultStory() {
@@ -106,7 +105,7 @@ export const LinkDown: Story = {
 
 export const HiddenSavedFixed28: Story = {
   render: () => <PdRouteHiddenFixed28Story />,
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
     await canvas.findByRole("heading", { name: "USB‑PD Settings" });

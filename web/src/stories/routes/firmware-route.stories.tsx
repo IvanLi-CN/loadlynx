@@ -1,6 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "@testing-library/dom";
-import userEvent from "@testing-library/user-event";
+import { waitFor, within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 const DEVD_DEVICE = {
@@ -55,7 +54,7 @@ type Story = StoryObj<typeof meta>;
 export const DevdBound: Story = {};
 
 export const DryRunEvidence: Story = {
-  play: async ({ canvasElement }) => {
+  play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
