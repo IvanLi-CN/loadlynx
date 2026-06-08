@@ -228,3 +228,39 @@ export async function runQualityGatesCheck({
     workflows,
   };
 }
+
+export async function validateWebToolingContracts({
+  webPackageJsonPath = new URL("../../web/package.json", import.meta.url),
+  webCheckWorkflowPath = new URL("../workflows/web-check.yml", import.meta.url),
+} = {}) {
+  const failures = [];
+  const webPackage = JSON.parse(await readFile(webPackageJsonPath, "utf8"));
+  const scripts = webPackage.scripts ?? {};
+  const webCheckWorkflow = await readFile(webCheckWorkflowPath, "utf8");
+
+  if (scripts["test:e2e"] !== "node scripts/run-playwright.mjs test") {
+    failures.push(
+      'web/package.json: scripts["test:e2e"] must be "node scripts/run-playwright.mjs test"',
+    );
+  }
+
+  if (scripts["test:e2e:ui"] !== "node scripts/run-playwright.mjs test --ui") {
+    failures.push(
+      'web/package.json: scripts["test:e2e:ui"] must be "node scripts/run-playwright.mjs test --ui"',
+    );
+  }
+
+  if (!webCheckWorkflow.includes("run: node scripts/run-playwright.mjs install --with-deps")) {
+    failures.push(
+      ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+    );
+  }
+
+  if (/\bbunx\s+playwright\s+install\b/.test(webCheckWorkflow)) {
+    failures.push(
+      ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+    );
+  }
+
+  return failures;
+}

@@ -2,8 +2,12 @@
 import assert from "node:assert/strict";
 import {
   parseWorkflowMetadata,
+  validateWebToolingContracts,
   validateWorkflowHygiene,
 } from "./check-quality-gates-lib.mjs";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 
 assert.deepEqual(
   parseWorkflowMetadata(
@@ -130,5 +134,131 @@ assert.deepEqual(
   }),
   ['workflow wrong-bun-file.yml: setup-bun bun-version-file must be ".bun-version"'],
 );
+
+const tempDir = await mkdtemp(join(tmpdir(), "loadlynx-workflow-hygiene-"));
+try {
+  const webPackagePath = join(tempDir, "package.json");
+  const workflowPath = join(tempDir, "web-check.yml");
+  await writeFile(
+    webPackagePath,
+    JSON.stringify(
+      {
+        scripts: {
+          "test:e2e": "node scripts/run-playwright.mjs test",
+          "test:e2e:ui": "node scripts/run-playwright.mjs test --ui",
+        },
+      },
+      null,
+      2,
+    ),
+  );
+  await writeFile(
+    workflowPath,
+    `name: Web Check
+jobs:
+  web-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps: []
+`,
+  );
+
+  assert.deepEqual(
+    await validateWebToolingContracts({
+      webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+    }),
+    [
+      ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+    ],
+  );
+
+  await writeFile(
+    webPackagePath,
+    JSON.stringify(
+      {
+        scripts: {
+          "test:e2e": "playwright test",
+          "test:e2e:ui": "playwright test --ui",
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  assert.deepEqual(
+    await validateWebToolingContracts({
+      webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+    }),
+    [
+      'web/package.json: scripts["test:e2e"] must be "node scripts/run-playwright.mjs test"',
+      'web/package.json: scripts["test:e2e:ui"] must be "node scripts/run-playwright.mjs test --ui"',
+      ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+    ],
+  );
+
+  await writeFile(
+    workflowPath,
+    `name: Web Check
+jobs:
+  web-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install Playwright browsers
+        run: node scripts/run-playwright.mjs install --with-deps
+`,
+  );
+
+  await writeFile(
+    webPackagePath,
+    JSON.stringify(
+      {
+        scripts: {
+          "test:e2e": "node scripts/run-playwright.mjs test",
+          "test:e2e:ui": "node scripts/run-playwright.mjs test --ui",
+        },
+      },
+      null,
+      2,
+    ),
+  );
+
+  assert.deepEqual(
+    await validateWebToolingContracts({
+      webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+    }),
+    [],
+  );
+
+  await writeFile(
+    workflowPath,
+    `name: Web Check
+jobs:
+  web-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Install Playwright browsers
+        run: bunx playwright install --with-deps
+`,
+  );
+
+  assert.deepEqual(
+    await validateWebToolingContracts({
+      webPackageJsonPath: new URL(`file://${webPackagePath}`),
+      webCheckWorkflowPath: new URL(`file://${workflowPath}`),
+    }),
+    [
+      ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+    ],
+  );
+} finally {
+  await rm(tempDir, { recursive: true, force: true });
+}
 
 console.log("workflow hygiene tests passed");
