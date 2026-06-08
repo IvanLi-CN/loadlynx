@@ -11,12 +11,40 @@ export function parseWorkflowMetadata(source, fileName) {
     name: null,
     hasPermissions: false,
     jobs: [],
+    setupBunUsesVersionFile: [],
+    setupBunUsesInlineVersion: [],
   };
 
   let currentJob = null;
   let inJobsSection = false;
+  let inSetupBunBlock = false;
+  let setupBunIndent = -1;
 
   for (const line of lines) {
+    const usesSetupBunMatch = line.match(/^(\s*)(?:-\s*)?uses:\s*oven-sh\/setup-bun@.+$/);
+    if (usesSetupBunMatch) {
+      inSetupBunBlock = true;
+      setupBunIndent = usesSetupBunMatch[1].length;
+    } else if (inSetupBunBlock) {
+      const trimmed = line.trim();
+      const indent = line.match(/^(\s*)/)?.[1].length ?? 0;
+      if (trimmed.length > 0 && indent <= setupBunIndent) {
+        inSetupBunBlock = false;
+        setupBunIndent = -1;
+      }
+    }
+
+    if (inSetupBunBlock) {
+      const bunVersionFileMatch = line.match(/^\s*bun-version-file:\s*(.+?)\s*$/);
+      if (bunVersionFileMatch) {
+        workflow.setupBunUsesVersionFile.push(normalizeScalar(bunVersionFileMatch[1]));
+      }
+      const bunVersionMatch = line.match(/^\s*bun-version:\s*(.+?)\s*$/);
+      if (bunVersionMatch) {
+        workflow.setupBunUsesInlineVersion.push(normalizeScalar(bunVersionMatch[1]));
+      }
+    }
+
     if (!workflow.name) {
       const workflowNameMatch = line.match(/^name:\s*(.+?)\s*$/);
       if (workflowNameMatch) {
@@ -164,6 +192,21 @@ export function validateWorkflowHygiene({ workflows }) {
       if (!job.hasTimeoutMinutes) {
         failures.push(`workflow ${workflow.fileName} job ${JSON.stringify(job.name ?? job.id)}: missing timeout-minutes`);
       }
+    }
+
+    if (workflow.setupBunUsesInlineVersion.length > 0) {
+      failures.push(
+        `workflow ${workflow.fileName}: setup-bun must use bun-version-file=.bun-version instead of inline bun-version`,
+      );
+    }
+
+    if (
+      workflow.setupBunUsesVersionFile.length > 0 &&
+      workflow.setupBunUsesVersionFile.some((value) => value !== ".bun-version")
+    ) {
+      failures.push(
+        `workflow ${workflow.fileName}: setup-bun bun-version-file must be ".bun-version"`,
+      );
     }
   }
 
