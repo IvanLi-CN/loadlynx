@@ -66,6 +66,12 @@ use transport::{
     spawn_cli_lease_heartbeat,
 };
 
+#[derive(Debug, Clone)]
+struct ResolvedDevdTarget {
+    devd: String,
+    device: String,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "loadlynx")]
 #[command(about = "LoadLynx LAN/USB/devd control CLI")]
@@ -964,20 +970,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .await?
                     }
                     BoardTarget::Analog => {
-                        let device_id = resolve_analog_target_device(device, &devd).await?;
+                        let resolved_analog = resolve_analog_target_device(device, &devd).await?;
                         if manifest_path.is_some() {
                             select_devd_device_artifact(
-                                &devd,
-                                &device_id,
+                                &resolved_analog.devd,
+                                &resolved_analog.device,
                                 manifest_path.clone(),
                                 artifact.clone(),
                             )
                             .await?;
                         }
                         request_devd_value(
-                            &devd,
+                            &resolved_analog.devd,
                             reqwest::Method::POST,
-                            &format!("/api/v1/devices/{device_id}/flash"),
+                            &format!("/api/v1/devices/{}/flash", resolved_analog.device),
                             Some(json!({
                                 "target": target.kind(),
                                 "artifact_id": artifact,
@@ -1009,11 +1015,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .await?
                     }
                     BoardTarget::Analog => {
-                        let device_id = resolve_analog_target_device(device, &devd).await?;
+                        let resolved_analog = resolve_analog_target_device(device, &devd).await?;
                         request_devd_value(
-                            &devd,
+                            &resolved_analog.devd,
                             reqwest::Method::POST,
-                            &format!("/api/v1/devices/{device_id}/reset"),
+                            &format!("/api/v1/devices/{}/reset", resolved_analog.device),
                             Some(json!({"target": target.kind(), "dry_run": dry_run})),
                         )
                         .await?
@@ -1503,16 +1509,36 @@ async fn select_devd_device_artifact(
 async fn resolve_analog_target_device(
     device: Option<String>,
     devd: &str,
-) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-    if device.is_some() {
-        return Err(
-            "analog firmware operations use the approved .stm32-port selector; --device is only for saved USB devices"
-                .into(),
-        );
-    }
+) -> Result<ResolvedDevdTarget, Box<dyn std::error::Error + Send + Sync>> {
+    let saved_device = match device {
+        Some(device) => Some(resolve_usb_target(Some(device), devd, false)?),
+        None => None,
+    };
+    let scan_devd = saved_device
+        .as_ref()
+        .map(|resolved| resolved.devd.as_str())
+        .unwrap_or(devd);
+    let scan = request_devd_value(
+        scan_devd,
+        reqwest::Method::POST,
+        "/api/v1/devices/scan",
+        None,
+    )
+    .await?;
+    let device = if let Some(saved_device) = saved_device.as_ref() {
+        resolve_scanned_analog_device_for_saved_usb(saved_device, &scan)?
+    } else {
+        resolve_single_analog_device_from_scan(&scan)?
+    };
+    Ok(ResolvedDevdTarget {
+        devd: scan_devd.to_string(),
+        device,
+    })
+}
 
-    let scan =
-        request_devd_value(devd, reqwest::Method::POST, "/api/v1/devices/scan", None).await?;
+fn resolve_single_analog_device_from_scan(
+    scan: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let devices = scan
         .get("devices")
         .and_then(Value::as_array)
@@ -1542,6 +1568,47 @@ async fn resolve_analog_target_device(
         return Err("multiple analog targets found; cannot select one implicitly".into());
     }
     Ok(id.to_string())
+}
+
+fn resolve_scanned_analog_device_for_saved_usb(
+    resolved: &ResolvedUsbHardware,
+    scan: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let devices = scan
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or("devd scan response did not include devices")?;
+    let matches_saved_device = |device: &Value| {
+        let id_matches = device.get("id").and_then(Value::as_str) == Some(resolved.device.as_str());
+        let port_matches = resolved
+            .port_path
+            .as_deref()
+            .is_some_and(|saved_port_path| {
+                device
+                    .get("digital_target")
+                    .and_then(|target| target.get("port_path"))
+                    .and_then(Value::as_str)
+                    == Some(saved_port_path)
+            });
+        id_matches || port_matches
+    };
+    devices
+        .iter()
+        .find(|device| {
+            matches_saved_device(device)
+                && device
+                    .get("analog_target")
+                    .is_some_and(|target| !target.is_null())
+        })
+        .and_then(|device| device.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "saved USB device {} has no approved analog target in devd scan",
+                resolved.hardware_id
+            )
+            .into()
+        })
 }
 
 fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> {
@@ -2546,7 +2613,7 @@ mod tests {
         let device = resolve_analog_target_device(None, &endpoint)
             .await
             .expect("analog target");
-        assert_eq!(device, "analog-1");
+        assert_eq!(device.device, "analog-1");
         assert!(value.get("devices").is_some());
 
         let response = request_devd_value(
@@ -2571,7 +2638,57 @@ mod tests {
             .await
             .expect("analog target");
 
-        assert_eq!(device, "digital-1");
+        assert_eq!(device.device, "digital-1");
+    }
+
+    #[tokio::test]
+    async fn analog_target_resolution_accepts_saved_usb_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = TestHttpState::default();
+        let endpoint = spawn_test_ipc_with_mode(state, TestIpcMode::DuplicateAnalogSelector).await;
+        let previous_home = {
+            let _guard = TEST_ENV_LOCK.lock().unwrap();
+            let previous_home = env::var_os("LOADLYNX_HOME");
+            unsafe { env::set_var("LOADLYNX_HOME", temp.path()) };
+            write_hardware_registry(
+                &temp.path().join("devices.json"),
+                &HardwareRegistry {
+                    default_hardware_id: None,
+                    hardware: vec![SavedHardware {
+                        id: "loadlynx-a1b2c3".to_string(),
+                        name: None,
+                        identity: None,
+                        last_transport: Some(SavedTransport::Usb),
+                        transports: SavedTransports {
+                            usb: Some(SavedUsbTransport {
+                                device: "stale-digital".to_string(),
+                                port_path: Some("mock://esp32s3".to_string()),
+                                devd: Some(endpoint.clone()),
+                            }),
+                            http: None,
+                        },
+                        last_seen_unix_seconds: None,
+                    }],
+                    ..HardwareRegistry::default()
+                },
+            )
+            .unwrap();
+            previous_home
+        };
+
+        let resolved = resolve_analog_target_device(Some("loadlynx-a1b2c3".to_string()), "/unused")
+            .await
+            .expect("analog target");
+
+        {
+            let _guard = TEST_ENV_LOCK.lock().unwrap();
+            match previous_home {
+                Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
+                None => unsafe { env::remove_var("LOADLYNX_HOME") },
+            }
+        }
+        assert_eq!(resolved.devd, endpoint);
+        assert_eq!(resolved.device, "digital-1");
     }
 
     #[test]
