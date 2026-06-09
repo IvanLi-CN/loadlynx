@@ -1232,7 +1232,20 @@ async fn flash_device(
     let post_flash_identity = match target {
         TargetKind::DigitalEsp32s3 => {
             run_espflash_digital(&state, &id, &artifact).await?;
-            Some(capture_post_flash_identity(&state, &id).await?)
+            let identity = capture_post_flash_identity(&state, &id).await?;
+            if let Some(expected_identity) = input.expected_identity_device_id.as_deref() {
+                let actual = identity.get("device_id").and_then(Value::as_str);
+                if actual != Some(expected_identity) {
+                    return Err(HttpError::conflict(
+                        "post_flash_identity_mismatch",
+                        format!(
+                            "expected post-flash identity device_id {expected_identity}, current identity is {}",
+                            actual.unwrap_or("<unknown>")
+                        ),
+                    ));
+                }
+            }
+            Some(identity)
         }
         TargetKind::AnalogStm32g431 => {
             run_probe_rs_analog(&state, &id, &artifact).await?;
@@ -1283,6 +1296,11 @@ fn enforce_flash_gate(
     }
     if let Some(expected_identity) = input.expected_identity_device_id.as_deref() {
         let guard = state.inner.lock().expect("state lock");
+        let preflash_only_lease = input
+            .lease_id
+            .as_deref()
+            .and_then(|lease_id| guard.leases.get(lease_id))
+            .is_some_and(|lease| lease.legacy_preflash_only);
         let device = guard
             .devices
             .get(device_id)
@@ -1292,7 +1310,7 @@ fn enforce_flash_gate(
             .as_ref()
             .and_then(|identity| identity.get("device_id"))
             .and_then(Value::as_str);
-        if actual != Some(expected_identity) {
+        if actual != Some(expected_identity) && !preflash_only_lease {
             return Err(HttpError::conflict(
                 "identity_confirmation_mismatch",
                 format!(
@@ -1610,7 +1628,10 @@ async fn create_lease(
 
 fn allows_legacy_preflash_identity_fallback(input: &LeaseRequest, error: &HttpError) -> bool {
     input.allow_legacy_preflash_identity_fallback == Some(true)
-        && input.expected_identity_device_id.as_deref() == Some("digital-esp32s3")
+        && input
+            .expected_identity_device_id
+            .as_deref()
+            .is_some_and(|id| id == "digital-esp32s3" || id.starts_with("loadlynx-"))
         && matches!(
             error.0.code.as_str(),
             "serial_response_timeout" | "serial_response_missing" | "serial_response_invalid"
@@ -6186,10 +6207,19 @@ mod tests {
 
         let stable_input = LeaseRequest {
             expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
+            ..input.clone()
+        };
+        assert!(allows_legacy_preflash_identity_fallback(
+            &stable_input,
+            &timeout
+        ));
+
+        let unstable_input = LeaseRequest {
+            expected_identity_device_id: Some("not-stable".to_string()),
             ..input
         };
         assert!(!allows_legacy_preflash_identity_fallback(
-            &stable_input,
+            &unstable_input,
             &timeout
         ));
     }

@@ -283,7 +283,9 @@ async fn create_cli_lease_for_resolved_usb_with_options(
     .await
     {
         Ok(lease) => {
-            validate_cli_lease_identity(&lease, resolved)?;
+            if !allow_legacy_preflash_identity_fallback {
+                validate_cli_lease_identity(&lease, resolved)?;
+            }
             Ok((lease, resolved.device.clone()))
         }
         Err(error) if saved_usb_device_needs_relookup(&*error) => {
@@ -303,7 +305,9 @@ async fn create_cli_lease_for_resolved_usb_with_options(
                 allow_legacy_preflash_identity_fallback,
             )
             .await?;
-            validate_cli_lease_identity(&lease, resolved)?;
+            if !allow_legacy_preflash_identity_fallback {
+                validate_cli_lease_identity(&lease, resolved)?;
+            }
             Ok((lease, device))
         }
         Err(error) => Err(error),
@@ -409,8 +413,8 @@ pub(crate) async fn post_usb_operation_with_optional_lease(
     let lease = if dry_run {
         None
     } else {
-        let allow_legacy_preflash_identity_fallback = path.ends_with("/flash")
-            && resolved.expected_identity_device_id.as_deref() == Some("digital-esp32s3");
+        let allow_legacy_preflash_identity_fallback =
+            path.ends_with("/flash") && resolved.expected_identity_device_id.is_some();
         Some(
             create_cli_lease_for_resolved_usb_with_options(
                 client,

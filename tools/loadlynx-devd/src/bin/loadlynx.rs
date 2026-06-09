@@ -2291,7 +2291,52 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_usb_firmware_operation_creates_cli_lease() {
+    async fn real_usb_firmware_operation_creates_preflash_lease() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_http(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "mock-loadlynx-devd".to_string(),
+            device: "digital-1".to_string(),
+            devd,
+            port_path: None,
+            expected_identity_device_id: Some("mock-loadlynx-devd".to_string()),
+        };
+
+        post_usb_operation_with_optional_lease(
+            &Client::new(),
+            &resolved,
+            "/api/v1/devices/digital-1/flash",
+            json!({"target": TargetKind::DigitalEsp32s3, "dry_run": false}),
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 1);
+        let payloads = state
+            .operation_payloads
+            .lock()
+            .expect("operation payloads lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("dry_run").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            payloads[0].get("lease_id").and_then(Value::as_str),
+            Some("lease-1")
+        );
+        let lease_payloads = state.lease_payloads.lock().expect("lease payloads lock");
+        assert_eq!(
+            lease_payloads[0]
+                .get("allow_legacy_preflash_identity_fallback")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn real_usb_reset_operation_creates_strict_cli_lease() {
         let state = TestHttpState::default();
         let devd = spawn_test_http(state.clone()).await;
         let resolved = ResolvedUsbHardware {
@@ -2312,19 +2357,11 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 1);
-        let payloads = state
-            .operation_payloads
-            .lock()
-            .expect("operation payloads lock");
-        assert_eq!(payloads.len(), 1);
-        assert_eq!(
-            payloads[0].get("dry_run").and_then(Value::as_bool),
-            Some(false)
-        );
-        assert_eq!(
-            payloads[0].get("lease_id").and_then(Value::as_str),
-            Some("lease-1")
+        let lease_payloads = state.lease_payloads.lock().expect("lease payloads lock");
+        assert!(
+            lease_payloads[0]
+                .get("allow_legacy_preflash_identity_fallback")
+                .is_none()
         );
     }
 
