@@ -15,6 +15,7 @@ docs/assets/usb-pd-settings-panel-rendered/**
 .stm32-probe
 .stm32-port
 .esp32-port
+.loadlynx
 
 # Frontend build artifacts and dependencies
 **/node_modules/

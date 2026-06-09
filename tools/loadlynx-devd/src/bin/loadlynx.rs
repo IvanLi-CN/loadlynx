@@ -625,13 +625,32 @@ async fn request_devd_value(
     if response.ok {
         Ok(response.result.unwrap_or(Value::Null))
     } else {
-        let error = response
-            .error
-            .map(|error| serde_json::to_string(&error).unwrap_or_else(|_| "<invalid error>".into()))
-            .unwrap_or_else(|| "unknown devd IPC error".to_string());
-        Err(format!("devd IPC operation failed: {error}").into())
+        Err(match response.error {
+            Some(error) => Box::new(DevdIpcOperationError(error)),
+            None => "devd IPC operation failed: unknown devd IPC error".into(),
+        })
     }
 }
+
+#[derive(Debug)]
+struct DevdIpcOperationError(loadlynx_devd::ApiError);
+
+impl std::fmt::Display for DevdIpcOperationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let encoded =
+            serde_json::to_string(&self.0).unwrap_or_else(|_| "<invalid error>".to_string());
+        if self.0.retryable {
+            write!(
+                formatter,
+                "retryable 503 from devd IPC operation: {encoded}"
+            )
+        } else {
+            write!(formatter, "devd IPC operation failed: {encoded}")
+        }
+    }
+}
+
+impl std::error::Error for DevdIpcOperationError {}
 
 fn ipc_request_for_devd_call(
     method: reqwest::Method,
@@ -2318,6 +2337,20 @@ mod tests {
                 .to_string()
                 .contains("devd endpoint must be a native IPC endpoint")
         );
+    }
+
+    #[test]
+    fn devd_ipc_retryable_error_preserves_retry_marker() {
+        let error = DevdIpcOperationError(loadlynx_devd::ApiError {
+            code: "device_busy".to_string(),
+            message: "serial port is busy".to_string(),
+            retryable: true,
+            details: None,
+        });
+
+        let message = error.to_string();
+        assert!(message.contains("retryable 503"));
+        assert!(message.contains("device_busy"));
     }
 
     #[test]
