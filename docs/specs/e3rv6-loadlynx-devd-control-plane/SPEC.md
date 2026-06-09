@@ -159,14 +159,12 @@ Flash behavior:
 
 ### CLI
 
-CLI devd access is IPC-only. `loadlynx --ipc <endpoint>` selects the IPC
-endpoint, `--no-auto-start` disables sibling daemon startup, and LAN/device HTTP
-still remains available through explicit `--url` or saved HTTP hardware.
+CLI devd access is IPC-only. `loadlynx` auto-starts a sibling `loadlynx-devd serve` on the default IPC endpoint when a command needs devd. `--ipc <endpoint>` selects an alternate IPC endpoint for deliberate multi-instance or debugging overrides, `--no-auto-start` disables sibling daemon startup, and LAN/device HTTP still remains available through explicit `--url` or saved HTTP transport.
 
 CLI commands should map 1:1 to devd/LAN operations:
 
 - `loadlynx discover --mdns --lan-scan --json`
-- `loadlynx devices --ipc /tmp/loadlynx-devd.sock`
+- `loadlynx devices`
 - `loadlynx device list`
 - `loadlynx device add`
 - `loadlynx device add --url http://loadlynx-xxxxxx.local`

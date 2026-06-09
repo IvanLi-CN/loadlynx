@@ -104,8 +104,8 @@ just loadlynx usb-port set digital /dev/cu.usbmodemXXXX
 # 人工交互选择端口（方向键选择，候选项按 espflash 默认串口枚举规则）
 just loadlynx usb-port set digital
 
-# 启动 devd IPC（CLI 路径）
-just devd-serve --endpoint /tmp/loadlynx-devd.sock
+# CLI 路径默认会按需 auto-start sibling devd；通常不需要手动传 IPC endpoint
+just loadlynx status --device <saved-id>
 
 # 启动 devd HTTP bridge（浏览器/Web 路径，loopback only）
 just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors

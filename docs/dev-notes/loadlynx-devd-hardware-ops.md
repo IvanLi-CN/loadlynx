@@ -19,14 +19,15 @@ External MCU daemons are not a LoadLynx hardware-operation path. If a flash, res
 ```sh
 just devd-build
 just devd-test
-just devd-serve --endpoint /tmp/loadlynx-devd.sock
-just loadlynx --ipc /tmp/loadlynx-devd.sock devices
-just loadlynx --ipc /tmp/loadlynx-devd.sock device add
-just loadlynx --ipc /tmp/loadlynx-devd.sock device use <saved-id>
-just loadlynx --ipc /tmp/loadlynx-devd.sock status --device <saved-id>
-just loadlynx --ipc /tmp/loadlynx-devd.sock flash digital --device <saved-id> --artifact <artifact-id>
-just loadlynx --ipc /tmp/loadlynx-devd.sock monitor digital --device <saved-id>
+just loadlynx devices
+just loadlynx device add
+just loadlynx device use <saved-id>
+just loadlynx status --device <saved-id>
+just loadlynx flash digital --device <saved-id> --artifact <artifact-id>
+just loadlynx monitor digital --device <saved-id>
 ```
+
+`loadlynx` auto-starts sibling `loadlynx-devd serve` on the default IPC endpoint when a command needs devd. Use `--ipc` and a matching `loadlynx-devd serve --endpoint ...` only for deliberate multi-instance or debugging overrides.
 
 ## Target Selection
 

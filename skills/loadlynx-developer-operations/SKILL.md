@@ -42,7 +42,6 @@ cd loadlynx
 ```bash
 just devd-build
 just devd-test
-just devd-serve --endpoint /tmp/loadlynx-devd.sock
 just devd-bridge-http --bind 127.0.0.1:<http-port> --allow-dev-cors
 just loadlynx <args>
 ```
@@ -81,23 +80,24 @@ just loadlynx usb-port set digital <path>
 ## devd, CLI, And USB CDC
 
 - Use `loadlynx-devd` for CLI/devd USB CDC control-plane work; do not route that path through external MCU daemons.
-- CLI/devd is native IPC-first. The CLI should expose `--ipc` as a Unix socket / Windows named pipe endpoint override and auto-start a sibling `loadlynx-devd serve` when needed. Do not reintroduce ordinary `--devd http://...` CLI workflows.
+- CLI/devd is native IPC-first. The CLI should auto-start a sibling `loadlynx-devd serve` on the default Unix socket / Windows named pipe when needed. `--ipc` is an endpoint override for explicit multi-instance or debugging scenarios, not part of normal user or agent commands. Do not reintroduce ordinary `--devd http://...` CLI workflows.
 - `loadlynx-devd bridge-http` is the browser/debug bridge only, must bind loopback, and is the path used by local Web development or release/GitHub Pages browser bridge fallback.
-- In source checkout mode, start devd through Just:
-
-```bash
-just devd-serve --endpoint /tmp/loadlynx-devd.sock
-```
-
 - Run the CLI through Just during source development:
 
 ```bash
-just loadlynx --ipc /tmp/loadlynx-devd.sock devices
-just loadlynx --ipc /tmp/loadlynx-devd.sock device add
-just loadlynx --ipc /tmp/loadlynx-devd.sock device list
-just loadlynx --ipc /tmp/loadlynx-devd.sock device use <saved-id>
+just loadlynx devices
+just loadlynx device add
+just loadlynx device list
+just loadlynx device use <saved-id>
 just loadlynx status
 just loadlynx status --device <saved-id>
+```
+
+- For a deliberate alternate IPC endpoint, start the matching daemon and pass the override consistently. Do not use this form for normal flashing or user operation:
+
+```bash
+just devd-serve --endpoint /tmp/loadlynx-devd.sock
+just loadlynx --ipc /tmp/loadlynx-devd.sock status --device <saved-id>
 ```
 
 - Web development may point a local UI at `loadlynx-devd bridge-http` with `VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:<http-port>`, but skill-driven hardware operations still use CLI commands.

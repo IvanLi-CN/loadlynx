@@ -25,7 +25,7 @@ loadlynx --help
 loadlynx-devd --help
 ```
 
-- This skill is IPC-only. `loadlynx --help` must expose `--ipc`; `loadlynx-devd --help` must expose both `serve` and `bridge-http`.
+- This skill is IPC-only. `loadlynx` must use IPC-backed devd access and auto-start `loadlynx-devd serve` when needed; `--ipc` may exist as a hidden endpoint override but is not a normal user argument. `loadlynx-devd --help` must expose both `serve` and `bridge-http`.
 - If `loadlynx --help` exposes `--devd`, or if `loadlynx-devd --help` lacks `bridge-http`, the installed host tools are from an obsolete HTTP-devd release. Stop and upgrade to a stable release with IPC host tools before any hardware operation.
 - Do not use the obsolete `--devd http://...` CLI interface as a compatibility path, even if a pinned older release can still be installed.
 - If the requested user workflow depends on a command that is absent, stop and report that the installed release does not support it. Do not invent commands, fall back to Web UI, or switch to source/developer instructions.
@@ -68,7 +68,7 @@ loadlynx --help
 
 - Connection priority is USB first, HTTP second.
 - CLI/devd uses native local IPC: Unix socket on macOS/Linux and named pipe on Windows. The CLI auto-starts a sibling `loadlynx-devd serve` when needed; use `--no-auto-start` only when the user explicitly wants to manage the daemon process.
-- For CLI-over-USB workflows, do not pass a local HTTP devd URL. `loadlynx --help` should expose `--ipc`, not `--devd`; `--ipc` is an endpoint override, not an IP port requirement.
+- For CLI-over-USB workflows, do not pass a local HTTP devd URL. `loadlynx --help` should not expose the old `--devd`; if `--ipc` exists, it is an endpoint override for deliberate alternate endpoints, not a normal command requirement.
 - `loadlynx-devd bridge-http` is only for browser/Web/debug paths and must bind loopback only.
 - If the user needs a browser bridge for GitHub Pages or a release Web bundle, start:
 

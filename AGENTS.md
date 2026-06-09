@@ -48,7 +48,7 @@ Set the default digital USB CDC port through `loadlynx usb-port set digital <pat
 
 ### CLI/devd Operations
 
-- Daemon control: `just devd-serve --endpoint /tmp/loadlynx-devd.sock` for CLI IPC, or let `loadlynx` auto-start the sibling daemon when supported.
+- Daemon control: normal CLI workflows should let `loadlynx` auto-start the sibling `loadlynx-devd serve` on the default IPC endpoint. Use `--ipc` / `--endpoint` only for explicit multi-instance or debugging overrides.
 - Digital target cache: `just loadlynx usb-port set digital <path>` after the owner explicitly authorizes the exact ESP32-S3 USB CDC path.
 - Device memory: `loadlynx devices`, `loadlynx device add`, `loadlynx device use <saved-id>`, and `loadlynx device remove <saved-id>`.
 - Flash: `loadlynx flash digital --device <saved-id> --artifact <artifact-id> ...`; analog flash must use the corresponding `loadlynx flash analog ...` CLI/devd path once implemented.
