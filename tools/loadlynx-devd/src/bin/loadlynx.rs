@@ -1036,13 +1036,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 }
             }
             Command::Monitor {
-                target: _,
+                target,
                 device,
                 tail,
                 format,
             } => {
-                let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
-                run_monitor(&client, resolved, tail, format).await?
+                match target {
+                    BoardTarget::Digital => {
+                        let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                        run_monitor(&client, resolved, tail, format).await?
+                    }
+                    BoardTarget::Analog => reject_unsupported_analog_monitor()?,
+                }
             }
             Command::Cc {
                 target_i_ma,
@@ -1794,6 +1799,13 @@ fn resolve_operation_confirmation_text(
         .allow_empty(false)
         .interact_text()?;
     Ok(Some(typed))
+}
+
+fn reject_unsupported_analog_monitor() -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Err(
+        "analog monitor is not supported yet; implement a loadlynx-devd probe-rs RTT/defmt monitor backend instead of routing analog monitor through the digital USB session"
+            .into(),
+    )
 }
 
 fn read_json_file(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -2919,6 +2931,13 @@ mod tests {
             }
             _ => panic!("expected monitor command"),
         }
+    }
+
+    #[test]
+    fn analog_monitor_is_explicitly_unsupported() {
+        let error = reject_unsupported_analog_monitor().unwrap_err().to_string();
+        assert!(error.contains("analog monitor is not supported yet"));
+        assert!(error.contains("digital USB session"));
     }
 
     #[test]

@@ -92,7 +92,7 @@
 
 - `cargo test -p loadlynx-protocol` 或受影响 host-testable crate 通过。
 - `just d-build` 通过；如修改模拟板则 `just a-build` 通过。
-- HIL 可用时，flash/monitor digital 与 analog，并比对 `tmp/{digital,analog}-fw-version.txt` 与 boot log。
+- HIL 可用时，flash digital/analog，monitor digital，并比对 `tmp/{digital,analog}-fw-version.txt` 与可用 boot/log evidence；analog RTT/defmt monitor 后端未实现时必须显式拒绝。
 
 ## 风险 / 开放问题 / 假设
 

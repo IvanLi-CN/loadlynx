@@ -33,7 +33,7 @@
 - Bun 1.3.14（见仓库根 `.bun-version`；用于 Web UI、Storybook、Playwright 与 bundle budget checks）
 - Node.js 20（见仓库根 `.node-version`；用于根目录 workflow / release-label / quality-gate tooling）
 
-推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；硬件选择、固件烧录、复位、监视和日志读取统一通过 `loadlynx` CLI + `loadlynx-devd`。
+推荐用 `just` 作为统一入口：构建用 `just a-build` / `just d-build`；硬件选择、固件烧录、复位、digital 监视和日志读取统一通过 `loadlynx` CLI + `loadlynx-devd`。
 
 ### G431（analog）
 
@@ -46,8 +46,7 @@ just a-build
 # 烧录（通过 loadlynx CLI + devd，真实写入需要显式确认）
 just loadlynx flash analog --device <saved-id> --artifact <artifact-id> --no-dry-run --confirm yes
 
-# 监视日志
-just loadlynx monitor analog --device <saved-id>
+# analog RTT/defmt 监视后端尚未实现；不得回退到外部 MCU daemon 或 digital USB monitor。
 ```
 
 备用：直接在子 crate 下构建：

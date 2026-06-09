@@ -75,7 +75,7 @@ just loadlynx usb-port set digital <path>
 
 - Do not use interactive candidate selection as an Agent to bypass explicit owner authorization.
 - Do not edit `.esp32-port`, `.stm32-port`, device registry files, or local `.loadlynx` files unless the owner explicitly authorizes the specific change.
-- Before flash/reset/monitor/HIL, echo the saved device id, selected transport, approved digital USB CDC path or analog probe evidence, artifact id, and dry-run/real mode.
+- Before flash/reset/digital monitor/HIL, echo the saved device id, selected transport, approved digital USB CDC path or analog probe evidence, artifact id, and dry-run/real mode.
 
 ## devd, CLI, And USB CDC
 
@@ -118,7 +118,7 @@ just loadlynx flash digital --device <saved-id> --artifact <artifact-id>
 
 - For real devd digital flash, use a saved USB device target (`--device <saved-id>` or saved default), require a valid lease, selected artifact, artifact hash verification, target evidence, explicit owner confirmation, and post-flash identity capture. Do not require a fixed typed phrase for this confirmation. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
 - Web Serial flash uses `esptool-js`, release firmware catalog/assets, browser-granted ports, and identity/profile memory only. It must not save OS port paths.
-- Analog firmware flash/reset/monitor/logs must also be exposed through `loadlynx` CLI + `loadlynx-devd`. Use `probe-rs` as an internal devd backend when needed; missing analog support is a CLI/devd product gap to implement.
+- Analog firmware flash/reset must also be exposed through `loadlynx` CLI + `loadlynx-devd`. Use `probe-rs` as an internal devd backend when needed. Analog RTT/defmt monitor/logs are a CLI/devd product gap until implemented; `loadlynx monitor analog` must reject explicitly rather than using digital USB monitor or any external MCU daemon.
 - After flashing or reset, compare boot logs against `tmp/analog-fw-version.txt` or `tmp/digital-fw-version.txt` before claiming the board is running the local build.
 
 ## WiFi And Calibration

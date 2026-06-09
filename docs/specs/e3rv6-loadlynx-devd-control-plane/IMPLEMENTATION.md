@@ -15,7 +15,7 @@ The control plane is implemented across the local daemon, CLI, Web routes and ES
 ## Implementation Notes
 
 - Do not copy `mains-aegis-devd` without adapting the device model. LoadLynx needs separate digital and analog targets under one logical device.
-- Treat `loadlynx-devd` as the owner of firmware workflows, reset, monitor, logs, USB CDC sessions and target evidence. Devd/Web ESP32-S3 digital firmware flashing uses devd's lease-gated direct `espflash` path with the approved `.esp32-port` target; analog/probe operations must also be exposed through CLI/devd.
+- Treat `loadlynx-devd` as the owner of firmware workflows, reset, digital monitor, logs, USB CDC sessions and target evidence. Devd/Web ESP32-S3 digital firmware flashing uses devd's lease-gated direct `espflash` path with the approved `.esp32-port` target; analog flash/reset are exposed through CLI/devd, while analog RTT/defmt monitor remains an explicit CLI/devd backend gap that must reject rather than route through the digital USB session.
 - Keep Web USB lease TTL short enough to recover from tab crashes while tolerating brief SSE/heartbeat jitter.
 - Keep LAN discovery read-oriented until a separate LAN write-control safety design is accepted.
 - `tools/loadlynx-devd/` exposes `loadlynx-devd serve`, `loadlynx-devd bridge-http`, and `loadlynx` from one Rust package.
@@ -120,7 +120,7 @@ Digital firmware `cargo check` reached the firmware build script and stopped bef
 1. devd/CLI foundation: package scaffold, API envelope, mock devices, scan/list/bind/lease/session tests.
 2. Firmware catalog and artifact generator for digital and analog targets.
 3. ESP32-S3 identity, mDNS/DNS-SD, and USB CDC JSONL bridge contract.
-4. devd hardware backends for digital flash/reset/monitor and analog flash/reset/monitor with dry-run proof.
+4. devd hardware backends for digital flash/reset/monitor and analog flash/reset with dry-run proof; analog RTT/defmt monitor backend remains a follow-up gap.
 5. Web Connect/Firmware/USB session UI with Storybook and visual evidence.
 6. CLI LAN and USB flows with dry-run and JSON output.
 7. HIL validation on approved cached selectors.

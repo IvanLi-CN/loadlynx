@@ -40,13 +40,13 @@ just loadlynx usb-port set digital <path>
 
 - Agents must not use interactive port selection to bypass explicit owner authorization.
 - Agents must not edit `.esp32-port`, `.stm32-port`, device registry files, or local `.loadlynx` files unless the owner explicitly asks for that mutation.
-- Before flash/reset/monitor, echo the saved device id, selected transport, physical port/probe evidence when available, artifact id, and dry-run/real mode.
+- Before flash/reset/digital monitor, echo the saved device id, selected transport, physical port/probe evidence when available, artifact id, and dry-run/real mode.
 
 ## Firmware Flows
 
 - Digital ESP32-S3 real flash uses devd's direct `espflash` backend against the approved `.esp32-port` target.
 - ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
-- Analog STM32G431 flash/reset/monitor must be exposed as `loadlynx` CLI + `loadlynx-devd` operations. Use `probe-rs` as an implementation backend inside devd when needed, with exact target evidence and the same no-guessing guardrails.
+- Analog STM32G431 flash/reset must be exposed as `loadlynx` CLI + `loadlynx-devd` operations. Analog RTT/defmt monitor is a separate devd backend gap; until implemented, `loadlynx monitor analog` must reject explicitly instead of routing through the digital USB session or any external MCU daemon.
 - Dry-run validates target resolution, artifact presence, and hashes without touching hardware.
 - Real flash requires artifact/hash/target evidence, explicit confirmation, and post-flash identity/status capture.
 

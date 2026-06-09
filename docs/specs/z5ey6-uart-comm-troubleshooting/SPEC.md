@@ -100,9 +100,9 @@
 - 烧录：
   - digital：`loadlynx flash digital --device <saved-id> --artifact <artifact-id>`；analog：`loadlynx flash analog --device <saved-id> --artifact <artifact-id>`。
 - 日志采集：
-  - `loadlynx monitor digital --device <saved-id> --reset`（停止时用 Ctrl+C）。
+  - `loadlynx monitor digital --device <saved-id>`（停止时用 Ctrl+C）。
   - 只看已有日志：使用 CLI/devd bounded log 读取入口。
-  - 双板同时观察：开两个终端分别运行 `loadlynx monitor analog --device <saved-id> --reset` 与 `loadlynx monitor digital --device <saved-id> --reset`。
+  - Analog RTT/defmt monitor 后端尚未实现时，`loadlynx monitor analog` 必须显式拒绝；不得借用 digital USB monitor 或外部 MCU daemon。
 - 关注要点：
   - 先读取 `tmp/digital-fw-version.txt` / `tmp/analog-fw-version.txt`，与日志开头的 version 行比对，确认一致再评估。
   - UART：`UART RX error: FifoOverflowed (total=...)`、DMA panic/nmi、`uhci_dma_rx_chunk...` 之类统计。

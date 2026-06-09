@@ -178,7 +178,7 @@ cd loadlynx
 - Firmware, Release, And HIL:
   - `just a-build` / `just d-build`。
   - CLI/devd digital flash 使用 devd direct `espflash`。
-  - analog flash/reset/monitor/logs 也必须通过 `loadlynx` CLI + `loadlynx-devd` 暴露；缺口视为 host-tool 实现工作。
+  - analog flash/reset 必须通过 `loadlynx` CLI + `loadlynx-devd` 暴露；analog RTT/defmt monitor/logs 缺口视为 host-tool 实现工作，未实现时必须显式拒绝而不是走 digital monitor 或外部 MCU daemon。
   - release workflow 需要在发布前构建并上传被用户技能依赖的程序与固件资产。
 - WiFi And Calibration:
   - WiFi 可涉及源码配置、协议、devd API、CLI、release packaging。

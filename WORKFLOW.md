@@ -15,7 +15,7 @@
   - `chore(digital): setup esp-hal display pipeline`
 
 ## 构建与验证
-- G431：Rust + Embassy，目标 `thumbv7em-none-eabihf`；由 `loadlynx-devd` 内部调用 probe-rs 完成烧录/复位，日志/监视能力也应收敛到 CLI/devd。
+- G431：Rust + Embassy，目标 `thumbv7em-none-eabihf`；由 `loadlynx-devd` 内部调用 probe-rs 完成烧录/复位。Analog RTT/defmt 日志/监视后端尚未实现时，CLI 必须显式拒绝而不是借用 digital monitor。
 - S3：Rust + esp-hal + Embassy；由 `loadlynx-devd` 内部调用 espflash 完成烧录/复位，并通过 USB CDC JSONL 读取状态与日志。
 
 ## 当前质量门
@@ -84,7 +84,7 @@
 - 人工开发时可用 `just loadlynx usb-port set` 或 `just loadlynx usb-port set digital` 进入方向键交互选择；候选项按 `espflash` 默认串口枚举规则展示。Agent 不得用交互候选选择绕过 owner 对 exact path 的批准。
 - Web 启动时通过 `VITE_LOADLYNX_DEVD_URL=<devd-url>` 指向当前 devd。
 - 真机验证必须证明 devd 与设备完成 JSONL 协议通信，例如收到 `hello` 或成功执行 `get_identity` / `get_status`。串口打开、候选扫描、Web lease 或 firmware dry-run 只能作为辅助证据。
-- 该流程复用 `.esp32-port` 作为 ESP32-S3 digital USB CDC 默认端口记忆，但不得读取、修改或依赖 `.stm32-port` 作为替代选择，也不得调用外部 selector。devd/Web ESP32-S3 digital firmware flash 留在 devd 路径：持有 Web lease、校验 artifact hash，并对批准端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。Analog/probe 的 flash/reset/monitor 也必须由 CLI/devd 暴露和执行。
+- 该流程复用 `.esp32-port` 作为 ESP32-S3 digital USB CDC 默认端口记忆，但不得读取、修改或依赖 `.stm32-port` 作为替代选择，也不得调用外部 selector。devd/Web ESP32-S3 digital firmware flash 留在 devd 路径：持有 Web lease、校验 artifact hash，并对批准端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。Analog/probe 的 flash/reset 也必须由 CLI/devd 暴露和执行；analog monitor/logs 在 devd 后端实现前必须显式拒绝。
 
 ## 文档真相源
 

@@ -14,7 +14,7 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - Web 界面支持固件烧录、局域网设备发现（mDNS/DNS-SD + 手工 `.local` + 受控子网扫描）、devd HTTP bridge、正式 Web Serial 路径和 USB/LAN 双连接合并。
 - CLI 支持通过以太网/LAN 与 USB/devd 操控硬件，并覆盖 discovery、status、flash、reset、monitor、safe control 与诊断导出。
 - 固件 artifact catalog 成为 Web、devd、CLI、本地构建和 release 的统一合同。
-- 将烧录、reset、monitor 与 bounded logs 的硬件操作职责收敛到 `loadlynx-devd`，owner-facing 和开发者 HIL 都通过 `loadlynx` CLI + devd 执行。
+- 将烧录、reset、digital monitor 与 bounded logs 的硬件操作职责收敛到 `loadlynx-devd`，owner-facing 和开发者 HIL 都通过 `loadlynx` CLI + devd 执行；analog RTT/defmt monitor 在 devd 后端实现前必须显式拒绝。
 - 复用 `mains-aegis` 的安全模型：scan 不自动连接，多候选必须用户选择，USB 控制必须持有有效 lease，PSK/敏感字段不得回显，日志解码必须匹配 artifact identity。
 
 ### Non-goals
@@ -53,7 +53,7 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - MUST: Web 页面能通过 LAN 只读 API 使用 mDNS `.local`、DNS-SD 结果或用户手工 URL 连接设备。
 - MUST: CLI 同时支持 LAN base URL 和 devd USB target，输出 JSON 与人类可读摘要。
 - SHOULD: devd 可以托管生产 Web 静态文件，并为 Vite dev server 提供 `/api` proxy 目标。
-- SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/monitor 操作。
+- SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/digital monitor 操作。Analog RTT/defmt monitor 尚未实现时，CLI/devd 必须返回结构化错误，不得悄悄监视 digital USB session。
 - MUST: Web Serial 是 GitHub Pages 与 release Web bundle 的正式浏览器路径；支持身份/状态/控制/PD/输出/预设/校准/WiFi/诊断和 ESP32-S3 flash，并在不支持 Serial API 的浏览器引导到 released CLI/devd。
 
 ## 功能与行为规格

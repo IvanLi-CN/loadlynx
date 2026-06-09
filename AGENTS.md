@@ -34,9 +34,9 @@ Prerequisites: Rust (embedded), `thumbv7em-none-eabihf` target, `probe-rs`; for 
 
 ## Firmware Flash/Reset/Monitor Workflow
 
-Firmware flash/reset/monitor/log operations are owned by the `loadlynx` CLI and `loadlynx-devd`. The daemon is the local hardware owner for USB CDC sessions, firmware flashing, reset, monitor, bounded logs, artifact verification, and target evidence. Do not route LoadLynx hardware work through an external MCU daemon.
+Firmware flash/reset/digital monitor/log operations are owned by the `loadlynx` CLI and `loadlynx-devd`. The daemon is the local hardware owner for USB CDC sessions, firmware flashing, reset, digital monitor, bounded logs, artifact verification, and target evidence. Do not route LoadLynx hardware work through an external MCU daemon.
 
-Set the default digital USB CDC port through `loadlynx usb-port set digital <path>`, which writes the repo-local development digital port cache used by subsequent CLI/devd operations. Digital flash uses devd's lease-gated direct `espflash` path against the approved `.esp32-port` target. Analog flash/reset/monitor must also be exposed through `loadlynx` + `loadlynx-devd`; if the installed CLI/devd does not support the requested analog operation yet, treat that as a missing LoadLynx host-tool capability to implement, not as permission to use another daemon.
+Set the default digital USB CDC port through `loadlynx usb-port set digital <path>`, which writes the repo-local development digital port cache used by subsequent CLI/devd operations. Digital flash uses devd's lease-gated direct `espflash` path against the approved `.esp32-port` target. Analog flash/reset must also be exposed through `loadlynx` + `loadlynx-devd`; analog RTT/defmt monitor is a missing LoadLynx host-tool capability until implemented, not permission to use another daemon or route through digital USB monitor.
 
 ### Build-time versioning and boot logs
 
