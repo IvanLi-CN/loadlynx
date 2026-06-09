@@ -1517,19 +1517,28 @@ async fn resolve_analog_target_device(
         .get("devices")
         .and_then(Value::as_array)
         .ok_or("device scan response did not include devices")?;
-    let mut analog_devices = devices.iter().filter_map(|device| {
-        device
-            .get("analog_target")
-            .filter(|target| !target.is_null())
-            .and_then(|_| device.get("id"))
-            .and_then(Value::as_str)
-    });
-    let Some(id) = analog_devices.next() else {
+    let mut selectors = HashSet::new();
+    let analog_devices = devices
+        .iter()
+        .filter_map(|device| {
+            let target = device
+                .get("analog_target")
+                .filter(|target| !target.is_null())?;
+            let id = device.get("id").and_then(Value::as_str)?;
+            let selector = target
+                .get("probe_selector")
+                .and_then(Value::as_str)
+                .unwrap_or(id);
+            Some((id, selector))
+        })
+        .filter_map(|(id, selector)| selectors.insert(selector.to_string()).then_some(id))
+        .collect::<Vec<_>>();
+    let Some(id) = analog_devices.first() else {
         return Err(
             "no analog target found; approve the STM32 probe selector before retrying".into(),
         );
     };
-    if analog_devices.next().is_some() {
+    if analog_devices.len() > 1 {
         return Err("multiple analog targets found; cannot select one implicitly".into());
     }
     Ok(id.to_string())
@@ -1911,6 +1920,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum TestIpcMode {
         Normal,
+        DuplicateAnalogSelector,
         ScanRequiredLease,
         ScanRequiredArtifact,
         IdentityMismatchThenScan,
@@ -1971,17 +1981,26 @@ mod tests {
             "devices.scan" => {
                 state.scans.fetch_add(1, Ordering::SeqCst);
                 let id = match mode {
-                    TestIpcMode::Normal => "digital-1",
+                    TestIpcMode::Normal | TestIpcMode::DuplicateAnalogSelector => "digital-1",
                     TestIpcMode::ScanRequiredLease
                     | TestIpcMode::ScanRequiredArtifact
                     | TestIpcMode::IdentityMismatchThenScan => "digital-current",
                 };
-                Ok(json!({
-                    "devices": [
+                let devices = match mode {
+                    TestIpcMode::DuplicateAnalogSelector => json!([
+                        {
+                            "id": id,
+                            "digital_target": {"port_path": "mock://esp32s3"},
+                            "analog_target": {"probe_selector": "mock-probe"}
+                        },
+                        {"id": "analog-1", "analog_target": {"probe_selector": "mock-probe"}}
+                    ]),
+                    _ => json!([
                         {"id": id, "digital_target": {"port_path": "mock://esp32s3"}},
                         {"id": "analog-1", "analog_target": {"probe_selector": "mock-probe"}}
-                    ]
-                }))
+                    ]),
+                };
+                Ok(json!({ "devices": devices }))
             }
             "devices.flash" | "devices.reset" => {
                 state
@@ -2541,6 +2560,18 @@ mod tests {
 
         assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
         assert_eq!(state.lease_creates.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn analog_target_resolution_deduplicates_same_probe_selector() {
+        let state = TestHttpState::default();
+        let endpoint = spawn_test_ipc_with_mode(state, TestIpcMode::DuplicateAnalogSelector).await;
+
+        let device = resolve_analog_target_device(None, &endpoint)
+            .await
+            .expect("analog target");
+
+        assert_eq!(device, "digital-1");
     }
 
     #[test]
