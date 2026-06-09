@@ -6,6 +6,7 @@ pub(crate) struct ApiSelector {
     pub(crate) device: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn request_api_value(
     client: &Client,
     default_devd: &str,

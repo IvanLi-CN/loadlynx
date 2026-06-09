@@ -1421,7 +1421,9 @@ async fn flash_device(
     enforce_flash_gate(&state, &id, &target, &artifact, &input)?;
     {
         let guard = state.inner.lock().expect("state lock");
-        ensure_flash_lease_for_target(&guard, Some(&id), input.lease_id.as_deref(), &target)?;
+        if target_requires_usb_lease(&target) {
+            ensure_flash_lease_for_target(&guard, Some(&id), input.lease_id.as_deref(), &target)?;
+        }
         let device = guard
             .devices
             .get(&id)
@@ -1584,7 +1586,9 @@ async fn reset_device(
     }
     {
         let guard = state.inner.lock().expect("state lock");
-        ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
+        if target_requires_usb_lease(&target) {
+            ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
+        }
         let device = guard
             .devices
             .get(&id)
@@ -3335,6 +3339,10 @@ fn ensure_real_operation_uses_cached_target(
         ));
     }
     Ok(())
+}
+
+fn target_requires_usb_lease(target: &TargetKind) -> bool {
+    matches!(target, TargetKind::DigitalEsp32s3)
 }
 
 #[derive(Debug)]
@@ -6982,6 +6990,12 @@ mod tests {
         let err = ensure_real_operation_uses_cached_target(device, &TargetKind::DigitalEsp32s3)
             .unwrap_err();
         assert_eq!(err.0.code, "target_selector_not_cached");
+    }
+
+    #[test]
+    fn analog_probe_operations_do_not_require_usb_lease() {
+        assert!(target_requires_usb_lease(&TargetKind::DigitalEsp32s3));
+        assert!(!target_requires_usb_lease(&TargetKind::AnalogStm32g431));
     }
 
     #[tokio::test]

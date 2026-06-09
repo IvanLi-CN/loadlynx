@@ -214,6 +214,7 @@ pub(crate) async fn handle_backup_export(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_backup_import(
     client: &Client,
     default_devd: &str,
@@ -804,6 +805,7 @@ async fn restore_wifi(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn confirm_wifi_restore_readback(
     client: &Client,
     default_devd: &str,

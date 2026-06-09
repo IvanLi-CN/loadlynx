@@ -920,53 +920,97 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 expected_identity_device_id,
                 acknowledge_non_project_firmware,
             } => {
-                let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
-                let resolved = ResolvedUsbHardware {
-                    expected_identity_device_id: expected_identity_device_id
-                        .clone()
-                        .or(resolved.expected_identity_device_id),
-                    ..resolved
-                };
-                if manifest_path.is_some() {
-                    select_device_artifact(
-                        &client,
-                        &resolved,
-                        manifest_path.clone(),
-                        artifact.clone(),
-                    )
-                    .await?;
-                }
                 let confirmation_text = resolve_flash_confirmation_text(&target, dry_run, confirm)?;
-                post_usb_operation_with_optional_lease(
-                    &client,
-                    &resolved,
-                    &format!("/api/v1/devices/{}/flash", resolved.device),
-                    json!({
-                        "target": target.kind(),
-                        "artifact_id": artifact,
-                        "dry_run": dry_run,
-                        "confirmation_phrase": confirmation_text,
-                        "expected_identity_device_id": resolved.expected_identity_device_id,
-                        "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
-                    }),
-                    dry_run,
-                )
-                .await?
+                match target {
+                    BoardTarget::Digital => {
+                        let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                        let resolved = ResolvedUsbHardware {
+                            expected_identity_device_id: expected_identity_device_id
+                                .clone()
+                                .or(resolved.expected_identity_device_id),
+                            ..resolved
+                        };
+                        if manifest_path.is_some() {
+                            select_device_artifact(
+                                &client,
+                                &resolved,
+                                manifest_path.clone(),
+                                artifact.clone(),
+                            )
+                            .await?;
+                        }
+                        post_usb_operation_with_optional_lease(
+                            &client,
+                            &resolved,
+                            &format!("/api/v1/devices/{}/flash", resolved.device),
+                            json!({
+                                "target": target.kind(),
+                                "artifact_id": artifact,
+                                "dry_run": dry_run,
+                                "confirmation_phrase": confirmation_text,
+                                "expected_identity_device_id": resolved.expected_identity_device_id,
+                                "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
+                            }),
+                            dry_run,
+                        )
+                        .await?
+                    }
+                    BoardTarget::Analog => {
+                        let device_id = resolve_analog_target_device(device, &devd).await?;
+                        if manifest_path.is_some() {
+                            select_devd_device_artifact(
+                                &devd,
+                                &device_id,
+                                manifest_path.clone(),
+                                artifact.clone(),
+                            )
+                            .await?;
+                        }
+                        request_devd_value(
+                            &devd,
+                            reqwest::Method::POST,
+                            &format!("/api/v1/devices/{device_id}/flash"),
+                            Some(json!({
+                                "target": target.kind(),
+                                "artifact_id": artifact,
+                                "dry_run": dry_run,
+                                "confirmation_phrase": confirmation_text,
+                                "expected_identity_device_id": expected_identity_device_id,
+                                "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
+                            })),
+                        )
+                        .await?
+                    }
+                }
             }
             Command::Reset {
                 target,
                 device,
                 dry_run,
             } => {
-                let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
-                post_usb_operation_with_optional_lease(
-                    &client,
-                    &resolved,
-                    &format!("/api/v1/devices/{}/reset", resolved.device),
-                    json!({"target": target.kind(), "dry_run": dry_run}),
-                    dry_run,
-                )
-                .await?
+                match target {
+                    BoardTarget::Digital => {
+                        let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                        post_usb_operation_with_optional_lease(
+                            &client,
+                            &resolved,
+                            &format!("/api/v1/devices/{}/reset", resolved.device),
+                            json!({"target": target.kind(), "dry_run": dry_run}),
+                            dry_run,
+                        )
+                        .await?
+                    }
+                    BoardTarget::Analog => {
+                        let device_id = resolve_analog_target_device(device, &devd).await?;
+                        request_devd_value(
+                            &devd,
+                            reqwest::Method::POST,
+                            &format!("/api/v1/devices/{device_id}/reset"),
+                            Some(json!({"target": target.kind(), "dry_run": dry_run})),
+                        )
+                        .await?
+                    }
+                }
             }
             Command::Monitor {
                 target: _,
@@ -1407,13 +1451,9 @@ async fn select_device_artifact(
     artifact_id: Option<String>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let body = json!({"manifest_path": manifest_path, "artifact_id": artifact_id});
-    let result = request_devd_value(
-        &resolved.devd,
-        reqwest::Method::POST,
-        &format!("/api/v1/devices/{}/artifact", resolved.device),
-        Some(body.clone()),
-    )
-    .await;
+    let result =
+        select_devd_device_artifact(&resolved.devd, &resolved.device, manifest_path, artifact_id)
+            .await;
     match result {
         Ok(value) => Ok(value),
         Err(error) if saved_usb_device_needs_relookup(&*error) => {
@@ -1435,6 +1475,56 @@ async fn select_device_artifact(
         }
         Err(error) => Err(error),
     }
+}
+
+async fn select_devd_device_artifact(
+    devd: &str,
+    device: &str,
+    manifest_path: Option<String>,
+    artifact_id: Option<String>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_devd_value(
+        devd,
+        reqwest::Method::POST,
+        &format!("/api/v1/devices/{device}/artifact"),
+        Some(json!({"manifest_path": manifest_path, "artifact_id": artifact_id})),
+    )
+    .await
+}
+
+async fn resolve_analog_target_device(
+    device: Option<String>,
+    devd: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if device.is_some() {
+        return Err(
+            "analog firmware operations use the approved .stm32-port selector; --device is only for saved USB devices"
+                .into(),
+        );
+    }
+
+    let scan =
+        request_devd_value(devd, reqwest::Method::POST, "/api/v1/devices/scan", None).await?;
+    let devices = scan
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or("device scan response did not include devices")?;
+    let mut analog_devices = devices.iter().filter_map(|device| {
+        device
+            .get("analog_target")
+            .filter(|target| !target.is_null())
+            .and_then(|_| device.get("id"))
+            .and_then(Value::as_str)
+    });
+    let Some(id) = analog_devices.next() else {
+        return Err(
+            "no analog target found; approve the STM32 probe selector before retrying".into(),
+        );
+    };
+    if analog_devices.next().is_some() {
+        return Err("multiple analog targets found; cannot select one implicitly".into());
+    }
+    Ok(id.to_string())
 }
 
 fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> {
@@ -1459,9 +1549,15 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
                 .into_iter()
                 .collect()
         }
-        Command::Flash { device, .. }
-        | Command::Reset { device, .. }
-        | Command::Monitor { device, .. }
+        Command::Flash { target, device, .. } | Command::Reset { target, device, .. } => {
+            match target {
+                BoardTarget::Digital => usb_target_devd_endpoint(device.as_ref(), default_devd)
+                    .into_iter()
+                    .collect(),
+                BoardTarget::Analog => vec![default_devd.to_string()],
+            }
+        }
+        Command::Monitor { device, .. }
         | Command::Pd {
             command: PdCommand::Set { device, .. },
         } => usb_target_devd_endpoint(device.as_ref(), default_devd)
@@ -1872,9 +1968,12 @@ mod tests {
                     | TestIpcMode::ScanRequiredArtifact
                     | TestIpcMode::IdentityMismatchThenScan => "digital-current",
                 };
-                Ok(
-                    json!({"devices": [{"id": id, "digital_target": {"port_path": "mock://esp32s3"}}]}),
-                )
+                Ok(json!({
+                    "devices": [
+                        {"id": id, "digital_target": {"port_path": "mock://esp32s3"}},
+                        {"id": "analog-1", "analog_target": {"probe_selector": "mock-probe"}}
+                    ]
+                }))
             }
             "devices.flash" | "devices.reset" => {
                 state
@@ -2281,6 +2380,14 @@ mod tests {
             vec!["/tmp/loadlynx.sock"]
         );
 
+        let cli =
+            Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "flash", "analog"])
+                .expect("analog flash parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+
         match previous_home {
             Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
             None => unsafe { env::remove_var("LOADLYNX_HOME") },
@@ -2351,6 +2458,37 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("retryable 503"));
         assert!(message.contains("device_busy"));
+    }
+
+    #[tokio::test]
+    async fn analog_flash_does_not_create_usb_lease() {
+        let state = TestHttpState::default();
+        let endpoint = spawn_test_ipc(state.clone()).await;
+        let value = request_devd_value(
+            &endpoint,
+            reqwest::Method::POST,
+            "/api/v1/devices/scan",
+            None,
+        )
+        .await
+        .expect("scan response");
+        let device = resolve_analog_target_device(None, &endpoint)
+            .await
+            .expect("analog target");
+        assert_eq!(device, "analog-1");
+        assert!(value.get("devices").is_some());
+
+        let response = request_devd_value(
+            &endpoint,
+            reqwest::Method::POST,
+            "/api/v1/devices/analog-1/flash",
+            Some(json!({"target": TargetKind::AnalogStm32g431, "dry_run": false})),
+        )
+        .await
+        .expect("analog flash");
+
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 0);
     }
 
     #[test]

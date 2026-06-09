@@ -47,7 +47,7 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - MUST: `loadlynx-devd serve` 不接收固定设备端口；设备必须通过 `scan -> user selects -> bind/connect/lease` 流程进入控制。
 - MUST: `POST /api/v1/devices/scan` 返回 ESP32-S3 serial candidates、STM32 probe candidates、LAN discovered devices、mock devices，并保留完整候选信息。
 - MUST: 多个候选存在时 Web 和 CLI 均不得自动选择第一个、最近、已连接或已识别设备。
-- MUST: USB CDC 写入、WiFi 配网、safe settings、flash/reset/monitor 等需要占用 USB 的操作必须持有有效 per-device lease 或明确的 CLI exclusive session。同一 device/port 可以有多个有效 lease；普通 JSONL 写操作进入 per-port bounded FIFO 串行执行。
+- MUST: USB CDC 写入、WiFi 配网、safe settings、ESP32-S3 flash/reset/monitor 等需要占用数字板 USB CDC 的操作必须持有有效 per-device lease 或明确的 CLI exclusive session。同一 device/port 可以有多个有效 lease；普通 JSONL 写操作进入 per-port bounded FIFO 串行执行。STM32G431 analog probe-rs flash/reset 不是 USB CDC 操作，不得要求 saved USB device 或 USB lease；它必须使用 devd 扫描出的 `.stm32-port` probe selector evidence。
 - MUST: 固件烧录前校验 artifact 文件 SHA-256，并用 firmware identity 匹配 `build_id`、profile、features、target chip 和 defmt metadata。
 - MUST: ESP32-S3 烧录与 STM32G431 烧录目标分离；同一设备记录可包含 `digital_target` 与 `analog_target`。
 - MUST: Web 页面能通过 LAN 只读 API 使用 mDNS `.local`、DNS-SD 结果或用户手工 URL 连接设备。
@@ -165,7 +165,7 @@ Artifact catalog entries must represent both boards:
 Flash behavior:
 
 - `target=digital_esp32s3`: devd/Web firmware flows use devd's lease-gated direct `espflash` backend with the approved `.esp32-port` serial target. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
-- `target=analog_stm32g431`: devd/CLI owns the analog firmware flow and may invoke `probe-rs` internally, with exact probe selector evidence required.
+- `target=analog_stm32g431`: devd/CLI owns the analog firmware flow and may invoke `probe-rs` internally, with exact `.stm32-port` probe selector evidence required. Analog flash/reset must not resolve `--device` through the saved USB registry or create a USB CDC lease.
 - `dry_run=true` must validate target resolution, artifact presence and hashes without touching hardware.
 - Real flash must refuse if the requested target does not match the selected device/board identity.
 - Real ESP32-S3 flash through CLI/devd/Web Serial must require artifact/hash/target evidence, explicit `yes` confirmation, explicit non-project firmware acknowledgement when applicable, and post-flash identity capture. A successful vendor-tool exit code alone is not sufficient.
@@ -188,9 +188,10 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx status --device <device-id>`
 - `loadlynx status --url http://loadlynx-xxxxxx.local`
 - `loadlynx flash digital --device <device-id> --artifact <artifact_id> [--dry-run] [--confirm yes]`
-- `loadlynx flash analog --device <device-id> --artifact <artifact_id> [--dry-run]`
-- `loadlynx reset digital|analog --device <device-id>`
-- `loadlynx monitor digital|analog --device <device-id> --tail 200`
+- `loadlynx flash analog --artifact <artifact_id> [--dry-run]`
+- `loadlynx reset digital --device <device-id>`
+- `loadlynx reset analog`
+- `loadlynx monitor digital --device <device-id> --tail 200`
 - `loadlynx pd set --device <device-id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
 - `loadlynx cc <target_i_ma> --device <id>`
 - `loadlynx cv <target_v_mv> --device <id>`
@@ -229,6 +230,7 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Given an analog artifact is selected for a digital target, When flash is requested, Then devd returns a non-retryable target mismatch error.
 - Given mDNS is unavailable, When the owner enters `http://loadlynx-xxxxxx.local` and it fails, Then Web offers IP fallback without marking the device as broken.
 - Given CLI receives `--dry-run`, When `flash analog` is called, Then it verifies artifact hashes and target resolution but does not invoke probe-rs/espflash.
+- Given CLI runs `flash analog` or `reset analog`, When there is no saved ESP32-S3 USB device or the digital USB device is busy, Then the analog path still reaches devd's `.stm32-port` probe-rs operation and does not create a USB CDC lease.
 - Given CLI needs local devd, When it sends a request to `loadlynx-devd serve`, Then the wire payload is a native IPC operation envelope and never an HTTP method/path proxy.
 - Given a devd endpoint is configured as `http://...`, When CLI attempts a devd-backed USB workflow, Then CLI rejects that endpoint and does not call the HTTP bridge.
 - Given CLI sets a USB target to 12V PD and enables a 2A CC load, When `status` is read through devd, Then the response shows the PD contract, CC target, output enabled state and measured current without direct CLI serial access.
