@@ -43,11 +43,11 @@
 # 构建（默认 PROFILE=release）
 just a-build
 
-# 烧录（通过 loadlynx CLI + devd，需先绑定包含 analog target 的设备）
-just loadlynx flash analog --device <saved-id> --artifact <artifact-id>
+# 烧录（通过 loadlynx CLI + devd，真实写入需要显式确认）
+just loadlynx flash analog --device <saved-id> --artifact <artifact-id> --no-dry-run --confirm yes
 
-# 监视（可选：复位后从头输出）
-just loadlynx monitor analog --device <saved-id> --reset
+# 监视日志
+just loadlynx monitor analog --device <saved-id>
 ```
 
 备用：直接在子 crate 下构建：
@@ -64,11 +64,11 @@ just loadlynx monitor analog --device <saved-id> --reset
 # 构建（Rust + esp-hal，默认 PROFILE=release）
 just d-build
 
-# 烧录（通过 loadlynx CLI + devd）
-just loadlynx flash digital --device <saved-id> --artifact <artifact-id>
+# 烧录（通过 loadlynx CLI + devd，真实写入需要显式确认）
+just loadlynx flash digital --device <saved-id> --artifact <artifact-id> --no-dry-run --confirm yes
 
-# 监视（可选：复位后从头输出）
-just loadlynx monitor digital --device <saved-id> --reset
+# 监视日志
+just loadlynx monitor digital --device <saved-id>
 ```
 
 备用：直接在子 crate 下构建：
