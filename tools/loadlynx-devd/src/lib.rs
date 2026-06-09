@@ -1481,6 +1481,7 @@ fn enforce_flash_gate(
 ) -> Result<(), HttpError> {
     if target == &TargetKind::AnalogStm32g431 {
         enforce_analog_operation_confirmation(input.confirmation_phrase.as_deref())?;
+        enforce_non_project_firmware_acknowledgement(artifact, input)?;
         return Ok(());
     }
     if target != &TargetKind::DigitalEsp32s3 {
@@ -1492,14 +1493,7 @@ fn enforce_flash_gate(
             format!("type `{FLASH_CONFIRMATION_TEXT}` to confirm real digital flash"),
         ));
     }
-    if !is_loadlynx_project_artifact(artifact)
-        && input.acknowledge_non_project_firmware != Some(true)
-    {
-        return Err(HttpError::bad_request(
-            "non_project_firmware_ack_required",
-            "non-project or unknown firmware requires acknowledge_non_project_firmware=true",
-        ));
-    }
+    enforce_non_project_firmware_acknowledgement(artifact, input)?;
     if let Some(expected_identity) = input.expected_identity_device_id.as_deref() {
         let guard = state.inner.lock().expect("state lock");
         let preflash_only_lease = input
@@ -1525,6 +1519,21 @@ fn enforce_flash_gate(
                 ),
             ));
         }
+    }
+    Ok(())
+}
+
+fn enforce_non_project_firmware_acknowledgement(
+    artifact: &FirmwareArtifact,
+    input: &FlashRequest,
+) -> Result<(), HttpError> {
+    if !is_loadlynx_project_artifact(artifact)
+        && input.acknowledge_non_project_firmware != Some(true)
+    {
+        return Err(HttpError::bad_request(
+            "non_project_firmware_ack_required",
+            "non-project or unknown firmware requires acknowledge_non_project_firmware=true",
+        ));
     }
     Ok(())
 }
@@ -7035,6 +7044,35 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.0.code, "operation_confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn real_analog_flash_requires_non_project_acknowledgement() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut artifact = test_artifact("foreign", TargetKind::AnalogStm32g431);
+            artifact.name = "Foreign firmware".to_string();
+            artifact.protocol = "unknown".to_string();
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert("foreign".to_string(), artifact);
+        }
+
+        let err = flash_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(FlashRequest {
+                target: Some(TargetKind::AnalogStm32g431),
+                artifact_id: Some("foreign".to_string()),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: Some(FLASH_CONFIRMATION_TEXT.to_string()),
+                expected_identity_device_id: None,
+                acknowledge_non_project_firmware: Some(false),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "non_project_firmware_ack_required");
     }
 
     #[tokio::test]
