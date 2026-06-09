@@ -204,6 +204,8 @@ enum Command {
         device: Option<String>,
         #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
+        #[arg(long = "confirm", alias = "confirm-phrase")]
+        confirm: Option<String>,
     },
     #[command(hide = true)]
     Monitor {
@@ -1001,6 +1003,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 target,
                 device,
                 dry_run,
+                confirm,
             } => {
                 match target {
                     BoardTarget::Digital => {
@@ -1015,12 +1018,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         .await?
                     }
                     BoardTarget::Analog => {
+                        let confirmation_text =
+                            resolve_operation_confirmation_text(&target, dry_run, confirm)?;
                         let resolved_analog = resolve_analog_target_device(device, &devd).await?;
                         request_devd_value(
                             &resolved_analog.devd,
                             reqwest::Method::POST,
                             &format!("/api/v1/devices/{}/reset", resolved_analog.device),
-                            Some(json!({"target": target.kind(), "dry_run": dry_run})),
+                            Some(json!({
+                                "target": target.kind(),
+                                "dry_run": dry_run,
+                                "confirmation_phrase": confirmation_text,
+                            })),
                         )
                         .await?
                     }
@@ -1760,13 +1769,25 @@ fn resolve_flash_confirmation_text(
     dry_run: bool,
     provided: Option<String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    if dry_run || !matches!(target, BoardTarget::Digital) {
+    resolve_operation_confirmation_text(target, dry_run, provided)
+}
+
+fn resolve_operation_confirmation_text(
+    target: &BoardTarget,
+    dry_run: bool,
+    provided: Option<String>,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    if dry_run {
         return Ok(provided);
     }
+    let operation = match target {
+        BoardTarget::Digital => "digital firmware flash",
+        BoardTarget::Analog => "analog firmware operation",
+    };
     if provided.is_some() {
         return Ok(provided);
     }
-    eprintln!("Real digital firmware flash is high risk.");
+    eprintln!("Real {operation} is high risk.");
     eprintln!("Type `{FLASH_CONFIRMATION_TEXT}` to continue.");
     let typed: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Confirmation")
@@ -2716,10 +2737,19 @@ mod tests {
     }
 
     #[test]
-    fn analog_real_flash_does_not_require_digital_confirmation() {
+    fn analog_real_operation_requires_confirmation_text() {
         assert_eq!(
-            resolve_flash_confirmation_text(&BoardTarget::Analog, false, None).unwrap(),
+            resolve_flash_confirmation_text(&BoardTarget::Analog, true, None).unwrap(),
             None
+        );
+        assert!(
+            resolve_flash_confirmation_text(
+                &BoardTarget::Analog,
+                false,
+                Some(FLASH_CONFIRMATION_TEXT.to_string())
+            )
+            .unwrap()
+            .is_some()
         );
     }
 

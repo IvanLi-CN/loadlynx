@@ -415,6 +415,7 @@ struct ResetRequest {
     target: Option<TargetKind>,
     dry_run: Option<bool>,
     lease_id: Option<String>,
+    confirmation_phrase: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1478,6 +1479,10 @@ fn enforce_flash_gate(
     artifact: &FirmwareArtifact,
     input: &FlashRequest,
 ) -> Result<(), HttpError> {
+    if target == &TargetKind::AnalogStm32g431 {
+        enforce_analog_operation_confirmation(input.confirmation_phrase.as_deref())?;
+        return Ok(());
+    }
     if target != &TargetKind::DigitalEsp32s3 {
         return Ok(());
     }
@@ -1522,6 +1527,16 @@ fn enforce_flash_gate(
         }
     }
     Ok(())
+}
+
+fn enforce_analog_operation_confirmation(value: Option<&str>) -> Result<(), HttpError> {
+    if is_flash_confirmation(value) {
+        return Ok(());
+    }
+    Err(HttpError::bad_request(
+        "operation_confirmation_required",
+        format!("type `{FLASH_CONFIRMATION_TEXT}` to confirm real analog operation"),
+    ))
 }
 
 fn is_flash_confirmation(value: Option<&str>) -> bool {
@@ -1575,6 +1590,7 @@ async fn reset_device(
         target: None,
         dry_run: Some(true),
         lease_id: None,
+        confirmation_phrase: None,
     });
     let target = input.target.unwrap_or(TargetKind::DigitalEsp32s3);
     let dry_run = input.dry_run.unwrap_or(true);
@@ -1583,6 +1599,9 @@ async fn reset_device(
         return Ok(Json(
             json!({"ok": true, "dry_run": true, "action": "reset", "target_evidence": evidence}),
         ));
+    }
+    if target == TargetKind::AnalogStm32g431 {
+        enforce_analog_operation_confirmation(input.confirmation_phrase.as_deref())?;
     }
     {
         let guard = state.inner.lock().expect("state lock");
@@ -6951,6 +6970,54 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(err.0.code, "flash_confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn real_analog_flash_requires_confirmation_text() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert(
+                "analog".to_string(),
+                test_artifact("analog", TargetKind::AnalogStm32g431),
+            );
+        }
+
+        let err = flash_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(FlashRequest {
+                target: Some(TargetKind::AnalogStm32g431),
+                artifact_id: Some("analog".to_string()),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: None,
+                expected_identity_device_id: None,
+                acknowledge_non_project_firmware: Some(true),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "operation_confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn real_analog_reset_requires_confirmation_text() {
+        let state = AppState::new(PathBuf::from("."));
+
+        let err = reset_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Some(Json(ResetRequest {
+                target: Some(TargetKind::AnalogStm32g431),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: None,
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "operation_confirmation_required");
     }
 
     #[tokio::test]
