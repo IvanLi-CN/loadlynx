@@ -1853,11 +1853,20 @@ fn allows_legacy_preflash_identity_fallback(input: &LeaseRequest, error: &HttpEr
         && input
             .expected_identity_device_id
             .as_deref()
-            .is_some_and(|id| id == "digital-esp32s3" || id.starts_with("loadlynx-"))
+            .is_some_and(|id| id == "digital-esp32s3" || is_stable_identity_device_id(id))
         && matches!(
             error.0.code.as_str(),
             "serial_response_timeout" | "serial_response_missing" | "serial_response_invalid"
         )
+}
+
+fn is_stable_identity_device_id(id: &str) -> bool {
+    id.strip_prefix("loadlynx-").is_some_and(|short_id| {
+        short_id.len() == 6
+            && short_id
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    }) || id.starts_with("mock-")
 }
 
 async fn heartbeat_lease(
@@ -6440,12 +6449,39 @@ mod tests {
             &timeout
         ));
 
+        let mock_input = LeaseRequest {
+            expected_identity_device_id: Some("mock-loadlynx-devd".to_string()),
+            ..input.clone()
+        };
+        assert!(allows_legacy_preflash_identity_fallback(
+            &mock_input,
+            &timeout
+        ));
+
+        let uppercase_input = LeaseRequest {
+            expected_identity_device_id: Some("loadlynx-A1B2C3".to_string()),
+            ..input.clone()
+        };
+        assert!(!allows_legacy_preflash_identity_fallback(
+            &uppercase_input,
+            &timeout
+        ));
+
         let unstable_input = LeaseRequest {
+            expected_identity_device_id: Some("loadlynx-bench".to_string()),
+            ..input.clone()
+        };
+        assert!(!allows_legacy_preflash_identity_fallback(
+            &unstable_input,
+            &timeout
+        ));
+
+        let unrelated_input = LeaseRequest {
             expected_identity_device_id: Some("not-stable".to_string()),
             ..input
         };
         assert!(!allows_legacy_preflash_identity_fallback(
-            &unstable_input,
+            &unrelated_input,
             &timeout
         ));
     }

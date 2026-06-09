@@ -1652,7 +1652,9 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
                 BoardTarget::Digital => usb_target_devd_endpoint(device.as_ref(), default_devd)
                     .into_iter()
                     .collect(),
-                BoardTarget::Analog => vec![default_devd.to_string()],
+                BoardTarget::Analog => {
+                    vec![analog_target_devd_endpoint(device.as_ref(), default_devd)]
+                }
             }
         }
         Command::Monitor { device, .. }
@@ -1767,6 +1769,10 @@ fn usb_target_devd_endpoint(device: Option<&String>, default_devd: &str) -> Opti
             .filter(|has_usb| *has_usb)
             .map(|_| default_devd.to_string())
     })
+}
+
+fn analog_target_devd_endpoint(device: Option<&String>, default_devd: &str) -> String {
+    usb_target_devd_endpoint(device, default_devd).unwrap_or_else(|| default_devd.to_string())
 }
 
 fn resolve_flash_confirmation_text(
@@ -2506,6 +2512,83 @@ mod tests {
             initial_devd_endpoints(&cli.command, &cli.ipc),
             vec!["/tmp/loadlynx.sock"]
         );
+
+        let cli =
+            Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "flash", "analog"])
+                .expect("analog flash parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+
+        let custom_devd = temp.path().join("custom-loadlynx.sock");
+        write_hardware_registry(
+            &temp.path().join("devices.json"),
+            &HardwareRegistry {
+                default_hardware_id: Some("loadlynx-a1b2c3".to_string()),
+                hardware: vec![SavedHardware {
+                    id: "loadlynx-a1b2c3".to_string(),
+                    name: None,
+                    identity: None,
+                    last_transport: Some(SavedTransport::Usb),
+                    transports: SavedTransports {
+                        usb: Some(SavedUsbTransport {
+                            device: "digital-1".to_string(),
+                            port_path: Some("mock://esp32s3".to_string()),
+                            devd: Some(custom_devd.to_string_lossy().to_string()),
+                        }),
+                        http: None,
+                    },
+                    last_seen_unix_seconds: None,
+                }],
+                ..HardwareRegistry::default()
+            },
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "flash",
+            "analog",
+            "--device",
+            "loadlynx-a1b2c3",
+        ])
+        .expect("analog saved flash parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec![custom_devd.to_string_lossy().to_string()]
+        );
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "reset",
+            "analog",
+            "--device",
+            "loadlynx-a1b2c3",
+        ])
+        .expect("analog saved reset parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec![custom_devd.to_string_lossy().to_string()]
+        );
+
+        match previous_home {
+            Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
+            None => unsafe { env::remove_var("LOADLYNX_HOME") },
+        }
+    }
+
+    #[test]
+    fn initial_devd_endpoints_start_default_for_unsaved_analog_commands() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_home = env::var_os("LOADLYNX_HOME");
+        // Tests serialize environment mutation through TEST_ENV_LOCK.
+        unsafe { env::set_var("LOADLYNX_HOME", temp.path()) };
 
         let cli =
             Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "flash", "analog"])
