@@ -60,11 +60,11 @@ No explicit milestones were recorded in the legacy plan.
 
 - 设备与链路
   - digital HTTP：`loadlynx-d68638.local`（mDNS），IP `192.168.31.216`，端口 `80`
-  - `just agentd-get-port analog`：`0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989`
-  - `just agentd-get-port digital`：`/dev/cu.usbmodem412101`
+  - analog target evidence：`0d28:0204:2BDC77EE006DCE9B589D7AD8F22BD989`
+  - digital USB target evidence：`/dev/cu.usbmodem412101`
 - 刷写与启动
   - build：`just a-build`、`just d-build`
-  - flash：`just agentd flash analog`、`just agentd flash digital`
+  - flash：CLI/devd analog and digital flash flows
   - `GET /api/v1/identity`：`capabilities.cp_supported=true`
 - CP 写入链路（HTTP → digital → UART → analog）
   - `PUT /api/v1/presets`：`mode="cp"` + `target_p_mw=10000` 写入成功

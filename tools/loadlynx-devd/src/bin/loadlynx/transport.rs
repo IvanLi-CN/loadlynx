@@ -4,27 +4,29 @@ use super::*;
 pub(crate) struct ApiSelector {
     pub(crate) url: Option<String>,
     pub(crate) device: Option<String>,
-    pub(crate) hardware: Option<String>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn request_api_value(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
     allow_insecure_lan_wifi: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
-    ensure_one_api_selector(
-        selector.url.as_ref(),
-        selector.device.as_ref(),
-        selector.hardware.as_ref(),
-    )?;
+    ensure_one_api_selector(selector.url.as_ref(), selector.device.as_ref())?;
     let is_wifi_write = path == "/api/v1/wifi"
         && (method == reqwest::Method::POST || method == reqwest::Method::DELETE);
-    if let Some(hardware_id) = selector.hardware {
-        match resolve_saved_hardware(&hardware_id, default_devd)? {
+    if let Some(url) = selector.url {
+        if is_wifi_write && !allow_insecure_lan_wifi {
+            return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
+        }
+        request_http_value(client, &url, method, path, body).await
+    } else {
+        match resolve_saved_hardware_selection(selector.device, default_devd, allow_interactive)? {
             ResolvedHardware::Usb(resolved) => {
                 let value = request_devd_usb_value(client, &resolved, method, path, body).await?;
                 let _ = mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
@@ -39,32 +41,30 @@ pub(crate) async fn request_api_value(
                 Ok(value)
             }
         }
-    } else if let Some(url) = selector.url {
-        if is_wifi_write && !allow_insecure_lan_wifi {
-            return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
-        }
-        request_http_value(client, &url, method, path, body).await
-    } else if let Some(device) = selector.device {
-        Err(format!(
-            "temporary devd device id `{device}` cannot be used for operations; bind it first with `loadlynx hardware bind usb --candidate {device}` and then use --hardware <hardware-id>"
-        )
-        .into())
-    } else {
-        match resolve_saved_hardware("default", default_devd)? {
-            ResolvedHardware::Usb(resolved) => {
-                let value = request_devd_usb_value(client, &resolved, method, path, body).await?;
-                let _ = mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
-                Ok(value)
-            }
-            ResolvedHardware::Http { url, .. } => {
-                if is_wifi_write && !allow_insecure_lan_wifi {
-                    return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
-                }
-                let value = request_http_value(client, &url, method, path, body).await?;
-                let _ = mark_default_transport_used(SavedTransport::Http);
-                Ok(value)
-            }
-        }
+    }
+}
+
+pub(crate) fn freeze_api_selector(
+    selector: ApiSelector,
+    default_devd: &str,
+    allow_interactive: bool,
+) -> Result<ApiSelector, Box<dyn std::error::Error + Send + Sync>> {
+    ensure_one_api_selector(selector.url.as_ref(), selector.device.as_ref())?;
+    if selector.url.is_some() {
+        return Ok(selector);
+    }
+
+    let resolved =
+        resolve_saved_hardware_selection(selector.device.clone(), default_devd, allow_interactive)?;
+    match resolved {
+        ResolvedHardware::Usb(resolved) => Ok(ApiSelector {
+            url: None,
+            device: Some(resolved.hardware_id),
+        }),
+        ResolvedHardware::Http { url, .. } => Ok(ApiSelector {
+            url: Some(url),
+            device: None,
+        }),
     }
 }
 
@@ -194,32 +194,30 @@ async fn request_devd_usb_value_once(
 pub(crate) fn ensure_one_api_selector(
     url: Option<&String>,
     device: Option<&String>,
-    hardware: Option<&String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let count = [url.is_some(), device.is_some(), hardware.is_some()]
+    let count = [url.is_some(), device.is_some()]
         .into_iter()
         .filter(|selected| *selected)
         .count();
     match count {
         0 => Ok(()),
         1 => Ok(()),
-        _ => Err("command accepts only one of --hardware, --device, or --url".into()),
+        _ => Err("command accepts only one of --device or --url".into()),
     }
 }
 
 pub(crate) fn ensure_one_status_selector(
     url: Option<&String>,
     device: Option<&String>,
-    hardware: Option<&String>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let count = [url.is_some(), device.is_some(), hardware.is_some()]
+    let count = [url.is_some(), device.is_some()]
         .into_iter()
         .filter(|selected| *selected)
         .count();
     match count {
         0 => Ok(()),
         1 => Ok(()),
-        _ => Err("status accepts only one of --hardware, --device, or --url".into()),
+        _ => Err("status accepts only one of --device or --url".into()),
     }
 }
 
@@ -286,7 +284,9 @@ async fn create_cli_lease_for_resolved_usb_with_options(
     .await
     {
         Ok(lease) => {
-            validate_cli_lease_identity(&lease, resolved)?;
+            if !allow_legacy_preflash_identity_fallback {
+                validate_cli_lease_identity(&lease, resolved)?;
+            }
             Ok((lease, resolved.device.clone()))
         }
         Err(error) if saved_usb_device_needs_relookup(&*error) => {
@@ -306,7 +306,9 @@ async fn create_cli_lease_for_resolved_usb_with_options(
                 allow_legacy_preflash_identity_fallback,
             )
             .await?;
-            validate_cli_lease_identity(&lease, resolved)?;
+            if !allow_legacy_preflash_identity_fallback {
+                validate_cli_lease_identity(&lease, resolved)?;
+            }
             Ok((lease, device))
         }
         Err(error) => Err(error),
@@ -412,8 +414,8 @@ pub(crate) async fn post_usb_operation_with_optional_lease(
     let lease = if dry_run {
         None
     } else {
-        let allow_legacy_preflash_identity_fallback = path.ends_with("/flash")
-            && resolved.expected_identity_device_id.as_deref() == Some("digital-esp32s3");
+        let allow_legacy_preflash_identity_fallback =
+            path.ends_with("/flash") && resolved.expected_identity_device_id.is_some();
         Some(
             create_cli_lease_for_resolved_usb_with_options(
                 client,

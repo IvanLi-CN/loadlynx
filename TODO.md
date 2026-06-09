@@ -6,7 +6,7 @@
 - 状态使用 `[ ]` 未开始、`[-]` 进行中、`[x]` 已完成。
 
 - [x] 任务名：修复数字板启用 `mock_setpoint` 时启动 panic
-  - 描述/复现：`FEATURES=mock_setpoint just d-build && just agentd flash digital && just agentd monitor digital --reset`（观察约 20 秒；单板或双板同时 monitor）曾报错 “Clocks have not been initialized yet”。
+  - 描述/复现：`FEATURES=mock_setpoint just d-build` 后通过 `loadlynx flash digital` 与 `loadlynx monitor digital --reset` 观察约 20 秒；单板或双板同时 monitor 曾报错 “Clocks have not been initialized yet”。
   - 验收标准：启用 mock_setpoint 时数字固件能正常启动并运行 setpoint 发送任务，无 panic。
   - 实施建议：确认时钟初始化顺序，保持 mock_setpoint 代码路径与正常路径一致的时钟依赖；必要时在启动早期补充时钟 guard。
   - 进展/结果：完成。当前 HEAD=8254578 复测未再出现 panic，mock_setpoint 与 setpoint 任务均正常运行。

@@ -34,7 +34,7 @@
 ### 非目标
 
 - 不实现实际 mDNS 协议代码或引入具体 crate，仅选定优先方案（自实现 vs 第三方库）；
-- 不改动 MCU Agentd、硬件电路或 bootloader；
+- 不引入外部 MCU daemon，不改动硬件电路或 bootloader；
 - 不解决跨网段、跨 VLAN 的集中发现问题，该类需求应通过单独的 discovery 服务或本地 helper 处理；
 - 不为扫描行为增加新的后端服务端点，扫描逻辑限定在浏览器执行。
 

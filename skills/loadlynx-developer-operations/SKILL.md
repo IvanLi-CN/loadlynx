@@ -1,11 +1,11 @@
 ---
 name: loadlynx-developer-operations
-description: "Operate LoadLynx developer and maintenance workflows as a superset of loadlynx-user-operations: inherit the released CLI-only user business workflows, USB-first/HTTP-fallback connection order, IPC-only CLI devd access, CLI hardware memory, Web Serial as the formal human browser path, first-flash gates, and command-availability gates, then add source checkout/clone, toolchain checks, Just recipes for loadlynx/devd/Web development, firmware and host-tool builds, GitHub Release asset maintenance, missing CLI business capability implementation, calibration, reset/monitor, and HIL verification."
+description: "Operate LoadLynx developer and maintenance workflows as a superset of loadlynx-user-operations: inherit the released CLI-only user business workflows, USB-first/HTTP-fallback connection order, IPC-only CLI devd access, CLI device memory, Web Serial as the formal human browser path, first-flash gates, and command-availability gates, then add source checkout/clone, toolchain checks, Just recipes for loadlynx/devd/Web development, firmware and host-tool builds, GitHub Release asset maintenance, missing CLI/devd business capability implementation, calibration, reset/monitor/logs, and HIL verification."
 ---
 
 # LoadLynx Developer Operations
 
-Use this skill for engineering, maintenance, release, and hardware-debug work. This skill is a superset of `skills/loadlynx-user-operations/SKILL.md`: when the task includes ordinary LoadLynx hardware operation, first apply the user skill's CLI-only business workflows, USB-first/HTTP-fallback connection order, CLI hardware memory, command-availability gates, and safety checks. Then add the developer-only source checkout, Just, firmware, release, calibration, reset/monitor, and HIL rules below. When this skill operates hardware, use CLI/Just-controlled paths, not Web UI operation.
+Use this skill for engineering, maintenance, release, and hardware-debug work. This skill is a superset of `skills/loadlynx-user-operations/SKILL.md`: when the task includes ordinary LoadLynx hardware operation, first apply the user skill's CLI-only business workflows, USB-first/HTTP-fallback connection order, CLI device memory, command-availability gates, and safety checks. Then add the developer-only source checkout, Just, firmware, release, calibration, reset/monitor/logs, and HIL rules below. When this skill operates hardware, use `loadlynx` CLI + `loadlynx-devd`, not Web UI operation or external MCU daemons.
 
 ## Start Here
 
@@ -42,7 +42,6 @@ cd loadlynx
 ```bash
 just devd-build
 just devd-test
-just devd-serve --endpoint /tmp/loadlynx-devd.sock
 just devd-bridge-http --bind 127.0.0.1:<http-port> --allow-dev-cors
 just loadlynx <args>
 ```
@@ -50,7 +49,7 @@ just loadlynx <args>
 - Firmware development uses `just a-build` for STM32G431 analog and `just d-build` for ESP32-S3 digital.
 - Release maintenance must keep GitHub Releases publishing the user-facing assets required by the user skill: installer scripts, platform `loadlynx-host-tools-<platform>.tar.gz` archives, firmware assets/catalogs when user CLI/Web flashing is advertised, web bundle, `SHA256SUMS` covering every release asset, and accurate release notes.
 - If user docs require `loadlynx wifi ...`, first verify that the CLI, devd API, firmware protocol, persistence behavior, and release binaries implement it. If absent, implement and test it before presenting WiFi configuration as a user capability.
-- If user docs require remembered hardware, verify `loadlynx hardware available/path/list/bind/default/use/forget`, `loadlynx status`, and `loadlynx status --hardware ...`. The registry must remain user-level config, not project checkout state.
+- If user docs require remembered devices, verify `loadlynx devices`, `loadlynx device list|add|use|remove`, `loadlynx status`, and `loadlynx status --device ...`. The registry must remain user-level config, not project checkout state.
 
 ## Business Capability Development
 
@@ -75,29 +74,30 @@ just loadlynx usb-port set digital <path>
 ```
 
 - Do not use interactive candidate selection as an Agent to bypass explicit owner authorization.
-- Do not call `just agentd selector set ...` or edit `.esp32-port` / `.stm32-port` unless the owner explicitly authorizes the specific change.
-- Before flash/reset/monitor/HIL, echo the target from `just agentd-get-port digital`, `just agentd-get-port analog`, or the approved `.esp32-port` path for devd digital work.
+- Do not edit `.esp32-port`, `.stm32-port`, device registry files, or local `.loadlynx` files unless the owner explicitly authorizes the specific change.
+- Before flash/reset/digital monitor/HIL, echo the saved device id, selected transport, approved digital USB CDC path or analog probe evidence, artifact id, and dry-run/real mode.
 
 ## devd, CLI, And USB CDC
 
-- Use `loadlynx-devd` for CLI/devd USB CDC control-plane work; do not route that path through `mcu-agentd` selectors.
-- CLI/devd is native IPC-first. The CLI should expose `--ipc` as a Unix socket / Windows named pipe endpoint override and auto-start a sibling `loadlynx-devd serve` when needed. Do not reintroduce ordinary `--devd http://...` CLI workflows.
+- Use `loadlynx-devd` for CLI/devd USB CDC control-plane work; do not route that path through external MCU daemons.
+- CLI/devd is native IPC-first. The CLI should auto-start a sibling `loadlynx-devd serve` on the default Unix socket / Windows named pipe when needed. `--ipc` is an endpoint override for explicit multi-instance or debugging scenarios, not part of normal user or agent commands. Do not reintroduce ordinary `--devd http://...` CLI workflows.
 - `loadlynx-devd bridge-http` is the browser/debug bridge only, must bind loopback, and is the path used by local Web development or release/GitHub Pages browser bridge fallback.
-- In source checkout mode, start devd through Just:
-
-```bash
-just devd-serve --endpoint /tmp/loadlynx-devd.sock
-```
-
 - Run the CLI through Just during source development:
 
 ```bash
-just loadlynx --ipc /tmp/loadlynx-devd.sock devices
-just loadlynx hardware available --scan
-just loadlynx hardware list
-just loadlynx hardware bind usb --candidate <scan-candidate-id> --set-default
+just loadlynx devices
+just loadlynx device add
+just loadlynx device list
+just loadlynx device use <saved-id>
 just loadlynx status
-just loadlynx status --hardware <saved-hardware-id>
+just loadlynx status --device <saved-id>
+```
+
+- For a deliberate alternate IPC endpoint, start the matching daemon and pass the override consistently. Do not use this form for normal flashing or user operation:
+
+```bash
+just devd-serve --endpoint /tmp/loadlynx-devd.sock
+just loadlynx --ipc /tmp/loadlynx-devd.sock status --device <saved-id>
 ```
 
 - Web development may point a local UI at `loadlynx-devd bridge-http` with `VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:<http-port>`, but skill-driven hardware operations still use CLI commands.
@@ -113,13 +113,12 @@ just loadlynx status --hardware <saved-hardware-id>
 - Run a devd firmware dry-run before real flash:
 
 ```bash
-just loadlynx flash digital --hardware <saved-hardware-id> --artifact <artifact-id>
+just loadlynx flash digital --device <saved-id> --artifact <artifact-id>
 ```
 
-- For real devd digital flash, use a saved USB hardware target (`--hardware <saved-hardware-id>` or saved default), require a valid lease, selected artifact, artifact hash verification, target evidence, explicit owner confirmation, and post-flash identity capture. Do not require a fixed typed phrase for this confirmation. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
-- Do not fall back to `just agentd flash digital` for CLI/devd digital flashing.
+- For real devd digital flash, use a saved USB device target (`--device <saved-id>` or saved default), require a valid lease, selected artifact, artifact hash verification, target evidence, explicit owner confirmation, and post-flash identity capture. Do not require a fixed typed phrase for this confirmation. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
 - Web Serial flash uses `esptool-js`, release firmware catalog/assets, browser-granted ports, and identity/profile memory only. It must not save OS port paths.
-- For analog firmware and non-devd firmware workflows, use `mcu-agentd` through `just agentd ...` and preserve selector guardrails.
+- Analog firmware flash/reset must also be exposed through `loadlynx` CLI + `loadlynx-devd`. Use `probe-rs` as an internal devd backend when needed. Analog RTT/defmt monitor/logs are a CLI/devd product gap until implemented; `loadlynx monitor analog` must reject explicitly rather than using digital USB monitor or any external MCU daemon.
 - After flashing or reset, compare boot logs against `tmp/analog-fw-version.txt` or `tmp/digital-fw-version.txt` before claiming the board is running the local build.
 
 ## WiFi And Calibration
@@ -135,4 +134,4 @@ just loadlynx flash digital --hardware <saved-hardware-id> --artifact <artifact-
 - Prefer targeted checks for the changed surface: `just devd-test`, affected `cargo test`, `just a-build`, `just d-build`, non-hardware Web checks, or release workflow linting.
 - For release workflow changes, verify official and development Releases build required firmware/host-tools assets before creating a GitHub Release.
 - HIL evidence must identify target, transport, lease/session where applicable, artifact/firmware identity, and observed protocol/log result.
-- If a selector is missing, stale, unreadable, or ambiguous, stop and ask the owner to identify the hardware target unambiguously.
+- If a selector or saved device target is missing, stale, unreadable, or ambiguous, stop and ask the owner to identify the hardware target unambiguously.

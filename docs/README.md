@@ -28,7 +28,7 @@
 - 软件开发笔记
   - ESP32-S3 启动流程：`dev-notes/software.md`
   - 硬件设计约定与易混点：`dev-notes/hardware-quirks.md`
-  - MCU Agent 服务设计：`dev-notes/mcu-agentd.md`
+  - LoadLynx CLI/devd 硬件操作：`dev-notes/loadlynx-devd-hardware-ops.md`
   - LoadLynx devd 本地设备控制面规格：`specs/e3rv6-loadlynx-devd-control-plane/SPEC.md`
   - 本地设备控制面复用方案：`solutions/devices/local-device-control-plane.md`
   - 固件 catalog schema：`../schemas/firmware-catalog.schema.json`

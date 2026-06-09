@@ -118,7 +118,7 @@ Monitor/log/event reads consume devd's bounded in-memory session state and do no
 
 Flash/reset flows that invoke tools such as `espflash --port` are exclusive. devd closes the serial owner before running the tool and returns a clear busy/in-progress error to same-port JSONL commands until the exclusive operation is finished.
 
-`loadlynx-devd` owns the USB CDC session for Web/CLI control-plane verification. This path does not use `mcu-agentd` or `mcu-agentd selector` state; its CLI default digital USB port memory reuses `.esp32-port`.
+`loadlynx-devd` owns the USB CDC session for Web/CLI control-plane verification. This path does not use external MCU daemon selector state; its CLI default digital USB port memory reuses `.esp32-port`.
 
 When validating against hardware, set the default ESP32-S3 digital USB CDC port through the CLI, such as `loadlynx usb-port set digital /dev/cu.usbmodemXXXX`, when the owner has identified the intended device. CLI/devd operations then use that project-local memory as the hardware target, reading only the port path line if `.esp32-port` also contains selector metadata such as `mac=...`. A passing hardware validation must include protocol-level evidence from that port: a decoded `hello`, a successful `get_identity`, a successful `get_status`, or equivalent JSONL request/response frames.
 

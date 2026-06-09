@@ -121,17 +121,19 @@ impl IpcConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct IpcHttpRequest {
-    pub method: String,
-    pub path: String,
+pub struct IpcRequest {
+    pub op: String,
     #[serde(default)]
-    pub body: Option<Value>,
+    pub params: Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct IpcHttpResponse {
-    pub status: u16,
-    pub body: Value,
+pub struct IpcResponse {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiError>,
 }
 
 impl DevdConfig {
@@ -224,16 +226,6 @@ pub enum TargetKind {
     AnalogStm32g431,
     LanHttp,
     Mock,
-}
-
-impl TargetKind {
-    fn board_name(&self) -> Option<&'static str> {
-        match self {
-            Self::DigitalEsp32s3 => Some("digital"),
-            Self::AnalogStm32g431 => Some("analog"),
-            Self::LanHttp | Self::Mock => None,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -381,6 +373,12 @@ pub struct ApiError {
     pub details: Option<Value>,
 }
 
+impl From<HttpError> for ApiError {
+    fn from(error: HttpError) -> Self {
+        error.0
+    }
+}
+
 #[derive(Debug)]
 pub struct HttpError(ApiError, StatusCode);
 
@@ -417,6 +415,7 @@ struct ResetRequest {
     target: Option<TargetKind>,
     dry_run: Option<bool>,
     lease_id: Option<String>,
+    confirmation_phrase: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -489,46 +488,37 @@ pub async fn serve_ipc(config: IpcConfig) -> Result<(), Box<dyn std::error::Erro
         .ok();
 
     let state = AppState::new(config.repo_root.clone());
-    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let http_addr = http_listener.local_addr()?;
-    let http_base = format!("http://{http_addr}");
-    let router = router(state, None, false);
-    tokio::spawn(async move {
-        if let Err(error) = axum::serve(http_listener, router).await {
-            tracing::error!("internal devd HTTP dispatcher stopped: {error}");
-        }
-    });
 
     tracing::info!("loadlynx-devd IPC listening on {}", config.endpoint);
 
     #[cfg(windows)]
     {
-        return serve_ipc_windows(config, http_base).await;
+        return serve_ipc_windows(config, state).await;
     }
     #[cfg(not(windows))]
     {
-        serve_ipc_unix(config, http_base).await
+        serve_ipc_unix(config, state).await
     }
 }
 
-pub async fn ipc_http_request(
+pub async fn ipc_request(
     endpoint: &str,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(windows)]
     {
-        return ipc_http_request_windows(endpoint, request).await;
+        return ipc_request_windows(endpoint, request).await;
     }
     #[cfg(not(windows))]
     {
-        return ipc_http_request_unix(endpoint, request).await;
+        return ipc_request_unix(endpoint, request).await;
     }
 }
 
 #[cfg(not(windows))]
 async fn serve_ipc_unix(
     config: IpcConfig,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = PathBuf::from(&config.endpoint);
     if let Some(parent) = path.parent() {
@@ -543,9 +533,9 @@ async fn serve_ipc_unix(
             tokio::select! {
                 accepted = listener.accept() => {
                     let (stream, _peer) = accepted?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_unix(stream, http_base).await
+                        handle_ipc_connection_unix(stream, state).await
                     });
                 }
                 _ = sleep(config.idle_timeout) => {
@@ -561,9 +551,9 @@ async fn serve_ipc_unix(
             tokio::select! {
                 accepted = listener.accept() => {
                     let (stream, _peer) = accepted?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_unix(stream, http_base).await
+                        handle_ipc_connection_unix(stream, state).await
                     });
                 }
                 _ = idle_notify.notified() => {}
@@ -597,7 +587,7 @@ async fn remove_stale_unix_socket(path: &PathBuf) -> io::Result<()> {
 #[cfg(windows)]
 async fn serve_ipc_windows(
     config: IpcConfig,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pipe_name = normalize_named_pipe_name(&config.endpoint);
     let active_connections = Arc::new(AtomicUsize::new(0));
@@ -608,9 +598,9 @@ async fn serve_ipc_windows(
             tokio::select! {
                 connected = server.connect() => {
                     connected?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_windows(server, http_base).await
+                        handle_ipc_connection_windows(server, state).await
                     });
                 }
                 _ = sleep(config.idle_timeout) => {
@@ -625,9 +615,9 @@ async fn serve_ipc_windows(
             tokio::select! {
                 connected = server.connect() => {
                     connected?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_windows(server, http_base).await
+                        handle_ipc_connection_windows(server, state).await
                     });
                 }
                 _ = idle_notify.notified() => {}
@@ -654,19 +644,19 @@ fn spawn_tracked_ipc_connection<F>(
 }
 
 #[cfg(not(windows))]
-async fn ipc_http_request_unix(
+async fn ipc_request_unix(
     endpoint: &str,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = tokio::net::UnixStream::connect(endpoint).await?;
     ipc_roundtrip(&mut stream, request).await
 }
 
 #[cfg(windows)]
-async fn ipc_http_request_windows(
+async fn ipc_request_windows(
     endpoint: &str,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     let pipe_name = normalize_named_pipe_name(endpoint);
     let mut stream = loop {
         match tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe_name) {
@@ -687,8 +677,8 @@ async fn ipc_http_request_windows(
 
 async fn ipc_roundtrip<S>(
     stream: &mut S,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>>
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -699,44 +689,47 @@ where
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
     reader.read_line(&mut response).await?;
-    let response: IpcHttpResponse = serde_json::from_str(response.trim_end())?;
+    let response: IpcResponse = serde_json::from_str(response.trim_end())?;
     Ok(response)
 }
 
 #[cfg(not(windows))]
 async fn handle_ipc_connection_unix(
     stream: tokio::net::UnixStream,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    handle_ipc_connection(stream, http_base).await
+    handle_ipc_connection(stream, state).await
 }
 
 #[cfg(windows)]
 async fn handle_ipc_connection_windows(
     stream: tokio::net::windows::named_pipe::NamedPipeServer,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    handle_ipc_connection(stream, http_base).await
+    handle_ipc_connection(stream, state).await
 }
 
 async fn handle_ipc_connection<S>(
     stream: S,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?;
     while let Some(line) = lines.next_line().await? {
-        let response = match serde_json::from_str::<IpcHttpRequest>(&line) {
-            Ok(request) => proxy_ipc_http(&client, &http_base, request).await,
-            Err(error) => IpcHttpResponse {
-                status: 400,
-                body: json!({"error": {"code": "ipc_invalid_json", "message": error.to_string(), "retryable": false}}),
+        let response = match serde_json::from_str::<IpcRequest>(&line) {
+            Ok(request) => dispatch_ipc_operation(&state, request).await,
+            Err(error) => IpcResponse {
+                ok: false,
+                result: None,
+                error: Some(ApiError {
+                    code: "ipc_invalid_json".to_string(),
+                    message: error.to_string(),
+                    retryable: false,
+                    details: None,
+                }),
             },
         };
         writer
@@ -748,49 +741,246 @@ where
     Ok(())
 }
 
-async fn proxy_ipc_http(
-    client: &reqwest::Client,
-    base: &str,
-    request: IpcHttpRequest,
-) -> IpcHttpResponse {
-    let method = match reqwest::Method::from_bytes(request.method.as_bytes()) {
-        Ok(method) => method,
-        Err(error) => {
-            return IpcHttpResponse {
-                status: 400,
-                body: json!({"error": {"code": "ipc_invalid_method", "message": error.to_string(), "retryable": false}}),
-            };
-        }
-    };
-    let url = match reqwest::Url::parse(base).and_then(|base| base.join(&request.path)) {
-        Ok(url) => url,
-        Err(error) => {
-            return IpcHttpResponse {
-                status: 400,
-                body: json!({"error": {"code": "ipc_invalid_path", "message": error.to_string(), "retryable": false}}),
-            };
-        }
-    };
-    let mut outbound = client.request(method, url);
-    if let Some(body) = request.body {
-        outbound = outbound.json(&body);
-    }
-    match outbound.send().await {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            let text = response.text().await.unwrap_or_default();
-            let body = if text.trim().is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_str(&text).unwrap_or_else(|_| json!({"raw": text}))
-            };
-            IpcHttpResponse { status, body }
-        }
-        Err(error) => IpcHttpResponse {
-            status: 503,
-            body: json!({"error": {"code": "ipc_dispatch_failed", "message": error.to_string(), "retryable": true}}),
+async fn dispatch_ipc_operation(state: &AppState, request: IpcRequest) -> IpcResponse {
+    match dispatch_ipc_operation_result(state.clone(), request).await {
+        Ok(value) => IpcResponse {
+            ok: true,
+            result: Some(value),
+            error: None,
+        },
+        Err(error) => IpcResponse {
+            ok: false,
+            result: None,
+            error: Some(error.into()),
         },
     }
+}
+
+async fn dispatch_ipc_operation_result(
+    state: AppState,
+    request: IpcRequest,
+) -> Result<Value, HttpError> {
+    let params = request.params;
+    match request.op.as_str() {
+        "health" => Ok(health().await.0),
+        "devices.list" => Ok(list_devices(State(state)).await.0),
+        "devices.scan" => Ok(scan_devices(State(state)).await?.0),
+        "devices.artifact.select" => {
+            let id = required_string(&params, "device_id")?;
+            let input: ArtifactSelectRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(select_artifact(State(state), Path(id), Json(input))
+                .await?
+                .0)
+        }
+        "devices.flash" => {
+            let id = required_string(&params, "device_id")?;
+            let input: FlashRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(flash_device(State(state), Path(id), Json(input)).await?.0)
+        }
+        "devices.reset" => {
+            let id = required_string(&params, "device_id")?;
+            let input: ResetRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(reset_device(State(state), Path(id), Some(Json(input)))
+                .await?
+                .0)
+        }
+        "devices.session" => {
+            let id = required_string(&params, "device_id")?;
+            let query: SessionQuery = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(device_session(State(state), Path(id), Query(query))
+                .await?
+                .0)
+        }
+        "serial.lease.create" => {
+            let input: LeaseRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(create_lease(State(state), Json(input)).await?.0)
+        }
+        "serial.lease.heartbeat" => {
+            let lease_id = required_string(&params, "lease_id")?;
+            Ok(heartbeat_lease(State(state), Path(lease_id)).await?.0)
+        }
+        "serial.lease.release" => {
+            let lease_id = required_string(&params, "lease_id")?;
+            Ok(release_lease(State(state), Path(lease_id)).await?.0)
+        }
+        "compat.identity" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_identity(State(state), Query(query)).await?.0)
+        }
+        "compat.status" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_status(State(state), Query(query)).await?.0)
+        }
+        "compat.network" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_network(State(state), Query(query)).await?.0)
+        }
+        "compat.session" => {
+            let query: SessionQuery = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_session(State(state), Query(query)).await?.0)
+        }
+        "compat.pd.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_pd_get(State(state), Query(query)).await?.0)
+        }
+        "compat.pd.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(compat_pd_post(State(state), Query(query), body.to_string())
+                .await?
+                .0)
+        }
+        "compat.cc" => {
+            let (query, body) = compat_query_and_body(params)?;
+            let input: CcRequest = serde_json::from_value(body)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_cc(State(state), Query(query), Json(input)).await?.0)
+        }
+        "compat.wifi.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_wifi_get(State(state), Query(query)).await?.0)
+        }
+        "compat.wifi.credentials" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_wifi_credentials_get(State(state), Query(query))
+                .await?
+                .0)
+        }
+        "compat.wifi.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            let input: WifiSetRequest = serde_json::from_value(body)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_wifi_post(State(state), Query(query), Json(input))
+                .await?
+                .0)
+        }
+        "compat.wifi.delete" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_wifi_delete(State(state), Query(query)).await?.0)
+        }
+        "compat.control.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_control_get(State(state), Query(query)).await?.0)
+        }
+        "compat.control.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_control_post(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.presets.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_presets_get(State(state), Query(query)).await?.0)
+        }
+        "compat.presets.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_presets_post(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.presets.apply" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_presets_apply(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.profile" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_calibration_profile(State(state), Query(query))
+                .await?
+                .0)
+        }
+        "compat.calibration.apply" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_apply(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.commit" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_commit(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.reset" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_reset(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.mode" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_mode(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.soft_reset" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_soft_reset(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.diagnostics.export" => {
+            let query: SessionQuery = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_diagnostics_export(State(state), Query(query))
+                .await?
+                .0)
+        }
+        _ => Err(HttpError::bad_request(
+            "ipc_unknown_operation",
+            format!("unknown IPC operation `{}`", request.op),
+        )),
+    }
+}
+
+fn required_string(params: &Value, field: &str) -> Result<String, HttpError> {
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| HttpError::bad_request("ipc_invalid_params", format!("missing `{field}`")))
+}
+
+fn compat_query_from_params(params: Value) -> Result<CompatQuery, HttpError> {
+    serde_json::from_value(params)
+        .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))
+}
+
+fn compat_query_and_body(params: Value) -> Result<(CompatQuery, Value), HttpError> {
+    let query = CompatQuery {
+        device_id: params
+            .get("device_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        lease_id: params
+            .get("lease_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let body = params.get("body").cloned().unwrap_or(Value::Null);
+    Ok((query, body))
 }
 
 #[cfg(windows)]
@@ -1232,7 +1422,9 @@ async fn flash_device(
     enforce_flash_gate(&state, &id, &target, &artifact, &input)?;
     {
         let guard = state.inner.lock().expect("state lock");
-        ensure_flash_lease_for_target(&guard, Some(&id), input.lease_id.as_deref(), &target)?;
+        if target_requires_usb_lease(&target) {
+            ensure_flash_lease_for_target(&guard, Some(&id), input.lease_id.as_deref(), &target)?;
+        }
         let device = guard
             .devices
             .get(&id)
@@ -1242,7 +1434,20 @@ async fn flash_device(
     let post_flash_identity = match target {
         TargetKind::DigitalEsp32s3 => {
             run_espflash_digital(&state, &id, &artifact).await?;
-            Some(capture_post_flash_identity(&state, &id).await?)
+            let identity = capture_post_flash_identity(&state, &id).await?;
+            if let Some(expected_identity) = input.expected_identity_device_id.as_deref() {
+                let actual = identity.get("device_id").and_then(Value::as_str);
+                if actual != Some(expected_identity) {
+                    return Err(HttpError::conflict(
+                        "post_flash_identity_mismatch",
+                        format!(
+                            "expected post-flash identity device_id {expected_identity}, current identity is {}",
+                            actual.unwrap_or("<unknown>")
+                        ),
+                    ));
+                }
+            }
+            Some(identity)
         }
         TargetKind::AnalogStm32g431 => {
             run_probe_rs_analog(&state, &id, &artifact).await?;
@@ -1274,6 +1479,11 @@ fn enforce_flash_gate(
     artifact: &FirmwareArtifact,
     input: &FlashRequest,
 ) -> Result<(), HttpError> {
+    if target == &TargetKind::AnalogStm32g431 {
+        enforce_analog_operation_confirmation(input.confirmation_phrase.as_deref())?;
+        enforce_non_project_firmware_acknowledgement(artifact, input)?;
+        return Ok(());
+    }
     if target != &TargetKind::DigitalEsp32s3 {
         return Ok(());
     }
@@ -1283,16 +1493,14 @@ fn enforce_flash_gate(
             format!("type `{FLASH_CONFIRMATION_TEXT}` to confirm real digital flash"),
         ));
     }
-    if !is_loadlynx_project_artifact(artifact)
-        && input.acknowledge_non_project_firmware != Some(true)
-    {
-        return Err(HttpError::bad_request(
-            "non_project_firmware_ack_required",
-            "non-project or unknown firmware requires acknowledge_non_project_firmware=true",
-        ));
-    }
+    enforce_non_project_firmware_acknowledgement(artifact, input)?;
     if let Some(expected_identity) = input.expected_identity_device_id.as_deref() {
         let guard = state.inner.lock().expect("state lock");
+        let preflash_only_lease = input
+            .lease_id
+            .as_deref()
+            .and_then(|lease_id| guard.leases.get(lease_id))
+            .is_some_and(|lease| lease.legacy_preflash_only);
         let device = guard
             .devices
             .get(device_id)
@@ -1302,7 +1510,7 @@ fn enforce_flash_gate(
             .as_ref()
             .and_then(|identity| identity.get("device_id"))
             .and_then(Value::as_str);
-        if actual != Some(expected_identity) {
+        if actual != Some(expected_identity) && !preflash_only_lease {
             return Err(HttpError::conflict(
                 "identity_confirmation_mismatch",
                 format!(
@@ -1313,6 +1521,31 @@ fn enforce_flash_gate(
         }
     }
     Ok(())
+}
+
+fn enforce_non_project_firmware_acknowledgement(
+    artifact: &FirmwareArtifact,
+    input: &FlashRequest,
+) -> Result<(), HttpError> {
+    if !is_loadlynx_project_artifact(artifact)
+        && input.acknowledge_non_project_firmware != Some(true)
+    {
+        return Err(HttpError::bad_request(
+            "non_project_firmware_ack_required",
+            "non-project or unknown firmware requires acknowledge_non_project_firmware=true",
+        ));
+    }
+    Ok(())
+}
+
+fn enforce_analog_operation_confirmation(value: Option<&str>) -> Result<(), HttpError> {
+    if is_flash_confirmation(value) {
+        return Ok(());
+    }
+    Err(HttpError::bad_request(
+        "operation_confirmation_required",
+        format!("type `{FLASH_CONFIRMATION_TEXT}` to confirm real analog operation"),
+    ))
 }
 
 fn is_flash_confirmation(value: Option<&str>) -> bool {
@@ -1366,6 +1599,7 @@ async fn reset_device(
         target: None,
         dry_run: Some(true),
         lease_id: None,
+        confirmation_phrase: None,
     });
     let target = input.target.unwrap_or(TargetKind::DigitalEsp32s3);
     let dry_run = input.dry_run.unwrap_or(true);
@@ -1375,9 +1609,14 @@ async fn reset_device(
             json!({"ok": true, "dry_run": true, "action": "reset", "target_evidence": evidence}),
         ));
     }
+    if target == TargetKind::AnalogStm32g431 {
+        enforce_analog_operation_confirmation(input.confirmation_phrase.as_deref())?;
+    }
     {
         let guard = state.inner.lock().expect("state lock");
-        ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
+        if target_requires_usb_lease(&target) {
+            ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
+        }
         let device = guard
             .devices
             .get(&id)
@@ -1386,7 +1625,7 @@ async fn reset_device(
     }
     match target {
         TargetKind::DigitalEsp32s3 => run_espflash_reset_digital(&state, &id).await?,
-        TargetKind::AnalogStm32g431 => run_agentd(target.clone(), "reset").await?,
+        TargetKind::AnalogStm32g431 => run_probe_rs_reset_analog(&state, &id).await?,
         TargetKind::LanHttp | TargetKind::Mock => {
             return Err(HttpError::bad_request(
                 "target_unsupported",
@@ -1620,11 +1859,23 @@ async fn create_lease(
 
 fn allows_legacy_preflash_identity_fallback(input: &LeaseRequest, error: &HttpError) -> bool {
     input.allow_legacy_preflash_identity_fallback == Some(true)
-        && input.expected_identity_device_id.as_deref() == Some("digital-esp32s3")
+        && input
+            .expected_identity_device_id
+            .as_deref()
+            .is_some_and(|id| id == "digital-esp32s3" || is_stable_identity_device_id(id))
         && matches!(
             error.0.code.as_str(),
             "serial_response_timeout" | "serial_response_missing" | "serial_response_invalid"
         )
+}
+
+fn is_stable_identity_device_id(id: &str) -> bool {
+    id.strip_prefix("loadlynx-").is_some_and(|short_id| {
+        short_id.len() == 6
+            && short_id
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    }) || id.starts_with("mock-")
 }
 
 async fn heartbeat_lease(
@@ -3127,6 +3378,10 @@ fn ensure_real_operation_uses_cached_target(
     Ok(())
 }
 
+fn target_requires_usb_lease(target: &TargetKind) -> bool {
+    matches!(target, TargetKind::DigitalEsp32s3)
+}
+
 #[derive(Debug)]
 struct EspflashOperation {
     command: &'static str,
@@ -3531,34 +3786,112 @@ async fn run_probe_rs_analog(
     Ok(())
 }
 
+async fn run_probe_rs_reset_analog(state: &AppState, device_id: &str) -> Result<(), HttpError> {
+    let probe_selector = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        let target = device.analog_target.as_ref().ok_or_else(|| {
+            HttpError::conflict("target_unavailable", "analog target is not available")
+        })?;
+        target
+            .probe_selector
+            .as_deref()
+            .map(canonicalize_probe_rs_selector)
+            .ok_or_else(|| {
+                HttpError::conflict(
+                    "target_probe_missing",
+                    "analog reset requires an approved STM32 probe selector",
+                )
+            })?
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(device, "info", "reset", "starting probe-rs reset");
+            push_trace(
+                device,
+                "tx",
+                json!({
+                    "type": "reset",
+                    "tool": "probe-rs",
+                    "chip": ANALOG_PROBE_CHIP,
+                    "probe": probe_selector,
+                    "command": "reset",
+                }),
+            );
+        }
+    }
+
+    let probe_rs = env::var(PROBE_RS_ENV).unwrap_or_else(|_| DEFAULT_PROBE_RS.to_string());
+    let output = Command::new(&probe_rs)
+        .arg("reset")
+        .arg("--chip")
+        .arg(ANALOG_PROBE_CHIP)
+        .arg("--probe")
+        .arg(&probe_selector)
+        .arg("--non-interactive")
+        .arg("--protocol")
+        .arg(ANALOG_PROBE_PROTOCOL)
+        .arg("--speed")
+        .arg(ANALOG_PROBE_SPEED_KHZ.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("probe_rs_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "reset_result",
+                    "tool": probe_rs,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "reset",
+                if output.status.success() {
+                    "probe-rs reset completed"
+                } else {
+                    "probe-rs reset failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "probe_rs_failed",
+            format!("probe-rs reset exited with {}", output.status),
+        ));
+    }
+    Ok(())
+}
+
 fn tail_text(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
     chars.reverse();
     chars.into_iter().collect()
-}
-
-async fn run_agentd(target: TargetKind, action: &str) -> Result<(), HttpError> {
-    let Some(board) = target.board_name() else {
-        return Err(HttpError::bad_request(
-            "target_unsupported",
-            "target cannot be handled by mcu-agentd",
-        ));
-    };
-    let status = Command::new("just")
-        .arg("agentd")
-        .arg(action)
-        .arg(board)
-        .stdin(Stdio::null())
-        .status()
-        .await
-        .map_err(|error| HttpError::retryable("agentd_launch_failed", error.to_string()))?;
-    if !status.success() {
-        return Err(HttpError::retryable(
-            "agentd_failed",
-            format!("mcu-agentd {action} {board} exited with {status}"),
-        ));
-    }
-    Ok(())
 }
 
 fn read_manifest(path: &str) -> Result<Vec<FirmwareArtifact>, HttpError> {
@@ -5074,7 +5407,7 @@ mod tests {
     }
 
     #[test]
-    fn default_digital_usb_port_reads_mcu_agentd_selector_record() {
+    fn default_digital_usb_port_reads_historical_metadata_record() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             default_digital_usb_port_path(dir.path()),
@@ -6118,10 +6451,46 @@ mod tests {
 
         let stable_input = LeaseRequest {
             expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
+            ..input.clone()
+        };
+        assert!(allows_legacy_preflash_identity_fallback(
+            &stable_input,
+            &timeout
+        ));
+
+        let mock_input = LeaseRequest {
+            expected_identity_device_id: Some("mock-loadlynx-devd".to_string()),
+            ..input.clone()
+        };
+        assert!(allows_legacy_preflash_identity_fallback(
+            &mock_input,
+            &timeout
+        ));
+
+        let uppercase_input = LeaseRequest {
+            expected_identity_device_id: Some("loadlynx-A1B2C3".to_string()),
+            ..input.clone()
+        };
+        assert!(!allows_legacy_preflash_identity_fallback(
+            &uppercase_input,
+            &timeout
+        ));
+
+        let unstable_input = LeaseRequest {
+            expected_identity_device_id: Some("loadlynx-bench".to_string()),
+            ..input.clone()
+        };
+        assert!(!allows_legacy_preflash_identity_fallback(
+            &unstable_input,
+            &timeout
+        ));
+
+        let unrelated_input = LeaseRequest {
+            expected_identity_device_id: Some("not-stable".to_string()),
             ..input
         };
         assert!(!allows_legacy_preflash_identity_fallback(
-            &stable_input,
+            &unrelated_input,
             &timeout
         ));
     }
@@ -6649,6 +7018,83 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn real_analog_flash_requires_confirmation_text() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert(
+                "analog".to_string(),
+                test_artifact("analog", TargetKind::AnalogStm32g431),
+            );
+        }
+
+        let err = flash_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(FlashRequest {
+                target: Some(TargetKind::AnalogStm32g431),
+                artifact_id: Some("analog".to_string()),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: None,
+                expected_identity_device_id: None,
+                acknowledge_non_project_firmware: Some(true),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "operation_confirmation_required");
+    }
+
+    #[tokio::test]
+    async fn real_analog_flash_requires_non_project_acknowledgement() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut artifact = test_artifact("foreign", TargetKind::AnalogStm32g431);
+            artifact.name = "Foreign firmware".to_string();
+            artifact.protocol = "unknown".to_string();
+            let mut guard = state.inner.lock().expect("state lock");
+            guard.artifacts.insert("foreign".to_string(), artifact);
+        }
+
+        let err = flash_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Json(FlashRequest {
+                target: Some(TargetKind::AnalogStm32g431),
+                artifact_id: Some("foreign".to_string()),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: Some(FLASH_CONFIRMATION_TEXT.to_string()),
+                expected_identity_device_id: None,
+                acknowledge_non_project_firmware: Some(false),
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "non_project_firmware_ack_required");
+    }
+
+    #[tokio::test]
+    async fn real_analog_reset_requires_confirmation_text() {
+        let state = AppState::new(PathBuf::from("."));
+
+        let err = reset_device(
+            State(state),
+            Path("mock-loadlynx-devd".to_string()),
+            Some(Json(ResetRequest {
+                target: Some(TargetKind::AnalogStm32g431),
+                dry_run: Some(false),
+                lease_id: None,
+                confirmation_phrase: None,
+            })),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(err.0.code, "operation_confirmation_required");
+    }
+
+    #[tokio::test]
     async fn real_digital_flash_requires_non_project_acknowledgement() {
         let state = AppState::new(PathBuf::from("."));
         {
@@ -6685,6 +7131,12 @@ mod tests {
         let err = ensure_real_operation_uses_cached_target(device, &TargetKind::DigitalEsp32s3)
             .unwrap_err();
         assert_eq!(err.0.code, "target_selector_not_cached");
+    }
+
+    #[test]
+    fn analog_probe_operations_do_not_require_usb_lease() {
+        assert!(target_requires_usb_lease(&TargetKind::DigitalEsp32s3));
+        assert!(!target_requires_usb_lease(&TargetKind::AnalogStm32g431));
     }
 
     #[tokio::test]

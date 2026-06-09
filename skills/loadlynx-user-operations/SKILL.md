@@ -1,6 +1,6 @@
 ---
 name: loadlynx-user-operations
-description: "Operate LoadLynx hardware from an end-user machine through released host tools and official Web paths: install GitHub Release host tools with SHA256SUMS verification, prefer USB/devd IPC CLI access before HTTP device fallback, use CLI-saved hardware memory for previously connected devices, use Web Serial only as the formal human browser UI path, and perform user business workflows such as device identity/status/telemetry checks, electronic-load output control, presets or CC/CV/CP/PD controls when the installed CLI exposes them, released firmware flashing with first-flash gates, and WiFi configuration only when released. Do not use source checkouts, Just, Rust, mcu-agentd, probe tooling, raw local devd HTTP, or project-local developer caches for skill-driven hardware operation."
+description: "Operate LoadLynx hardware from an end-user machine through released host tools and official Web paths: install GitHub Release host tools with SHA256SUMS verification, prefer USB/devd IPC CLI access before HTTP device fallback, use CLI-saved device memory for previously connected devices, use Web Serial only as the formal human browser UI path, and perform user business workflows such as device identity/status/telemetry checks, electronic-load output control, presets or CC/CV/CP/PD controls when the installed CLI exposes them, released firmware flashing with first-flash gates, and WiFi configuration only when released. Do not use source checkouts, Just, Rust, external MCU daemons, probe tooling, raw local devd HTTP, or project-local developer caches for skill-driven hardware operation."
 ---
 
 # LoadLynx User Operations
@@ -15,7 +15,7 @@ Use this skill on a normal user's computer. All skill-driven hardware operation 
 npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-user-operations
 ```
 
-- Never require the user to clone the repository or install Rust, Bun, Just, `mcu-agentd`, `espflash`, or `probe-rs`.
+- Never require the user to clone the repository or install Rust, Bun, Just, external MCU daemons, `espflash`, or `probe-rs`.
 - Use only released LoadLynx host tools and released firmware assets from `https://github.com/IvanLi-CN/loadlynx/releases`.
 - Do not use the Web UI as the skill's agent-operated hardware path. If the user wants an agent to operate hardware, use CLI commands only. Web Serial is a supported human browser path, not the agent automation path.
 - Before giving any CLI workflow, verify the installed program supports it:
@@ -25,7 +25,7 @@ loadlynx --help
 loadlynx-devd --help
 ```
 
-- This skill is IPC-only. `loadlynx --help` must expose `--ipc`; `loadlynx-devd --help` must expose both `serve` and `bridge-http`.
+- This skill is IPC-only. `loadlynx` must use IPC-backed devd access and auto-start `loadlynx-devd serve` when needed; `--ipc` may exist as a hidden endpoint override but is not a normal user argument. `loadlynx-devd --help` must expose both `serve` and `bridge-http`.
 - If `loadlynx --help` exposes `--devd`, or if `loadlynx-devd --help` lacks `bridge-http`, the installed host tools are from an obsolete HTTP-devd release. Stop and upgrade to a stable release with IPC host tools before any hardware operation.
 - Do not use the obsolete `--devd http://...` CLI interface as a compatibility path, even if a pinned older release can still be installed.
 - If the requested user workflow depends on a command that is absent, stop and report that the installed release does not support it. Do not invent commands, fall back to Web UI, or switch to source/developer instructions.
@@ -68,7 +68,7 @@ loadlynx --help
 
 - Connection priority is USB first, HTTP second.
 - CLI/devd uses native local IPC: Unix socket on macOS/Linux and named pipe on Windows. The CLI auto-starts a sibling `loadlynx-devd serve` when needed; use `--no-auto-start` only when the user explicitly wants to manage the daemon process.
-- For CLI-over-USB workflows, do not pass a local HTTP devd URL. `loadlynx --help` should expose `--ipc`, not `--devd`; `--ipc` is an endpoint override, not an IP port requirement.
+- For CLI-over-USB workflows, do not pass a local HTTP devd URL. `loadlynx --help` should not expose the old `--devd`; if `--ipc` exists, it is an endpoint override for deliberate alternate endpoints, not a normal command requirement.
 - `loadlynx-devd bridge-http` is only for browser/Web/debug paths and must bind loopback only.
 - If the user needs a browser bridge for GitHub Pages or a release Web bundle, start:
 
@@ -80,19 +80,19 @@ loadlynx-devd bridge-http --bind 127.0.0.1:30180
 - Use only the released CLI's user-facing selection flow for USB targets. Do not edit project-local developer port/probe caches or any selector file by hand.
 - Use HTTP only when USB is unavailable, explicitly not desired, or the user chooses a saved HTTP device. HTTP targets may be explicit base URLs, IP addresses, or `loadlynx-<short-id>.local`.
 
-## CLI Hardware Memory
+## CLI Device Memory
 
-- The CLI must be the source of remembered hardware. Do not rely on Web local storage, browser history, or project-local cache files for user workflows.
-- Before scanning manually, check the installed CLI for saved-hardware commands that can list, select, connect, forget, or update devices.
-- After a successful USB or HTTP connection, save or update that hardware through the CLI if the installed release exposes a saved-device command.
+- The CLI must be the source of remembered devices. Do not rely on Web local storage, browser history, or project-local cache files for user workflows.
+- Before scanning manually, check the installed CLI for `devices` and `device list|add|use|remove`.
+- After a successful USB or HTTP connection, save or update that device through `loadlynx device add`.
 - Prefer a saved USB device over a saved HTTP endpoint for the same hardware. Use the saved HTTP endpoint only as fallback.
-- If the installed CLI cannot remember previously connected hardware, report that the current release lacks required user hardware memory and escalate to developer work to implement/release it.
+- If the installed CLI cannot remember previously connected devices, report that the current release lacks required user device memory and escalate to developer work to implement/release it.
 
 ## LoadLynx Business Workflows
 
 - Treat transport selection as preparation only. The user-facing job is operating the LoadLynx electronic-load and USB-PD device safely through released CLI commands.
 - Identity and status:
-  - Identify the selected hardware before writes.
+  - Identify the selected device before writes.
   - Read firmware versions, uptime, network identity, link state, analog board state, fault flags, voltage, current, power, temperature, and USB-PD attach/contract state when the CLI/status payload exposes them.
 - Electronic-load operation:
   - Enable or disable output only after confirming the hardware ID, intended mode, and target state.
@@ -120,41 +120,37 @@ loadlynx-devd bridge-http --bind 127.0.0.1:30180
 - CLI discovery and status:
 
 ```bash
-loadlynx hardware available
-loadlynx hardware list
-loadlynx hardware default show
 loadlynx devices
+loadlynx device list
 loadlynx status --url http://<device-host-or-ip>
-loadlynx status --hardware <saved-hardware-id>
+loadlynx status --device <saved-device-id>
 loadlynx status
 ```
 
-- Hardware memory:
+- Device memory:
 
 ```bash
-loadlynx hardware path
-loadlynx hardware available --scan
-loadlynx hardware list
-loadlynx hardware bind usb --candidate <scan-candidate-id> [--name <name>] [--set-default]
-loadlynx hardware bind http --url http://<device-host-or-ip> [--name <name>] [--set-default]
-loadlynx hardware default set <saved-hardware-id>
-loadlynx hardware default clear
-loadlynx hardware use <saved-hardware-id> --transport usb
-loadlynx hardware use <saved-hardware-id> --transport http
-loadlynx hardware forget <saved-hardware-id>
+loadlynx devices
+loadlynx device list
+loadlynx device add [--name <name>]
+loadlynx device add --url http://<device-host-or-ip> [--name <name>]
+loadlynx device use <saved-device-id>
+loadlynx device use --global <saved-device-id>
+loadlynx device use --clear
+loadlynx device remove <saved-device-id>
 ```
 
-- Use `hardware available` to see currently visible USB/devd candidates plus saved HTTP fallback entries; add `--scan` when device visibility should refresh first. If CLI IPC/devd is unavailable, use the reported USB error and saved HTTP fallback to decide whether to let the CLI auto-start IPC devd, start `loadlynx-devd serve`, or use HTTP.
-- Bind a hardware entity before operating it. USB binding reads firmware identity from the selected candidate; HTTP binding reads `/api/v1/identity`. Binding must fail if `identity.device_id` is missing or is not a stable `loadlynx-<short-id>` hardware ID.
-- `status`, output, PD, WiFi, control, presets, calibration, soft-reset, diagnostics, flash, reset and monitor should use `--hardware <saved-hardware-id>` or the saved default. Do not use temporary devd candidate IDs for control operations.
-- `loadlynx status` uses the saved default hardware. In non-interactive/JSON automation, a missing default is a structured `default_hardware_not_set` error.
-- `hardware use <id> --transport ...` changes the remembered transport for that hardware. `--transport` command flags, where available, should be treated as one-call overrides rather than rebinding.
+- Use `loadlynx devices` or `loadlynx device list` to see saved devices. Use `loadlynx device add` in an interactive TTY to scan and bind USB, or `loadlynx device add --url ...` to bind HTTP/LAN.
+- Bind a device before operating it. USB binding reads firmware identity from the selected candidate; HTTP binding reads `/api/v1/identity`. Binding must fail if `identity.device_id` is missing or is not a stable `loadlynx-<short-id>` device ID.
+- `status`, output, PD, WiFi, control, presets, calibration, soft-reset, diagnostics, flash, reset and monitor should use `--device <saved-device-id>`, nearest ancestor `.loadlynx`, or the saved global default. Do not use temporary devd candidate IDs for control operations.
+- `loadlynx status` uses `--device`, nearest ancestor `.loadlynx`, then global default. In non-interactive/JSON automation, missing selection is a structured device-selection error.
+- `loadlynx device use <id>` writes a local `.loadlynx` file in the current directory. `loadlynx device use --global <id>` changes the global default.
 - The memory file lives in the user's OS config directory: macOS `~/Library/Application Support/LoadLynx/devices.json`, Linux `${XDG_CONFIG_HOME:-~/.config}/loadlynx/devices.json`, Windows `%APPDATA%\LoadLynx\devices.json`; `LOADLYNX_HOME` overrides the directory.
-- List saved hardware before scanning, then use `--hardware <saved-hardware-id>` instead of retyping device IDs or URLs.
+- List saved devices before scanning, then use `--device <saved-device-id>` instead of retyping device IDs or URLs.
 - CLI output control:
   - Confirm `loadlynx output --help` and `loadlynx output set --help` expose the needed command.
-  - Require the user to confirm the saved hardware ID and intended output state before changing output.
-  - Verify the result with `loadlynx status --hardware <saved-hardware-id>` or `loadlynx status` when the intended hardware is the saved default.
+  - Require the user to confirm the saved device ID and intended output state before changing output.
+  - Verify the result with `loadlynx status --device <saved-device-id>` or `loadlynx status` when the intended device is selected by local/global default.
 - CLI firmware flash:
   - Confirm `loadlynx flash --help` supports the needed artifact/catalog options.
   - Use dry-run first whenever the CLI exposes it.
@@ -171,9 +167,9 @@ loadlynx hardware forget <saved-hardware-id>
 
 ## Escalate Out
 
-- Switch to `skills/loadlynx-developer-operations/SKILL.md` for source checkout, cloning, project builds, `just`, local devd builds, release workflow changes, `mcu-agentd`, probe/selector maintenance, calibration writes, HIL/debug sessions, or implementing missing CLI features.
+- Switch to `skills/loadlynx-developer-operations/SKILL.md` for source checkout, cloning, project builds, `just`, local devd builds, release workflow changes, CLI/devd firmware backend work, calibration writes, HIL/debug sessions, or implementing missing CLI features.
 - If a hardware operation is only available through Web UI and not through `loadlynx`, stop and escalate to developer work to add/release a CLI command.
-- If hardware memory is only available in Web UI or project-local files and not through `loadlynx`, stop and escalate to developer work to add/release CLI hardware memory.
+- If device memory is only available in Web UI or project-local files and not through `loadlynx`, stop and escalate to developer work to add/release CLI device memory.
 - Do not use raw HTTP writes or source-tree commands to bypass missing released user functionality.
 - Do not continue hardware-changing operations when identity, artifact, target, lease, or command availability is ambiguous.
 

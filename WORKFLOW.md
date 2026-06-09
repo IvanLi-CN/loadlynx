@@ -2,8 +2,8 @@
 
 - 多目标（G431 + S3）统一在一个仓库内管理，固件分别存放于 `firmware/` 子目录。
 - 控制回路与安全相关逻辑优先落在 G431；S3 侧专注于人机与联网。
-- 构建在各自 crate 内完成；固件烧录/复位/监视通过 `mcu-agentd`（仓根 `mcu-agentd.toml`）。
-- Web 控制台与 `loadlynx-devd` 的 USB CDC 控制面验证直接使用 `loadlynx-devd`，不使用 `mcu-agentd` selector。
+- 构建在各自 crate 内完成；固件烧录/复位/监视统一通过 `loadlynx` CLI 调用 `loadlynx-devd` 完成。
+- Web 控制台与 `loadlynx-devd` 的 USB CDC 控制面验证直接使用同一 devd 控制面，不存在外部 MCU daemon selector。
 
 ## 分支与工作区
 - 建议使用 feature 分支进行新特性/模块开发。
@@ -15,8 +15,8 @@
   - `chore(digital): setup esp-hal display pipeline`
 
 ## 构建与验证
-- G431：Rust + Embassy，目标 `thumbv7em-none-eabihf`；由 `mcu-agentd` 调用 probe-rs 完成烧录/复位/监视。
-- S3：Rust + esp-hal + Embassy；由 `mcu-agentd` 调用 espflash 完成烧录/复位/监视。
+- G431：Rust + Embassy，目标 `thumbv7em-none-eabihf`；由 `loadlynx-devd` 内部调用 probe-rs 完成烧录/复位。Analog RTT/defmt 日志/监视后端尚未实现时，CLI 必须显式拒绝而不是借用 digital monitor。
+- S3：Rust + esp-hal + Embassy；由 `loadlynx-devd` 内部调用 espflash 完成烧录/复位，并通过 USB CDC JSONL 读取状态与日志。
 
 ## 当前质量门
 
@@ -68,27 +68,23 @@
 - `just check`：日常快速自检
 - `just check-full`：尽量贴近 CI，但不触发 release / deploy / hardware side effects
 
-## MCU 端口/探针缓存与 Agentd
+## CLI/devd 设备记忆与目标选择
 
-- 守护与 CLI：使用外部 `mcu-agentd`（配置见仓根 `mcu-agentd.toml`）。推荐先执行 `just agentd-init` 安装/升级二进制，再通过 Just 封装调用：
-  - 启动/状态/停止：`just agentd-start` / `just agentd-status` / `just agentd-stop`。
-- 缓存文件：
-  - Digital（ESP32‑S3）：仓根 `./.esp32-port`。
-  - Analog（STM32G431）：仓根 `./.stm32-port`（旧版 `./.stm32-probe` 仅在 `.stm32-port` 不存在时作为迁移来源，读取后写回 `.stm32-port` 并删除旧文件）。
-- 设置与查看缓存（推荐流程）：
-  - 设置：`just agentd selector set digital /dev/cu.usbserial-xxxx`；`just agentd selector set analog 0483:3748:SERIAL`。
-  - 查看：`just agentd-get-port digital` / `just agentd-get-port analog`。
-- 后续所有 `flash` / `reset` / `monitor` 子命令都会优先使用上述缓存值；缓存缺失时可用 `just agentd selector list <mcu>` 查看候选，或用 `just agentd selector set <mcu> --auto`（仅当候选唯一时成功）。
+- 用户级设备记忆由 `loadlynx` 管理：`loadlynx devices`、`loadlynx device list|add|use|remove`。
+- 本地项目选择文件固定为最近祖先 `.loadlynx`，内容只保存一个 saved device id；全局 registry 位于用户配置目录。
+- 业务命令使用 `--device <saved-id> > 最近祖先 .loadlynx > 全局默认 > 交互式已保存设备选择` 的顺序解析目标。
+- Digital（ESP32‑S3）USB CDC 的开发默认端口仍可通过 `just loadlynx usb-port set digital <path>` 写入仓根 `./.esp32-port`，供 devd 进行安全校验；Agent 不得擅自修改。
+- Analog（STM32G431）探针选择也必须由 CLI/devd 能力承载；若缺少 owner-facing 设置或监视入口，视为产品缺口，不再回退到外部 daemon。
 
 ## Web/devd USB CDC 控制面验证
 
 - `loadlynx-devd` 负责 Web 控制台到 ESP32-S3 USB CDC JSONL 的本地桥接，协议见 `docs/interfaces/usb-cdc-jsonl-bridge.md`。
 - 使用 `just loadlynx usb-port set digital <path>` 设置默认 ESP32-S3 digital USB CDC 端口；后续 CLI/devd 操作读取该项目本地记忆并使用该端口。
-- `.esp32-port` 可以保留 mcu-agentd 兼容的 metadata 行（例如 `mac=...`）；CLI/devd 只把端口路径行作为默认 USB 端口。
+- `.esp32-port` 可以保留历史 metadata 行（例如 `mac=...`）；CLI/devd 只把端口路径行作为默认 USB 端口。
 - 人工开发时可用 `just loadlynx usb-port set` 或 `just loadlynx usb-port set digital` 进入方向键交互选择；候选项按 `espflash` 默认串口枚举规则展示。Agent 不得用交互候选选择绕过 owner 对 exact path 的批准。
 - Web 启动时通过 `VITE_LOADLYNX_DEVD_URL=<devd-url>` 指向当前 devd。
 - 真机验证必须证明 devd 与设备完成 JSONL 协议通信，例如收到 `hello` 或成功执行 `get_identity` / `get_status`。串口打开、候选扫描、Web lease 或 firmware dry-run 只能作为辅助证据。
-- 该流程复用 `.esp32-port` 作为 ESP32-S3 digital USB CDC 默认端口记忆，但不得读取、修改或依赖 `.stm32-port`，也不得调用 `just agentd selector set`。devd/Web ESP32-S3 digital firmware flash 继续留在 devd 路径：持有 Web lease、校验 artifact hash，并对批准端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。非 devd 固件烧录/复位/monitor 和 analog/probe 操作才进入 `mcu-agentd` 流程。
+- 该流程复用 `.esp32-port` 作为 ESP32-S3 digital USB CDC 默认端口记忆，但不得读取、修改或依赖 `.stm32-port` 作为替代选择，也不得调用外部 selector。devd/Web ESP32-S3 digital firmware flash 留在 devd 路径：持有 Web lease、校验 artifact hash，并对批准端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。Analog/probe 的 flash/reset 也必须由 CLI/devd 暴露和执行；analog monitor/logs 在 devd 后端实现前必须显式拒绝。
 
 ## 文档真相源
 

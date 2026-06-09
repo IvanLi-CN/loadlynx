@@ -75,9 +75,11 @@ pub(crate) async fn handle_backup_export(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     file: &Path,
     include: &[String],
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let selector = freeze_api_selector(selector, default_devd, allow_interactive)?;
     let selection = parse_backup_selection(include)?;
     let mut sections = serde_json::Map::new();
     let mut warnings = Vec::<Value>::new();
@@ -87,6 +89,7 @@ pub(crate) async fn handle_backup_export(
             client,
             default_devd,
             selector.clone(),
+            allow_interactive,
             reqwest::Method::GET,
             "/api/v1/presets",
             None,
@@ -103,6 +106,7 @@ pub(crate) async fn handle_backup_export(
             client,
             default_devd,
             selector.clone(),
+            allow_interactive,
             reqwest::Method::GET,
             "/api/v1/control",
             None,
@@ -130,6 +134,7 @@ pub(crate) async fn handle_backup_export(
                 client,
                 default_devd,
                 selector.clone(),
+                allow_interactive,
                 reqwest::Method::GET,
                 "/api/v1/calibration/profile",
                 None,
@@ -147,6 +152,7 @@ pub(crate) async fn handle_backup_export(
                 client,
                 default_devd,
                 selector.clone(),
+                allow_interactive,
                 reqwest::Method::GET,
                 "/api/v1/wifi/credentials",
                 None,
@@ -160,6 +166,7 @@ pub(crate) async fn handle_backup_export(
             client,
             default_devd,
             selector,
+            allow_interactive,
             reqwest::Method::GET,
             "/api/v1/pd",
             None,
@@ -207,15 +214,18 @@ pub(crate) async fn handle_backup_export(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_backup_import(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     file: &Path,
     include: &[String],
     dry_run: bool,
     allow_insecure_lan_wifi: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let selector = freeze_api_selector(selector, default_devd, allow_interactive)?;
     let selection = parse_backup_selection(include)?;
     let backup = read_backup_file(file)?;
     validate_backup_envelope(&backup)?;
@@ -233,11 +243,12 @@ pub(crate) async fn handle_backup_import(
     preflight_backup_restore(
         default_devd,
         &selector,
+        allow_interactive,
         &backup,
         selection,
         allow_insecure_lan_wifi,
     )?;
-    disable_output_for_restore(client, default_devd, selector.clone()).await?;
+    disable_output_for_restore(client, default_devd, selector.clone(), allow_interactive).await?;
     settle_after_restore_write().await;
     let mut results = Vec::<Value>::new();
 
@@ -246,6 +257,7 @@ pub(crate) async fn handle_backup_import(
             client,
             default_devd,
             selector.clone(),
+            allow_interactive,
             &backup,
             &mut results,
         )
@@ -256,6 +268,7 @@ pub(crate) async fn handle_backup_import(
             client,
             default_devd,
             selector.clone(),
+            allow_interactive,
             &backup,
             &mut results,
         )
@@ -266,6 +279,7 @@ pub(crate) async fn handle_backup_import(
             client,
             default_devd,
             selector.clone(),
+            allow_interactive,
             &backup,
             &mut results,
         )
@@ -276,6 +290,7 @@ pub(crate) async fn handle_backup_import(
             client,
             default_devd,
             selector,
+            allow_interactive,
             &backup,
             &mut results,
             allow_insecure_lan_wifi,
@@ -295,15 +310,12 @@ pub(crate) async fn handle_backup_import(
 pub(crate) fn preflight_backup_restore(
     default_devd: &str,
     selector: &ApiSelector,
+    allow_interactive: bool,
     backup: &Value,
     selection: BackupSelection,
     allow_insecure_lan_wifi: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    ensure_one_api_selector(
-        selector.url.as_ref(),
-        selector.device.as_ref(),
-        selector.hardware.as_ref(),
-    )?;
+    ensure_one_api_selector(selector.url.as_ref(), selector.device.as_ref())?;
 
     if !selection.wifi || backup.pointer("/sections/settings/wifi").is_none() {
         return Ok(());
@@ -311,13 +323,15 @@ pub(crate) fn preflight_backup_restore(
 
     let is_lan_restore = if selector.url.is_some() {
         true
-    } else if let Some(hardware_id) = selector.hardware.as_ref() {
+    } else {
         matches!(
-            resolve_saved_hardware(hardware_id, default_devd)?,
+            resolve_saved_hardware_selection(
+                selector.device.clone(),
+                default_devd,
+                allow_interactive
+            )?,
             ResolvedHardware::Http { .. }
         )
-    } else {
-        false
     };
 
     if is_lan_restore && !allow_insecure_lan_wifi {
@@ -441,11 +455,13 @@ async fn disable_output_for_restore(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let control = request_api_value(
         client,
         default_devd,
         selector,
+        allow_interactive,
         reqwest::Method::POST,
         "/api/v1/control",
         Some(json!({"output_enabled": false})),
@@ -463,6 +479,7 @@ async fn restore_presets(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     backup: &Value,
     results: &mut Vec<Value>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -474,6 +491,7 @@ async fn restore_presets(
         client,
         default_devd,
         selector.clone(),
+        allow_interactive,
         reqwest::Method::GET,
         "/api/v1/presets",
         None,
@@ -493,9 +511,16 @@ async fn restore_presets(
         if current_presets.iter().any(|current| current == preset) {
             continue;
         }
-        restore_preset_with_readback(client, default_devd, selector.clone(), preset, preset_id)
-            .await
-            .map_err(|err| format!("preset {preset_id} restore failed: {err}"))?;
+        restore_preset_with_readback(
+            client,
+            default_devd,
+            selector.clone(),
+            allow_interactive,
+            preset,
+            preset_id,
+        )
+        .await
+        .map_err(|err| format!("preset {preset_id} restore failed: {err}"))?;
         changed_count += 1;
         settle_after_restore_write().await;
     }
@@ -509,6 +534,7 @@ async fn restore_preset_with_readback(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     preset: &Value,
     preset_id: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -516,6 +542,7 @@ async fn restore_preset_with_readback(
         client,
         default_devd,
         selector.clone(),
+        allow_interactive,
         reqwest::Method::POST,
         "/api/v1/presets",
         Some(preset.clone()),
@@ -529,6 +556,7 @@ async fn restore_preset_with_readback(
                 client,
                 default_devd,
                 selector,
+                allow_interactive,
                 reqwest::Method::GET,
                 "/api/v1/presets",
                 None,
@@ -553,6 +581,7 @@ async fn restore_calibration(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     backup: &Value,
     results: &mut Vec<Value>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -581,6 +610,7 @@ async fn restore_calibration(
             client,
             default_devd,
             selector,
+            allow_interactive,
             reqwest::Method::POST,
             "/api/v1/calibration/reset",
             Some(json!({"kind": "all"})),
@@ -601,6 +631,7 @@ async fn restore_calibration(
                 client,
                 default_devd,
                 selector.clone(),
+                allow_interactive,
                 reqwest::Method::POST,
                 "/api/v1/calibration/reset",
                 Some(json!({"kind": kind})),
@@ -615,6 +646,7 @@ async fn restore_calibration(
                 client,
                 default_devd,
                 selector.clone(),
+                allow_interactive,
                 reqwest::Method::POST,
                 "/api/v1/calibration/commit",
                 Some(body),
@@ -682,6 +714,7 @@ async fn restore_wifi(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     backup: &Value,
     results: &mut Vec<Value>,
     allow_insecure_lan_wifi: bool,
@@ -702,6 +735,7 @@ async fn restore_wifi(
         client,
         default_devd,
         selector.clone(),
+        allow_interactive,
         ssid,
         psk,
         source,
@@ -718,6 +752,7 @@ async fn restore_wifi(
             client,
             default_devd,
             selector.clone(),
+            allow_interactive,
             reqwest::Method::DELETE,
             "/api/v1/wifi",
             None,
@@ -729,6 +764,7 @@ async fn restore_wifi(
                 client,
                 default_devd,
                 selector,
+                allow_interactive,
                 ssid,
                 psk,
                 "factory",
@@ -743,6 +779,7 @@ async fn restore_wifi(
             client,
             default_devd,
             selector.clone(),
+            allow_interactive,
             reqwest::Method::POST,
             "/api/v1/wifi",
             Some(json!({"ssid": ssid, "psk": psk, "wait": false})),
@@ -754,6 +791,7 @@ async fn restore_wifi(
                 client,
                 default_devd,
                 selector,
+                allow_interactive,
                 ssid,
                 psk,
                 source,
@@ -767,10 +805,12 @@ async fn restore_wifi(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn confirm_wifi_restore_readback(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     ssid: &str,
     psk: &str,
     source: &str,
@@ -780,6 +820,7 @@ async fn confirm_wifi_restore_readback(
         client,
         default_devd,
         selector,
+        allow_interactive,
         reqwest::Method::GET,
         "/api/v1/wifi/credentials",
         None,
@@ -800,6 +841,7 @@ async fn restore_pd(
     client: &Client,
     default_devd: &str,
     selector: ApiSelector,
+    allow_interactive: bool,
     backup: &Value,
     results: &mut Vec<Value>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
@@ -853,6 +895,7 @@ async fn restore_pd(
         client,
         default_devd,
         selector,
+        allow_interactive,
         reqwest::Method::POST,
         "/api/v1/pd",
         Some(Value::Object(body)),

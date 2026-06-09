@@ -29,7 +29,7 @@
 - `cargo test --manifest-path libs/calibration-format/Cargo.toml` passed.
 - `cargo fmt --manifest-path firmware/digital/Cargo.toml -- --check` passed.
 - `just d-build` passed after creating a temporary ignored `.env` from `.env.example` for compile-time Wi-Fi variables; the placeholder `.env` was removed afterwards and was not committed.
-- HIL flash/monitor was not run because both `digital` and `analog` selectors are missing in this worktree, and `mcu-agentd config validate` also reported the analog artifact missing before analog build.
+- HIL flash/monitor was not run because both `digital` and `analog` target selections were missing in this worktree, and the analog artifact was missing before analog build.
 - `just a-build` was attempted for preflight but is blocked by missing `third_party/embassy/embassy-embedded-hal` in this worktree; analog firmware was not modified.
 
 ## Specification Companion Notes

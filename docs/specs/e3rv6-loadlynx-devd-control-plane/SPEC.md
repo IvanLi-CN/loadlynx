@@ -2,7 +2,7 @@
 
 ## 背景 / 问题陈述
 
-LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、Web 控制台、`mcu-agentd` 硬件在环入口，以及 STM32G431 模拟板的 probe-rs 烧录路径。现有入口分散在浏览器 LAN API、Web Serial/USB 设想、`just agentd ...` 命令和人工选择串口/探针流程之间。
+LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、Web 控制台、早期分散的硬件在环入口，以及 STM32G431 模拟板的 probe-rs 烧录路径。现有入口曾分散在浏览器 LAN API、Web Serial/USB 设想、外部工具命令和人工选择串口/探针流程之间。
 
 `mains-aegis` 的 `tools/mains-aegis-devd` 已验证一个更稳的模式：本地 daemon 作为 Web/App/CLI 的唯一 USB HTTP bridge，负责设备扫描、显式绑定、独占 lease、固件 artifact 校验、烧录、reset、monitor 与 bounded logs。LoadLynx 需要类似能力，但不能直接照搬，因为 LoadLynx 有两个烧录目标、两个硬件选择器、ESP32-S3 到 STM32G431 的 UART 控制链路，以及高风险电子负载输出控制。
 
@@ -14,7 +14,7 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - Web 界面支持固件烧录、局域网设备发现（mDNS/DNS-SD + 手工 `.local` + 受控子网扫描）、devd HTTP bridge、正式 Web Serial 路径和 USB/LAN 双连接合并。
 - CLI 支持通过以太网/LAN 与 USB/devd 操控硬件，并覆盖 discovery、status、flash、reset、monitor、safe control 与诊断导出。
 - 固件 artifact catalog 成为 Web、devd、CLI、本地构建和 release 的统一合同。
-- 保留 `mcu-agentd` 作为底层烧录/monitor fallback，但常规 owner-facing 操作优先走 `loadlynx-devd`。
+- 将烧录、reset、digital monitor 与 bounded logs 的硬件操作职责收敛到 `loadlynx-devd`，owner-facing 和开发者 HIL 都通过 `loadlynx` CLI + devd 执行；analog RTT/defmt monitor 在 devd 后端实现前必须显式拒绝。
 - 复用 `mains-aegis` 的安全模型：scan 不自动连接，多候选必须用户选择，USB 控制必须持有有效 lease，PSK/敏感字段不得回显，日志解码必须匹配 artifact identity。
 
 ### Non-goals
@@ -47,13 +47,13 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - MUST: `loadlynx-devd serve` 不接收固定设备端口；设备必须通过 `scan -> user selects -> bind/connect/lease` 流程进入控制。
 - MUST: `POST /api/v1/devices/scan` 返回 ESP32-S3 serial candidates、STM32 probe candidates、LAN discovered devices、mock devices，并保留完整候选信息。
 - MUST: 多个候选存在时 Web 和 CLI 均不得自动选择第一个、最近、已连接或已识别设备。
-- MUST: USB CDC 写入、WiFi 配网、safe settings、flash/reset/monitor 等需要占用 USB 的操作必须持有有效 per-device lease 或明确的 CLI exclusive session。同一 device/port 可以有多个有效 lease；普通 JSONL 写操作进入 per-port bounded FIFO 串行执行。
+- MUST: USB CDC 写入、WiFi 配网、safe settings、ESP32-S3 flash/reset/monitor 等需要占用数字板 USB CDC 的操作必须持有有效 per-device lease 或明确的 CLI exclusive session。同一 device/port 可以有多个有效 lease；普通 JSONL 写操作进入 per-port bounded FIFO 串行执行。STM32G431 analog probe-rs flash/reset 不是 USB CDC 操作，不得要求 saved USB device 或 USB lease；它必须使用 devd 扫描出的 `.stm32-port` probe selector evidence。
 - MUST: 固件烧录前校验 artifact 文件 SHA-256，并用 firmware identity 匹配 `build_id`、profile、features、target chip 和 defmt metadata。
 - MUST: ESP32-S3 烧录与 STM32G431 烧录目标分离；同一设备记录可包含 `digital_target` 与 `analog_target`。
 - MUST: Web 页面能通过 LAN 只读 API 使用 mDNS `.local`、DNS-SD 结果或用户手工 URL 连接设备。
 - MUST: CLI 同时支持 LAN base URL 和 devd USB target，输出 JSON 与人类可读摘要。
 - SHOULD: devd 可以托管生产 Web 静态文件，并为 Vite dev server 提供 `/api` proxy 目标。
-- SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/monitor 操作。
+- SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/digital monitor 操作。Analog RTT/defmt monitor 尚未实现时，CLI/devd 必须返回结构化错误，不得悄悄监视 digital USB session。
 - MUST: Web Serial 是 GitHub Pages 与 release Web bundle 的正式浏览器路径；支持身份/状态/控制/PD/输出/预设/校准/WiFi/诊断和 ESP32-S3 flash，并在不支持 Serial API 的浏览器引导到 released CLI/devd。
 
 ## 功能与行为规格
@@ -77,6 +77,20 @@ not expose ordinary browser HTTP. macOS/Linux use Unix sockets and Windows uses
 named pipes. `loadlynx` uses this IPC surface and may auto-start a sibling
 `loadlynx-devd serve`; ordinary CLI workflows must not require or expose
 `--devd http://...`.
+
+CLI-to-devd IPC must use an operation envelope, not HTTP-over-IPC. The request
+shape is `{"op": "<domain.operation>", "params": {...}}`, and the response shape
+is `{"ok": true, "result": ...}` or `{"ok": false, "error": ApiError}`. The CLI
+must not send HTTP `method`, URL `path`, headers, status codes, or raw
+`/api/v1/...` routes as the devd IPC protocol. The daemon must dispatch IPC
+operations directly to the control-plane handlers instead of starting an
+internal HTTP server or proxying IPC to `bridge-http`.
+
+HTTP URLs are valid only for explicit LAN device access (`--url`) or saved HTTP
+device transports. If a devd endpoint value starts with `http://` or
+`https://`, the CLI must reject it as an invalid devd endpoint instead of
+falling back to HTTP. This keeps the browser/debug bridge out of ordinary CLI
+hardware workflows.
 
 `loadlynx-devd bridge-http` is the browser/debug bridge. It may serve the Web
 bundle and compatibility API, but it must reject non-loopback binds. GitHub
@@ -150,8 +164,8 @@ Artifact catalog entries must represent both boards:
 
 Flash behavior:
 
-- `target=digital_esp32s3`: devd/Web firmware flows use devd's lease-gated direct `espflash` backend with the approved `.esp32-port` serial target; `mcu-agentd` is not the owner-facing devd digital flash path. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
-- `target=analog_stm32g431`: use probe-rs or `mcu-agentd` backend, exact probe selector required.
+- `target=digital_esp32s3`: devd/Web firmware flows use devd's lease-gated direct `espflash` backend with the approved `.esp32-port` serial target. ELF artifacts use `espflash flash`; raw image artifacts require `flash_address` and use `espflash write-bin`.
+- `target=analog_stm32g431`: devd/CLI owns the analog firmware flow and may invoke `probe-rs` internally, with exact `.stm32-port` probe selector evidence required. Analog flash/reset must not resolve `--device` through the saved USB registry or create a USB CDC lease.
 - `dry_run=true` must validate target resolution, artifact presence and hashes without touching hardware.
 - Real flash must refuse if the requested target does not match the selected device/board identity.
 - Real ESP32-S3 flash through CLI/devd/Web Serial must require artifact/hash/target evidence, explicit `yes` confirmation, explicit non-project firmware acknowledgement when applicable, and post-flash identity capture. A successful vendor-tool exit code alone is not sufficient.
@@ -159,40 +173,39 @@ Flash behavior:
 
 ### CLI
 
-CLI devd access is IPC-only. `loadlynx --ipc <endpoint>` selects the IPC
-endpoint, `--no-auto-start` disables sibling daemon startup, and LAN/device HTTP
-still remains available through explicit `--url` or saved HTTP hardware.
+CLI devd access is IPC-only. `loadlynx` auto-starts a sibling `loadlynx-devd serve` on the default IPC endpoint when a command needs devd. `--ipc <endpoint>` selects an alternate IPC endpoint for deliberate multi-instance or debugging overrides, `--no-auto-start` disables sibling daemon startup, and LAN/device HTTP still remains available through explicit `--url` or saved HTTP transport.
 
 CLI commands should map 1:1 to devd/LAN operations:
 
 - `loadlynx discover --mdns --lan-scan --json`
-- `loadlynx devices --ipc /tmp/loadlynx-devd.sock`
-- `loadlynx hardware available --scan --json`
-- `loadlynx hardware bind usb --candidate <scan-candidate-id> [--set-default]`
-- `loadlynx hardware bind http --url http://loadlynx-xxxxxx.local [--set-default]`
-- `loadlynx hardware default set <hardware-id>`
-- `loadlynx hardware use <hardware-id> --transport usb|http`
+- `loadlynx devices`
+- `loadlynx device list`
+- `loadlynx device add`
+- `loadlynx device add --url http://loadlynx-xxxxxx.local`
+- `loadlynx device use <device-id>`
+- `loadlynx device use --global <device-id>`
 - `loadlynx status`
-- `loadlynx status --hardware <hardware-id>`
+- `loadlynx status --device <device-id>`
 - `loadlynx status --url http://loadlynx-xxxxxx.local`
-- `loadlynx flash digital --hardware <hardware-id> --artifact <artifact_id> [--dry-run] [--confirm yes]`
-- `loadlynx flash analog --hardware <hardware-id> --artifact <artifact_id> [--dry-run]`
-- `loadlynx reset digital|analog --hardware <hardware-id>`
-- `loadlynx monitor digital|analog --hardware <hardware-id> --tail 200`
-- `loadlynx pd set --hardware <hardware-id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
-- `loadlynx cc <target_i_ma> --hardware <id>`
-- `loadlynx cv <target_v_mv> --hardware <id>`
-- `loadlynx cp <target_p_mw> --hardware <id>`
-- `loadlynx cc|cv|cp <target> --hardware <id> --disable`
-- `loadlynx wifi show|set|clear --hardware <id>`
-- `loadlynx control get --hardware <id>`
-- `loadlynx control set --hardware <id> --enable|--disable`
-- `loadlynx preset list|set|apply --hardware <id>`
-- `loadlynx calibration profile|mode|apply|commit|reset --hardware <id>`
-- `loadlynx soft-reset --hardware <id> --reason manual`
-- `loadlynx diagnostics export --hardware <id>`
+- `loadlynx flash digital --device <device-id> --artifact <artifact_id> [--dry-run] [--confirm yes]`
+- `loadlynx flash analog --artifact <artifact_id> [--dry-run]`
+- `loadlynx reset digital --device <device-id>`
+- `loadlynx reset analog`
+- `loadlynx monitor digital --device <device-id> --tail 200`
+- `loadlynx pd set --device <device-id> --mode fixed|pps --object-pos <n> --target-mv <mv> --i-req-ma <ma>`
+- `loadlynx cc <target_i_ma> --device <id>`
+- `loadlynx cv <target_v_mv> --device <id>`
+- `loadlynx cp <target_p_mw> --device <id>`
+- `loadlynx cc|cv|cp <target> --device <id> --disable`
+- `loadlynx wifi show|set|clear --device <id>`
+- `loadlynx control get --device <id>`
+- `loadlynx control set --device <id> --enable|--disable`
+- `loadlynx preset list|set|apply --device <id>`
+- `loadlynx calibration profile|mode|apply|commit|reset --device <id>`
+- `loadlynx soft-reset --device <id> --reason manual`
+- `loadlynx diagnostics export --device <id>`
 
-Temporary devd candidate IDs are discovery outputs, not operation targets. A USB candidate may only enter user operations through `hardware bind usb --candidate ...`; the bind flow must read identity over a short bind-probe lease and reject firmware that does not expose a stable `identity.device_id` such as `loadlynx-<short-id>`. Bind-probe leases are restricted to identity binding and must not authorize normal control, diagnostics, reset or flash operations. Saved hardware records use that stable ID as the registry key, may hold both USB and HTTP transport locators, remember `last_transport`, and expose a `default_hardware_id` for `loadlynx status` and other selector-free automation. Saved USB operations on a fresh auto-started devd may trigger scan before lease creation, then must confirm the current firmware identity still matches the saved hardware ID; a missing lease identity is a failed confirmation, not a permissive legacy fallback.
+Temporary devd candidate IDs are discovery outputs, not operation targets. A USB candidate may only enter user operations through `loadlynx device add`; the bind flow must read identity over a short bind-probe lease and reject firmware that does not expose a stable `identity.device_id` such as `loadlynx-<short-id>`. Bind-probe leases are restricted to identity binding and must not authorize normal control, diagnostics, reset or flash operations. Saved device records use that stable ID as the registry key, may hold both USB and HTTP transport locators, remember `last_transport`, and expose a global default plus nearest-ancestor `.loadlynx` local selection for selector-free automation. Saved USB operations on a fresh auto-started devd may trigger scan before lease creation, then must confirm the current firmware identity still matches the saved device ID; a missing lease identity is a failed confirmation, not a permissive legacy fallback.
 
 LAN WiFi writes require the explicit `--allow-insecure-lan-wifi` CLI flag. USB/devd WiFi writes do not require that LAN safety override because they are local physical access operations.
 
@@ -217,6 +230,9 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Given an analog artifact is selected for a digital target, When flash is requested, Then devd returns a non-retryable target mismatch error.
 - Given mDNS is unavailable, When the owner enters `http://loadlynx-xxxxxx.local` and it fails, Then Web offers IP fallback without marking the device as broken.
 - Given CLI receives `--dry-run`, When `flash analog` is called, Then it verifies artifact hashes and target resolution but does not invoke probe-rs/espflash.
+- Given CLI runs `flash analog` or `reset analog`, When there is no saved ESP32-S3 USB device or the digital USB device is busy, Then the analog path still reaches devd's `.stm32-port` probe-rs operation and does not create a USB CDC lease.
+- Given CLI needs local devd, When it sends a request to `loadlynx-devd serve`, Then the wire payload is a native IPC operation envelope and never an HTTP method/path proxy.
+- Given a devd endpoint is configured as `http://...`, When CLI attempts a devd-backed USB workflow, Then CLI rejects that endpoint and does not call the HTTP bridge.
 - Given CLI sets a USB target to 12V PD and enables a 2A CC load, When `status` is read through devd, Then the response shows the PD contract, CC target, output enabled state and measured current without direct CLI serial access.
 - Given CLI disables output, When `status` is read through devd, Then output enabled and analog enable are false and measured current is near zero.
 - Given a USB CDC `set_wifi_config` request contains PSK, When session traces or diagnostics are fetched, Then PSK is redacted.
@@ -278,7 +294,7 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - CLI tests cover JSON output and dry-run target evidence.
 - Web typecheck, Storybook, and route-level mock tests pass.
 - Firmware builds for digital and analog remain green.
-- HIL verification uses devd's approved `.esp32-port` evidence for Web/devd digital flashing and existing `mcu-agentd` guardrails for non-devd or analog/probe operations. It never changes selector caches without explicit owner approval.
+- HIL verification uses devd's approved `.esp32-port` evidence for digital flashing and devd-owned target evidence for analog/probe operations. It never changes selector caches without explicit owner approval.
 
 ## 风险与开放问题
 
@@ -286,11 +302,11 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Web Serial ESP32 flashing has different browser support and should not be on the critical path.
 - LAN write operations need a separate safety review before exposing high-risk load control beyond existing HTTP APIs.
 - mDNS reliability varies by OS/router; UI must treat it as convenience, not the only path.
-- devd must avoid competing with `mcu-agentd` or a Web Serial session for the same USB port.
+- devd must avoid competing with Web Serial or another active local session for the same USB port.
 
 ## 假设
 
 - The owner wants a local-first toolchain with no cloud dependency.
 - The digital board remains the LAN/Web control endpoint.
 - Hardware-changing operations require explicit target evidence before execution.
-- Existing `mcu-agentd` selector guardrails continue to apply to any devd backend integration.
+- Existing no-guessing selector guardrails continue to apply to any devd backend integration.

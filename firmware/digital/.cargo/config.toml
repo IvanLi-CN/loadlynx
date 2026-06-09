@@ -2,7 +2,7 @@
 target = "xtensa-esp32s3-none-elf"
 
 [target.'cfg(target_arch = "xtensa")']
-# Flash/reset/monitor must go through mcu-agentd (repo root `mcu-agentd.toml`).
+# Flash/reset/monitor must go through loadlynx CLI + loadlynx-devd.
 rustflags = [
   "-C", "link-arg=-nostartfiles",
 ]
@@ -12,5 +12,5 @@ build-std = ["core", "alloc"]
 
 [env]
 # Ensure defmt logs are compiled in at info level for all digital firmware
-# builds, so that espflash/agentd can always decode runtime logs.
+# builds, so that devd-owned espflash/log workflows can decode runtime logs.
 DEFMT_LOG = "info"

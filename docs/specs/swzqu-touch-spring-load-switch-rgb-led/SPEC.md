@@ -158,9 +158,9 @@ None（本计划默认不新增/修改/删除 UART 协议、HTTP API、文件格
 - Build：
   - `just d-build`
 - HIL（硬件在环）：
-  - `just agentd-get-port digital`（确认当前使用的串口选择）
-  - `just agentd flash digital`
-  - `just agentd monitor digital --from-start`，观察：
+  - `loadlynx devices`（确认当前保存设备与 USB transport）
+  - `loadlynx flash digital --device <saved-id> --artifact <artifact-id>`
+  - `loadlynx monitor digital --device <saved-id> --from-start`，观察：
     - 触摸任务启动日志（含 baseline/阈值配置）
     - 触摸触发计数递增且无明显误触发
     - `load_enabled` 切换与 UI/遥测一致

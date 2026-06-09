@@ -34,11 +34,13 @@ pub(crate) fn print_cli_error(
 }
 
 pub(crate) fn classify_cli_error_code(message: &str) -> &'static str {
-    if message.contains("default hardware is not set") {
-        "default_hardware_not_set"
-    } else if message.contains("saved hardware not found") {
-        "hardware_not_found"
-    } else if message.contains("is not a stable LoadLynx hardware id") {
+    if message.contains("default device is not set") {
+        "default_device_not_set"
+    } else if message.contains("saved device not found") {
+        "device_not_found"
+    } else if message.contains("is not a stable LoadLynx hardware id")
+        || message.contains("is not a stable LoadLynx device id")
+    {
         "unstable_hardware_identity"
     } else if message.contains("identity_confirmation_mismatch") {
         "identity_confirmation_mismatch"
@@ -46,8 +48,8 @@ pub(crate) fn classify_cli_error_code(message: &str) -> &'static str {
         "device_not_found"
     } else if message.contains("target_selector_not_cached") {
         "target_selector_not_cached"
-    } else if message.contains("bind it first") {
-        "hardware_not_bound"
+    } else if message.contains("bind it first") || message.contains("run `loadlynx device add`") {
+        "device_not_bound"
     } else {
         "command_failed"
     }
@@ -163,15 +165,71 @@ pub(crate) fn render_human_payload(payload: &Value) -> Result<String, serde_json
         ));
     }
 
+    if let Some(devices) = payload.get("devices").and_then(Value::as_array)
+        && payload.get("global_default_device_id").is_some()
+    {
+        return Ok(render_saved_devices_payload(payload, devices));
+    }
+
     if payload.get("ok").and_then(Value::as_bool) == Some(true) {
         return Ok("OK".to_string());
     }
 
-    if let Some(devices) = payload.get("devices").and_then(Value::as_array) {
-        return Ok(format!("Devices: {} discovered", devices.len()));
-    }
-
     serde_json::to_string_pretty(payload)
+}
+
+fn render_saved_devices_payload(payload: &Value, devices: &[Value]) -> String {
+    let mut out = String::new();
+    let global_default = str_field(payload, "global_default_device_id");
+    if let Some(local) = payload.get("local_device") {
+        let path = local
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or(".loadlynx");
+        let id = local
+            .get("device_id")
+            .and_then(Value::as_str)
+            .unwrap_or("-");
+        out.push_str(&format!("Local: {id} ({path})"));
+    } else {
+        out.push_str("Local: none");
+    }
+    out.push('\n');
+    out.push_str(&format!("Global: {}", global_default.unwrap_or("none")));
+    out.push('\n');
+    out.push_str(&format!("Saved devices: {}", devices.len()));
+    for device in devices {
+        out.push_str("\n  ");
+        out.push_str(&render_saved_device_line(device, global_default));
+    }
+    out
+}
+
+fn render_saved_device_line(device: &Value, global_default: Option<&str>) -> String {
+    let id = device.get("id").and_then(Value::as_str).unwrap_or("-");
+    let name = device.get("name").and_then(Value::as_str);
+    let last_transport = device
+        .get("last_transport")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let has_usb = device.pointer("/transports/usb").is_some();
+    let has_http = device.pointer("/transports/http").is_some();
+
+    let mut parts = vec![id.to_string()];
+    if let Some(name) = name {
+        parts.push(format!("name={name}"));
+    }
+    parts.push(format!("pref={last_transport}"));
+    if has_usb {
+        parts.push("usb".to_string());
+    }
+    if has_http {
+        parts.push("http".to_string());
+    }
+    if global_default == Some(id) {
+        parts.push("global-default".to_string());
+    }
+    parts.join(" ")
 }
 
 fn append_backup_warnings(out: &mut String, payload: &Value) {

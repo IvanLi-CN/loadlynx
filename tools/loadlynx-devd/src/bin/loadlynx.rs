@@ -1,17 +1,18 @@
 use chrono::Utc;
-use clap::{ArgAction, Parser, Subcommand, ValueEnum};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
+use clap_complete::{Shell, generate};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use loadlynx_devd::{
-    FLASH_CONFIRMATION_TEXT, IpcHttpRequest, TargetKind, default_ipc_endpoint, ipc_http_request,
+    FLASH_CONFIRMATION_TEXT, IpcRequest, TargetKind, default_ipc_endpoint, ipc_request,
     list_digital_usb_port_candidates, write_default_digital_usb_port,
 };
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     collections::HashSet,
     env, fs, io,
-    io::{Read, Write},
+    io::{IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
     time::{SystemTime, UNIX_EPOCH},
@@ -44,9 +45,10 @@ use hardware::{
     sort_hardware, upsert_hardware_transport, write_hardware_registry,
 };
 use hardware::{
-    ResolvedHardware, ResolvedUsbHardware, SavedTransport, handle_hardware_command,
-    is_stable_hardware_id, mark_default_transport_used, mark_hardware_transport_used,
-    resolve_saved_hardware, resolve_usb_target,
+    ResolvedHardware, ResolvedUsbHardware, SavedTransport, handle_device_command,
+    has_saved_device_for_transport, is_stable_hardware_id, mark_hardware_transport_used,
+    resolve_saved_hardware_selection, resolve_saved_hardware_selection_with_transport,
+    resolve_usb_target,
 };
 use mode_first::{ModeFirstCommand, handle_mode_first_command};
 #[cfg(test)]
@@ -58,20 +60,30 @@ use render::{print_cli_error, print_cli_payload};
 use transport::validate_cli_lease_identity;
 use transport::{
     ApiSelector, create_cli_bind_probe_lease, ensure_one_api_selector, ensure_one_status_selector,
-    post_usb_operation_with_optional_lease, release_cli_lease, request_api_value,
-    request_devd_usb_value, request_http_value, resolve_output_enable,
+    freeze_api_selector, post_usb_operation_with_optional_lease, release_cli_lease,
+    request_api_value, request_devd_usb_value, request_http_value, resolve_output_enable,
     resolve_scanned_usb_device_for_saved_hardware, run_monitor, saved_usb_device_needs_relookup,
     spawn_cli_lease_heartbeat,
 };
 
+#[derive(Debug, Clone)]
+struct ResolvedDevdTarget {
+    devd: String,
+    device: String,
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "loadlynx")]
 #[command(about = "LoadLynx LAN/USB/devd control CLI")]
+#[command(disable_version_flag = true)]
+#[command(version)]
 struct Cli {
-    #[arg(long, global = true, default_value_t = default_ipc_endpoint())]
+    #[arg(long, global = true, default_value_t = default_ipc_endpoint(), hide = true)]
     ipc: String,
-    #[arg(long, global = true)]
+    #[arg(long, global = true, hide = true)]
     no_auto_start: bool,
+    #[arg(short = 'v', long = "version", action = ArgAction::Version)]
+    version: Option<bool>,
     #[arg(long, global = true)]
     json: bool,
     #[command(subcommand)]
@@ -80,66 +92,43 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    Discover {
-        #[arg(long)]
-        mdns: bool,
-        #[arg(long)]
-        lan_scan: bool,
+    Completion {
+        shell: Shell,
     },
     Devices,
+    Device {
+        #[command(subcommand)]
+        command: DeviceCommand,
+    },
     Status {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
     },
     Flash {
         target: BoardTarget,
         #[arg(long)]
         device: Option<String>,
         #[arg(long)]
-        hardware: Option<String>,
-        #[arg(long)]
         artifact: Option<String>,
-        #[arg(long = "manifest-path")]
+        #[arg(long = "manifest-path", hide = true)]
         manifest_path: Option<String>,
         #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
         dry_run: bool,
         #[arg(long = "confirm", alias = "confirm-phrase")]
         confirm: Option<String>,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         expected_identity_device_id: Option<String>,
         #[arg(long)]
         acknowledge_non_project_firmware: bool,
     },
-    Reset {
-        target: BoardTarget,
-        #[arg(long)]
-        device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
-        #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
-        dry_run: bool,
-    },
-    Monitor {
-        target: BoardTarget,
-        #[arg(long)]
-        device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
-        #[arg(long, default_value_t = 200)]
-        tail: usize,
-        #[arg(long, value_enum, default_value_t = MonitorFormat::Human)]
-        format: MonitorFormat,
-    },
     Cc {
         target_i_ma: u32,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
-        hardware: Option<String>,
+        device: Option<String>,
         #[arg(long)]
         preset_id: Option<u8>,
         #[arg(long)]
@@ -153,10 +142,10 @@ enum Command {
     },
     Cv {
         target_v_mv: u32,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
-        hardware: Option<String>,
+        device: Option<String>,
         #[arg(long)]
         preset_id: Option<u8>,
         #[arg(long)]
@@ -170,10 +159,10 @@ enum Command {
     },
     Cp {
         target_p_mw: u32,
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
-        hardware: Option<String>,
+        device: Option<String>,
         #[arg(long)]
         preset_id: Option<u8>,
         #[arg(long)]
@@ -201,35 +190,82 @@ enum Command {
         #[command(subcommand)]
         command: PresetCommand,
     },
+    #[command(hide = true)]
+    Discover {
+        #[arg(long)]
+        mdns: bool,
+        #[arg(long)]
+        lan_scan: bool,
+    },
+    #[command(hide = true)]
+    Reset {
+        target: BoardTarget,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long = "no-dry-run", default_value_t = true, action = ArgAction::SetFalse)]
+        dry_run: bool,
+        #[arg(long = "confirm", alias = "confirm-phrase")]
+        confirm: Option<String>,
+    },
+    #[command(hide = true)]
+    Monitor {
+        target: BoardTarget,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long, default_value_t = 200)]
+        tail: usize,
+        #[arg(long, value_enum, default_value_t = MonitorFormat::Human)]
+        format: MonitorFormat,
+    },
+    #[command(hide = true)]
     Calibration {
         #[command(subcommand)]
         command: CalibrationCommand,
     },
+    #[command(hide = true)]
     SoftReset {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long, default_value = "manual")]
         reason: String,
     },
+    #[command(hide = true)]
     Diagnostics {
         #[command(subcommand)]
         command: DiagnosticsCommand,
     },
+    #[command(hide = true)]
     Backup {
         #[command(subcommand)]
         command: BackupCommand,
     },
+    #[command(hide = true)]
     UsbPort {
         #[command(subcommand)]
         command: UsbPortCommand,
     },
-    Hardware {
-        #[command(subcommand)]
-        command: HardwareCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum DeviceCommand {
+    List,
+    Add {
+        #[arg(long, hide = true)]
+        url: Option<String>,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    Use {
+        id: Option<String>,
+        #[arg(long)]
+        global: bool,
+        #[arg(long)]
+        clear: bool,
+    },
+    Remove {
+        id: String,
     },
 }
 
@@ -238,8 +274,6 @@ enum PdCommand {
     Set {
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long, value_enum)]
         mode: Option<PdModeArg>,
         #[arg(long = "object-pos")]
@@ -256,20 +290,16 @@ enum PdCommand {
 #[derive(Debug, Subcommand)]
 enum WifiCommand {
     Show {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
     },
     Set {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         ssid: String,
         #[arg(long)]
@@ -280,12 +310,10 @@ enum WifiCommand {
         allow_insecure_lan_wifi: bool,
     },
     Clear {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         allow_insecure_lan_wifi: bool,
     },
@@ -294,20 +322,16 @@ enum WifiCommand {
 #[derive(Debug, Subcommand)]
 enum ControlCommand {
     Get {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
     },
     Set {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         enable: bool,
         #[arg(long)]
@@ -318,30 +342,24 @@ enum ControlCommand {
 #[derive(Debug, Subcommand)]
 enum PresetCommand {
     List {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
     },
     Set {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         file: PathBuf,
     },
     Apply {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         preset_id: u8,
     },
 }
@@ -349,49 +367,39 @@ enum PresetCommand {
 #[derive(Debug, Subcommand)]
 enum CalibrationCommand {
     Profile {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
     },
     Mode {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         kind: String,
     },
     Apply {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         file: PathBuf,
     },
     Commit {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         file: PathBuf,
     },
     Reset {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         kind: String,
     },
 }
@@ -399,36 +407,30 @@ enum CalibrationCommand {
 #[derive(Debug, Subcommand)]
 enum DiagnosticsCommand {
     Export {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
     },
 }
 
 #[derive(Debug, Subcommand)]
 enum BackupCommand {
     Export {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         file: PathBuf,
         #[arg(long = "include", value_delimiter = ',')]
         include: Vec<String>,
     },
     Import {
-        #[arg(long)]
+        #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        hardware: Option<String>,
         #[arg(long)]
         file: PathBuf,
         #[arg(long = "include", value_delimiter = ',')]
@@ -446,47 +448,6 @@ enum UsbPortCommand {
         #[arg(value_name = "TARGET_OR_PORT", num_args = 0..=2)]
         args: Vec<String>,
     },
-}
-
-#[derive(Debug, Subcommand)]
-enum HardwareCommand {
-    Available {
-        #[arg(long)]
-        scan: bool,
-    },
-    Bind {
-        #[arg(value_enum)]
-        transport: SavedTransport,
-        #[arg(long)]
-        candidate: Option<String>,
-        #[arg(long)]
-        url: Option<String>,
-        #[arg(long)]
-        name: Option<String>,
-        #[arg(long)]
-        set_default: bool,
-    },
-    Default {
-        #[command(subcommand)]
-        command: HardwareDefaultCommand,
-    },
-    Use {
-        id: String,
-        #[arg(long, value_enum)]
-        transport: SavedTransport,
-    },
-    List,
-    Path,
-    Forget {
-        id: String,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum HardwareDefaultCommand {
-    Show,
-    Set { id: String },
-    Clear,
 }
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -612,6 +573,7 @@ async fn spawn_ipc_devd_process(
     endpoint: &str,
 ) -> Result<tokio::process::Child, Box<dyn std::error::Error + Send + Sync>> {
     let devd_bin = sibling_devd_binary();
+    let manifest = PathBuf::from("tools/loadlynx-devd/Cargo.toml");
     if devd_bin.exists() {
         return TokioCommand::new(&devd_bin)
             .arg("serve")
@@ -630,7 +592,6 @@ async fn spawn_ipc_devd_process(
             });
     }
 
-    let manifest = PathBuf::from("tools/loadlynx-devd/Cargo.toml");
     TokioCommand::new("cargo")
         .arg("run")
         .arg("--manifest-path")
@@ -661,27 +622,221 @@ async fn request_devd_value(
     body: Option<Value>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        let client = Client::new();
-        return request_http_value(&client, endpoint, method, path, body).await;
+        return Err(
+            "devd endpoint must be a native IPC endpoint, not HTTP; use --url or a saved HTTP device transport for LAN devices"
+                .into(),
+        );
     }
 
-    let response = ipc_http_request(
-        endpoint,
-        IpcHttpRequest {
-            method: method.as_str().to_string(),
-            path: path.to_string(),
-            body,
-        },
-    )
-    .await?;
-    if (200..300).contains(&response.status) {
-        Ok(response.body)
+    let request = ipc_request_for_devd_call(method, path, body)?;
+    let response = ipc_request(endpoint, request).await?;
+    if response.ok {
+        Ok(response.result.unwrap_or(Value::Null))
     } else {
-        Err(format!(
-            "devd IPC request failed with HTTP {}: {}",
-            response.status, response.body
-        )
-        .into())
+        Err(match response.error {
+            Some(error) => Box::new(DevdIpcOperationError(error)),
+            None => "devd IPC operation failed: unknown devd IPC error".into(),
+        })
+    }
+}
+
+#[derive(Debug)]
+struct DevdIpcOperationError(loadlynx_devd::ApiError);
+
+impl std::fmt::Display for DevdIpcOperationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let encoded =
+            serde_json::to_string(&self.0).unwrap_or_else(|_| "<invalid error>".to_string());
+        if self.0.retryable {
+            write!(
+                formatter,
+                "retryable 503 from devd IPC operation: {encoded}"
+            )
+        } else {
+            write!(formatter, "devd IPC operation failed: {encoded}")
+        }
+    }
+}
+
+impl std::error::Error for DevdIpcOperationError {}
+
+fn ipc_request_for_devd_call(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<IpcRequest, Box<dyn std::error::Error + Send + Sync>> {
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    let mut params = parse_query_params(query)?;
+    let segments = route
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    let op = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["health"]) | ("GET", ["api", "v1", "ping"]) => "health",
+        ("GET", ["api", "v1", "devices"]) => "devices.list",
+        ("POST", ["api", "v1", "devices", "scan"]) => "devices.scan",
+        ("POST", ["api", "v1", "devices", id, "artifact"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "devices.artifact.select".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("POST", ["api", "v1", "devices", id, "flash"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "devices.flash".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("POST", ["api", "v1", "devices", id, "reset"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "devices.reset".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("GET", ["api", "v1", "devices", id, "session"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            coerce_numeric_query_param(&mut params, "logs_limit")?;
+            coerce_numeric_query_param(&mut params, "trace_limit")?;
+            "devices.session"
+        }
+        ("POST", ["api", "v1", "serial", "lease"]) => {
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "serial.lease.create".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("POST", ["api", "v1", "serial", "lease", lease_id]) => {
+            params.insert("lease_id".to_string(), json!(lease_id));
+            "serial.lease.heartbeat"
+        }
+        ("DELETE", ["api", "v1", "serial", "lease", lease_id]) => {
+            params.insert("lease_id".to_string(), json!(lease_id));
+            "serial.lease.release"
+        }
+        ("GET", ["api", "v1", "identity"]) => "compat.identity",
+        ("GET", ["api", "v1", "status"]) => "compat.status",
+        ("GET", ["api", "v1", "network"]) => "compat.network",
+        ("GET", ["api", "v1", "serial", "session"]) => "compat.session",
+        ("GET", ["api", "v1", "pd"]) => "compat.pd.get",
+        ("POST", ["api", "v1", "pd"]) | ("PUT", ["api", "v1", "pd"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.pd.post"
+        }
+        ("POST", ["api", "v1", "cc"]) | ("PUT", ["api", "v1", "cc"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.cc"
+        }
+        ("GET", ["api", "v1", "wifi"]) => "compat.wifi.get",
+        ("POST", ["api", "v1", "wifi"]) | ("PUT", ["api", "v1", "wifi"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.wifi.post"
+        }
+        ("DELETE", ["api", "v1", "wifi"]) => "compat.wifi.delete",
+        ("GET", ["api", "v1", "wifi", "credentials"]) => "compat.wifi.credentials",
+        ("GET", ["api", "v1", "control"]) => "compat.control.get",
+        ("POST", ["api", "v1", "control"]) | ("PUT", ["api", "v1", "control"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.control.post"
+        }
+        ("GET", ["api", "v1", "presets"]) => "compat.presets.get",
+        ("POST", ["api", "v1", "presets"]) | ("PUT", ["api", "v1", "presets"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.presets.post"
+        }
+        ("POST", ["api", "v1", "presets", "apply"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.presets.apply"
+        }
+        ("GET", ["api", "v1", "calibration", "profile"]) => "compat.calibration.profile",
+        ("POST", ["api", "v1", "calibration", "apply"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.apply"
+        }
+        ("POST", ["api", "v1", "calibration", "commit"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.commit"
+        }
+        ("POST", ["api", "v1", "calibration", "reset"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.reset"
+        }
+        ("POST", ["api", "v1", "calibration", "mode"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.mode"
+        }
+        ("POST", ["api", "v1", "soft-reset"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.soft_reset"
+        }
+        ("GET", ["api", "v1", "diagnostics"]) | ("GET", ["api", "v1", "diagnostics", "export"]) => {
+            "compat.diagnostics.export"
+        }
+        _ => {
+            return Err(format!("unsupported devd IPC route: {} {}", method.as_str(), path).into());
+        }
+    };
+
+    if body.is_some() {
+        set_body(&mut params, body.as_ref());
+    }
+    Ok(IpcRequest {
+        op: op.to_string(),
+        params: Value::Object(params),
+    })
+}
+
+fn parse_query_params(
+    query: &str,
+) -> Result<Map<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut params = Map::new();
+    if query.is_empty() {
+        return Ok(params);
+    }
+    let scratch_base = Url::parse("http://loadlynx.invalid/")?;
+    let url = scratch_base.join(&format!("?{query}"))?;
+    for (key, value) in url.query_pairs() {
+        params.insert(key.into_owned(), json!(value.into_owned()));
+    }
+    Ok(params)
+}
+
+fn coerce_numeric_query_param(
+    params: &mut Map<String, Value>,
+    field: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(value) = params.get(field).and_then(Value::as_str) else {
+        return Ok(());
+    };
+    params.insert(field.to_string(), json!(value.parse::<usize>()?));
+    Ok(())
+}
+
+fn merge_body_object(
+    params: &mut Map<String, Value>,
+    body: Option<Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(body) = body else {
+        return Ok(());
+    };
+    let Some(object) = body.as_object() else {
+        return Err("devd IPC route requires an object body".into());
+    };
+    params.extend(object.clone());
+    Ok(())
+}
+
+fn set_body(params: &mut Map<String, Value>, body: Option<&Value>) {
+    if let Some(body) = body {
+        params.insert("body".to_string(), body.clone());
     }
 }
 
@@ -690,6 +845,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let cli = Cli::parse();
     let json_output = cli.json;
     let devd = cli.ipc;
+    let allow_interactive = !json_output && io::stdin().is_terminal() && io::stdout().is_terminal();
     for endpoint in initial_devd_endpoints(&cli.command, &devd) {
         ensure_ipc_devd(&endpoint, !cli.no_auto_start).await?;
     }
@@ -698,645 +854,601 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         .build()?;
     let payload_result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
         let payload = match cli.command {
-        Command::Hardware { command } => handle_hardware_command(command, &client, &devd).await?,
-        Command::UsbPort {
-            command: UsbPortCommand::Set { args },
-        } => {
-            let (target, port) = resolve_usb_port_set_args(args)?;
-            let repo_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-            match target {
-                UsbPortTarget::Digital => {
-                    write_default_digital_usb_port(&repo_root, &port)?;
-                    json!({"ok": true, "mcu": "digital", "default_usb_port": port})
+            Command::Completion { shell } => {
+                let mut cmd = Cli::command();
+                generate(shell, &mut cmd, "loadlynx", &mut io::stdout());
+                json!({"__loadlynx_cli_already_printed": true})
+            }
+            Command::Devices => {
+                handle_device_command(DeviceCommand::List, &client, &devd, allow_interactive)
+                    .await?
+            }
+            Command::Device { command } => {
+                handle_device_command(command, &client, &devd, allow_interactive).await?
+            }
+            Command::UsbPort {
+                command: UsbPortCommand::Set { args },
+            } => {
+                let (target, port) = resolve_usb_port_set_args(args)?;
+                let repo_root = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                match target {
+                    UsbPortTarget::Digital => {
+                        write_default_digital_usb_port(&repo_root, &port)?;
+                        json!({"ok": true, "mcu": "digital", "default_usb_port": port})
+                    }
                 }
             }
-        }
-        Command::Discover { mdns, lan_scan } => {
-            let scan =
-                request_devd_value(&devd, reqwest::Method::POST, "/api/v1/devices/scan", None)
-                    .await?;
-            json!({"mdns_requested": mdns, "lan_scan_requested": lan_scan, "devd": scan})
-        }
-        Command::Devices => {
-            request_devd_value(&devd, reqwest::Method::GET, "/api/v1/devices", None).await?
-        }
-        Command::Status {
-            url,
-            device,
-            hardware,
-        } => {
-            ensure_one_status_selector(url.as_ref(), device.as_ref(), hardware.as_ref())?;
-            if let Some(device) = device {
-                return Err(format!(
-                    "temporary devd device id `{device}` cannot be used for status; bind it first with `loadlynx hardware bind usb --candidate {device}` and then use --hardware <hardware-id>"
-                )
-                .into());
+            Command::Discover { mdns, lan_scan } => {
+                let scan =
+                    request_devd_value(&devd, reqwest::Method::POST, "/api/v1/devices/scan", None)
+                        .await?;
+                json!({"mdns_requested": mdns, "lan_scan_requested": lan_scan, "devd": scan})
             }
-            if let Some(url) = url {
-                client
-                    .get(api_url(&url, "/api/v1/status")?)
-                    .send()
-                    .await?
-                    .error_for_status()?
-                    .json::<Value>()
-                    .await?
-            } else if let Some(hardware_id) = hardware.or_else(|| Some("default".to_string())) {
-                match resolve_saved_hardware(&hardware_id, &devd)? {
-                    ResolvedHardware::Usb(resolved) => {
-                        let status = request_devd_usb_value(
+            Command::Status { url, device } => {
+                ensure_one_status_selector(url.as_ref(), device.as_ref())?;
+                if let Some(url) = url {
+                    client
+                        .get(api_url(&url, "/api/v1/status")?)
+                        .send()
+                        .await?
+                        .error_for_status()?
+                        .json::<Value>()
+                        .await?
+                } else {
+                    match resolve_saved_hardware_selection(device, &devd, allow_interactive)? {
+                        ResolvedHardware::Usb(resolved) => {
+                            let status = request_devd_usb_value(
+                                &client,
+                                &resolved,
+                                reqwest::Method::GET,
+                                "/api/v1/status",
+                                None,
+                            )
+                            .await?;
+                            let _ = mark_hardware_transport_used(
+                                &resolved.hardware_id,
+                                SavedTransport::Usb,
+                            );
+                            status
+                        }
+                        ResolvedHardware::Http { hardware_id, url } => {
+                            let status = client
+                                .get(api_url(&url, "/api/v1/status")?)
+                                .send()
+                                .await?
+                                .error_for_status()?
+                                .json::<Value>()
+                                .await?;
+                            let _ =
+                                mark_hardware_transport_used(&hardware_id, SavedTransport::Http);
+                            status
+                        }
+                    }
+                }
+            }
+            Command::Flash {
+                target,
+                device,
+                artifact,
+                manifest_path,
+                dry_run,
+                confirm,
+                expected_identity_device_id,
+                acknowledge_non_project_firmware,
+            } => {
+                let confirmation_text = resolve_flash_confirmation_text(&target, dry_run, confirm)?;
+                match target {
+                    BoardTarget::Digital => {
+                        let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                        let resolved = ResolvedUsbHardware {
+                            expected_identity_device_id: expected_identity_device_id
+                                .clone()
+                                .or(resolved.expected_identity_device_id),
+                            ..resolved
+                        };
+                        if manifest_path.is_some() {
+                            select_device_artifact(
+                                &client,
+                                &resolved,
+                                manifest_path.clone(),
+                                artifact.clone(),
+                            )
+                            .await?;
+                        }
+                        post_usb_operation_with_optional_lease(
                             &client,
                             &resolved,
-                            reqwest::Method::GET,
-                            "/api/v1/status",
-                            None,
+                            &format!("/api/v1/devices/{}/flash", resolved.device),
+                            json!({
+                                "target": target.kind(),
+                                "artifact_id": artifact,
+                                "dry_run": dry_run,
+                                "confirmation_phrase": confirmation_text,
+                                "expected_identity_device_id": resolved.expected_identity_device_id,
+                                "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
+                            }),
+                            dry_run,
                         )
-                        .await?;
-                        let _ =
-                            mark_hardware_transport_used(&resolved.hardware_id, SavedTransport::Usb);
-                        status
+                        .await?
                     }
-                    ResolvedHardware::Http { hardware_id, url } => {
-                        let status = client
-                            .get(api_url(&url, "/api/v1/status")?)
-                            .send()
-                            .await?
-                            .error_for_status()?
-                            .json::<Value>()
+                    BoardTarget::Analog => {
+                        let resolved_analog = resolve_analog_target_device(device, &devd).await?;
+                        if manifest_path.is_some() {
+                            select_devd_device_artifact(
+                                &resolved_analog.devd,
+                                &resolved_analog.device,
+                                manifest_path.clone(),
+                                artifact.clone(),
+                            )
                             .await?;
-                        let _ = mark_hardware_transport_used(&hardware_id, SavedTransport::Http);
-                        status
+                        }
+                        request_devd_value(
+                            &resolved_analog.devd,
+                            reqwest::Method::POST,
+                            &format!("/api/v1/devices/{}/flash", resolved_analog.device),
+                            Some(json!({
+                                "target": target.kind(),
+                                "artifact_id": artifact,
+                                "dry_run": dry_run,
+                                "confirmation_phrase": confirmation_text,
+                                "expected_identity_device_id": expected_identity_device_id,
+                                "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
+                            })),
+                        )
+                        .await?
                     }
                 }
-            } else {
-                return Err("status requires a saved default hardware, --hardware, or --url".into());
             }
-        }
-        Command::Flash {
-            target,
-            device,
-            hardware,
-            artifact,
-            manifest_path,
-            dry_run,
-            confirm,
-            expected_identity_device_id,
-            acknowledge_non_project_firmware,
-        } => {
-            let resolved = resolve_usb_target(device, hardware, &devd)?;
-            let resolved = ResolvedUsbHardware {
-                expected_identity_device_id: expected_identity_device_id.clone().or(
-                    resolved.expected_identity_device_id,
-                ),
-                ..resolved
-            };
-            if manifest_path.is_some() {
-                select_device_artifact(&client, &resolved, manifest_path.clone(), artifact.clone())
-                    .await?;
+            Command::Reset {
+                target,
+                device,
+                dry_run,
+                confirm,
+            } => {
+                match target {
+                    BoardTarget::Digital => {
+                        let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                        post_usb_operation_with_optional_lease(
+                            &client,
+                            &resolved,
+                            &format!("/api/v1/devices/{}/reset", resolved.device),
+                            json!({"target": target.kind(), "dry_run": dry_run}),
+                            dry_run,
+                        )
+                        .await?
+                    }
+                    BoardTarget::Analog => {
+                        let confirmation_text =
+                            resolve_operation_confirmation_text(&target, dry_run, confirm)?;
+                        let resolved_analog = resolve_analog_target_device(device, &devd).await?;
+                        request_devd_value(
+                            &resolved_analog.devd,
+                            reqwest::Method::POST,
+                            &format!("/api/v1/devices/{}/reset", resolved_analog.device),
+                            Some(json!({
+                                "target": target.kind(),
+                                "dry_run": dry_run,
+                                "confirmation_phrase": confirmation_text,
+                            })),
+                        )
+                        .await?
+                    }
+                }
             }
-            let confirmation_text = resolve_flash_confirmation_text(&target, dry_run, confirm)?;
-            post_usb_operation_with_optional_lease(
-                &client,
-                &resolved,
-                &format!("/api/v1/devices/{}/flash", resolved.device),
-                json!({
-                    "target": target.kind(),
-                    "artifact_id": artifact,
-                    "dry_run": dry_run,
-                    "confirmation_phrase": confirmation_text,
-                    "expected_identity_device_id": resolved.expected_identity_device_id,
-                    "acknowledge_non_project_firmware": acknowledge_non_project_firmware,
-                }),
-                dry_run,
-            )
-            .await?
-        }
-        Command::Reset {
-            target,
-            device,
-            hardware,
-            dry_run,
-        } => {
-            let resolved = resolve_usb_target(device, hardware, &devd)?;
-            post_usb_operation_with_optional_lease(
-                &client,
-                &resolved,
-                &format!("/api/v1/devices/{}/reset", resolved.device),
-                json!({"target": target.kind(), "dry_run": dry_run}),
-                dry_run,
-            )
-            .await?
-        }
-        Command::Monitor {
-            target: _,
-            device,
-            hardware,
-            tail,
-            format,
-        } => {
-            let resolved = resolve_usb_target(device, hardware, &devd)?;
-            run_monitor(&client, resolved, tail, format).await?
-        }
-        Command::Cc {
-            target_i_ma,
-            url,
-            hardware,
-            preset_id,
-            min_v_mv,
-            max_i_ma_total,
-            max_p_mw,
-            disable,
-        } => {
-            handle_mode_first_command(
-                &client,
-                &devd,
-                ModeFirstCommand::Cc,
+            Command::Monitor {
+                target,
+                device,
+                tail,
+                format,
+            } => {
+                match target {
+                    BoardTarget::Digital => {
+                        let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                        run_monitor(&client, resolved, tail, format).await?
+                    }
+                    BoardTarget::Analog => reject_unsupported_analog_monitor()?,
+                }
+            }
+            Command::Cc {
                 target_i_ma,
-                None,
-                None,
                 url,
-                hardware,
+                device,
                 preset_id,
                 min_v_mv,
                 max_i_ma_total,
                 max_p_mw,
                 disable,
-            )
-            .await?
-        }
-        Command::Cv {
-            target_v_mv,
-            url,
-            hardware,
-            preset_id,
-            min_v_mv,
-            max_i_ma_total,
-            max_p_mw,
-            disable,
-        } => {
-            handle_mode_first_command(
-                &client,
-                &devd,
-                ModeFirstCommand::Cv,
-                0,
-                Some(target_v_mv),
-                None,
-                url,
-                hardware,
-                preset_id,
-                min_v_mv,
-                max_i_ma_total,
-                max_p_mw,
-                disable,
-            )
-            .await?
-        }
-        Command::Cp {
-            target_p_mw,
-            url,
-            hardware,
-            preset_id,
-            min_v_mv,
-            max_i_ma_total,
-            max_p_mw,
-            disable,
-        } => {
-            handle_mode_first_command(
-                &client,
-                &devd,
-                ModeFirstCommand::Cp,
-                0,
-                None,
-                Some(target_p_mw),
-                url,
-                hardware,
-                preset_id,
-                min_v_mv,
-                max_i_ma_total,
-                max_p_mw,
-                disable,
-            )
-            .await?
-        }
-        Command::Pd { command } => match command {
-            PdCommand::Set {
-                device,
-                hardware,
-                mode,
-                object_pos,
-                target_mv,
-                i_req_ma,
-                allow_extended_voltage,
             } => {
-                let resolved = resolve_usb_target(device, hardware, &devd)?;
-                let mut body = serde_json::Map::new();
-                if let Some(mode) = mode {
-                    body.insert(
-                        "mode".to_string(),
-                        Value::String(
-                            match mode {
-                                PdModeArg::Fixed => "fixed",
-                                PdModeArg::Pps => "pps",
-                            }
-                            .to_string(),
-                        ),
-                    );
-                }
-                if let Some(object_pos) = object_pos {
-                    body.insert("object_pos".to_string(), json!(object_pos));
-                }
-                if let Some(target_mv) = target_mv {
-                    body.insert("target_mv".to_string(), json!(target_mv));
-                }
-                if let Some(i_req_ma) = i_req_ma {
-                    body.insert("i_req_ma".to_string(), json!(i_req_ma));
-                }
-                if let Some(allow_extended_voltage) = allow_extended_voltage {
-                    body.insert(
-                        "allow_extended_voltage".to_string(),
-                        json!(allow_extended_voltage),
-                    );
-                }
-                request_devd_usb_value(
-                    &client,
-                    &resolved,
-                    reqwest::Method::POST,
-                    "/api/v1/pd",
-                    Some(Value::Object(body)),
-                )
-                .await?
-            }
-        },
-        Command::Wifi { command } => match command {
-            WifiCommand::Show {
-                url,
-                device,
-                hardware,
-            } => {
-                request_api_value(
+                handle_mode_first_command(
                     &client,
                     &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::GET,
-                    "/api/v1/wifi",
+                    ModeFirstCommand::Cc,
+                    target_i_ma,
                     None,
-                    false,
-                )
-                .await?
-            }
-            WifiCommand::Set {
-                url,
-                device,
-                hardware,
-                ssid,
-                psk,
-                wait,
-                allow_insecure_lan_wifi,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/wifi",
-                    Some(json!({"ssid": ssid, "psk": psk, "wait": wait})),
-                    allow_insecure_lan_wifi,
-                )
-                .await?
-            }
-            WifiCommand::Clear {
-                url,
-                device,
-                hardware,
-                allow_insecure_lan_wifi,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::DELETE,
-                    "/api/v1/wifi",
                     None,
-                    allow_insecure_lan_wifi,
-                )
-                .await?
-            }
-        },
-        Command::Control { command } => match command {
-            ControlCommand::Get {
-                url,
-                device,
-                hardware,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::GET,
-                    "/api/v1/control",
-                    None,
-                    false,
-                )
-                .await?
-            }
-            ControlCommand::Set {
-                url,
-                device,
-                hardware,
-                enable,
-                disable,
-            } => {
-                let output_enabled = resolve_output_enable(enable, disable)?;
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/control",
-                    Some(json!({"output_enabled": output_enabled})),
-                    false,
-                )
-                .await?
-            }
-        },
-        Command::Preset { command } => match command {
-            PresetCommand::List {
-                url,
-                device,
-                hardware,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::GET,
-                    "/api/v1/presets",
-                    None,
-                    false,
-                )
-                .await?
-            }
-            PresetCommand::Set {
-                url,
-                device,
-                hardware,
-                file,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/presets",
-                    Some(read_json_file(&file)?),
-                    false,
-                )
-                .await?
-            }
-            PresetCommand::Apply {
-                url,
-                device,
-                hardware,
-                preset_id,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/presets/apply",
-                    Some(json!({"preset_id": preset_id})),
-                    false,
-                )
-                .await?
-            }
-        },
-        Command::Calibration { command } => match command {
-            CalibrationCommand::Profile {
-                url,
-                device,
-                hardware,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::GET,
-                    "/api/v1/calibration/profile",
-                    None,
-                    false,
-                )
-                .await?
-            }
-            CalibrationCommand::Mode {
-                url,
-                device,
-                hardware,
-                kind,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/calibration/mode",
-                    Some(json!({"kind": kind})),
-                    false,
-                )
-                .await?
-            }
-            CalibrationCommand::Apply {
-                url,
-                device,
-                hardware,
-                file,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/calibration/apply",
-                    Some(read_json_file(&file)?),
-                    false,
-                )
-                .await?
-            }
-            CalibrationCommand::Commit {
-                url,
-                device,
-                hardware,
-                file,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/calibration/commit",
-                    Some(read_json_file(&file)?),
-                    false,
-                )
-                .await?
-            }
-            CalibrationCommand::Reset {
-                url,
-                device,
-                hardware,
-                kind,
-            } => {
-                request_api_value(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::POST,
-                    "/api/v1/calibration/reset",
-                    Some(json!({"kind": kind})),
-                    false,
-                )
-                .await?
-            }
-        },
-        Command::SoftReset {
-            url,
-            device,
-            hardware,
-            reason,
-        } => {
-            request_api_value(
-                &client,
-                &devd,
-                ApiSelector {
                     url,
                     device,
-                    hardware,
-                },
-                reqwest::Method::POST,
-                "/api/v1/soft-reset",
-                Some(json!({"reason": reason})),
-                false,
-            )
-            .await?
-        }
-        Command::Diagnostics { command } => match command {
-            DiagnosticsCommand::Export {
+                    allow_interactive,
+                    preset_id,
+                    min_v_mv,
+                    max_i_ma_total,
+                    max_p_mw,
+                    disable,
+                )
+                .await?
+            }
+            Command::Cv {
+                target_v_mv,
                 url,
                 device,
-                hardware,
+                preset_id,
+                min_v_mv,
+                max_i_ma_total,
+                max_p_mw,
+                disable,
+            } => {
+                handle_mode_first_command(
+                    &client,
+                    &devd,
+                    ModeFirstCommand::Cv,
+                    0,
+                    Some(target_v_mv),
+                    None,
+                    url,
+                    device,
+                    allow_interactive,
+                    preset_id,
+                    min_v_mv,
+                    max_i_ma_total,
+                    max_p_mw,
+                    disable,
+                )
+                .await?
+            }
+            Command::Cp {
+                target_p_mw,
+                url,
+                device,
+                preset_id,
+                min_v_mv,
+                max_i_ma_total,
+                max_p_mw,
+                disable,
+            } => {
+                handle_mode_first_command(
+                    &client,
+                    &devd,
+                    ModeFirstCommand::Cp,
+                    0,
+                    None,
+                    Some(target_p_mw),
+                    url,
+                    device,
+                    allow_interactive,
+                    preset_id,
+                    min_v_mv,
+                    max_i_ma_total,
+                    max_p_mw,
+                    disable,
+                )
+                .await?
+            }
+            Command::Pd { command } => match command {
+                PdCommand::Set {
+                    device,
+                    mode,
+                    object_pos,
+                    target_mv,
+                    i_req_ma,
+                    allow_extended_voltage,
+                } => {
+                    let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                    let mut body = serde_json::Map::new();
+                    if let Some(mode) = mode {
+                        body.insert(
+                            "mode".to_string(),
+                            Value::String(
+                                match mode {
+                                    PdModeArg::Fixed => "fixed",
+                                    PdModeArg::Pps => "pps",
+                                }
+                                .to_string(),
+                            ),
+                        );
+                    }
+                    if let Some(object_pos) = object_pos {
+                        body.insert("object_pos".to_string(), json!(object_pos));
+                    }
+                    if let Some(target_mv) = target_mv {
+                        body.insert("target_mv".to_string(), json!(target_mv));
+                    }
+                    if let Some(i_req_ma) = i_req_ma {
+                        body.insert("i_req_ma".to_string(), json!(i_req_ma));
+                    }
+                    if let Some(allow_extended_voltage) = allow_extended_voltage {
+                        body.insert(
+                            "allow_extended_voltage".to_string(),
+                            json!(allow_extended_voltage),
+                        );
+                    }
+                    request_devd_usb_value(
+                        &client,
+                        &resolved,
+                        reqwest::Method::POST,
+                        "/api/v1/pd",
+                        Some(Value::Object(body)),
+                    )
+                    .await?
+                }
+            },
+            Command::Wifi { command } => match command {
+                WifiCommand::Show { url, device } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::GET,
+                        "/api/v1/wifi",
+                        None,
+                        false,
+                    )
+                    .await?
+                }
+                WifiCommand::Set {
+                    url,
+                    device,
+                    ssid,
+                    psk,
+                    wait,
+                    allow_insecure_lan_wifi,
+                } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/wifi",
+                        Some(json!({"ssid": ssid, "psk": psk, "wait": wait})),
+                        allow_insecure_lan_wifi,
+                    )
+                    .await?
+                }
+                WifiCommand::Clear {
+                    url,
+                    device,
+                    allow_insecure_lan_wifi,
+                } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::DELETE,
+                        "/api/v1/wifi",
+                        None,
+                        allow_insecure_lan_wifi,
+                    )
+                    .await?
+                }
+            },
+            Command::Control { command } => match command {
+                ControlCommand::Get { url, device } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::GET,
+                        "/api/v1/control",
+                        None,
+                        false,
+                    )
+                    .await?
+                }
+                ControlCommand::Set {
+                    url,
+                    device,
+                    enable,
+                    disable,
+                } => {
+                    let output_enabled = resolve_output_enable(enable, disable)?;
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/control",
+                        Some(json!({"output_enabled": output_enabled})),
+                        false,
+                    )
+                    .await?
+                }
+            },
+            Command::Preset { command } => match command {
+                PresetCommand::List { url, device } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::GET,
+                        "/api/v1/presets",
+                        None,
+                        false,
+                    )
+                    .await?
+                }
+                PresetCommand::Set { url, device, file } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/presets",
+                        Some(read_json_file(&file)?),
+                        false,
+                    )
+                    .await?
+                }
+                PresetCommand::Apply {
+                    url,
+                    device,
+                    preset_id,
+                } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/presets/apply",
+                        Some(json!({"preset_id": preset_id})),
+                        false,
+                    )
+                    .await?
+                }
+            },
+            Command::Calibration { command } => match command {
+                CalibrationCommand::Profile { url, device } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::GET,
+                        "/api/v1/calibration/profile",
+                        None,
+                        false,
+                    )
+                    .await?
+                }
+                CalibrationCommand::Mode { url, device, kind } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/calibration/mode",
+                        Some(json!({"kind": kind})),
+                        false,
+                    )
+                    .await?
+                }
+                CalibrationCommand::Apply { url, device, file } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/calibration/apply",
+                        Some(read_json_file(&file)?),
+                        false,
+                    )
+                    .await?
+                }
+                CalibrationCommand::Commit { url, device, file } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/calibration/commit",
+                        Some(read_json_file(&file)?),
+                        false,
+                    )
+                    .await?
+                }
+                CalibrationCommand::Reset { url, device, kind } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::POST,
+                        "/api/v1/calibration/reset",
+                        Some(json!({"kind": kind})),
+                        false,
+                    )
+                    .await?
+                }
+            },
+            Command::SoftReset {
+                url,
+                device,
+                reason,
             } => {
                 request_api_value(
                     &client,
                     &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    reqwest::Method::GET,
-                    "/api/v1/diagnostics/export",
-                    None,
+                    ApiSelector { url, device },
+                    allow_interactive,
+                    reqwest::Method::POST,
+                    "/api/v1/soft-reset",
+                    Some(json!({"reason": reason})),
                     false,
                 )
                 .await?
             }
-        },
-        Command::Backup { command } => match command {
-            BackupCommand::Export {
-                url,
-                device,
-                hardware,
-                file,
-                include,
-            } => {
-                handle_backup_export(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    &file,
-                    &include,
-                )
-                .await?
-            }
-            BackupCommand::Import {
-                url,
-                device,
-                hardware,
-                file,
-                include,
-                dry_run,
-                allow_insecure_lan_wifi,
-            } => {
-                handle_backup_import(
-                    &client,
-                    &devd,
-                    ApiSelector {
-                        url,
-                        device,
-                        hardware,
-                    },
-                    &file,
-                    &include,
+            Command::Diagnostics { command } => match command {
+                DiagnosticsCommand::Export { url, device } => {
+                    request_api_value(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        reqwest::Method::GET,
+                        "/api/v1/diagnostics/export",
+                        None,
+                        false,
+                    )
+                    .await?
+                }
+            },
+            Command::Backup { command } => match command {
+                BackupCommand::Export {
+                    url,
+                    device,
+                    file,
+                    include,
+                } => {
+                    handle_backup_export(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        &file,
+                        &include,
+                    )
+                    .await?
+                }
+                BackupCommand::Import {
+                    url,
+                    device,
+                    file,
+                    include,
                     dry_run,
                     allow_insecure_lan_wifi,
-                )
-                .await?
-            }
-        },
+                } => {
+                    handle_backup_import(
+                        &client,
+                        &devd,
+                        ApiSelector { url, device },
+                        allow_interactive,
+                        &file,
+                        &include,
+                        dry_run,
+                        allow_insecure_lan_wifi,
+                    )
+                    .await?
+                }
+            },
         };
         Ok(payload)
     }
@@ -1367,13 +1479,9 @@ async fn select_device_artifact(
     artifact_id: Option<String>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let body = json!({"manifest_path": manifest_path, "artifact_id": artifact_id});
-    let result = request_devd_value(
-        &resolved.devd,
-        reqwest::Method::POST,
-        &format!("/api/v1/devices/{}/artifact", resolved.device),
-        Some(body.clone()),
-    )
-    .await;
+    let result =
+        select_devd_device_artifact(&resolved.devd, &resolved.device, manifest_path, artifact_id)
+            .await;
     match result {
         Ok(value) => Ok(value),
         Err(error) if saved_usb_device_needs_relookup(&*error) => {
@@ -1397,208 +1505,222 @@ async fn select_device_artifact(
     }
 }
 
+async fn select_devd_device_artifact(
+    devd: &str,
+    device: &str,
+    manifest_path: Option<String>,
+    artifact_id: Option<String>,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    request_devd_value(
+        devd,
+        reqwest::Method::POST,
+        &format!("/api/v1/devices/{device}/artifact"),
+        Some(json!({"manifest_path": manifest_path, "artifact_id": artifact_id})),
+    )
+    .await
+}
+
+async fn resolve_analog_target_device(
+    device: Option<String>,
+    devd: &str,
+) -> Result<ResolvedDevdTarget, Box<dyn std::error::Error + Send + Sync>> {
+    let saved_device = match device {
+        Some(device) => Some(resolve_usb_target(Some(device), devd, false)?),
+        None => None,
+    };
+    let scan_devd = saved_device
+        .as_ref()
+        .map(|resolved| resolved.devd.as_str())
+        .unwrap_or(devd);
+    let scan = request_devd_value(
+        scan_devd,
+        reqwest::Method::POST,
+        "/api/v1/devices/scan",
+        None,
+    )
+    .await?;
+    let device = if let Some(saved_device) = saved_device.as_ref() {
+        resolve_scanned_analog_device_for_saved_usb(saved_device, &scan)?
+    } else {
+        resolve_single_analog_device_from_scan(&scan)?
+    };
+    Ok(ResolvedDevdTarget {
+        devd: scan_devd.to_string(),
+        device,
+    })
+}
+
+fn resolve_single_analog_device_from_scan(
+    scan: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let devices = scan
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or("device scan response did not include devices")?;
+    let mut selectors = HashSet::new();
+    let analog_devices = devices
+        .iter()
+        .filter_map(|device| {
+            let target = device
+                .get("analog_target")
+                .filter(|target| !target.is_null())?;
+            let id = device.get("id").and_then(Value::as_str)?;
+            let selector = target
+                .get("probe_selector")
+                .and_then(Value::as_str)
+                .unwrap_or(id);
+            Some((id, selector))
+        })
+        .filter_map(|(id, selector)| selectors.insert(selector.to_string()).then_some(id))
+        .collect::<Vec<_>>();
+    let Some(id) = analog_devices.first() else {
+        return Err(
+            "no analog target found; approve the STM32 probe selector before retrying".into(),
+        );
+    };
+    if analog_devices.len() > 1 {
+        return Err("multiple analog targets found; cannot select one implicitly".into());
+    }
+    Ok(id.to_string())
+}
+
+fn resolve_scanned_analog_device_for_saved_usb(
+    resolved: &ResolvedUsbHardware,
+    scan: &Value,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let devices = scan
+        .get("devices")
+        .and_then(Value::as_array)
+        .ok_or("devd scan response did not include devices")?;
+    let matches_saved_device = |device: &Value| {
+        let id_matches = device.get("id").and_then(Value::as_str) == Some(resolved.device.as_str());
+        let port_matches = resolved
+            .port_path
+            .as_deref()
+            .is_some_and(|saved_port_path| {
+                device
+                    .get("digital_target")
+                    .and_then(|target| target.get("port_path"))
+                    .and_then(Value::as_str)
+                    == Some(saved_port_path)
+            });
+        id_matches || port_matches
+    };
+    devices
+        .iter()
+        .find(|device| {
+            matches_saved_device(device)
+                && device
+                    .get("analog_target")
+                    .is_some_and(|target| !target.is_null())
+        })
+        .and_then(|device| device.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .ok_or_else(|| {
+            format!(
+                "saved USB device {} has no approved analog target in devd scan",
+                resolved.hardware_id
+            )
+            .into()
+        })
+}
+
 fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> {
     let endpoints = match command {
-        Command::Discover { .. } | Command::Devices => vec![default_devd.to_string()],
-        Command::Status {
-            url,
-            device,
-            hardware,
-        } => selector_devd_endpoint(
-            url.as_ref(),
-            device.as_ref(),
-            hardware.as_ref(),
-            default_devd,
-        )
-        .into_iter()
-        .collect(),
-        Command::Flash {
-            device, hardware, ..
+        Command::Completion { .. } => Vec::new(),
+        Command::Device { command } => match command {
+            DeviceCommand::List | DeviceCommand::Use { .. } | DeviceCommand::Remove { .. } => {
+                Vec::new()
+            }
+            DeviceCommand::Add { url, .. } => {
+                if url.is_some() {
+                    Vec::new()
+                } else {
+                    vec![default_devd.to_string()]
+                }
+            }
+        },
+        Command::Discover { .. } => vec![default_devd.to_string()],
+        Command::Devices => Vec::new(),
+        Command::Status { url, device } => {
+            selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
+                .into_iter()
+                .collect()
         }
-        | Command::Reset {
-            device, hardware, ..
+        Command::Flash { target, device, .. } | Command::Reset { target, device, .. } => {
+            match target {
+                BoardTarget::Digital => usb_target_devd_endpoint(device.as_ref(), default_devd)
+                    .into_iter()
+                    .collect(),
+                BoardTarget::Analog => {
+                    vec![analog_target_devd_endpoint(device.as_ref(), default_devd)]
+                }
+            }
         }
-        | Command::Monitor {
-            device, hardware, ..
-        }
+        Command::Monitor { device, .. }
         | Command::Pd {
-            command: PdCommand::Set {
-                device, hardware, ..
-            },
-        } => usb_target_devd_endpoint(device.as_ref(), hardware.as_ref(), default_devd)
+            command: PdCommand::Set { device, .. },
+        } => usb_target_devd_endpoint(device.as_ref(), default_devd)
             .into_iter()
             .collect(),
-        Command::Cc { url, hardware, .. }
-        | Command::Cv { url, hardware, .. }
-        | Command::Cp { url, hardware, .. } => {
-            selector_devd_endpoint(url.as_ref(), None, hardware.as_ref(), default_devd)
+        Command::Cc { url, device, .. }
+        | Command::Cv { url, device, .. }
+        | Command::Cp { url, device, .. } => {
+            selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
                 .into_iter()
                 .collect()
         }
         Command::Wifi { command } => match command {
-            WifiCommand::Show {
-                url,
-                device,
-                hardware,
+            WifiCommand::Show { url, device }
+            | WifiCommand::Set { url, device, .. }
+            | WifiCommand::Clear { url, device, .. } => {
+                selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
+                    .into_iter()
+                    .collect()
             }
-            | WifiCommand::Set {
-                url,
-                device,
-                hardware,
-                ..
-            }
-            | WifiCommand::Clear {
-                url,
-                device,
-                hardware,
-                ..
-            } => selector_devd_endpoint(
-                url.as_ref(),
-                device.as_ref(),
-                hardware.as_ref(),
-                default_devd,
-            )
-            .into_iter()
-            .collect(),
         },
         Command::Control { command } => match command {
-            ControlCommand::Get {
-                url,
-                device,
-                hardware,
+            ControlCommand::Get { url, device } | ControlCommand::Set { url, device, .. } => {
+                selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
+                    .into_iter()
+                    .collect()
             }
-            | ControlCommand::Set {
-                url,
-                device,
-                hardware,
-                ..
-            } => selector_devd_endpoint(
-                url.as_ref(),
-                device.as_ref(),
-                hardware.as_ref(),
-                default_devd,
-            )
-            .into_iter()
-            .collect(),
         },
         Command::Preset { command } => match command {
-            PresetCommand::List {
-                url,
-                device,
-                hardware,
+            PresetCommand::List { url, device }
+            | PresetCommand::Set { url, device, .. }
+            | PresetCommand::Apply { url, device, .. } => {
+                { selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd) }
+                    .into_iter()
+                    .collect()
             }
-            | PresetCommand::Set {
-                url,
-                device,
-                hardware,
-                ..
-            }
-            | PresetCommand::Apply {
-                url,
-                device,
-                hardware,
-                ..
-            } => selector_devd_endpoint(
-                url.as_ref(),
-                device.as_ref(),
-                hardware.as_ref(),
-                default_devd,
-            )
-            .into_iter()
-            .collect(),
         },
         Command::Calibration { command } => match command {
-            CalibrationCommand::Profile {
-                url,
-                device,
-                hardware,
+            CalibrationCommand::Profile { url, device }
+            | CalibrationCommand::Mode { url, device, .. }
+            | CalibrationCommand::Apply { url, device, .. }
+            | CalibrationCommand::Commit { url, device, .. }
+            | CalibrationCommand::Reset { url, device, .. } => {
+                selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
+                    .into_iter()
+                    .collect()
             }
-            | CalibrationCommand::Mode {
-                url,
-                device,
-                hardware,
-                ..
-            }
-            | CalibrationCommand::Apply {
-                url,
-                device,
-                hardware,
-                ..
-            }
-            | CalibrationCommand::Commit {
-                url,
-                device,
-                hardware,
-                ..
-            }
-            | CalibrationCommand::Reset {
-                url,
-                device,
-                hardware,
-                ..
-            } => selector_devd_endpoint(
-                url.as_ref(),
-                device.as_ref(),
-                hardware.as_ref(),
-                default_devd,
-            )
-            .into_iter()
-            .collect(),
         },
-        Command::SoftReset {
-            url,
-            device,
-            hardware,
-            ..
-        }
+        Command::SoftReset { url, device, .. }
         | Command::Diagnostics {
-            command:
-                DiagnosticsCommand::Export {
-                    url,
-                    device,
-                    hardware,
-                },
-        } => selector_devd_endpoint(
-            url.as_ref(),
-            device.as_ref(),
-            hardware.as_ref(),
-            default_devd,
-        )
-        .into_iter()
-        .collect(),
-        Command::Backup { command } => match command {
-            BackupCommand::Export {
-                url,
-                device,
-                hardware,
-                ..
-            }
-            | BackupCommand::Import {
-                url,
-                device,
-                hardware,
-                ..
-            } => selector_devd_endpoint(
-                url.as_ref(),
-                device.as_ref(),
-                hardware.as_ref(),
-                default_devd,
-            )
+            command: DiagnosticsCommand::Export { url, device },
+        } => selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
             .into_iter()
             .collect(),
+        Command::Backup { command } => match command {
+            BackupCommand::Export { url, device, .. }
+            | BackupCommand::Import { url, device, .. } => {
+                { selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd) }
+                    .into_iter()
+                    .collect()
+            }
         },
         Command::UsbPort { .. } => Vec::new(),
-        Command::Hardware {
-            command: HardwareCommand::Available { scan: true },
-        } => vec![default_devd.to_string()],
-        Command::Hardware {
-            command:
-                HardwareCommand::Bind {
-                    transport: SavedTransport::Usb,
-                    ..
-                },
-        } => vec![default_devd.to_string()],
-        Command::Hardware { .. } => Vec::new(),
     };
 
     let mut seen = HashSet::new();
@@ -1611,39 +1733,46 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
 fn selector_devd_endpoint(
     url: Option<&String>,
     device: Option<&String>,
-    hardware: Option<&String>,
     default_devd: &str,
 ) -> Option<String> {
     if url.is_some() {
         return None;
     }
-    if device.is_some() {
-        return Some(default_devd.to_string());
-    }
-    let resolved = hardware
-        .and_then(|id| resolve_saved_hardware(id, default_devd).ok())
-        .or_else(|| resolve_saved_hardware("default", default_devd).ok());
-    resolved.and_then(|resolved| match resolved {
+    let resolved = resolve_saved_hardware_selection(device.cloned(), default_devd, false).ok();
+    let endpoint = resolved.and_then(|resolved| match resolved {
         ResolvedHardware::Usb(resolved) => Some(resolved.devd),
         ResolvedHardware::Http { .. } => None,
+    });
+    endpoint.or_else(|| {
+        has_saved_device_for_transport(Some(SavedTransport::Usb))
+            .ok()
+            .filter(|has_usb| *has_usb)
+            .map(|_| default_devd.to_string())
     })
 }
 
-fn usb_target_devd_endpoint(
-    device: Option<&String>,
-    hardware: Option<&String>,
-    default_devd: &str,
-) -> Option<String> {
-    if device.is_some() {
-        return Some(default_devd.to_string());
-    }
-    let resolved = hardware
-        .and_then(|id| resolve_saved_hardware(id, default_devd).ok())
-        .or_else(|| resolve_saved_hardware("default", default_devd).ok());
-    resolved.and_then(|resolved| match resolved {
+fn usb_target_devd_endpoint(device: Option<&String>, default_devd: &str) -> Option<String> {
+    let resolved = resolve_saved_hardware_selection_with_transport(
+        device.cloned(),
+        default_devd,
+        false,
+        Some(SavedTransport::Usb),
+    )
+    .ok();
+    let endpoint = resolved.and_then(|resolved| match resolved {
         ResolvedHardware::Usb(resolved) => Some(resolved.devd),
         ResolvedHardware::Http { .. } => None,
+    });
+    endpoint.or_else(|| {
+        has_saved_device_for_transport(Some(SavedTransport::Usb))
+            .ok()
+            .filter(|has_usb| *has_usb)
+            .map(|_| default_devd.to_string())
     })
+}
+
+fn analog_target_devd_endpoint(device: Option<&String>, default_devd: &str) -> String {
+    usb_target_devd_endpoint(device, default_devd).unwrap_or_else(|| default_devd.to_string())
 }
 
 fn resolve_flash_confirmation_text(
@@ -1651,19 +1780,38 @@ fn resolve_flash_confirmation_text(
     dry_run: bool,
     provided: Option<String>,
 ) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
-    if dry_run || !matches!(target, BoardTarget::Digital) {
+    resolve_operation_confirmation_text(target, dry_run, provided)
+}
+
+fn resolve_operation_confirmation_text(
+    target: &BoardTarget,
+    dry_run: bool,
+    provided: Option<String>,
+) -> Result<Option<String>, Box<dyn std::error::Error + Send + Sync>> {
+    if dry_run {
         return Ok(provided);
     }
+    let operation = match target {
+        BoardTarget::Digital => "digital firmware flash",
+        BoardTarget::Analog => "analog firmware operation",
+    };
     if provided.is_some() {
         return Ok(provided);
     }
-    eprintln!("Real digital firmware flash is high risk.");
+    eprintln!("Real {operation} is high risk.");
     eprintln!("Type `{FLASH_CONFIRMATION_TEXT}` to continue.");
     let typed: String = Input::with_theme(&ColorfulTheme::default())
         .with_prompt("Confirmation")
         .allow_empty(false)
         .interact_text()?;
     Ok(Some(typed))
+}
+
+fn reject_unsupported_analog_monitor() -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    Err(
+        "analog monitor is not supported yet; implement a loadlynx-devd probe-rs RTT/defmt monitor backend instead of routing analog monitor through the digital USB session"
+            .into(),
+    )
 }
 
 fn read_json_file(path: &Path) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -1742,14 +1890,18 @@ mod tests {
     use super::*;
     use axum::{
         Router,
-        extract::{Path, State},
-        http::StatusCode,
+        extract::State,
         routing::{get, post},
     };
+    use loadlynx_devd::IpcResponse;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::sync::{LazyLock, Mutex as StdMutex};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+
+    static TEST_ENV_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 
     #[derive(Clone, Default)]
     struct TestHttpState {
@@ -1855,246 +2007,191 @@ mod tests {
         format!("http://{addr}")
     }
 
-    async fn spawn_test_http(state: TestHttpState) -> String {
-        async fn create_lease(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> axum::Json<Value> {
-            state.lease_creates.fetch_add(1, Ordering::SeqCst);
-            state
-                .lease_payloads
-                .lock()
-                .expect("lease payloads lock")
-                .push(payload.clone());
-            axum::Json(json!({
+    async fn spawn_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::Normal).await
+    }
+
+    async fn spawn_scan_required_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::ScanRequiredLease).await
+    }
+
+    async fn spawn_artifact_scan_required_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::ScanRequiredArtifact).await
+    }
+
+    async fn spawn_identity_mismatch_then_scan_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::IdentityMismatchThenScan).await
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestIpcMode {
+        Normal,
+        DuplicateAnalogSelector,
+        ScanRequiredLease,
+        ScanRequiredArtifact,
+        IdentityMismatchThenScan,
+    }
+
+    async fn spawn_test_ipc_with_mode(state: TestHttpState, mode: TestIpcMode) -> String {
+        let temp_dir = tempfile::tempdir().expect("temp ipc dir");
+        let endpoint = temp_dir.path().join("loadlynx.sock");
+        let endpoint_string = endpoint.to_string_lossy().to_string();
+        let listener = tokio::net::UnixListener::bind(&endpoint).expect("bind test IPC");
+        tokio::spawn(async move {
+            let _keep_dir_alive = temp_dir;
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let response = match serde_json::from_str::<IpcRequest>(&line) {
+                            Ok(request) => handle_test_ipc_request(&state, mode, request),
+                            Err(error) => IpcResponse {
+                                ok: false,
+                                result: None,
+                                error: Some(loadlynx_devd::ApiError {
+                                    code: "ipc_invalid_json".to_string(),
+                                    message: error.to_string(),
+                                    retryable: false,
+                                    details: None,
+                                }),
+                            },
+                        };
+                        let text = serde_json::to_string(&response).expect("test IPC response");
+                        if writer.write_all(text.as_bytes()).await.is_err()
+                            || writer.write_all(b"\n").await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        endpoint_string
+    }
+
+    fn handle_test_ipc_request(
+        state: &TestHttpState,
+        mode: TestIpcMode,
+        request: IpcRequest,
+    ) -> IpcResponse {
+        let params = request.params;
+        let result = match request.op.as_str() {
+            "serial.lease.create" => test_create_lease(state, mode, params),
+            "serial.lease.heartbeat" | "serial.lease.release" => Ok(json!({"ok": true})),
+            "compat.status" => Ok(json!({"ok": true, "link_up": true})),
+            "devices.scan" => {
+                state.scans.fetch_add(1, Ordering::SeqCst);
+                let id = match mode {
+                    TestIpcMode::Normal | TestIpcMode::DuplicateAnalogSelector => "digital-1",
+                    TestIpcMode::ScanRequiredLease
+                    | TestIpcMode::ScanRequiredArtifact
+                    | TestIpcMode::IdentityMismatchThenScan => "digital-current",
+                };
+                let devices = match mode {
+                    TestIpcMode::DuplicateAnalogSelector => json!([
+                        {
+                            "id": id,
+                            "digital_target": {"port_path": "mock://esp32s3"},
+                            "analog_target": {"probe_selector": "mock-probe"}
+                        },
+                        {"id": "analog-1", "analog_target": {"probe_selector": "mock-probe"}}
+                    ]),
+                    _ => json!([
+                        {"id": id, "digital_target": {"port_path": "mock://esp32s3"}},
+                        {"id": "analog-1", "analog_target": {"probe_selector": "mock-probe"}}
+                    ]),
+                };
+                Ok(json!({ "devices": devices }))
+            }
+            "devices.flash" | "devices.reset" => {
+                state
+                    .operation_payloads
+                    .lock()
+                    .expect("operation payloads lock")
+                    .push(params.clone());
+                Ok(json!({"ok": true, "payload": params}))
+            }
+            "devices.artifact.select" => test_select_artifact(state, mode, params),
+            _ => Err((
+                "ipc_unknown_operation",
+                format!("unknown op {}", request.op),
+            )),
+        };
+
+        match result {
+            Ok(value) => IpcResponse {
+                ok: true,
+                result: Some(value),
+                error: None,
+            },
+            Err((code, message)) => IpcResponse {
+                ok: false,
+                result: None,
+                error: Some(loadlynx_devd::ApiError {
+                    code: code.to_string(),
+                    message,
+                    retryable: false,
+                    details: None,
+                }),
+            },
+        }
+    }
+
+    fn test_create_lease(
+        state: &TestHttpState,
+        mode: TestIpcMode,
+        payload: Value,
+    ) -> Result<Value, (&'static str, String)> {
+        state.lease_creates.fetch_add(1, Ordering::SeqCst);
+        state
+            .lease_payloads
+            .lock()
+            .expect("lease payloads lock")
+            .push(payload.clone());
+        match mode {
+            TestIpcMode::ScanRequiredLease if state.scans.load(Ordering::SeqCst) == 0 => {
+                Err(("device_not_found", "device is not known".to_string()))
+            }
+            TestIpcMode::IdentityMismatchThenScan if state.scans.load(Ordering::SeqCst) == 0 => {
+                Err((
+                    "identity_confirmation_mismatch",
+                    "identity confirmation mismatch".to_string(),
+                ))
+            }
+            _ => Ok(json!({
                 "lease_id": "lease-1",
                 "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
                 "heartbeat_interval_ms": 1000
-            }))
+            })),
         }
-
-        async fn heartbeat_lease() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true}))
-        }
-
-        async fn release_lease() -> StatusCode {
-            StatusCode::NO_CONTENT
-        }
-
-        async fn operation(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> axum::Json<Value> {
-            state
-                .operation_payloads
-                .lock()
-                .expect("operation payloads lock")
-                .push(payload.clone());
-            axum::Json(json!({"ok": true, "payload": payload}))
-        }
-
-        async fn status() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true, "link_up": true}))
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-1", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route("/api/v1/serial/lease", post(create_lease))
-            .route(
-                "/api/v1/serial/lease/{lease_id}",
-                post(heartbeat_lease).delete(release_lease),
-            )
-            .route("/api/v1/status", axum::routing::get(status))
-            .route("/api/v1/devices/scan", post(scan))
-            .route("/api/v1/devices/{device}/flash", post(operation))
-            .route("/api/v1/devices/{device}/reset", post(operation))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
     }
 
-    async fn spawn_scan_required_test_http(state: TestHttpState) -> String {
-        async fn create_lease_after_scan(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> (StatusCode, axum::Json<Value>) {
-            state.lease_creates.fetch_add(1, Ordering::SeqCst);
-            state
-                .lease_payloads
-                .lock()
-                .expect("lease payloads lock")
-                .push(payload.clone());
-            if state.scans.load(Ordering::SeqCst) == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(json!({"code": "device_not_found"})),
-                )
-            } else {
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "lease_id": "lease-1",
-                        "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
-                        "heartbeat_interval_ms": 1000
-                    })),
-                )
-            }
+    fn test_select_artifact(
+        state: &TestHttpState,
+        mode: TestIpcMode,
+        payload: Value,
+    ) -> Result<Value, (&'static str, String)> {
+        let device = payload
+            .get("device_id")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>")
+            .to_string();
+        state
+            .artifact_devices
+            .lock()
+            .expect("artifact devices lock")
+            .push(device.clone());
+        if matches!(mode, TestIpcMode::ScanRequiredArtifact)
+            && state.scans.load(Ordering::SeqCst) == 0
+        {
+            return Err(("device_not_found", "device is not known".to_string()));
         }
-
-        async fn heartbeat_lease() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true}))
-        }
-
-        async fn release_lease() -> StatusCode {
-            StatusCode::NO_CONTENT
-        }
-
-        async fn status() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true, "link_up": true}))
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route("/api/v1/serial/lease", post(create_lease_after_scan))
-            .route(
-                "/api/v1/serial/lease/{lease_id}",
-                post(heartbeat_lease).delete(release_lease),
-            )
-            .route("/api/v1/status", axum::routing::get(status))
-            .route("/api/v1/devices/scan", post(scan))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    async fn spawn_artifact_scan_required_test_http(state: TestHttpState) -> String {
-        async fn select_artifact_after_scan(
-            State(state): State<TestHttpState>,
-            Path(device): Path<String>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> (StatusCode, axum::Json<Value>) {
-            state
-                .artifact_devices
-                .lock()
-                .expect("artifact devices lock")
-                .push(device.clone());
-            if state.scans.load(Ordering::SeqCst) == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(json!({"code": "device_not_found"})),
-                )
-            } else {
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({"ok": true, "device_id": device, "payload": payload})),
-                )
-            }
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route(
-                "/api/v1/devices/{device}/artifact",
-                post(select_artifact_after_scan),
-            )
-            .route("/api/v1/devices/scan", post(scan))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    async fn spawn_identity_mismatch_then_scan_test_http(state: TestHttpState) -> String {
-        async fn create_lease_after_scan(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> (StatusCode, axum::Json<Value>) {
-            state.lease_creates.fetch_add(1, Ordering::SeqCst);
-            state
-                .lease_payloads
-                .lock()
-                .expect("lease payloads lock")
-                .push(payload.clone());
-            if state.scans.load(Ordering::SeqCst) == 0 {
-                (
-                    StatusCode::CONFLICT,
-                    axum::Json(json!({"code": "identity_confirmation_mismatch"})),
-                )
-            } else {
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "lease_id": "lease-1",
-                        "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
-                        "heartbeat_interval_ms": 1000
-                    })),
-                )
-            }
-        }
-
-        async fn heartbeat_lease() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true}))
-        }
-
-        async fn release_lease() -> StatusCode {
-            StatusCode::NO_CONTENT
-        }
-
-        async fn status() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true, "link_up": true}))
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route("/api/v1/serial/lease", post(create_lease_after_scan))
-            .route(
-                "/api/v1/serial/lease/{lease_id}",
-                post(heartbeat_lease).delete(release_lease),
-            )
-            .route("/api/v1/status", axum::routing::get(status))
-            .route("/api/v1/devices/scan", post(scan))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
+        Ok(json!({"ok": true, "device_id": device, "payload": payload}))
     }
 
     #[test]
@@ -2174,8 +2271,8 @@ mod tests {
             ApiSelector {
                 url: Some("http://127.0.0.1:9".to_string()),
                 device: None,
-                hardware: None,
             },
+            false,
             file.path(),
             &[],
             true,
@@ -2211,8 +2308,8 @@ mod tests {
             ApiSelector {
                 url: Some("http://127.0.0.1:9".to_string()),
                 device: None,
-                hardware: None,
             },
+            false,
             reqwest::Method::GET,
             "/api/v1/wifi/credentials",
             None,
@@ -2288,13 +2385,18 @@ mod tests {
         let selector = ApiSelector {
             url: Some("http://loadlynx.local".to_string()),
             device: None,
-            hardware: None,
         };
         let selection = parse_backup_selection(&[]).expect("default selection");
 
-        let err =
-            preflight_backup_restore("http://127.0.0.1:9", &selector, &backup, selection, false)
-                .expect_err("LAN WiFi restore should require an explicit opt-in");
+        let err = preflight_backup_restore(
+            "http://127.0.0.1:9",
+            &selector,
+            false,
+            &backup,
+            selection,
+            false,
+        )
+        .expect_err("LAN WiFi restore should require an explicit opt-in");
 
         assert!(
             err.to_string()
@@ -2345,35 +2447,50 @@ mod tests {
         .expect("usb-port parse");
         assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
 
-        let cli = Cli::try_parse_from([
-            "loadlynx",
-            "--ipc",
-            "/tmp/loadlynx.sock",
-            "hardware",
-            "list",
-        ])
-        .expect("hardware list parse");
+        let cli =
+            Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "device", "list"])
+                .expect("device list parse");
         assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
 
-        let cli = Cli::try_parse_from([
-            "loadlynx",
-            "--ipc",
-            "/tmp/loadlynx.sock",
-            "hardware",
-            "available",
-        ])
-        .expect("hardware available parse");
+        let cli = Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "devices"])
+            .expect("devices parse");
         assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
     }
 
     #[test]
     fn initial_devd_endpoints_include_usb_commands() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_home = env::var_os("LOADLYNX_HOME");
+        // Tests serialize environment mutation through TEST_ENV_LOCK.
+        unsafe { env::set_var("LOADLYNX_HOME", temp.path()) };
+        write_hardware_registry(
+            &temp.path().join("devices.json"),
+            &HardwareRegistry {
+                default_hardware_id: Some("loadlynx-a1b2c3".to_string()),
+                hardware: vec![SavedHardware {
+                    id: "loadlynx-a1b2c3".to_string(),
+                    name: None,
+                    identity: None,
+                    last_transport: Some(SavedTransport::Usb),
+                    transports: SavedTransports {
+                        usb: Some(SavedUsbTransport {
+                            device: "digital-1".to_string(),
+                            port_path: Some("mock://esp32s3".to_string()),
+                            devd: None,
+                        }),
+                        http: None,
+                    },
+                    last_seen_unix_seconds: None,
+                }],
+                ..HardwareRegistry::default()
+            },
+        )
+        .unwrap();
+
         let cli = Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "devices"])
             .expect("devices parse");
-        assert_eq!(
-            initial_devd_endpoints(&cli.command, &cli.ipc),
-            vec!["/tmp/loadlynx.sock"]
-        );
+        assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
 
         let cli = Cli::try_parse_from([
             "loadlynx",
@@ -2381,7 +2498,7 @@ mod tests {
             "/tmp/loadlynx.sock",
             "status",
             "--device",
-            "digital-1",
+            "loadlynx-a1b2c3",
         ])
         .expect("status device parse");
         assert_eq!(
@@ -2389,19 +2506,102 @@ mod tests {
             vec!["/tmp/loadlynx.sock"]
         );
 
-        let cli = Cli::try_parse_from([
-            "loadlynx",
-            "--ipc",
-            "/tmp/loadlynx.sock",
-            "hardware",
-            "available",
-            "--scan",
-        ])
-        .expect("hardware available scan parse");
+        let cli = Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "device", "add"])
+            .expect("device add parse");
         assert_eq!(
             initial_devd_endpoints(&cli.command, &cli.ipc),
             vec!["/tmp/loadlynx.sock"]
         );
+
+        let cli =
+            Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "flash", "analog"])
+                .expect("analog flash parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+
+        let custom_devd = temp.path().join("custom-loadlynx.sock");
+        write_hardware_registry(
+            &temp.path().join("devices.json"),
+            &HardwareRegistry {
+                default_hardware_id: Some("loadlynx-a1b2c3".to_string()),
+                hardware: vec![SavedHardware {
+                    id: "loadlynx-a1b2c3".to_string(),
+                    name: None,
+                    identity: None,
+                    last_transport: Some(SavedTransport::Usb),
+                    transports: SavedTransports {
+                        usb: Some(SavedUsbTransport {
+                            device: "digital-1".to_string(),
+                            port_path: Some("mock://esp32s3".to_string()),
+                            devd: Some(custom_devd.to_string_lossy().to_string()),
+                        }),
+                        http: None,
+                    },
+                    last_seen_unix_seconds: None,
+                }],
+                ..HardwareRegistry::default()
+            },
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "flash",
+            "analog",
+            "--device",
+            "loadlynx-a1b2c3",
+        ])
+        .expect("analog saved flash parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec![custom_devd.to_string_lossy().to_string()]
+        );
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "reset",
+            "analog",
+            "--device",
+            "loadlynx-a1b2c3",
+        ])
+        .expect("analog saved reset parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec![custom_devd.to_string_lossy().to_string()]
+        );
+
+        match previous_home {
+            Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
+            None => unsafe { env::remove_var("LOADLYNX_HOME") },
+        }
+    }
+
+    #[test]
+    fn initial_devd_endpoints_start_default_for_unsaved_analog_commands() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_home = env::var_os("LOADLYNX_HOME");
+        // Tests serialize environment mutation through TEST_ENV_LOCK.
+        unsafe { env::set_var("LOADLYNX_HOME", temp.path()) };
+
+        let cli =
+            Cli::try_parse_from(["loadlynx", "--ipc", "/tmp/loadlynx.sock", "flash", "analog"])
+                .expect("analog flash parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+
+        match previous_home {
+            Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
+            None => unsafe { env::remove_var("LOADLYNX_HOME") },
+        }
     }
 
     #[test]
@@ -2418,21 +2618,193 @@ mod tests {
         assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
     }
 
-    #[tokio::test]
-    async fn request_devd_value_accepts_legacy_http_endpoint() {
-        let state = TestHttpState::default();
-        let devd = spawn_test_http(state).await;
+    #[test]
+    fn ipc_request_for_devd_call_maps_compat_status_to_native_operation() {
+        let request = ipc_request_for_devd_call(
+            reqwest::Method::GET,
+            "/api/v1/status?device_id=loadlynx-a1b2c3&lease_id=lease-1",
+            None,
+        )
+        .expect("native status IPC request");
 
-        let value = request_devd_value(
-            &devd,
+        assert_eq!(request.op, "compat.status");
+        assert_eq!(
+            request.params.get("device_id").and_then(Value::as_str),
+            Some("loadlynx-a1b2c3")
+        );
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("lease-1")
+        );
+    }
+
+    #[test]
+    fn ipc_query_params_preserve_numeric_ids_as_strings() {
+        let request = ipc_request_for_devd_call(
+            reqwest::Method::GET,
+            "/api/v1/status?device_id=123456&lease_id=789",
+            None,
+        )
+        .expect("native status IPC request");
+
+        assert_eq!(request.op, "compat.status");
+        assert_eq!(
+            request.params.get("device_id").and_then(Value::as_str),
+            Some("123456")
+        );
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("789")
+        );
+    }
+
+    #[test]
+    fn ipc_session_limits_are_coerced_to_numbers() {
+        let request = ipc_request_for_devd_call(
+            reqwest::Method::GET,
+            "/api/v1/devices/digital-1/session?lease_id=123&logs_limit=5&trace_limit=9",
+            None,
+        )
+        .expect("native session IPC request");
+
+        assert_eq!(request.op, "devices.session");
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("123")
+        );
+        assert_eq!(
+            request.params.get("logs_limit").and_then(Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(
+            request.params.get("trace_limit").and_then(Value::as_u64),
+            Some(9)
+        );
+    }
+
+    #[tokio::test]
+    async fn request_devd_value_rejects_http_devd_endpoint() {
+        let error = request_devd_value(
+            "http://127.0.0.1:30180",
             reqwest::Method::POST,
             "/api/v1/devices/digital-1/reset",
             Some(json!({"dry_run": true})),
         )
         .await
-        .unwrap();
+        .expect_err("HTTP devd endpoint must be rejected");
 
-        assert_eq!(value.get("ok").and_then(Value::as_bool), Some(true));
+        assert!(
+            error
+                .to_string()
+                .contains("devd endpoint must be a native IPC endpoint")
+        );
+    }
+
+    #[test]
+    fn devd_ipc_retryable_error_preserves_retry_marker() {
+        let error = DevdIpcOperationError(loadlynx_devd::ApiError {
+            code: "device_busy".to_string(),
+            message: "serial port is busy".to_string(),
+            retryable: true,
+            details: None,
+        });
+
+        let message = error.to_string();
+        assert!(message.contains("retryable 503"));
+        assert!(message.contains("device_busy"));
+    }
+
+    #[tokio::test]
+    async fn analog_flash_does_not_create_usb_lease() {
+        let state = TestHttpState::default();
+        let endpoint = spawn_test_ipc(state.clone()).await;
+        let value = request_devd_value(
+            &endpoint,
+            reqwest::Method::POST,
+            "/api/v1/devices/scan",
+            None,
+        )
+        .await
+        .expect("scan response");
+        let device = resolve_analog_target_device(None, &endpoint)
+            .await
+            .expect("analog target");
+        assert_eq!(device.device, "analog-1");
+        assert!(value.get("devices").is_some());
+
+        let response = request_devd_value(
+            &endpoint,
+            reqwest::Method::POST,
+            "/api/v1/devices/analog-1/flash",
+            Some(json!({"target": TargetKind::AnalogStm32g431, "dry_run": false})),
+        )
+        .await
+        .expect("analog flash");
+
+        assert_eq!(response.get("ok").and_then(Value::as_bool), Some(true));
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn analog_target_resolution_deduplicates_same_probe_selector() {
+        let state = TestHttpState::default();
+        let endpoint = spawn_test_ipc_with_mode(state, TestIpcMode::DuplicateAnalogSelector).await;
+
+        let device = resolve_analog_target_device(None, &endpoint)
+            .await
+            .expect("analog target");
+
+        assert_eq!(device.device, "digital-1");
+    }
+
+    #[tokio::test]
+    async fn analog_target_resolution_accepts_saved_usb_device() {
+        let temp = tempfile::tempdir().unwrap();
+        let state = TestHttpState::default();
+        let endpoint = spawn_test_ipc_with_mode(state, TestIpcMode::DuplicateAnalogSelector).await;
+        let previous_home = {
+            let _guard = TEST_ENV_LOCK.lock().unwrap();
+            let previous_home = env::var_os("LOADLYNX_HOME");
+            unsafe { env::set_var("LOADLYNX_HOME", temp.path()) };
+            write_hardware_registry(
+                &temp.path().join("devices.json"),
+                &HardwareRegistry {
+                    default_hardware_id: None,
+                    hardware: vec![SavedHardware {
+                        id: "loadlynx-a1b2c3".to_string(),
+                        name: None,
+                        identity: None,
+                        last_transport: Some(SavedTransport::Usb),
+                        transports: SavedTransports {
+                            usb: Some(SavedUsbTransport {
+                                device: "stale-digital".to_string(),
+                                port_path: Some("mock://esp32s3".to_string()),
+                                devd: Some(endpoint.clone()),
+                            }),
+                            http: None,
+                        },
+                        last_seen_unix_seconds: None,
+                    }],
+                    ..HardwareRegistry::default()
+                },
+            )
+            .unwrap();
+            previous_home
+        };
+
+        let resolved = resolve_analog_target_device(Some("loadlynx-a1b2c3".to_string()), "/unused")
+            .await
+            .expect("analog target");
+
+        {
+            let _guard = TEST_ENV_LOCK.lock().unwrap();
+            match previous_home {
+                Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
+                None => unsafe { env::remove_var("LOADLYNX_HOME") },
+            }
+        }
+        assert_eq!(resolved.devd, endpoint);
+        assert_eq!(resolved.device, "digital-1");
     }
 
     #[test]
@@ -2460,10 +2832,19 @@ mod tests {
     }
 
     #[test]
-    fn analog_real_flash_does_not_require_digital_confirmation() {
+    fn analog_real_operation_requires_confirmation_text() {
         assert_eq!(
-            resolve_flash_confirmation_text(&BoardTarget::Analog, false, None).unwrap(),
+            resolve_flash_confirmation_text(&BoardTarget::Analog, true, None).unwrap(),
             None
+        );
+        assert!(
+            resolve_flash_confirmation_text(
+                &BoardTarget::Analog,
+                false,
+                Some(FLASH_CONFIRMATION_TEXT.to_string())
+            )
+            .unwrap()
+            .is_some()
         );
     }
 
@@ -2494,7 +2875,7 @@ mod tests {
     #[tokio::test]
     async fn dry_run_usb_firmware_operation_does_not_create_cli_lease() {
         let state = TestHttpState::default();
-        let devd = spawn_test_http(state.clone()).await;
+        let devd = spawn_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "mock-loadlynx-devd".to_string(),
             device: "digital-1".to_string(),
@@ -2527,9 +2908,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn real_usb_firmware_operation_creates_cli_lease() {
+    async fn real_usb_firmware_operation_creates_preflash_lease() {
         let state = TestHttpState::default();
-        let devd = spawn_test_http(state.clone()).await;
+        let devd = spawn_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "mock-loadlynx-devd".to_string(),
             device: "digital-1".to_string(),
@@ -2541,7 +2922,7 @@ mod tests {
         post_usb_operation_with_optional_lease(
             &Client::new(),
             &resolved,
-            "/api/v1/devices/digital-1/reset",
+            "/api/v1/devices/digital-1/flash",
             json!({"target": TargetKind::DigitalEsp32s3, "dry_run": false}),
             false,
         )
@@ -2561,6 +2942,43 @@ mod tests {
         assert_eq!(
             payloads[0].get("lease_id").and_then(Value::as_str),
             Some("lease-1")
+        );
+        let lease_payloads = state.lease_payloads.lock().expect("lease payloads lock");
+        assert_eq!(
+            lease_payloads[0]
+                .get("allow_legacy_preflash_identity_fallback")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn real_usb_reset_operation_creates_strict_cli_lease() {
+        let state = TestHttpState::default();
+        let devd = spawn_test_ipc(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "mock-loadlynx-devd".to_string(),
+            device: "digital-1".to_string(),
+            devd,
+            port_path: None,
+            expected_identity_device_id: Some("mock-loadlynx-devd".to_string()),
+        };
+
+        post_usb_operation_with_optional_lease(
+            &Client::new(),
+            &resolved,
+            "/api/v1/devices/digital-1/reset",
+            json!({"target": TargetKind::DigitalEsp32s3, "dry_run": false}),
+            false,
+        )
+        .await
+        .unwrap();
+
+        let lease_payloads = state.lease_payloads.lock().expect("lease payloads lock");
+        assert!(
+            lease_payloads[0]
+                .get("allow_legacy_preflash_identity_fallback")
+                .is_none()
         );
     }
 
@@ -2596,6 +3014,13 @@ mod tests {
             }
             _ => panic!("expected monitor command"),
         }
+    }
+
+    #[test]
+    fn analog_monitor_is_explicitly_unsupported() {
+        let error = reject_unsupported_analog_monitor().unwrap_err().to_string();
+        assert!(error.contains("analog monitor is not supported yet"));
+        assert!(error.contains("digital USB session"));
     }
 
     #[test]
@@ -2817,70 +3242,52 @@ mod tests {
     }
 
     #[test]
-    fn hardware_commands_parse_saved_device_workflows() {
-        let cli = Cli::try_parse_from([
-            "loadlynx",
-            "hardware",
-            "bind",
-            "usb",
-            "--candidate",
-            "digital-1",
-            "--set-default",
-        ])
-        .unwrap();
+    fn device_commands_parse_saved_device_workflows() {
+        let cli = Cli::try_parse_from(["loadlynx", "device", "add", "--name", "Bench"]).unwrap();
         match cli.command {
-            Command::Hardware {
-                command:
-                    HardwareCommand::Bind {
-                        transport,
-                        candidate,
-                        set_default,
-                        ..
-                    },
+            Command::Device {
+                command: DeviceCommand::Add { url, name },
             } => {
-                assert_eq!(transport, SavedTransport::Usb);
-                assert_eq!(candidate.as_deref(), Some("digital-1"));
-                assert!(set_default);
+                assert!(url.is_none());
+                assert_eq!(name.as_deref(), Some("Bench"));
             }
-            _ => panic!("expected hardware bind command"),
+            _ => panic!("expected device add command"),
         }
 
         let cli =
-            Cli::try_parse_from(["loadlynx", "status", "--hardware", "usb-digital-1"]).unwrap();
+            Cli::try_parse_from(["loadlynx", "status", "--device", "loadlynx-abc123"]).unwrap();
         match cli.command {
-            Command::Status { hardware, .. } => {
-                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+            Command::Status { device, .. } => {
+                assert_eq!(device.as_deref(), Some("loadlynx-abc123"));
             }
             _ => panic!("expected status command"),
         }
 
-        let cli = Cli::try_parse_from(["loadlynx", "hardware", "available", "--scan"]).unwrap();
+        let cli = Cli::try_parse_from(["loadlynx", "devices"]).unwrap();
         match cli.command {
-            Command::Hardware {
-                command: HardwareCommand::Available { scan },
-            } => assert!(scan),
-            _ => panic!("expected hardware available command"),
+            Command::Devices => {}
+            _ => panic!("expected devices command"),
         }
 
-        let cli =
-            Cli::try_parse_from(["loadlynx", "hardware", "default", "set", "loadlynx-abc123"])
-                .unwrap();
+        let cli = Cli::try_parse_from(["loadlynx", "device", "use", "--global", "loadlynx-abc123"])
+            .unwrap();
         match cli.command {
-            Command::Hardware {
-                command:
-                    HardwareCommand::Default {
-                        command: HardwareDefaultCommand::Set { id },
-                    },
-            } => assert_eq!(id, "loadlynx-abc123"),
-            _ => panic!("expected hardware default set command"),
+            Command::Device {
+                command: DeviceCommand::Use { id, global, clear },
+            } => {
+                assert_eq!(id.as_deref(), Some("loadlynx-abc123"));
+                assert!(global);
+                assert!(!clear);
+            }
+            _ => panic!("expected device use command"),
         }
 
         let cli = Cli::try_parse_from([
             "loadlynx",
             "cc",
             "2000",
-            "--hardware",
-            "usb-digital-1",
+            "--device",
+            "loadlynx-abc123",
             "--preset-id",
             "2",
             "--disable",
@@ -2889,13 +3296,13 @@ mod tests {
         match cli.command {
             Command::Cc {
                 target_i_ma,
-                hardware,
+                device,
                 preset_id,
                 disable,
                 ..
             } => {
                 assert_eq!(target_i_ma, 2000);
-                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+                assert_eq!(device.as_deref(), Some("loadlynx-abc123"));
                 assert_eq!(preset_id, Some(2));
                 assert!(disable);
             }
@@ -2914,30 +3321,30 @@ mod tests {
             _ => panic!("expected cc command"),
         }
 
-        let cli = Cli::try_parse_from(["loadlynx", "cv", "24500", "--hardware", "usb-digital-1"])
+        let cli = Cli::try_parse_from(["loadlynx", "cv", "24500", "--device", "loadlynx-abc123"])
             .unwrap();
         match cli.command {
             Command::Cv {
                 target_v_mv,
-                hardware,
+                device,
                 ..
             } => {
                 assert_eq!(target_v_mv, 24_500);
-                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+                assert_eq!(device.as_deref(), Some("loadlynx-abc123"));
             }
             _ => panic!("expected cv command"),
         }
 
-        let cli = Cli::try_parse_from(["loadlynx", "cp", "60000", "--hardware", "usb-digital-1"])
+        let cli = Cli::try_parse_from(["loadlynx", "cp", "60000", "--device", "loadlynx-abc123"])
             .unwrap();
         match cli.command {
             Command::Cp {
                 target_p_mw,
-                hardware,
+                device,
                 ..
             } => {
                 assert_eq!(target_p_mw, 60_000);
-                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+                assert_eq!(device.as_deref(), Some("loadlynx-abc123"));
             }
             _ => panic!("expected cp command"),
         }
@@ -2946,8 +3353,8 @@ mod tests {
             "loadlynx",
             "control",
             "set",
-            "--hardware",
-            "usb-digital-1",
+            "--device",
+            "loadlynx-abc123",
             "--enable",
         ])
         .unwrap();
@@ -2955,13 +3362,13 @@ mod tests {
             Command::Control {
                 command:
                     ControlCommand::Set {
-                        hardware,
+                        device,
                         enable,
                         disable,
                         ..
                     },
             } => {
-                assert_eq!(hardware.as_deref(), Some("usb-digital-1"));
+                assert_eq!(device.as_deref(), Some("loadlynx-abc123"));
                 assert!(enable);
                 assert!(!disable);
             }
@@ -2988,8 +3395,8 @@ mod tests {
             ApiSelector {
                 url: Some(url.clone()),
                 device: None,
-                hardware: None,
             },
+            false,
             ModeFirstCommand::Cc,
             2_000,
             None,
@@ -3029,8 +3436,8 @@ mod tests {
             ApiSelector {
                 url: Some(url),
                 device: None,
-                hardware: None,
             },
+            false,
             ModeFirstCommand::Cc,
             2_000,
             None,
@@ -3079,8 +3486,10 @@ mod tests {
     #[test]
     fn cli_errors_are_classified_for_json_automation() {
         assert_eq!(
-            classify_cli_error_code("default hardware is not set; run bind"),
-            "default_hardware_not_set"
+            classify_cli_error_code(
+                "default device is not set; run `loadlynx device use --global <saved-id>`"
+            ),
+            "default_device_not_set"
         );
         assert_eq!(
             classify_cli_error_code(
@@ -3104,7 +3513,7 @@ mod tests {
     #[tokio::test]
     async fn bind_probe_lease_marks_explicit_binding_probe() {
         let state = TestHttpState::default();
-        let devd = spawn_test_http(state.clone()).await;
+        let devd = spawn_test_ipc(state.clone()).await;
 
         create_cli_bind_probe_lease(&Client::new(), &devd, "digital-1")
             .await
@@ -3121,7 +3530,7 @@ mod tests {
     #[tokio::test]
     async fn saved_usb_request_scans_fresh_devd_before_retrying_lease() {
         let state = TestHttpState::default();
-        let devd = spawn_scan_required_test_http(state.clone()).await;
+        let devd = spawn_scan_required_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-stale".to_string(),
@@ -3159,7 +3568,7 @@ mod tests {
     #[tokio::test]
     async fn saved_usb_request_scans_after_identity_mismatch() {
         let state = TestHttpState::default();
-        let devd = spawn_identity_mismatch_then_scan_test_http(state.clone()).await;
+        let devd = spawn_identity_mismatch_then_scan_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-reused".to_string(),
@@ -3241,7 +3650,7 @@ mod tests {
     #[tokio::test]
     async fn artifact_selection_scans_saved_port_after_stale_device_id() {
         let state = TestHttpState::default();
-        let devd = spawn_artifact_scan_required_test_http(state.clone()).await;
+        let devd = spawn_artifact_scan_required_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-stale".to_string(),
@@ -3379,23 +3788,81 @@ mod tests {
     fn selectors_reject_ambiguous_saved_hardware_inputs() {
         let status_err = ensure_one_status_selector(
             Some(&"http://loadlynx.local".to_string()),
-            None,
-            Some(&"bench".to_string()),
+            Some(&"loadlynx-a1b2c3".to_string()),
         )
         .unwrap_err();
         assert!(status_err.to_string().contains("status accepts only one"));
 
         let usb_err = resolve_usb_target(
             Some("digital-1".to_string()),
-            Some("bench".to_string()),
             "http://127.0.0.1:30180",
+            false,
         )
         .unwrap_err();
-        assert!(usb_err.to_string().contains("bind the hardware first"));
+        assert!(
+            usb_err
+                .to_string()
+                .contains("saved device not found: digital-1")
+        );
 
         let mode_err =
             validate_mode_first_targets(ModeFirstCommand::Cp, 0, None, Some(1_000), 10_000, 500)
                 .unwrap_err();
         assert!(mode_err.to_string().contains("target_p_mw"));
+    }
+
+    #[test]
+    fn freeze_api_selector_resolves_interactive_saved_device_once() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_home = env::var_os("LOADLYNX_HOME");
+        let previous_cwd = env::current_dir().unwrap();
+        let project = temp.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+
+        // Tests serialize environment mutation through TEST_ENV_LOCK.
+        unsafe { env::set_var("LOADLYNX_HOME", temp.path()) };
+        env::set_current_dir(&project).unwrap();
+        write_hardware_registry(
+            &temp.path().join("devices.json"),
+            &HardwareRegistry {
+                hardware: vec![SavedHardware {
+                    id: "loadlynx-a1b2c3".to_string(),
+                    name: Some("Bench".to_string()),
+                    identity: None,
+                    last_transport: Some(SavedTransport::Usb),
+                    transports: SavedTransports {
+                        usb: Some(SavedUsbTransport {
+                            device: "digital-1".to_string(),
+                            port_path: Some("mock://esp32s3".to_string()),
+                            devd: None,
+                        }),
+                        http: None,
+                    },
+                    last_seen_unix_seconds: None,
+                }],
+                ..HardwareRegistry::default()
+            },
+        )
+        .unwrap();
+
+        let frozen = freeze_api_selector(
+            ApiSelector {
+                url: None,
+                device: None,
+            },
+            "http://127.0.0.1:30180",
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(frozen.url, None);
+        assert_eq!(frozen.device.as_deref(), Some("loadlynx-a1b2c3"));
+
+        env::set_current_dir(previous_cwd).unwrap();
+        match previous_home {
+            Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
+            None => unsafe { env::remove_var("LOADLYNX_HOME") },
+        }
     }
 }

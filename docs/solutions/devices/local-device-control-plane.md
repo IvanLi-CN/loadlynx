@@ -44,8 +44,8 @@ Use a local-first control plane:
 - Runtime identity must match `build_id`, profile, features and target chip before log decode can be trusted.
 - LAN records and USB records merge by `identity.device_id`, not by URL, port path or display name.
 - `identity.device_id` must be device-unique. Do not use configurable hostnames or aliases as the registry key; keep them as display or network locator metadata.
-- A local CLI should treat discovery IDs as temporary candidate IDs. Persisted hardware should be keyed by stable firmware identity, and ordinary operations should use a saved hardware ID or a saved default instead of reusing a daemon's transient device table.
-- Saved hardware can contain multiple transport locators for the same physical device. Remember the last selected transport per hardware entity, and verify runtime identity before using a saved local USB transport so a stale port or candidate ID cannot silently control a different device.
+- A local CLI should treat discovery IDs as temporary candidate IDs. Persisted devices should be keyed by stable firmware identity, and ordinary operations should use a saved device ID or a saved default instead of reusing a daemon's transient device table.
+- Saved devices can contain multiple transport locators for the same physical device. Remember the last selected transport per device entity, and verify runtime identity before using a saved local USB transport so a stale port or candidate ID cannot silently control a different device.
 - Sensitive frame fields such as WiFi PSK are redacted at trace ingestion, before logs leave the daemon.
 - Keep device-local transports compact and purpose-built. When USB/serial frame budgets are tight, firmware may return a compact operation-specific payload while the daemon expands it back to the public HTTP/Web shape for CLI and browser callers.
 - Treat safe-control CLIs as mode-first entrypoints. `cc`, `cv` and `cp` should each own their target unit, preset/edit/apply path and explicit disable path; do not keep a user-facing `output set` toggle as the primary surface once the mode-specific commands exist.
@@ -57,7 +57,7 @@ Use a local-first control plane:
 ## Guardrails / Reuse Notes
 
 - A devd should be project-specific when the hardware domain has custom targets, safety semantics or firmware identities.
-- Keep `mcu-agentd` or vendor tools as backend executors where useful, but do not expose their raw selector mutation commands through a Web UI.
+- Keep vendor tools as internal backend executors where useful, but do not expose their raw selector mutation commands through a Web UI or bypass the product CLI/devd control plane.
 - Do not persist browser leases in localStorage. A refresh should require a new lease.
 - Do not let compatibility endpoints return arbitrary data when multiple devices are active; require `device_id` or `lease_id`.
 - Do not expose lease IDs as ordinary user CLI parameters. CLI tools should create, heartbeat and release leases internally, keeping the user workflow stable while still preserving daemon-side authorization.
@@ -71,7 +71,7 @@ Use a local-first control plane:
 - Long-running firmware-side waits need matching daemon-side serial timeouts for that operation only. Keep ordinary request timeouts short, then widen timeout windows for explicit wait semantics such as WiFi connection waits.
 - Treat mDNS/DNS-SD as convenience discovery. Always keep manual IP/hostname entry and bounded scan fallback.
 - For dual-MCU devices, represent board targets explicitly instead of flattening them into one generic "serial device".
-- If older firmware exposes only a generic USB identity, block binding and control until firmware provides a stable hardware ID. Do not synthesize a persistent ID from OS port paths or daemon candidate IDs.
+- If older firmware exposes only a generic USB identity, block binding and control until firmware provides a stable device ID. Do not synthesize a persistent ID from OS port paths or daemon candidate IDs.
 - Treat bind-probe leases as a narrow identity-binding capability. They may bypass a project-local approved-port cache only to read identity for an explicitly selected candidate, and must be rejected by ordinary operation checks. Saved USB operation leases must return the expected stable identity; a missing identity field is a failed confirmation.
 - Keep firmware catalog generation outside the daemon. devd should verify manifests and hashes, not invent release metadata.
 - Release installers should verify a `SHA256SUMS` file that covers every release asset, install into a user-owned directory, validate installed binaries, and print PATH guidance without editing profiles automatically.

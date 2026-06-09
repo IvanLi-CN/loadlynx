@@ -119,8 +119,8 @@
   - `just d-build`
   - `cd firmware/digital && cargo +esp build --release --no-default-features --features "enable_analog_5v_on_boot,esp32s3,audio_menu"`
 - HIL:
-  - `just agentd flash digital`
-  - `just agentd monitor digital`
+  - `loadlynx flash digital --device <saved-id> --artifact <artifact-id>`
+  - `loadlynx monitor digital --device <saved-id>`
   - 必要时只读监测 analog 版本与运行状态
 
 ### Quality checks
@@ -130,18 +130,18 @@
 
 ## Visual Evidence
 
-- Baseline monitor: `.mcu-agentd/monitor/digital/20260318_103504.mon.ndjson`
+- Baseline monitor: archived digital monitor `20260318_103504.mon.ndjson`
   - 默认构建仍走旧的单任务整帧 chunked push，日志为 `display: frame ... push complete (dirty_rows=320 dirty_spans=80)`。
   - 稳态 `fast_status ok` 大约落在 `7-10/s`，`uart_rx_err_total=0`。
-- Candidate monitor（16 行 chunk，已回退前）: `.mcu-agentd/monitor/digital/20260318_110028.mon.ndjson`
+- Candidate monitor（16 行 chunk，已回退前）: archived digital monitor `20260318_110028.mon.ndjson`
   - `display_present_ms` 多次落在 `141-151ms`，`display_pending_drops` 快速攀升。
   - 依照规格回退到 `4096B / 8 rows`。
-- Candidate monitor（最终 8 行 chunk）: `.mcu-agentd/monitor/digital/20260318_112042.mon.ndjson`
+- Candidate monitor（最终 8 行 chunk）: archived digital monitor `20260318_112042.mon.ndjson`
   - 启动版本与 `tmp/digital-fw-version.txt` 一致：`src 0x556f8d3862056bfd`。
   - 首帧 `display: frame 1 rendered ... clone_ms=0 render_ms=134 dirty_rows=320 full=true`，对应 `present_ms=69`。
   - 稳态样本：`display_clone_ms=20-22`、`display_present_ms=4-23`（偶发 `130-149` 峰值）、`uart_rx_err_total=0`、`fast_status_ok=325 @ 22.757s`。
   - 与回退前版本相比，clone 成本明显下降，`fast_status ok` 速率提升，`framing_drops` 仍存在但未触发 UART 错误。
-- Candidate monitor（最终 16 行 chunk + 细粒度 dirty rect + pending 背压）: `.mcu-agentd/monitor/digital/20260318_201044.mon.ndjson`
+- Candidate monitor（最终 16 行 chunk + 细粒度 dirty rect + pending 背压）: archived digital monitor `20260318_201044.mon.ndjson`
   - 启动版本与 `tmp/digital-fw-version.txt` 一致：`src 0x9a3d8bca4b4a9db9`。
   - render 基线改为“最新完成帧直接成为 composed 基底”，steady-state 不再做 rect clone-back。
   - `display_pending_drops=0`，`display_clone_ms` 主要落在 `3-11ms`，`display_present_ms` 主要落在 `14-62ms`。
