@@ -226,16 +226,6 @@ pub enum TargetKind {
     Mock,
 }
 
-impl TargetKind {
-    fn board_name(&self) -> Option<&'static str> {
-        match self {
-            Self::DigitalEsp32s3 => Some("digital"),
-            Self::AnalogStm32g431 => Some("analog"),
-            Self::LanHttp | Self::Mock => None,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TargetCandidate {
     pub kind: TargetKind,
@@ -1386,7 +1376,7 @@ async fn reset_device(
     }
     match target {
         TargetKind::DigitalEsp32s3 => run_espflash_reset_digital(&state, &id).await?,
-        TargetKind::AnalogStm32g431 => run_agentd(target.clone(), "reset").await?,
+        TargetKind::AnalogStm32g431 => run_probe_rs_reset_analog(&state, &id).await?,
         TargetKind::LanHttp | TargetKind::Mock => {
             return Err(HttpError::bad_request(
                 "target_unsupported",
@@ -3531,34 +3521,112 @@ async fn run_probe_rs_analog(
     Ok(())
 }
 
+async fn run_probe_rs_reset_analog(state: &AppState, device_id: &str) -> Result<(), HttpError> {
+    let probe_selector = {
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard
+            .devices
+            .get(device_id)
+            .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+        let target = device.analog_target.as_ref().ok_or_else(|| {
+            HttpError::conflict("target_unavailable", "analog target is not available")
+        })?;
+        target
+            .probe_selector
+            .as_deref()
+            .map(canonicalize_probe_rs_selector)
+            .ok_or_else(|| {
+                HttpError::conflict(
+                    "target_probe_missing",
+                    "analog reset requires an approved STM32 probe selector",
+                )
+            })?
+    };
+
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_log(device, "info", "reset", "starting probe-rs reset");
+            push_trace(
+                device,
+                "tx",
+                json!({
+                    "type": "reset",
+                    "tool": "probe-rs",
+                    "chip": ANALOG_PROBE_CHIP,
+                    "probe": probe_selector,
+                    "command": "reset",
+                }),
+            );
+        }
+    }
+
+    let probe_rs = env::var(PROBE_RS_ENV).unwrap_or_else(|_| DEFAULT_PROBE_RS.to_string());
+    let output = Command::new(&probe_rs)
+        .arg("reset")
+        .arg("--chip")
+        .arg(ANALOG_PROBE_CHIP)
+        .arg("--probe")
+        .arg(&probe_selector)
+        .arg("--non-interactive")
+        .arg("--protocol")
+        .arg(ANALOG_PROBE_PROTOCOL)
+        .arg("--speed")
+        .arg(ANALOG_PROBE_SPEED_KHZ.to_string())
+        .stdin(Stdio::null())
+        .output()
+        .await
+        .map_err(|error| HttpError::retryable("probe_rs_launch_failed", error.to_string()))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    {
+        let mut guard = state.inner.lock().expect("state lock");
+        if let Some(device) = guard.devices.get_mut(device_id) {
+            push_trace(
+                device,
+                "rx",
+                json!({
+                    "type": "reset_result",
+                    "tool": probe_rs,
+                    "status": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 2000),
+                    "stderr_tail": tail_text(&stderr, 2000),
+                }),
+            );
+            push_log(
+                device,
+                if output.status.success() {
+                    "info"
+                } else {
+                    "error"
+                },
+                "reset",
+                if output.status.success() {
+                    "probe-rs reset completed"
+                } else {
+                    "probe-rs reset failed"
+                },
+            );
+            if output.status.success() {
+                device.connection = ConnectionState::Disconnected;
+            }
+        }
+    }
+
+    if !output.status.success() {
+        return Err(HttpError::retryable(
+            "probe_rs_failed",
+            format!("probe-rs reset exited with {}", output.status),
+        ));
+    }
+    Ok(())
+}
+
 fn tail_text(text: &str, max_chars: usize) -> String {
     let mut chars = text.chars().rev().take(max_chars).collect::<Vec<_>>();
     chars.reverse();
     chars.into_iter().collect()
-}
-
-async fn run_agentd(target: TargetKind, action: &str) -> Result<(), HttpError> {
-    let Some(board) = target.board_name() else {
-        return Err(HttpError::bad_request(
-            "target_unsupported",
-            "target cannot be handled by mcu-agentd",
-        ));
-    };
-    let status = Command::new("just")
-        .arg("agentd")
-        .arg(action)
-        .arg(board)
-        .stdin(Stdio::null())
-        .status()
-        .await
-        .map_err(|error| HttpError::retryable("agentd_launch_failed", error.to_string()))?;
-    if !status.success() {
-        return Err(HttpError::retryable(
-            "agentd_failed",
-            format!("mcu-agentd {action} {board} exited with {status}"),
-        ));
-    }
-    Ok(())
 }
 
 fn read_manifest(path: &str) -> Result<Vec<FirmwareArtifact>, HttpError> {
@@ -5074,7 +5142,7 @@ mod tests {
     }
 
     #[test]
-    fn default_digital_usb_port_reads_mcu_agentd_selector_record() {
+    fn default_digital_usb_port_reads_historical_metadata_record() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
             default_digital_usb_port_path(dir.path()),

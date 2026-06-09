@@ -40,8 +40,8 @@
 ## 3. 快速验证
 
 1. 构建：优先用 `just d-build`；若直接运行 cargo，则先 `. "$HOME/export-esp.sh"`，再执行 `(cd firmware/digital && cargo +esp build)`。
-2. 烧录：`just agentd flash digital`。
-3. 观察日志：`just agentd monitor digital --reset`，应依次看到系统上电、数字外设就绪、TPS82130 5 V 使能确认等信息。
+2. 烧录：`loadlynx flash digital --device <saved-id> --artifact <artifact-id>`。
+3. 观察日志：`loadlynx monitor digital --device <saved-id> --reset`，应依次看到系统上电、数字外设就绪、TPS82130 5 V 使能确认等信息。
 4. 同时测量跨板使能线，确认延时后由 0 V 拉至 3.3 V，并验证模拟板 5 V 轨启动顺序。
    - 数字板侧：FPC1 Pin 3=`ALG_EN`（串联电阻 R1 后到 MCU GPIO33）。
    - 模拟板侧：FPC1 Pin 14=`5V_EN`（被 `ALG_EN` 驱动后使能 TPS82130 EN）。

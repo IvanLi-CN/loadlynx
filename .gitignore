@@ -1,7 +1,6 @@
 downloads/
 tmp/
 logs/
-logs/agentd/
 # Generated UI mock renders (tracked PNGs for PR review; keep other artifacts ignored)
 docs/assets/usb-pd-settings-panel-rendered/**
 !docs/assets/usb-pd-settings-panel-rendered/
@@ -16,7 +15,6 @@ docs/assets/usb-pd-settings-panel-rendered/**
 .stm32-probe
 .stm32-port
 .esp32-port
-.mcu-agentd/
 
 # Frontend build artifacts and dependencies
 **/node_modules/

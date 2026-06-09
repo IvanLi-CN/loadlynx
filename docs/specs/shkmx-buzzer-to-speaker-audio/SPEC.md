@@ -79,7 +79,7 @@ None
 
 - Unit tests: 若可行，将“提示音/告警音调度策略”抽出为纯逻辑单元并添加 host-side 单测，覆盖优先级与 ack 语义。
 - Integration tests: `just d-build`（或等价命令）可通过，且不引入新的警告级错误（按仓库既有约定）。
-- HIL: 在当前硬件上 `just agentd flash digital` + `just agentd monitor digital` 验证可听到 UI 反馈音与告警音（记录日志片段与结论）。
+- HIL: 在当前硬件上通过 `loadlynx flash digital --device <saved-id> --artifact <artifact-id>` + `loadlynx monitor digital --device <saved-id>` 验证可听到 UI 反馈音与告警音（记录日志片段与结论）。
 
 ### Quality checks
 

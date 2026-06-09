@@ -63,7 +63,7 @@
 - **基础信息**
   - `build version`（analog/digital 各自的 fw version 日志行；确保与本地 tmp/{analog|digital}-fw-version.txt 一致）
     - analog 侧即便未改动也要写明版本字符串与 `tmp/analog-fw-version.txt` 来源；缺失时实验视为无效。
-    - 记录本次 `mcu-agentd` logs/monitor（可用 `just agentd logs all --tail 200 --sessions` 汇总），方便后续对照。
+    - 记录本次 `loadlynx-devd` bounded logs/monitor（通过 `loadlynx monitor ...` 或 CLI/devd 日志导出汇总），方便后续对照。
   - `test duration (s)`
   - `baud` / `FAST_STATUS_HZ`（发送侧频率）
   - `DISPLAY_MIN_FRAME_INTERVAL_MS`、`DISPLAY_CHUNK_ROWS`、`DISPLAY_CHUNK_YIELD_LOOPS`
@@ -98,11 +98,11 @@
 - 构建：
   - `just d-build`（必要时 `FEATURES=... just d-build`）；analog 若也升级：`just a-build`。
 - 烧录：
-  - `just agentd flash digital`；analog：`just agentd flash analog`。
+  - digital：`loadlynx flash digital --device <saved-id> --artifact <artifact-id>`；analog：`loadlynx flash analog --device <saved-id> --artifact <artifact-id>`。
 - 日志采集：
-  - `just agentd monitor digital --reset`（停止时用 Ctrl+C）。
-  - 只看已有日志：`just agentd monitor digital --from-start`。
-  - 双板同时观察：开两个终端分别运行 `just agentd monitor analog --reset` 与 `just agentd monitor digital --reset`。
+  - `loadlynx monitor digital --device <saved-id> --reset`（停止时用 Ctrl+C）。
+  - 只看已有日志：使用 CLI/devd bounded log 读取入口。
+  - 双板同时观察：开两个终端分别运行 `loadlynx monitor analog --device <saved-id> --reset` 与 `loadlynx monitor digital --device <saved-id> --reset`。
 - 关注要点：
   - 先读取 `tmp/digital-fw-version.txt` / `tmp/analog-fw-version.txt`，与日志开头的 version 行比对，确认一致再评估。
   - UART：`UART RX error: FifoOverflowed (total=...)`、DMA panic/nmi、`uhci_dma_rx_chunk...` 之类统计。
