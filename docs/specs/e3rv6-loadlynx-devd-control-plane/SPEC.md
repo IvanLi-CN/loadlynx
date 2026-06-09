@@ -78,6 +78,20 @@ named pipes. `loadlynx` uses this IPC surface and may auto-start a sibling
 `loadlynx-devd serve`; ordinary CLI workflows must not require or expose
 `--devd http://...`.
 
+CLI-to-devd IPC must use an operation envelope, not HTTP-over-IPC. The request
+shape is `{"op": "<domain.operation>", "params": {...}}`, and the response shape
+is `{"ok": true, "result": ...}` or `{"ok": false, "error": ApiError}`. The CLI
+must not send HTTP `method`, URL `path`, headers, status codes, or raw
+`/api/v1/...` routes as the devd IPC protocol. The daemon must dispatch IPC
+operations directly to the control-plane handlers instead of starting an
+internal HTTP server or proxying IPC to `bridge-http`.
+
+HTTP URLs are valid only for explicit LAN device access (`--url`) or saved HTTP
+device transports. If a devd endpoint value starts with `http://` or
+`https://`, the CLI must reject it as an invalid devd endpoint instead of
+falling back to HTTP. This keeps the browser/debug bridge out of ordinary CLI
+hardware workflows.
+
 `loadlynx-devd bridge-http` is the browser/debug bridge. It may serve the Web
 bundle and compatibility API, but it must reject non-loopback binds. GitHub
 Pages and release Web bundles should prefer Web Serial where available and use
@@ -215,6 +229,8 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Given an analog artifact is selected for a digital target, When flash is requested, Then devd returns a non-retryable target mismatch error.
 - Given mDNS is unavailable, When the owner enters `http://loadlynx-xxxxxx.local` and it fails, Then Web offers IP fallback without marking the device as broken.
 - Given CLI receives `--dry-run`, When `flash analog` is called, Then it verifies artifact hashes and target resolution but does not invoke probe-rs/espflash.
+- Given CLI needs local devd, When it sends a request to `loadlynx-devd serve`, Then the wire payload is a native IPC operation envelope and never an HTTP method/path proxy.
+- Given a devd endpoint is configured as `http://...`, When CLI attempts a devd-backed USB workflow, Then CLI rejects that endpoint and does not call the HTTP bridge.
 - Given CLI sets a USB target to 12V PD and enables a 2A CC load, When `status` is read through devd, Then the response shows the PD contract, CC target, output enabled state and measured current without direct CLI serial access.
 - Given CLI disables output, When `status` is read through devd, Then output enabled and analog enable are false and measured current is near zero.
 - Given a USB CDC `set_wifi_config` request contains PSK, When session traces or diagnostics are fetched, Then PSK is redacted.

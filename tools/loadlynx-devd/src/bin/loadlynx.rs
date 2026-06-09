@@ -3,12 +3,12 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use loadlynx_devd::{
-    FLASH_CONFIRMATION_TEXT, IpcHttpRequest, TargetKind, default_ipc_endpoint, ipc_http_request,
+    FLASH_CONFIRMATION_TEXT, IpcRequest, TargetKind, default_ipc_endpoint, ipc_request,
     list_digital_usb_port_candidates, write_default_digital_usb_port,
 };
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use std::{
     collections::HashSet,
     env, fs, io,
@@ -565,6 +565,7 @@ async fn spawn_ipc_devd_process(
     endpoint: &str,
 ) -> Result<tokio::process::Child, Box<dyn std::error::Error + Send + Sync>> {
     let devd_bin = sibling_devd_binary();
+    let manifest = PathBuf::from("tools/loadlynx-devd/Cargo.toml");
     if devd_bin.exists() {
         return TokioCommand::new(&devd_bin)
             .arg("serve")
@@ -583,7 +584,6 @@ async fn spawn_ipc_devd_process(
             });
     }
 
-    let manifest = PathBuf::from("tools/loadlynx-devd/Cargo.toml");
     TokioCommand::new("cargo")
         .arg("run")
         .arg("--manifest-path")
@@ -614,27 +614,194 @@ async fn request_devd_value(
     body: Option<Value>,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     if endpoint.starts_with("http://") || endpoint.starts_with("https://") {
-        let client = Client::new();
-        return request_http_value(&client, endpoint, method, path, body).await;
+        return Err(
+            "devd endpoint must be a native IPC endpoint, not HTTP; use --url or a saved HTTP device transport for LAN devices"
+                .into(),
+        );
     }
 
-    let response = ipc_http_request(
-        endpoint,
-        IpcHttpRequest {
-            method: method.as_str().to_string(),
-            path: path.to_string(),
-            body,
-        },
-    )
-    .await?;
-    if (200..300).contains(&response.status) {
-        Ok(response.body)
+    let request = ipc_request_for_devd_call(method, path, body)?;
+    let response = ipc_request(endpoint, request).await?;
+    if response.ok {
+        Ok(response.result.unwrap_or(Value::Null))
     } else {
-        Err(format!(
-            "devd IPC request failed with HTTP {}: {}",
-            response.status, response.body
-        )
-        .into())
+        let error = response
+            .error
+            .map(|error| serde_json::to_string(&error).unwrap_or_else(|_| "<invalid error>".into()))
+            .unwrap_or_else(|| "unknown devd IPC error".to_string());
+        Err(format!("devd IPC operation failed: {error}").into())
+    }
+}
+
+fn ipc_request_for_devd_call(
+    method: reqwest::Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<IpcRequest, Box<dyn std::error::Error + Send + Sync>> {
+    let (route, query) = path.split_once('?').unwrap_or((path, ""));
+    let mut params = parse_query_params(query)?;
+    let segments = route
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    let op = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["health"]) | ("GET", ["api", "v1", "ping"]) => "health",
+        ("GET", ["api", "v1", "devices"]) => "devices.list",
+        ("POST", ["api", "v1", "devices", "scan"]) => "devices.scan",
+        ("POST", ["api", "v1", "devices", id, "artifact"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "devices.artifact.select".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("POST", ["api", "v1", "devices", id, "flash"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "devices.flash".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("POST", ["api", "v1", "devices", id, "reset"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "devices.reset".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("GET", ["api", "v1", "devices", id, "session"]) => {
+            params.insert("device_id".to_string(), json!(id));
+            "devices.session"
+        }
+        ("POST", ["api", "v1", "serial", "lease"]) => {
+            merge_body_object(&mut params, body)?;
+            return Ok(IpcRequest {
+                op: "serial.lease.create".to_string(),
+                params: Value::Object(params),
+            });
+        }
+        ("POST", ["api", "v1", "serial", "lease", lease_id]) => {
+            params.insert("lease_id".to_string(), json!(lease_id));
+            "serial.lease.heartbeat"
+        }
+        ("DELETE", ["api", "v1", "serial", "lease", lease_id]) => {
+            params.insert("lease_id".to_string(), json!(lease_id));
+            "serial.lease.release"
+        }
+        ("GET", ["api", "v1", "identity"]) => "compat.identity",
+        ("GET", ["api", "v1", "status"]) => "compat.status",
+        ("GET", ["api", "v1", "network"]) => "compat.network",
+        ("GET", ["api", "v1", "serial", "session"]) => "compat.session",
+        ("GET", ["api", "v1", "pd"]) => "compat.pd.get",
+        ("POST", ["api", "v1", "pd"]) | ("PUT", ["api", "v1", "pd"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.pd.post"
+        }
+        ("POST", ["api", "v1", "cc"]) | ("PUT", ["api", "v1", "cc"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.cc"
+        }
+        ("GET", ["api", "v1", "wifi"]) => "compat.wifi.get",
+        ("POST", ["api", "v1", "wifi"]) | ("PUT", ["api", "v1", "wifi"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.wifi.post"
+        }
+        ("DELETE", ["api", "v1", "wifi"]) => "compat.wifi.delete",
+        ("GET", ["api", "v1", "wifi", "credentials"]) => "compat.wifi.credentials",
+        ("GET", ["api", "v1", "control"]) => "compat.control.get",
+        ("POST", ["api", "v1", "control"]) | ("PUT", ["api", "v1", "control"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.control.post"
+        }
+        ("GET", ["api", "v1", "presets"]) => "compat.presets.get",
+        ("POST", ["api", "v1", "presets"]) | ("PUT", ["api", "v1", "presets"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.presets.post"
+        }
+        ("POST", ["api", "v1", "presets", "apply"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.presets.apply"
+        }
+        ("GET", ["api", "v1", "calibration", "profile"]) => "compat.calibration.profile",
+        ("POST", ["api", "v1", "calibration", "apply"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.apply"
+        }
+        ("POST", ["api", "v1", "calibration", "commit"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.commit"
+        }
+        ("POST", ["api", "v1", "calibration", "reset"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.reset"
+        }
+        ("POST", ["api", "v1", "calibration", "mode"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.calibration.mode"
+        }
+        ("POST", ["api", "v1", "soft-reset"]) => {
+            set_body(&mut params, body.as_ref());
+            "compat.soft_reset"
+        }
+        ("GET", ["api", "v1", "diagnostics"]) | ("GET", ["api", "v1", "diagnostics", "export"]) => {
+            "compat.diagnostics.export"
+        }
+        _ => {
+            return Err(format!("unsupported devd IPC route: {} {}", method.as_str(), path).into());
+        }
+    };
+
+    if body.is_some() {
+        set_body(&mut params, body.as_ref());
+    }
+    Ok(IpcRequest {
+        op: op.to_string(),
+        params: Value::Object(params),
+    })
+}
+
+fn parse_query_params(
+    query: &str,
+) -> Result<Map<String, Value>, Box<dyn std::error::Error + Send + Sync>> {
+    let mut params = Map::new();
+    if query.is_empty() {
+        return Ok(params);
+    }
+    let scratch_base = Url::parse("http://loadlynx.invalid/")?;
+    let url = scratch_base.join(&format!("?{query}"))?;
+    for (key, value) in url.query_pairs() {
+        let value = value.into_owned();
+        let value = value
+            .parse::<usize>()
+            .map(|number| json!(number))
+            .unwrap_or_else(|_| json!(value));
+        params.insert(key.into_owned(), value);
+    }
+    Ok(params)
+}
+
+fn merge_body_object(
+    params: &mut Map<String, Value>,
+    body: Option<Value>,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(body) = body else {
+        return Ok(());
+    };
+    let Some(object) = body.as_object() else {
+        return Err("devd IPC route requires an object body".into());
+    };
+    params.extend(object.clone());
+    Ok(())
+}
+
+fn set_body(params: &mut Map<String, Value>, body: Option<&Value>) {
+    if let Some(body) = body {
+        params.insert("body".to_string(), body.clone());
     }
 }
 
@@ -1485,15 +1652,16 @@ mod tests {
     use super::*;
     use axum::{
         Router,
-        extract::{Path, State},
-        http::StatusCode,
+        extract::State,
         routing::{get, post},
     };
+    use loadlynx_devd::IpcResponse;
     use std::sync::{
         Arc, Mutex,
         atomic::{AtomicUsize, Ordering},
     };
     use std::sync::{LazyLock, Mutex as StdMutex};
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 
     static TEST_ENV_LOCK: LazyLock<StdMutex<()>> = LazyLock::new(|| StdMutex::new(()));
 
@@ -1601,246 +1769,178 @@ mod tests {
         format!("http://{addr}")
     }
 
-    async fn spawn_test_http(state: TestHttpState) -> String {
-        async fn create_lease(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> axum::Json<Value> {
-            state.lease_creates.fetch_add(1, Ordering::SeqCst);
-            state
-                .lease_payloads
-                .lock()
-                .expect("lease payloads lock")
-                .push(payload.clone());
-            axum::Json(json!({
+    async fn spawn_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::Normal).await
+    }
+
+    async fn spawn_scan_required_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::ScanRequiredLease).await
+    }
+
+    async fn spawn_artifact_scan_required_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::ScanRequiredArtifact).await
+    }
+
+    async fn spawn_identity_mismatch_then_scan_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::IdentityMismatchThenScan).await
+    }
+
+    #[derive(Clone, Copy)]
+    enum TestIpcMode {
+        Normal,
+        ScanRequiredLease,
+        ScanRequiredArtifact,
+        IdentityMismatchThenScan,
+    }
+
+    async fn spawn_test_ipc_with_mode(state: TestHttpState, mode: TestIpcMode) -> String {
+        let temp_dir = tempfile::tempdir().expect("temp ipc dir");
+        let endpoint = temp_dir.path().join("loadlynx.sock");
+        let endpoint_string = endpoint.to_string_lossy().to_string();
+        let listener = tokio::net::UnixListener::bind(&endpoint).expect("bind test IPC");
+        tokio::spawn(async move {
+            let _keep_dir_alive = temp_dir;
+            loop {
+                let Ok((stream, _peer)) = listener.accept().await else {
+                    break;
+                };
+                let state = state.clone();
+                tokio::spawn(async move {
+                    let (reader, mut writer) = tokio::io::split(stream);
+                    let mut lines = tokio::io::BufReader::new(reader).lines();
+                    while let Ok(Some(line)) = lines.next_line().await {
+                        let response = match serde_json::from_str::<IpcRequest>(&line) {
+                            Ok(request) => handle_test_ipc_request(&state, mode, request),
+                            Err(error) => IpcResponse {
+                                ok: false,
+                                result: None,
+                                error: Some(loadlynx_devd::ApiError {
+                                    code: "ipc_invalid_json".to_string(),
+                                    message: error.to_string(),
+                                    retryable: false,
+                                    details: None,
+                                }),
+                            },
+                        };
+                        let text = serde_json::to_string(&response).expect("test IPC response");
+                        if writer.write_all(text.as_bytes()).await.is_err()
+                            || writer.write_all(b"\n").await.is_err()
+                        {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        endpoint_string
+    }
+
+    fn handle_test_ipc_request(
+        state: &TestHttpState,
+        mode: TestIpcMode,
+        request: IpcRequest,
+    ) -> IpcResponse {
+        let params = request.params;
+        let result = match request.op.as_str() {
+            "serial.lease.create" => test_create_lease(state, mode, params),
+            "serial.lease.heartbeat" | "serial.lease.release" => Ok(json!({"ok": true})),
+            "compat.status" => Ok(json!({"ok": true, "link_up": true})),
+            "devices.scan" => {
+                state.scans.fetch_add(1, Ordering::SeqCst);
+                let id = match mode {
+                    TestIpcMode::Normal => "digital-1",
+                    TestIpcMode::ScanRequiredLease
+                    | TestIpcMode::ScanRequiredArtifact
+                    | TestIpcMode::IdentityMismatchThenScan => "digital-current",
+                };
+                Ok(
+                    json!({"devices": [{"id": id, "digital_target": {"port_path": "mock://esp32s3"}}]}),
+                )
+            }
+            "devices.flash" | "devices.reset" => {
+                state
+                    .operation_payloads
+                    .lock()
+                    .expect("operation payloads lock")
+                    .push(params.clone());
+                Ok(json!({"ok": true, "payload": params}))
+            }
+            "devices.artifact.select" => test_select_artifact(state, mode, params),
+            _ => Err((
+                "ipc_unknown_operation",
+                format!("unknown op {}", request.op),
+            )),
+        };
+
+        match result {
+            Ok(value) => IpcResponse {
+                ok: true,
+                result: Some(value),
+                error: None,
+            },
+            Err((code, message)) => IpcResponse {
+                ok: false,
+                result: None,
+                error: Some(loadlynx_devd::ApiError {
+                    code: code.to_string(),
+                    message,
+                    retryable: false,
+                    details: None,
+                }),
+            },
+        }
+    }
+
+    fn test_create_lease(
+        state: &TestHttpState,
+        mode: TestIpcMode,
+        payload: Value,
+    ) -> Result<Value, (&'static str, String)> {
+        state.lease_creates.fetch_add(1, Ordering::SeqCst);
+        state
+            .lease_payloads
+            .lock()
+            .expect("lease payloads lock")
+            .push(payload.clone());
+        match mode {
+            TestIpcMode::ScanRequiredLease if state.scans.load(Ordering::SeqCst) == 0 => {
+                Err(("device_not_found", "device is not known".to_string()))
+            }
+            TestIpcMode::IdentityMismatchThenScan if state.scans.load(Ordering::SeqCst) == 0 => {
+                Err((
+                    "identity_confirmation_mismatch",
+                    "identity confirmation mismatch".to_string(),
+                ))
+            }
+            _ => Ok(json!({
                 "lease_id": "lease-1",
                 "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
                 "heartbeat_interval_ms": 1000
-            }))
+            })),
         }
-
-        async fn heartbeat_lease() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true}))
-        }
-
-        async fn release_lease() -> StatusCode {
-            StatusCode::NO_CONTENT
-        }
-
-        async fn operation(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> axum::Json<Value> {
-            state
-                .operation_payloads
-                .lock()
-                .expect("operation payloads lock")
-                .push(payload.clone());
-            axum::Json(json!({"ok": true, "payload": payload}))
-        }
-
-        async fn status() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true, "link_up": true}))
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-1", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route("/api/v1/serial/lease", post(create_lease))
-            .route(
-                "/api/v1/serial/lease/{lease_id}",
-                post(heartbeat_lease).delete(release_lease),
-            )
-            .route("/api/v1/status", axum::routing::get(status))
-            .route("/api/v1/devices/scan", post(scan))
-            .route("/api/v1/devices/{device}/flash", post(operation))
-            .route("/api/v1/devices/{device}/reset", post(operation))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
     }
 
-    async fn spawn_scan_required_test_http(state: TestHttpState) -> String {
-        async fn create_lease_after_scan(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> (StatusCode, axum::Json<Value>) {
-            state.lease_creates.fetch_add(1, Ordering::SeqCst);
-            state
-                .lease_payloads
-                .lock()
-                .expect("lease payloads lock")
-                .push(payload.clone());
-            if state.scans.load(Ordering::SeqCst) == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(json!({"code": "device_not_found"})),
-                )
-            } else {
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "lease_id": "lease-1",
-                        "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
-                        "heartbeat_interval_ms": 1000
-                    })),
-                )
-            }
+    fn test_select_artifact(
+        state: &TestHttpState,
+        mode: TestIpcMode,
+        payload: Value,
+    ) -> Result<Value, (&'static str, String)> {
+        let device = payload
+            .get("device_id")
+            .and_then(Value::as_str)
+            .unwrap_or("<missing>")
+            .to_string();
+        state
+            .artifact_devices
+            .lock()
+            .expect("artifact devices lock")
+            .push(device.clone());
+        if matches!(mode, TestIpcMode::ScanRequiredArtifact)
+            && state.scans.load(Ordering::SeqCst) == 0
+        {
+            return Err(("device_not_found", "device is not known".to_string()));
         }
-
-        async fn heartbeat_lease() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true}))
-        }
-
-        async fn release_lease() -> StatusCode {
-            StatusCode::NO_CONTENT
-        }
-
-        async fn status() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true, "link_up": true}))
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route("/api/v1/serial/lease", post(create_lease_after_scan))
-            .route(
-                "/api/v1/serial/lease/{lease_id}",
-                post(heartbeat_lease).delete(release_lease),
-            )
-            .route("/api/v1/status", axum::routing::get(status))
-            .route("/api/v1/devices/scan", post(scan))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    async fn spawn_artifact_scan_required_test_http(state: TestHttpState) -> String {
-        async fn select_artifact_after_scan(
-            State(state): State<TestHttpState>,
-            Path(device): Path<String>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> (StatusCode, axum::Json<Value>) {
-            state
-                .artifact_devices
-                .lock()
-                .expect("artifact devices lock")
-                .push(device.clone());
-            if state.scans.load(Ordering::SeqCst) == 0 {
-                (
-                    StatusCode::NOT_FOUND,
-                    axum::Json(json!({"code": "device_not_found"})),
-                )
-            } else {
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({"ok": true, "device_id": device, "payload": payload})),
-                )
-            }
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route(
-                "/api/v1/devices/{device}/artifact",
-                post(select_artifact_after_scan),
-            )
-            .route("/api/v1/devices/scan", post(scan))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
-    }
-
-    async fn spawn_identity_mismatch_then_scan_test_http(state: TestHttpState) -> String {
-        async fn create_lease_after_scan(
-            State(state): State<TestHttpState>,
-            axum::Json(payload): axum::Json<Value>,
-        ) -> (StatusCode, axum::Json<Value>) {
-            state.lease_creates.fetch_add(1, Ordering::SeqCst);
-            state
-                .lease_payloads
-                .lock()
-                .expect("lease payloads lock")
-                .push(payload.clone());
-            if state.scans.load(Ordering::SeqCst) == 0 {
-                (
-                    StatusCode::CONFLICT,
-                    axum::Json(json!({"code": "identity_confirmation_mismatch"})),
-                )
-            } else {
-                (
-                    StatusCode::OK,
-                    axum::Json(json!({
-                        "lease_id": "lease-1",
-                        "identity_device_id": payload.get("expected_identity_device_id").cloned().unwrap_or(Value::Null),
-                        "heartbeat_interval_ms": 1000
-                    })),
-                )
-            }
-        }
-
-        async fn heartbeat_lease() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true}))
-        }
-
-        async fn release_lease() -> StatusCode {
-            StatusCode::NO_CONTENT
-        }
-
-        async fn status() -> axum::Json<Value> {
-            axum::Json(json!({"ok": true, "link_up": true}))
-        }
-
-        async fn scan(State(state): State<TestHttpState>) -> axum::Json<Value> {
-            state.scans.fetch_add(1, Ordering::SeqCst);
-            axum::Json(
-                json!({"devices": [{"id": "digital-current", "digital_target": {"port_path": "mock://esp32s3"}}]}),
-            )
-        }
-
-        let app = Router::new()
-            .route("/api/v1/serial/lease", post(create_lease_after_scan))
-            .route(
-                "/api/v1/serial/lease/{lease_id}",
-                post(heartbeat_lease).delete(release_lease),
-            )
-            .route("/api/v1/status", axum::routing::get(status))
-            .route("/api/v1/devices/scan", post(scan))
-            .with_state(state);
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-        tokio::spawn(async move {
-            axum::serve(listener, app).await.unwrap();
-        });
-        format!("http://{addr}")
+        Ok(json!({"ok": true, "device_id": device, "payload": payload}))
     }
 
     #[test]
@@ -2182,21 +2282,42 @@ mod tests {
         assert!(initial_devd_endpoints(&cli.command, &cli.ipc).is_empty());
     }
 
-    #[tokio::test]
-    async fn request_devd_value_accepts_legacy_http_endpoint() {
-        let state = TestHttpState::default();
-        let devd = spawn_test_http(state).await;
+    #[test]
+    fn ipc_request_for_devd_call_maps_compat_status_to_native_operation() {
+        let request = ipc_request_for_devd_call(
+            reqwest::Method::GET,
+            "/api/v1/status?device_id=loadlynx-a1b2c3&lease_id=lease-1",
+            None,
+        )
+        .expect("native status IPC request");
 
-        let value = request_devd_value(
-            &devd,
+        assert_eq!(request.op, "compat.status");
+        assert_eq!(
+            request.params.get("device_id").and_then(Value::as_str),
+            Some("loadlynx-a1b2c3")
+        );
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("lease-1")
+        );
+    }
+
+    #[tokio::test]
+    async fn request_devd_value_rejects_http_devd_endpoint() {
+        let error = request_devd_value(
+            "http://127.0.0.1:30180",
             reqwest::Method::POST,
             "/api/v1/devices/digital-1/reset",
             Some(json!({"dry_run": true})),
         )
         .await
-        .unwrap();
+        .expect_err("HTTP devd endpoint must be rejected");
 
-        assert_eq!(value.get("ok").and_then(Value::as_bool), Some(true));
+        assert!(
+            error
+                .to_string()
+                .contains("devd endpoint must be a native IPC endpoint")
+        );
     }
 
     #[test]
@@ -2258,7 +2379,7 @@ mod tests {
     #[tokio::test]
     async fn dry_run_usb_firmware_operation_does_not_create_cli_lease() {
         let state = TestHttpState::default();
-        let devd = spawn_test_http(state.clone()).await;
+        let devd = spawn_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "mock-loadlynx-devd".to_string(),
             device: "digital-1".to_string(),
@@ -2293,7 +2414,7 @@ mod tests {
     #[tokio::test]
     async fn real_usb_firmware_operation_creates_preflash_lease() {
         let state = TestHttpState::default();
-        let devd = spawn_test_http(state.clone()).await;
+        let devd = spawn_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "mock-loadlynx-devd".to_string(),
             device: "digital-1".to_string(),
@@ -2338,7 +2459,7 @@ mod tests {
     #[tokio::test]
     async fn real_usb_reset_operation_creates_strict_cli_lease() {
         let state = TestHttpState::default();
-        let devd = spawn_test_http(state.clone()).await;
+        let devd = spawn_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "mock-loadlynx-devd".to_string(),
             device: "digital-1".to_string(),
@@ -2889,7 +3010,7 @@ mod tests {
     #[tokio::test]
     async fn bind_probe_lease_marks_explicit_binding_probe() {
         let state = TestHttpState::default();
-        let devd = spawn_test_http(state.clone()).await;
+        let devd = spawn_test_ipc(state.clone()).await;
 
         create_cli_bind_probe_lease(&Client::new(), &devd, "digital-1")
             .await
@@ -2906,7 +3027,7 @@ mod tests {
     #[tokio::test]
     async fn saved_usb_request_scans_fresh_devd_before_retrying_lease() {
         let state = TestHttpState::default();
-        let devd = spawn_scan_required_test_http(state.clone()).await;
+        let devd = spawn_scan_required_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-stale".to_string(),
@@ -2944,7 +3065,7 @@ mod tests {
     #[tokio::test]
     async fn saved_usb_request_scans_after_identity_mismatch() {
         let state = TestHttpState::default();
-        let devd = spawn_identity_mismatch_then_scan_test_http(state.clone()).await;
+        let devd = spawn_identity_mismatch_then_scan_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-reused".to_string(),
@@ -3026,7 +3147,7 @@ mod tests {
     #[tokio::test]
     async fn artifact_selection_scans_saved_port_after_stale_device_id() {
         let state = TestHttpState::default();
-        let devd = spawn_artifact_scan_required_test_http(state.clone()).await;
+        let devd = spawn_artifact_scan_required_test_ipc(state.clone()).await;
         let resolved = ResolvedUsbHardware {
             hardware_id: "loadlynx-a1b2c3".to_string(),
             device: "digital-stale".to_string(),

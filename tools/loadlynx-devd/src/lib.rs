@@ -121,17 +121,19 @@ impl IpcConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct IpcHttpRequest {
-    pub method: String,
-    pub path: String,
+pub struct IpcRequest {
+    pub op: String,
     #[serde(default)]
-    pub body: Option<Value>,
+    pub params: Value,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct IpcHttpResponse {
-    pub status: u16,
-    pub body: Value,
+pub struct IpcResponse {
+    pub ok: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ApiError>,
 }
 
 impl DevdConfig {
@@ -371,6 +373,12 @@ pub struct ApiError {
     pub details: Option<Value>,
 }
 
+impl From<HttpError> for ApiError {
+    fn from(error: HttpError) -> Self {
+        error.0
+    }
+}
+
 #[derive(Debug)]
 pub struct HttpError(ApiError, StatusCode);
 
@@ -479,46 +487,37 @@ pub async fn serve_ipc(config: IpcConfig) -> Result<(), Box<dyn std::error::Erro
         .ok();
 
     let state = AppState::new(config.repo_root.clone());
-    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
-    let http_addr = http_listener.local_addr()?;
-    let http_base = format!("http://{http_addr}");
-    let router = router(state, None, false);
-    tokio::spawn(async move {
-        if let Err(error) = axum::serve(http_listener, router).await {
-            tracing::error!("internal devd HTTP dispatcher stopped: {error}");
-        }
-    });
 
     tracing::info!("loadlynx-devd IPC listening on {}", config.endpoint);
 
     #[cfg(windows)]
     {
-        return serve_ipc_windows(config, http_base).await;
+        return serve_ipc_windows(config, state).await;
     }
     #[cfg(not(windows))]
     {
-        serve_ipc_unix(config, http_base).await
+        serve_ipc_unix(config, state).await
     }
 }
 
-pub async fn ipc_http_request(
+pub async fn ipc_request(
     endpoint: &str,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     #[cfg(windows)]
     {
-        return ipc_http_request_windows(endpoint, request).await;
+        return ipc_request_windows(endpoint, request).await;
     }
     #[cfg(not(windows))]
     {
-        return ipc_http_request_unix(endpoint, request).await;
+        return ipc_request_unix(endpoint, request).await;
     }
 }
 
 #[cfg(not(windows))]
 async fn serve_ipc_unix(
     config: IpcConfig,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let path = PathBuf::from(&config.endpoint);
     if let Some(parent) = path.parent() {
@@ -533,9 +532,9 @@ async fn serve_ipc_unix(
             tokio::select! {
                 accepted = listener.accept() => {
                     let (stream, _peer) = accepted?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_unix(stream, http_base).await
+                        handle_ipc_connection_unix(stream, state).await
                     });
                 }
                 _ = sleep(config.idle_timeout) => {
@@ -551,9 +550,9 @@ async fn serve_ipc_unix(
             tokio::select! {
                 accepted = listener.accept() => {
                     let (stream, _peer) = accepted?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_unix(stream, http_base).await
+                        handle_ipc_connection_unix(stream, state).await
                     });
                 }
                 _ = idle_notify.notified() => {}
@@ -587,7 +586,7 @@ async fn remove_stale_unix_socket(path: &PathBuf) -> io::Result<()> {
 #[cfg(windows)]
 async fn serve_ipc_windows(
     config: IpcConfig,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let pipe_name = normalize_named_pipe_name(&config.endpoint);
     let active_connections = Arc::new(AtomicUsize::new(0));
@@ -598,9 +597,9 @@ async fn serve_ipc_windows(
             tokio::select! {
                 connected = server.connect() => {
                     connected?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_windows(server, http_base).await
+                        handle_ipc_connection_windows(server, state).await
                     });
                 }
                 _ = sleep(config.idle_timeout) => {
@@ -615,9 +614,9 @@ async fn serve_ipc_windows(
             tokio::select! {
                 connected = server.connect() => {
                     connected?;
-                    let http_base = http_base.clone();
+                    let state = state.clone();
                     spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_windows(server, http_base).await
+                        handle_ipc_connection_windows(server, state).await
                     });
                 }
                 _ = idle_notify.notified() => {}
@@ -644,19 +643,19 @@ fn spawn_tracked_ipc_connection<F>(
 }
 
 #[cfg(not(windows))]
-async fn ipc_http_request_unix(
+async fn ipc_request_unix(
     endpoint: &str,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     let mut stream = tokio::net::UnixStream::connect(endpoint).await?;
     ipc_roundtrip(&mut stream, request).await
 }
 
 #[cfg(windows)]
-async fn ipc_http_request_windows(
+async fn ipc_request_windows(
     endpoint: &str,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>> {
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>> {
     let pipe_name = normalize_named_pipe_name(endpoint);
     let mut stream = loop {
         match tokio::net::windows::named_pipe::ClientOptions::new().open(&pipe_name) {
@@ -677,8 +676,8 @@ async fn ipc_http_request_windows(
 
 async fn ipc_roundtrip<S>(
     stream: &mut S,
-    request: IpcHttpRequest,
-) -> Result<IpcHttpResponse, Box<dyn std::error::Error + Send + Sync>>
+    request: IpcRequest,
+) -> Result<IpcResponse, Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
@@ -689,44 +688,47 @@ where
     let mut reader = BufReader::new(stream);
     let mut response = String::new();
     reader.read_line(&mut response).await?;
-    let response: IpcHttpResponse = serde_json::from_str(response.trim_end())?;
+    let response: IpcResponse = serde_json::from_str(response.trim_end())?;
     Ok(response)
 }
 
 #[cfg(not(windows))]
 async fn handle_ipc_connection_unix(
     stream: tokio::net::UnixStream,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    handle_ipc_connection(stream, http_base).await
+    handle_ipc_connection(stream, state).await
 }
 
 #[cfg(windows)]
 async fn handle_ipc_connection_windows(
     stream: tokio::net::windows::named_pipe::NamedPipeServer,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    handle_ipc_connection(stream, http_base).await
+    handle_ipc_connection(stream, state).await
 }
 
 async fn handle_ipc_connection<S>(
     stream: S,
-    http_base: String,
+    state: AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (reader, mut writer) = tokio::io::split(stream);
     let mut lines = BufReader::new(reader).lines();
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(120))
-        .build()?;
     while let Some(line) = lines.next_line().await? {
-        let response = match serde_json::from_str::<IpcHttpRequest>(&line) {
-            Ok(request) => proxy_ipc_http(&client, &http_base, request).await,
-            Err(error) => IpcHttpResponse {
-                status: 400,
-                body: json!({"error": {"code": "ipc_invalid_json", "message": error.to_string(), "retryable": false}}),
+        let response = match serde_json::from_str::<IpcRequest>(&line) {
+            Ok(request) => dispatch_ipc_operation(&state, request).await,
+            Err(error) => IpcResponse {
+                ok: false,
+                result: None,
+                error: Some(ApiError {
+                    code: "ipc_invalid_json".to_string(),
+                    message: error.to_string(),
+                    retryable: false,
+                    details: None,
+                }),
             },
         };
         writer
@@ -738,49 +740,246 @@ where
     Ok(())
 }
 
-async fn proxy_ipc_http(
-    client: &reqwest::Client,
-    base: &str,
-    request: IpcHttpRequest,
-) -> IpcHttpResponse {
-    let method = match reqwest::Method::from_bytes(request.method.as_bytes()) {
-        Ok(method) => method,
-        Err(error) => {
-            return IpcHttpResponse {
-                status: 400,
-                body: json!({"error": {"code": "ipc_invalid_method", "message": error.to_string(), "retryable": false}}),
-            };
-        }
-    };
-    let url = match reqwest::Url::parse(base).and_then(|base| base.join(&request.path)) {
-        Ok(url) => url,
-        Err(error) => {
-            return IpcHttpResponse {
-                status: 400,
-                body: json!({"error": {"code": "ipc_invalid_path", "message": error.to_string(), "retryable": false}}),
-            };
-        }
-    };
-    let mut outbound = client.request(method, url);
-    if let Some(body) = request.body {
-        outbound = outbound.json(&body);
-    }
-    match outbound.send().await {
-        Ok(response) => {
-            let status = response.status().as_u16();
-            let text = response.text().await.unwrap_or_default();
-            let body = if text.trim().is_empty() {
-                Value::Null
-            } else {
-                serde_json::from_str(&text).unwrap_or_else(|_| json!({"raw": text}))
-            };
-            IpcHttpResponse { status, body }
-        }
-        Err(error) => IpcHttpResponse {
-            status: 503,
-            body: json!({"error": {"code": "ipc_dispatch_failed", "message": error.to_string(), "retryable": true}}),
+async fn dispatch_ipc_operation(state: &AppState, request: IpcRequest) -> IpcResponse {
+    match dispatch_ipc_operation_result(state.clone(), request).await {
+        Ok(value) => IpcResponse {
+            ok: true,
+            result: Some(value),
+            error: None,
+        },
+        Err(error) => IpcResponse {
+            ok: false,
+            result: None,
+            error: Some(error.into()),
         },
     }
+}
+
+async fn dispatch_ipc_operation_result(
+    state: AppState,
+    request: IpcRequest,
+) -> Result<Value, HttpError> {
+    let params = request.params;
+    match request.op.as_str() {
+        "health" => Ok(health().await.0),
+        "devices.list" => Ok(list_devices(State(state)).await.0),
+        "devices.scan" => Ok(scan_devices(State(state)).await?.0),
+        "devices.artifact.select" => {
+            let id = required_string(&params, "device_id")?;
+            let input: ArtifactSelectRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(select_artifact(State(state), Path(id), Json(input))
+                .await?
+                .0)
+        }
+        "devices.flash" => {
+            let id = required_string(&params, "device_id")?;
+            let input: FlashRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(flash_device(State(state), Path(id), Json(input)).await?.0)
+        }
+        "devices.reset" => {
+            let id = required_string(&params, "device_id")?;
+            let input: ResetRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(reset_device(State(state), Path(id), Some(Json(input)))
+                .await?
+                .0)
+        }
+        "devices.session" => {
+            let id = required_string(&params, "device_id")?;
+            let query: SessionQuery = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(device_session(State(state), Path(id), Query(query))
+                .await?
+                .0)
+        }
+        "serial.lease.create" => {
+            let input: LeaseRequest = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(create_lease(State(state), Json(input)).await?.0)
+        }
+        "serial.lease.heartbeat" => {
+            let lease_id = required_string(&params, "lease_id")?;
+            Ok(heartbeat_lease(State(state), Path(lease_id)).await?.0)
+        }
+        "serial.lease.release" => {
+            let lease_id = required_string(&params, "lease_id")?;
+            Ok(release_lease(State(state), Path(lease_id)).await?.0)
+        }
+        "compat.identity" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_identity(State(state), Query(query)).await?.0)
+        }
+        "compat.status" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_status(State(state), Query(query)).await?.0)
+        }
+        "compat.network" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_network(State(state), Query(query)).await?.0)
+        }
+        "compat.session" => {
+            let query: SessionQuery = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_session(State(state), Query(query)).await?.0)
+        }
+        "compat.pd.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_pd_get(State(state), Query(query)).await?.0)
+        }
+        "compat.pd.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(compat_pd_post(State(state), Query(query), body.to_string())
+                .await?
+                .0)
+        }
+        "compat.cc" => {
+            let (query, body) = compat_query_and_body(params)?;
+            let input: CcRequest = serde_json::from_value(body)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_cc(State(state), Query(query), Json(input)).await?.0)
+        }
+        "compat.wifi.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_wifi_get(State(state), Query(query)).await?.0)
+        }
+        "compat.wifi.credentials" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_wifi_credentials_get(State(state), Query(query))
+                .await?
+                .0)
+        }
+        "compat.wifi.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            let input: WifiSetRequest = serde_json::from_value(body)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_wifi_post(State(state), Query(query), Json(input))
+                .await?
+                .0)
+        }
+        "compat.wifi.delete" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_wifi_delete(State(state), Query(query)).await?.0)
+        }
+        "compat.control.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_control_get(State(state), Query(query)).await?.0)
+        }
+        "compat.control.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_control_post(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.presets.get" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_presets_get(State(state), Query(query)).await?.0)
+        }
+        "compat.presets.post" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_presets_post(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.presets.apply" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_presets_apply(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.profile" => {
+            let query = compat_query_from_params(params)?;
+            Ok(compat_calibration_profile(State(state), Query(query))
+                .await?
+                .0)
+        }
+        "compat.calibration.apply" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_apply(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.commit" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_commit(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.reset" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_reset(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.calibration.mode" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_calibration_mode(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.soft_reset" => {
+            let (query, body) = compat_query_and_body(params)?;
+            Ok(
+                compat_soft_reset(State(state), Query(query), body.to_string())
+                    .await?
+                    .0,
+            )
+        }
+        "compat.diagnostics.export" => {
+            let query: SessionQuery = serde_json::from_value(params)
+                .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))?;
+            Ok(compat_diagnostics_export(State(state), Query(query))
+                .await?
+                .0)
+        }
+        _ => Err(HttpError::bad_request(
+            "ipc_unknown_operation",
+            format!("unknown IPC operation `{}`", request.op),
+        )),
+    }
+}
+
+fn required_string(params: &Value, field: &str) -> Result<String, HttpError> {
+    params
+        .get(field)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .ok_or_else(|| HttpError::bad_request("ipc_invalid_params", format!("missing `{field}`")))
+}
+
+fn compat_query_from_params(params: Value) -> Result<CompatQuery, HttpError> {
+    serde_json::from_value(params)
+        .map_err(|error| HttpError::bad_request("ipc_invalid_params", error.to_string()))
+}
+
+fn compat_query_and_body(params: Value) -> Result<(CompatQuery, Value), HttpError> {
+    let query = CompatQuery {
+        device_id: params
+            .get("device_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        lease_id: params
+            .get("lease_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    };
+    let body = params.get("body").cloned().unwrap_or(Value::Null);
+    Ok((query, body))
 }
 
 #[cfg(windows)]
