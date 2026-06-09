@@ -612,7 +612,7 @@ pub(crate) fn resolve_hardware_transport(
             Ok(ResolvedHardware::Usb(ResolvedUsbHardware {
                 hardware_id: hardware.id.clone(),
                 device: usb.device.clone(),
-                devd: usb.devd.clone().unwrap_or_else(|| default_devd.to_string()),
+                devd: sanitize_usb_devd_endpoint(usb.devd.as_deref(), default_devd),
                 port_path: usb.port_path.clone(),
                 expected_identity_device_id: is_stable_hardware_id(&hardware.id)
                     .then(|| hardware.id.clone()),
@@ -629,6 +629,16 @@ pub(crate) fn resolve_hardware_transport(
                 url: http.url.clone(),
             })
         }
+    }
+}
+
+fn sanitize_usb_devd_endpoint(stored: Option<&str>, default_devd: &str) -> String {
+    match stored {
+        Some(endpoint) if endpoint.starts_with("http://") || endpoint.starts_with("https://") => {
+            default_devd.to_string()
+        }
+        Some(endpoint) => endpoint.to_string(),
+        None => default_devd.to_string(),
     }
 }
 
@@ -1105,6 +1115,35 @@ mod tests {
             ResolvedHardware::Usb(resolved) => {
                 assert_eq!(resolved.hardware_id, "loadlynx-local");
                 assert_eq!(resolved.device, "digital-local");
+            }
+            ResolvedHardware::Http { .. } => panic!("expected usb device"),
+        }
+    }
+
+    #[test]
+    fn saved_usb_legacy_http_devd_endpoint_falls_back_to_default_ipc() {
+        let hardware = SavedHardware {
+            id: "loadlynx-legacy".to_string(),
+            name: None,
+            identity: None,
+            last_transport: Some(SavedTransport::Usb),
+            transports: SavedTransports {
+                usb: Some(SavedUsbTransport {
+                    device: "digital-legacy".to_string(),
+                    port_path: Some("/dev/cu.usbmodem212101".to_string()),
+                    devd: Some("http://127.0.0.1:30180".to_string()),
+                }),
+                http: None,
+            },
+            last_seen_unix_seconds: None,
+        };
+
+        match resolve_hardware_transport(&hardware, SavedTransport::Usb, "/tmp/loadlynx.sock")
+            .unwrap()
+        {
+            ResolvedHardware::Usb(resolved) => {
+                assert_eq!(resolved.devd, "/tmp/loadlynx.sock");
+                assert_eq!(resolved.device, "digital-legacy");
             }
             ResolvedHardware::Http { .. } => panic!("expected usb device"),
         }

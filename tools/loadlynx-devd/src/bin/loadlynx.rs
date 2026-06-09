@@ -695,6 +695,8 @@ fn ipc_request_for_devd_call(
         }
         ("GET", ["api", "v1", "devices", id, "session"]) => {
             params.insert("device_id".to_string(), json!(id));
+            coerce_numeric_query_param(&mut params, "logs_limit")?;
+            coerce_numeric_query_param(&mut params, "trace_limit")?;
             "devices.session"
         }
         ("POST", ["api", "v1", "serial", "lease"]) => {
@@ -794,14 +796,20 @@ fn parse_query_params(
     let scratch_base = Url::parse("http://loadlynx.invalid/")?;
     let url = scratch_base.join(&format!("?{query}"))?;
     for (key, value) in url.query_pairs() {
-        let value = value.into_owned();
-        let value = value
-            .parse::<usize>()
-            .map(|number| json!(number))
-            .unwrap_or_else(|_| json!(value));
-        params.insert(key.into_owned(), value);
+        params.insert(key.into_owned(), json!(value.into_owned()));
     }
     Ok(params)
+}
+
+fn coerce_numeric_query_param(
+    params: &mut Map<String, Value>,
+    field: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(value) = params.get(field).and_then(Value::as_str) else {
+        return Ok(());
+    };
+    params.insert(field.to_string(), json!(value.parse::<usize>()?));
+    Ok(())
 }
 
 fn merge_body_object(
@@ -2425,6 +2433,50 @@ mod tests {
         assert_eq!(
             request.params.get("lease_id").and_then(Value::as_str),
             Some("lease-1")
+        );
+    }
+
+    #[test]
+    fn ipc_query_params_preserve_numeric_ids_as_strings() {
+        let request = ipc_request_for_devd_call(
+            reqwest::Method::GET,
+            "/api/v1/status?device_id=123456&lease_id=789",
+            None,
+        )
+        .expect("native status IPC request");
+
+        assert_eq!(request.op, "compat.status");
+        assert_eq!(
+            request.params.get("device_id").and_then(Value::as_str),
+            Some("123456")
+        );
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("789")
+        );
+    }
+
+    #[test]
+    fn ipc_session_limits_are_coerced_to_numbers() {
+        let request = ipc_request_for_devd_call(
+            reqwest::Method::GET,
+            "/api/v1/devices/digital-1/session?lease_id=123&logs_limit=5&trace_limit=9",
+            None,
+        )
+        .expect("native session IPC request");
+
+        assert_eq!(request.op, "devices.session");
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("123")
+        );
+        assert_eq!(
+            request.params.get("logs_limit").and_then(Value::as_u64),
+            Some(5)
+        );
+        assert_eq!(
+            request.params.get("trace_limit").and_then(Value::as_u64),
+            Some(9)
         );
     }
 
