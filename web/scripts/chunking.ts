@@ -4,13 +4,6 @@ function packageChunkName(id: string): string | null {
   }
 
   if (
-    id.includes("/node_modules/react/") ||
-    id.includes("/node_modules/react-dom/")
-  ) {
-    return "react-vendor";
-  }
-
-  if (
     id.includes("/node_modules/@tanstack/react-router/") ||
     id.includes("/node_modules/@tanstack/router-core/") ||
     id.includes("/node_modules/@tanstack/react-query/") ||

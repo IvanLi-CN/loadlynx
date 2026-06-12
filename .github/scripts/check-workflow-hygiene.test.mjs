@@ -281,6 +281,8 @@ try {
       {
         scripts: {
           "test:e2e": "node scripts/run-playwright.mjs test",
+          "test:preview-smoke":
+            "node scripts/run-playwright.mjs test --config playwright.preview.config.ts",
           "test:e2e:ui": "node scripts/run-playwright.mjs test --ui",
         },
       },
@@ -329,6 +331,9 @@ jobs:
     }),
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
+      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
       ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
@@ -347,6 +352,9 @@ jobs:
     }),
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
+      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
       "web/package-lock.json must not exist; use web/bun.lock as the only lockfile",
       ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
@@ -362,6 +370,7 @@ jobs:
       {
         scripts: {
           "test:e2e": "playwright test",
+          "test:preview-smoke": "playwright test --config playwright.preview.config.ts",
           "test:e2e:ui": "playwright test --ui",
         },
       },
@@ -380,8 +389,12 @@ jobs:
     }),
     [
       'web/package.json: scripts["test:e2e"] must be "node scripts/run-playwright.mjs test"',
+      'web/package.json: scripts["test:preview-smoke"] must be "node scripts/run-playwright.mjs test --config playwright.preview.config.ts"',
       'web/package.json: scripts["test:e2e:ui"] must be "node scripts/run-playwright.mjs test --ui"',
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
+      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
       ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
@@ -398,6 +411,8 @@ jobs:
     steps:
       - name: Install Playwright browsers
         run: node scripts/run-playwright.mjs install --with-deps
+      - name: Production preview smoke
+        run: bun run test:preview-smoke
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -415,6 +430,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Install Playwright browsers
+        run: node scripts/run-playwright.mjs install --with-deps
+      - name: Production preview smoke
+        run: bun run test:preview-smoke
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
@@ -448,6 +467,8 @@ jobs:
       {
         scripts: {
           "test:e2e": "node scripts/run-playwright.mjs test",
+          "test:preview-smoke":
+            "node scripts/run-playwright.mjs test --config playwright.preview.config.ts",
           "test:e2e:ui": "node scripts/run-playwright.mjs test --ui",
         },
       },
@@ -498,6 +519,7 @@ jobs:
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
     ],
   );
 
@@ -525,6 +547,9 @@ jobs:
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
+      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
       ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );

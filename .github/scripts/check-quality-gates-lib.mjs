@@ -329,6 +329,15 @@ export async function validateWebToolingContracts({
     );
   }
 
+  if (
+    scripts["test:preview-smoke"] !==
+    "node scripts/run-playwright.mjs test --config playwright.preview.config.ts"
+  ) {
+    failures.push(
+      'web/package.json: scripts["test:preview-smoke"] must be "node scripts/run-playwright.mjs test --config playwright.preview.config.ts"',
+    );
+  }
+
   if (scripts["test:e2e:ui"] !== "node scripts/run-playwright.mjs test --ui") {
     failures.push(
       'web/package.json: scripts["test:e2e:ui"] must be "node scripts/run-playwright.mjs test --ui"',
@@ -344,6 +353,30 @@ export async function validateWebToolingContracts({
   if (/\bbunx\s+playwright\s+install\b/.test(webCheckWorkflow)) {
     failures.push(
       ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+    );
+  }
+
+  if (!webCheckWorkflow.includes("run: bun run test:preview-smoke")) {
+    failures.push(
+      ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
+    );
+  }
+
+  if (!webPagesWorkflow.includes("run: node scripts/run-playwright.mjs install --with-deps")) {
+    failures.push(
+      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
+    );
+  }
+
+  if (/\bbunx\s+playwright\s+install\b/.test(webPagesWorkflow)) {
+    failures.push(
+      ".github/workflows/web-pages.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
+    );
+  }
+
+  if (!webPagesWorkflow.includes("run: bun run test:preview-smoke")) {
+    failures.push(
+      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
     );
   }
 

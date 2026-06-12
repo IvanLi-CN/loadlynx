@@ -60,3 +60,4 @@
 | y4sf4 | Digital Display PSRAM/DMA Pipeline | active | `y4sf4-display-psram-dma-pipeline/SPEC.md` | `y4sf4-display-psram-dma-pipeline/IMPLEMENTATION.md` | PR #71；PSRAM 专用 framebuffer arena、多缓冲 present、真实 present-FPS、细粒度 dirty rect、pending 背压 |
 | br7kq | LoadLynx Backup & Restore | active | `br7kq-loadlynx-backup-restore/SPEC.md` | `br7kq-loadlynx-backup-restore/IMPLEMENTATION.md` | CLI/Web JSON backup restore；恢复前强制关闭负载；WiFi PSK 明文备份 |
 | n9v2q | Web Console Cyberpunk Redesign | active | `n9v2q-web-cyberpunk-redesign/SPEC.md` | `n9v2q-web-cyberpunk-redesign/IMPLEMENTATION.md` | 全 Web Console 赛博朋克重做；移除 daisyUI/Iconify；新增 shadcn 风格组件与 i18n |
+| n5nwv | Web production preview smoke 与 chunk-cycle regression | active | `n5nwv-web-production-preview-smoke/SPEC.md` | `n5nwv-web-production-preview-smoke/IMPLEMENTATION.md` | 修复 production-only 首屏崩溃；新增 dist preview smoke 并接入 web-check / web-pages |

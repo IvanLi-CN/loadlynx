@@ -90,6 +90,10 @@ jobs:
         working-directory: web
         run: bun run check:bundle:app
 
+      - name: Production preview smoke
+        working-directory: web
+        run: bun run test:preview-smoke
+
       - name: Unit tests
         working-directory: web
         run: bun run test:unit

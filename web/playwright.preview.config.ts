@@ -1,18 +1,18 @@
 import { defineConfig } from "@playwright/test";
 import { localhostUrl, resolvePort } from "./scripts/ports";
 
-const webDevPort = resolvePort("webDev").port;
+const webPreviewPort = resolvePort("webPreview").port;
 
 export default defineConfig({
   testDir: "./tests/e2e",
-  grepInvert: /@preview-smoke/,
+  grep: /@preview-smoke/,
   use: {
-    baseURL: localhostUrl(webDevPort),
+    baseURL: localhostUrl(webPreviewPort),
     trace: "on-first-retry",
   },
   webServer: {
-    command: "bun run dev",
-    url: localhostUrl(webDevPort),
+    command: "bun run preview",
+    url: localhostUrl(webPreviewPort),
     reuseExistingServer: false,
     timeout: 120 * 1000,
   },
