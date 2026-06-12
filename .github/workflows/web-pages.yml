@@ -68,6 +68,10 @@ jobs:
           fi
           bun ci
 
+      - name: Install Playwright browsers
+        working-directory: web
+        run: node scripts/run-playwright.mjs install --with-deps
+
       - name: Build web app
         working-directory: web
         run: bun run build
@@ -75,6 +79,10 @@ jobs:
       - name: Check app bundle budgets
         working-directory: web
         run: bun run check:bundle:app
+
+      - name: Production preview smoke
+        working-directory: web
+        run: bun run test:preview-smoke
 
       - name: Add SPA 404 page
         working-directory: web

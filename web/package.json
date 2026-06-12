@@ -11,6 +11,7 @@
     "check:bundle:storybook": "bun scripts/check-bundles.ts storybook",
     "test:unit": "vitest --config vitest.config.ts --project=unit --run",
     "test:e2e": "node scripts/run-playwright.mjs test",
+    "test:preview-smoke": "node scripts/run-playwright.mjs test --config playwright.preview.config.ts",
     "test:e2e:ui": "node scripts/run-playwright.mjs test --ui",
     "storybook": "STORYBOOK_PORT=$(bun scripts/ports.ts print storybook) && storybook dev -p $STORYBOOK_PORT --exact-port",
     "build-storybook": "storybook build",

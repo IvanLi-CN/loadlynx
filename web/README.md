@@ -86,6 +86,7 @@ Core scripts:
 - `bun run check:bundle:app` – verify built app JS chunks stay within the app bundle budget.
 - `bun run check:bundle:storybook` – verify Storybook preview chunks stay within budget and separately cap the framework mocker runtime.
 - `bun run preview` – preview the built app.
+- `bun run test:preview-smoke` – serve the built `dist` bundle with `vite preview` and fail on uncaught runtime errors or console errors during first paint.
 - `bun run lint` – run `biome lint .`.
 - `bun run format` – run `biome format --write .`.
 - `bun run check` – run `biome check .`.
@@ -98,6 +99,7 @@ Core scripts:
 ## Bundle budgets
 
 - App build budget: every emitted `dist/assets/*.js` chunk must stay at or below `250 kB`.
+- Production preview smoke: after `bun run build`, `bun run test:preview-smoke` must prove the built `dist` bundle mounts without uncaught `pageerror` or `console error`.
 - Storybook preview budget: every emitted `storybook-static/assets/*.js` chunk must stay at or below `250 kB`.
 - Storybook framework runtime budget: `storybook-static/vite-inject-mocker-entry.js` is tracked separately with a `1200 kB` cap because it is injected by Storybook's Vitest mocker runtime rather than by LoadLynx application code.
 - `bun run test:storybook:ci` enforces the Storybook budget automatically after `build-storybook`.
