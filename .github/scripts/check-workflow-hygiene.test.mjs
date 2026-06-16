@@ -4,6 +4,7 @@ import {
   parseWorkflowMetadata,
   validateCurrentTruthDocs,
   validateHttpSurfaceContracts,
+  validateReleasedCliDocs,
   validateWebToolingContracts,
   validateWorkflowHygiene,
 } from "./check-quality-gates-lib.mjs";
@@ -796,6 +797,61 @@ export async function updateControl(baseUrl: string, payload: ControlUpdateReque
         'web/src/api/client-backup.ts: exportDiagnostics must keep "/api/v1/diagnostics/export" as the primary client path',
       ],
     );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+{
+  const tempDir = await mkdtemp(join(tmpdir(), "check-released-cli-docs-"));
+
+  try {
+    const readmePath = join(tempDir, "README.md");
+    const userSkillPath = join(tempDir, "SKILL.md");
+    const specPath = join(tempDir, "SPEC.md");
+    const implementationPath = join(tempDir, "IMPLEMENTATION.md");
+    const historyPath = join(tempDir, "HISTORY.md");
+
+    await writeFile(
+      readmePath,
+      [
+        "Current stable host tools expose loadlynx wifi show|set|clear.",
+        "Use loadlynx pd set for PD stimulus.",
+        "Use loadlynx cv <target_v_mv> for voltage-clamp stimulus.",
+        "The local daemon command is loadlynx-devd serve.",
+        "The browser/debug bridge is bridge-http.",
+        "## External USB-C Source Validation",
+      ].join("\n"),
+    );
+    await writeFile(userSkillPath, "Released user skill uses saved devices.\n");
+    await writeFile(specPath, "External DUT diagnostics are the primary verdict.\n");
+    await writeFile(implementationPath, "Release v0.5.1 docs are aligned.\n");
+    await writeFile(historyPath, "No project-specific external DUT name is embedded.\n");
+
+    const docs = [
+      { label: "README.md", path: new URL(`file://${readmePath}`) },
+      { label: "SKILL.md", path: new URL(`file://${userSkillPath}`) },
+      { label: "SPEC.md", path: new URL(`file://${specPath}`) },
+      { label: "IMPLEMENTATION.md", path: new URL(`file://${implementationPath}`) },
+      { label: "HISTORY.md", path: new URL(`file://${historyPath}`) },
+    ];
+
+    assert.deepEqual(await validateReleasedCliDocs({ docs }), []);
+
+    await writeFile(
+      userSkillPath,
+      [
+        `Do not use --devd ${"http://"}127.0.0.1:30180.`,
+        `The current CLI does not ${"implement"} WiFi.`,
+        `${"Isola"}${"Purr"}-specific flow.`,
+      ].join("\n"),
+    );
+
+    assert.deepEqual(await validateReleasedCliDocs({ docs }), [
+      "SKILL.md: forbidden released CLI drift phrase present (project-specific external DUT name)",
+      "SKILL.md: forbidden released CLI drift phrase present (ordinary user CLI daemon URL path)",
+      "SKILL.md: forbidden released CLI drift phrase present (stale current CLI WiFi absence claim)",
+    ]);
   } finally {
     await rm(tempDir, { recursive: true, force: true });
   }

@@ -80,7 +80,7 @@ just loadlynx usb-port set digital <path>
 ## devd, CLI, And USB CDC
 
 - Use `loadlynx-devd` for CLI/devd USB CDC control-plane work; do not route that path through external MCU daemons.
-- CLI/devd is native IPC-first. The CLI should auto-start a sibling `loadlynx-devd serve` on the default Unix socket / Windows named pipe when needed. `--ipc` is an endpoint override for explicit multi-instance or debugging scenarios, not part of normal user or agent commands. Do not reintroduce ordinary `--devd http://...` CLI workflows.
+- CLI/devd is native IPC-first. The CLI should auto-start a sibling `loadlynx-devd serve` on the default Unix socket / Windows named pipe when needed. `--ipc` is an endpoint override for explicit multi-instance or debugging scenarios, not part of normal user or agent commands. Do not reintroduce ordinary daemon-URL CLI workflows.
 - `loadlynx-devd bridge-http` is the browser/debug bridge only, must bind loopback, and is the path used by local Web development or release/GitHub Pages browser bridge fallback.
 - Run the CLI through Just during source development:
 
