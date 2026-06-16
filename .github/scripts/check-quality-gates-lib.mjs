@@ -698,6 +698,57 @@ export async function validateReleaseDecisionDocs({
     }
   }
 
+  const requiredDocumentSnippets = [
+    {
+      label: "README.md",
+      snippets: ["skills/loadlynx-release-decision/SKILL.md", "type:patch` or higher"],
+    },
+    {
+      label: "AGENTS.md",
+      snippets: ["skills/loadlynx-release-decision/SKILL.md", "type:patch` or higher"],
+    },
+    {
+      label: "skills/loadlynx-developer-operations/SKILL.md",
+      snippets: ["skills/loadlynx-release-decision/SKILL.md"],
+    },
+    {
+      label: "skills/loadlynx-release-decision/SKILL.md",
+      snippets: [
+        "type:none` is an explicit no-release decision",
+        "type:patch` or higher",
+        "workflow_dispatch",
+        "pr_number=<PR>",
+      ],
+    },
+    {
+      label: "docs/specs/dvfnn-pr-label-release-flow/SPEC.md",
+      snippets: [
+        "Release Decision Matrix",
+        "skills/loadlynx-release-decision/SKILL.md",
+        "type:patch` or higher",
+      ],
+    },
+    {
+      label: "docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md",
+      snippets: ["v0.5.2"],
+    },
+    {
+      label: "docs/specs/dvfnn-pr-label-release-flow/HISTORY.md",
+      snippets: ["v0.5.2", "pr_number=<PR>"],
+    },
+  ];
+
+  for (const { label, snippets } of requiredDocumentSnippets) {
+    const source = byLabel.get(label) ?? "";
+    for (const snippet of snippets) {
+      if (!source.includes(snippet)) {
+        failures.push(
+          `${label}: required release-decision phrase missing: ${JSON.stringify(snippet)}`,
+        );
+      }
+    }
+  }
+
   const skill = byLabel.get("skills/loadlynx-release-decision/SKILL.md") ?? "";
   if (!/^name: loadlynx-release-decision$/m.test(skill)) {
     failures.push("skills/loadlynx-release-decision/SKILL.md: missing skill name frontmatter");

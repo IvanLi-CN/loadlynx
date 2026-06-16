@@ -53,7 +53,8 @@ gh pr view <pr-number> --repo IvanLi-CN/loadlynx --json state,mergedAt,mergeComm
 gh pr edit <pr-number> --repo IvanLi-CN/loadlynx --remove-label type:none --add-label type:patch
 ```
 
-3. Dispatch the release workflow against the source PR:
+3. Dispatch the release workflow against the source PR with `workflow_dispatch`
+   input `pr_number=<PR>`:
 
 ```bash
 gh workflow run release.yml --repo IvanLi-CN/loadlynx -f pr_number=<pr-number>

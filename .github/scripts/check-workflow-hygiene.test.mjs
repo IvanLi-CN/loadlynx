@@ -871,8 +871,14 @@ export async function updateControl(baseUrl: string, payload: ControlUpdateReque
     const implementationPath = join(tempDir, "IMPLEMENTATION.md");
     const historyPath = join(tempDir, "HISTORY.md");
 
-    await writeFile(readmePath, "See skills/loadlynx-release-decision/SKILL.md.\n");
-    await writeFile(agentsPath, "Use skills/loadlynx-release-decision/SKILL.md.\n");
+    await writeFile(
+      readmePath,
+      "See skills/loadlynx-release-decision/SKILL.md; use type:patch` or higher.\n",
+    );
+    await writeFile(
+      agentsPath,
+      "Use skills/loadlynx-release-decision/SKILL.md and type:patch` or higher.\n",
+    );
     await writeFile(
       skillPath,
       `---
@@ -895,10 +901,10 @@ Use workflow_dispatch with pr_number=<PR>.
     await writeFile(developerSkillPath, "Use skills/loadlynx-release-decision/SKILL.md.\n");
     await writeFile(
       specPath,
-      "Release Decision Matrix: owner-facing/user-facing operation contract uses type:patch` or higher.\n",
+      "Release Decision Matrix: skills/loadlynx-release-decision/SKILL.md says owner-facing/user-facing operation contract uses type:patch` or higher.\n",
     );
     await writeFile(implementationPath, "Backfill produced v0.5.2.\n");
-    await writeFile(historyPath, "workflow_dispatch pr_number=<PR> is the backfill path.\n");
+    await writeFile(historyPath, "workflow_dispatch pr_number=<PR> is the backfill path for v0.5.2.\n");
 
     const docs = [
       { label: "README.md", path: new URL(`file://${readmePath}`) },
@@ -931,10 +937,20 @@ Use workflow_dispatch with pr_number=<PR>.
 
     assert.deepEqual(await validateReleaseDecisionDocs({ docs }), []);
 
-    await writeFile(agentsPath, "docs-only operation contract can stay type:none.\n");
+    await writeFile(agentsPath, "Use type:patch` or higher.\n");
+
+    assert.deepEqual(await validateReleaseDecisionDocs({ docs }), [
+      'AGENTS.md: required release-decision phrase missing: "skills/loadlynx-release-decision/SKILL.md"',
+    ]);
+
+    await writeFile(
+      agentsPath,
+      "Use skills/loadlynx-release-decision/SKILL.md; docs-only operation contract can stay type:none.\n",
+    );
     await writeFile(skillYamlPath, 'interface:\n  default_prompt: "Use release decision."\n');
 
     assert.deepEqual(await validateReleaseDecisionDocs({ docs }), [
+      'AGENTS.md: required release-decision phrase missing: "type:patch` or higher"',
       "skills/loadlynx-release-decision/agents/openai.yaml: default_prompt must mention $loadlynx-release-decision",
       "AGENTS.md: forbidden release decision drift phrase present (operation-contract docs-only no-release default)",
     ]);
