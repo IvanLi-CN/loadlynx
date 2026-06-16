@@ -553,3 +553,85 @@ export async function validateHttpSurfaceContracts({
 
   return failures;
 }
+
+export async function validateReleasedCliDocs({
+  docs = [
+    {
+      label: "README.md",
+      path: new URL("../../README.md", import.meta.url),
+    },
+    {
+      label: "skills/loadlynx-user-operations/SKILL.md",
+      path: new URL("../../skills/loadlynx-user-operations/SKILL.md", import.meta.url),
+    },
+    {
+      label: "docs/specs/fhpfk-loadlynx-operational-skills/SPEC.md",
+      path: new URL("../../docs/specs/fhpfk-loadlynx-operational-skills/SPEC.md", import.meta.url),
+    },
+    {
+      label: "docs/specs/fhpfk-loadlynx-operational-skills/IMPLEMENTATION.md",
+      path: new URL("../../docs/specs/fhpfk-loadlynx-operational-skills/IMPLEMENTATION.md", import.meta.url),
+    },
+    {
+      label: "docs/specs/fhpfk-loadlynx-operational-skills/HISTORY.md",
+      path: new URL("../../docs/specs/fhpfk-loadlynx-operational-skills/HISTORY.md", import.meta.url),
+    },
+  ],
+} = {}) {
+  const failures = [];
+  const joined = [];
+
+  for (const doc of docs) {
+    const source = await readFile(doc.path, "utf8");
+    joined.push([doc.label, source]);
+  }
+
+  const allText = joined.map(([, source]) => source).join("\n");
+  const requiredSnippets = [
+    "loadlynx wifi show|set|clear",
+    "loadlynx pd set",
+    "loadlynx cv <target_v_mv>",
+    "loadlynx-devd serve",
+    "bridge-http",
+    "External USB-C Source Validation",
+  ];
+
+  for (const snippet of requiredSnippets) {
+    if (!allText.includes(snippet)) {
+      failures.push(`released CLI docs: required phrase missing: ${JSON.stringify(snippet)}`);
+    }
+  }
+
+  const forbiddenPatterns = [
+    {
+      label: "project-specific external DUT name",
+      pattern: /\b[Ii]sola[Pp]urr\b/,
+    },
+    {
+      label: "ordinary user CLI daemon URL path",
+      pattern: /--devd\s+http/i,
+    },
+    {
+      label: "stale current CLI WiFi absence claim",
+      pattern: /current CLI[\s\S]{0,80}(does not implement|lacks|没有|無).*WiFi/i,
+    },
+    {
+      label: "stale no WiFi command claim",
+      pattern: /\bno (released )?`?loadlynx wifi/i,
+    },
+    {
+      label: "stale WiFi implementation milestone",
+      pattern: /WiFi 配置仍是实现门槛|CLI WiFi 配置仍是实现门槛|没有 WiFi 配置命令/,
+    },
+  ];
+
+  for (const [label, source] of joined) {
+    for (const { label: ruleLabel, pattern } of forbiddenPatterns) {
+      if (pattern.test(source)) {
+        failures.push(`${label}: forbidden released CLI drift phrase present (${ruleLabel})`);
+      }
+    }
+  }
+
+  return failures;
+}

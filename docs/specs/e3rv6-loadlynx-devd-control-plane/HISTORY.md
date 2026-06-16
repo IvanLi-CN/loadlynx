@@ -30,7 +30,7 @@ Final preset-list HIL showed a repeatable USB Serial/JTAG failure mode where the
 
 ## IPC-first host tools and Web Serial release path
 
-The host tools boundary changed to make released CLI/devd safer for ordinary users. `loadlynx-devd serve` is now an IPC daemon used by the CLI, while `loadlynx-devd bridge-http` is the loopback-only browser/debug bridge. This is a minor breaking change because ordinary CLI workflows no longer expose `--devd http://...`; the CLI uses `--ipc` and can auto-start a sibling devd process.
+The host tools boundary changed to make released CLI/devd safer for ordinary users. `loadlynx-devd serve` is now an IPC daemon used by the CLI, while `loadlynx-devd bridge-http` is the loopback-only browser/debug bridge. This is a minor breaking change because ordinary CLI workflows no longer expose the legacy daemon-URL flag; the CLI uses `--ipc` and can auto-start a sibling devd process.
 
 Web Serial moved from follow-up idea to official browser path for GitHub Pages and release Web bundles. The browser flash path uses release firmware catalog/assets, in-browser SHA-256 verification, typed confirmation, optional identity match, non-project firmware acknowledgement and post-flash identity capture. Identity/profile memory is allowed, but OS serial port paths are not persisted.
 

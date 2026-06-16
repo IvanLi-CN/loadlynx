@@ -35,7 +35,13 @@ Real ESP32-S3 flash instructions now require first-flash/non-project gates acros
 
 ## Obsolete host tools gate
 
-The v0.3.0 stable release shipped before the IPC host-tools boundary and originally missed `SHA256SUMS`, which broke the installer path. The release checksum was backfilled without replacing binaries, but the user skill does not support the old `--devd http://...` CLI surface. Installed host tools must use IPC-backed CLI/devd access and expose `loadlynx-devd bridge-http`; otherwise the correct user action is to upgrade to an IPC-capable stable release or escalate to release maintenance.
+The v0.3.0 stable release shipped before the IPC host-tools boundary and originally missed `SHA256SUMS`, which broke the installer path. The release checksum was backfilled without replacing binaries, but the user skill does not support the old daemon-URL CLI surface. Installed host tools must use IPC-backed CLI/devd access and expose `loadlynx-devd bridge-http`; otherwise the correct user action is to upgrade to an IPC-capable stable release or escalate to release maintenance.
+
+## Released WiFi and external validation boundary
+
+The stable host-tools surface now includes `loadlynx wifi show|set|clear`, so user-facing instructions may describe WiFi as a released CLI workflow. The installed-help gate remains mandatory because users can still have older host tools on PATH; a missing `wifi` command is an installed-version problem, not permission to use raw HTTP or Web UI writes.
+
+LoadLynx may be used as a generic validation sink for external USB-C source devices, but LoadLynx-owned documentation must describe that path without embedding another project's workflow. The reusable boundary is: saved LoadLynx device target, USB/devd transport for writes, `pd set` for PD sink stimulus, `cv` for voltage-clamp load stimulus, and external DUT diagnostics as the primary current-limit verdict with LoadLynx telemetry as auxiliary evidence.
 
 ## Documentation Model
 

@@ -76,7 +76,7 @@ endpoint, serves JSONL IPC requests, auto-exits after idle timeout, and does
 not expose ordinary browser HTTP. macOS/Linux use Unix sockets and Windows uses
 named pipes. `loadlynx` uses this IPC surface and may auto-start a sibling
 `loadlynx-devd serve`; ordinary CLI workflows must not require or expose
-`--devd http://...`.
+the legacy daemon-URL CLI flag.
 
 CLI-to-devd IPC must use an operation envelope, not HTTP-over-IPC. The request
 shape is `{"op": "<domain.operation>", "params": {...}}`, and the response shape
