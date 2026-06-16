@@ -5,6 +5,7 @@
 - `loadlynx-user-operations` now assumes an end-user machine and covers released host-tools installation, saved-device-first CLI access, USB/devd preference, HTTP fallback, GitHub Release firmware download, released CLI flash workflows, CLI device memory, released WiFi commands, and external USB-C source validation without requiring a source checkout.
 - `loadlynx-developer-operations` now requires project checkout detection before repo commands, allows cloning `https://github.com/IvanLi-CN/loadlynx.git` only when source work is needed, and keeps Just/source/HIL workflows behind developer context and hardware approval gates.
 - Both skill folders include `SKILL.md` and `agents/openai.yaml`.
+- `loadlynx-release-decision` is the release-label companion skill for operation-skill changes. It keeps `type:none` decisions out of user-facing operation contract changes and documents merged-PR release backfill.
 - `AGENTS.md` routes released CLI-only user hardware operations to the user skill and source/Just/devd/firmware/HIL work to the developer skill.
 - Official release workflows build platform host-tools archives before creating a GitHub Release. Each archive includes `loadlynx-devd`, `loadlynx`, and a short package README. The release also publishes installer scripts, firmware catalog/assets, Web bundle, and `SHA256SUMS` covering every release asset.
 - The user skill and project README now point normal USB bridge setup at released host tools installed by `install-loadlynx-host.sh` / `install-loadlynx-host.ps1` or manually verified against `SHA256SUMS`, instead of source builds.
@@ -30,6 +31,7 @@
 - Release workflow validation includes local host-tools release build and YAML/diff checks.
 - `cargo test --manifest-path tools/loadlynx-devd/Cargo.toml --locked` covers CLI hardware registry parsing, schema migration, default hardware, transport selection, bind-probe lease restriction, saved USB identity confirmation, fresh devd scan-before-lease retry, path selection, IPC/CLI behavior, lease handling and flash gates.
 - `npm run test:workflow-hygiene` covers documentation drift guards for the released CLI/user skill surface: WiFi, `pd set`, `cv`, `loadlynx-devd serve`, `bridge-http`, stale ordinary daemon URL wording, and banned project-specific external DUT names.
+- `npm run test:workflow-hygiene` also covers the release decision skill and README/AGENTS references so operation-skill release impact remains discoverable.
 - Review convergence validation passed with `cargo fmt --manifest-path tools/loadlynx-devd/Cargo.toml --all`, `cargo test --manifest-path tools/loadlynx-devd/Cargo.toml`, `git diff --check`, and `tools/loadlynx-devd/install/install-loadlynx-host.sh --dry-run`. PowerShell parser validation was not available in the local environment.
 
 ## Specification Companion Notes
@@ -60,3 +62,4 @@
 - [x] M5: 用户 CLI WiFi 配置已通过 `loadlynx wifi show|set|clear`、devd/firmware协议与持久化发布；skill 仍按 installed help 做能力门禁。
 - [x] M6: 实现 CLI 用户级硬件记忆：保存、列出可连接设备、列出最近连接设备、列出已记住设备、选择、更新、遗忘 USB 与 HTTP 设备，并保存到用户配置目录。
 - [x] M7: 增加通用外部 USB-C source validation 操作路径，使用 `pd set` + `cv` 刺激并把外部 DUT diagnostics 作为主判定。
+- [x] M8: 增加 release decision skill，明确 owner-facing/user-facing 操作合同变更必须 `type:patch` 或更高，并记录 PR #100 补发路径。

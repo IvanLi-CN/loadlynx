@@ -1,0 +1,4 @@
+interface:
+  display_name: "LoadLynx Release Decision"
+  short_description: "Choose release labels and backfill releases."
+  default_prompt: "Use $loadlynx-release-decision to decide LoadLynx PR release labels or backfill a release from merged PR labels."

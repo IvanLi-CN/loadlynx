@@ -2,6 +2,7 @@
 import {
   validateCurrentTruthDocs,
   validateHttpSurfaceContracts,
+  validateReleaseDecisionDocs,
   validateReleasedCliDocs,
   loadWorkflowMetadata,
   validateWebToolingContracts,
@@ -15,6 +16,7 @@ const toolingFailures = await validateWebToolingContracts();
 const currentTruthDocFailures = await validateCurrentTruthDocs();
 const httpSurfaceFailures = await validateHttpSurfaceContracts();
 const releasedCliDocFailures = await validateReleasedCliDocs();
+const releaseDecisionDocFailures = await validateReleaseDecisionDocs();
 const failures = [
   ...workflowFailures,
   ...hygieneFailures,
@@ -22,6 +24,7 @@ const failures = [
   ...currentTruthDocFailures,
   ...httpSurfaceFailures,
   ...releasedCliDocFailures,
+  ...releaseDecisionDocFailures,
 ];
 
 if (failures.length > 0) {
