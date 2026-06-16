@@ -635,3 +635,98 @@ export async function validateReleasedCliDocs({
 
   return failures;
 }
+
+export async function validateReleaseDecisionDocs({
+  docs = [
+    {
+      label: "README.md",
+      path: new URL("../../README.md", import.meta.url),
+    },
+    {
+      label: "AGENTS.md",
+      path: new URL("../../AGENTS.md", import.meta.url),
+    },
+    {
+      label: "skills/loadlynx-release-decision/SKILL.md",
+      path: new URL("../../skills/loadlynx-release-decision/SKILL.md", import.meta.url),
+    },
+    {
+      label: "skills/loadlynx-release-decision/agents/openai.yaml",
+      path: new URL("../../skills/loadlynx-release-decision/agents/openai.yaml", import.meta.url),
+    },
+    {
+      label: "skills/loadlynx-developer-operations/SKILL.md",
+      path: new URL("../../skills/loadlynx-developer-operations/SKILL.md", import.meta.url),
+    },
+    {
+      label: "docs/specs/dvfnn-pr-label-release-flow/SPEC.md",
+      path: new URL("../../docs/specs/dvfnn-pr-label-release-flow/SPEC.md", import.meta.url),
+    },
+    {
+      label: "docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md",
+      path: new URL("../../docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md", import.meta.url),
+    },
+    {
+      label: "docs/specs/dvfnn-pr-label-release-flow/HISTORY.md",
+      path: new URL("../../docs/specs/dvfnn-pr-label-release-flow/HISTORY.md", import.meta.url),
+    },
+  ],
+} = {}) {
+  const failures = [];
+  const joined = [];
+
+  for (const doc of docs) {
+    const source = await readFile(doc.path, "utf8");
+    joined.push([doc.label, source]);
+  }
+
+  const byLabel = new Map(joined);
+  const allText = joined.map(([, source]) => source).join("\n");
+  const requiredSnippets = [
+    "skills/loadlynx-release-decision/SKILL.md",
+    "owner-facing/user-facing operation contract",
+    "type:patch` or higher",
+    "type:none` is an explicit no-release decision",
+    "workflow_dispatch",
+    "pr_number=<PR>",
+    "v0.5.2",
+  ];
+
+  for (const snippet of requiredSnippets) {
+    if (!allText.includes(snippet)) {
+      failures.push(`release decision docs: required phrase missing: ${JSON.stringify(snippet)}`);
+    }
+  }
+
+  const skill = byLabel.get("skills/loadlynx-release-decision/SKILL.md") ?? "";
+  if (!/^name: loadlynx-release-decision$/m.test(skill)) {
+    failures.push("skills/loadlynx-release-decision/SKILL.md: missing skill name frontmatter");
+  }
+  if (!/description: ".*release labels.*backfill releases.*"/s.test(skill)) {
+    failures.push("skills/loadlynx-release-decision/SKILL.md: description must cover labels and backfills");
+  }
+
+  const openaiYaml = byLabel.get("skills/loadlynx-release-decision/agents/openai.yaml") ?? "";
+  if (!openaiYaml.includes("$loadlynx-release-decision")) {
+    failures.push(
+      "skills/loadlynx-release-decision/agents/openai.yaml: default_prompt must mention $loadlynx-release-decision",
+    );
+  }
+
+  const forbiddenPatterns = [
+    {
+      label: "operation-contract docs-only no-release default",
+      pattern: /(?:skill|docs)-only operation contract can stay type:none/i,
+    },
+  ];
+
+  for (const [label, source] of joined) {
+    for (const { label: ruleLabel, pattern } of forbiddenPatterns) {
+      if (pattern.test(source) && !label.includes("loadlynx-release-decision")) {
+        failures.push(`${label}: forbidden release decision drift phrase present (${ruleLabel})`);
+      }
+    }
+  }
+
+  return failures;
+}

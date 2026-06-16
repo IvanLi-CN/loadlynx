@@ -43,6 +43,10 @@ The stable host-tools surface now includes `loadlynx wifi show|set|clear`, so us
 
 LoadLynx may be used as a generic validation sink for external USB-C source devices, but LoadLynx-owned documentation must describe that path without embedding another project's workflow. The reusable boundary is: saved LoadLynx device target, USB/devd transport for writes, `pd set` for PD sink stimulus, `cv` for voltage-clamp load stimulus, and external DUT diagnostics as the primary current-limit verdict with LoadLynx telemetry as auxiliary evidence.
 
+## Operation skill release decision
+
+Operation skills are owner-facing release contract material. When a skill/docs change alters released LoadLynx operation guidance, the PR must use `type:patch` or higher even if no product code changes. The release-decision skill carries that rule and the merged-PR backfill procedure; developer operations only references it and keeps artifact maintenance rules.
+
 ## Documentation Model
 
 `SPEC.md` is the active topic contract. Historical rationale, evolution notes, and records moved out of the topic contract are kept here.

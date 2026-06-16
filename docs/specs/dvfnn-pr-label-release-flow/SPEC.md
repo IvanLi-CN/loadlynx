@@ -25,6 +25,15 @@
 - Official release artifacts include analog ELF, digital ELF, firmware catalog, host tools for supported host targets, user installer scripts, Web bundle, and `SHA256SUMS` covering every release asset.
 - Release builds inject the computed version into firmware and Web artifacts instead of rewriting package manifests.
 
+## Release Decision Matrix
+
+- PRs that change released CLI, Web, firmware, installer, firmware catalog, release workflow, or user-facing artifact behavior must use `type:patch` or higher.
+- PRs that change owner-facing/user-facing operation contracts in `README.md`, `AGENTS.md`, `skills/loadlynx-user-operations`, or `skills/loadlynx-developer-operations` must use `type:patch` or higher even when the diff is docs/skill-only.
+- A skill/docs PR changes the operation contract when it changes what an operator may install, run, verify, trust, or treat as released behavior.
+- `type:none` is allowed only for internal documentation, spec/solution maintenance, comments, or tooling notes that do not change an owner-facing or user-facing operation contract.
+- Release label decisions and release backfills are governed by `skills/loadlynx-release-decision/SKILL.md`.
+- If a merged PR should have released but carried `type:none`, update the source PR labels and dispatch `Release (LoadLynx)` with `workflow_dispatch` input `pr_number=<PR>`.
+
 ## GitHub Integration
 
 - `Label Gate` is declared in `.github/quality-gates.json` as the required check.
@@ -38,6 +47,7 @@
 - A PR without exactly one `type:*` and one `channel:*` fails `Label Gate`.
 - A PR with `type:patch` and `channel:stable` on top of `v0.1.0` produces `v0.1.1`.
 - A merged stable PR creates a GitHub Release containing analog, digital, firmware catalog, host-tools, installer, Web, and `SHA256SUMS` artifacts.
+- A docs/skill PR that changes owner-facing released operation guidance is labeled `type:patch` or higher; `type:none` is rejected by review or contract checks for that class of change.
 - Firmware/Web release metadata reports the injected release version.
 - The source PR receives the release completion comment.
 - Ordinary PR CI failures do not trigger Telegram notifications.

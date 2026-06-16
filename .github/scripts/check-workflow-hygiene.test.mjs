@@ -4,6 +4,7 @@ import {
   parseWorkflowMetadata,
   validateCurrentTruthDocs,
   validateHttpSurfaceContracts,
+  validateReleaseDecisionDocs,
   validateReleasedCliDocs,
   validateWebToolingContracts,
   validateWorkflowHygiene,
@@ -851,6 +852,91 @@ export async function updateControl(baseUrl: string, payload: ControlUpdateReque
       "SKILL.md: forbidden released CLI drift phrase present (project-specific external DUT name)",
       "SKILL.md: forbidden released CLI drift phrase present (ordinary user CLI daemon URL path)",
       "SKILL.md: forbidden released CLI drift phrase present (stale current CLI WiFi absence claim)",
+    ]);
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
+}
+
+{
+  const tempDir = await mkdtemp(join(tmpdir(), "check-release-decision-docs-"));
+
+  try {
+    const readmePath = join(tempDir, "README.md");
+    const agentsPath = join(tempDir, "AGENTS.md");
+    const skillPath = join(tempDir, "SKILL.md");
+    const skillYamlPath = join(tempDir, "openai.yaml");
+    const developerSkillPath = join(tempDir, "DEVELOPER_SKILL.md");
+    const specPath = join(tempDir, "SPEC.md");
+    const implementationPath = join(tempDir, "IMPLEMENTATION.md");
+    const historyPath = join(tempDir, "HISTORY.md");
+
+    await writeFile(readmePath, "See skills/loadlynx-release-decision/SKILL.md.\n");
+    await writeFile(agentsPath, "Use skills/loadlynx-release-decision/SKILL.md.\n");
+    await writeFile(
+      skillPath,
+      `---
+name: loadlynx-release-decision
+description: "Decide LoadLynx release labels and backfill releases from merged PRs."
+---
+type:none\` is an explicit no-release decision.
+owner-facing/user-facing operation contract changes require type:patch\` or higher.
+Use workflow_dispatch with pr_number=<PR>.
+`,
+    );
+    await writeFile(
+      skillYamlPath,
+      `interface:
+  display_name: "LoadLynx Release Decision"
+  short_description: "Choose release labels and backfill releases."
+  default_prompt: "Use $loadlynx-release-decision to decide labels."
+`,
+    );
+    await writeFile(developerSkillPath, "Use skills/loadlynx-release-decision/SKILL.md.\n");
+    await writeFile(
+      specPath,
+      "Release Decision Matrix: owner-facing/user-facing operation contract uses type:patch` or higher.\n",
+    );
+    await writeFile(implementationPath, "Backfill produced v0.5.2.\n");
+    await writeFile(historyPath, "workflow_dispatch pr_number=<PR> is the backfill path.\n");
+
+    const docs = [
+      { label: "README.md", path: new URL(`file://${readmePath}`) },
+      { label: "AGENTS.md", path: new URL(`file://${agentsPath}`) },
+      {
+        label: "skills/loadlynx-release-decision/SKILL.md",
+        path: new URL(`file://${skillPath}`),
+      },
+      {
+        label: "skills/loadlynx-release-decision/agents/openai.yaml",
+        path: new URL(`file://${skillYamlPath}`),
+      },
+      {
+        label: "skills/loadlynx-developer-operations/SKILL.md",
+        path: new URL(`file://${developerSkillPath}`),
+      },
+      {
+        label: "docs/specs/dvfnn-pr-label-release-flow/SPEC.md",
+        path: new URL(`file://${specPath}`),
+      },
+      {
+        label: "docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md",
+        path: new URL(`file://${implementationPath}`),
+      },
+      {
+        label: "docs/specs/dvfnn-pr-label-release-flow/HISTORY.md",
+        path: new URL(`file://${historyPath}`),
+      },
+    ];
+
+    assert.deepEqual(await validateReleaseDecisionDocs({ docs }), []);
+
+    await writeFile(agentsPath, "docs-only operation contract can stay type:none.\n");
+    await writeFile(skillYamlPath, 'interface:\n  default_prompt: "Use release decision."\n');
+
+    assert.deepEqual(await validateReleaseDecisionDocs({ docs }), [
+      "skills/loadlynx-release-decision/agents/openai.yaml: default_prompt must mention $loadlynx-release-decision",
+      "AGENTS.md: forbidden release decision drift phrase present (operation-contract docs-only no-release default)",
     ]);
   } finally {
     await rm(tempDir, { recursive: true, force: true });

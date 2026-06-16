@@ -47,6 +47,9 @@ just loadlynx <args>
 ```
 
 - Firmware development uses `just a-build` for STM32G431 analog and `just d-build` for ESP32-S3 digital.
+- For release label decisions, no-release decisions, docs/skill release-impact checks, or
+  release backfills, first use `skills/loadlynx-release-decision/SKILL.md`; this skill only
+  owns the artifact maintenance and engineering execution side of releases.
 - Release maintenance must keep GitHub Releases publishing the user-facing assets required by the user skill: installer scripts, platform `loadlynx-host-tools-<platform>.tar.gz` archives, firmware assets/catalogs when user CLI/Web flashing is advertised, web bundle, `SHA256SUMS` covering every release asset, and accurate release notes.
 - If user docs require `loadlynx wifi ...`, first verify that the CLI, devd API, firmware protocol, persistence behavior, and release binaries implement it. If absent, implement and test it before presenting WiFi configuration as a user capability.
 - If user docs require remembered devices, verify `loadlynx devices`, `loadlynx device list|add|use|remove`, `loadlynx status`, and `loadlynx status --device ...`. The registry must remain user-level config, not project checkout state.

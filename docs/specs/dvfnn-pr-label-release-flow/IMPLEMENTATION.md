@@ -27,6 +27,9 @@
 - Aligned local `check-root` with CI by including the release-label regression test, and added the same `third_party/embassy` submodule guard to the embedded build path so `check-embedded` fails fast with the same actionable hint as `lint-embedded`.
 - Closed the remaining digital firmware lint gap by adding repo-local `just d-clippy`, wiring `lint-embedded` through it, and making the `Code Check` workflow's `digital-firmware` job fail on `cargo +esp clippy -- -D warnings` before the release build step.
 - Centralized the GitHub Actions Node.js runtime version into repo-root `.node-version` and switched every `actions/setup-node` callsite to `node-version-file`, so workflow runtime upgrades no longer require editing four separate inline literals.
+- Added `skills/loadlynx-release-decision` as the operational entrypoint for release-label decisions, `type:none` checks, docs/skill release-impact decisions, and merged-PR release backfills.
+- Clarified that owner-facing/user-facing operation contract changes in README, AGENTS, and LoadLynx operation skills require `type:patch` or higher even when the diff is docs/skill-only.
+- Backfilled PR #100 after reclassifying its released-operation skill/docs update from `type:none` to `type:patch`, producing stable release `v0.5.2` through `Release (LoadLynx)` workflow dispatch with `pr_number=100`.
 
 ## Verification
 
@@ -38,5 +41,7 @@
 - `.github/quality-gates.json` now declares only the surviving informational checks (`check`, `web-check`), while digital firmware remains verified via the `Code Check` workflow's `digital-firmware` job.
 - Local embedded lint verification now includes digital firmware clippy under dummy Wi-Fi compile-time config, matching CI's `digital-firmware` lint semantics without requiring operators to create a real `.env` just to run the lint gate.
 - Workflow hygiene now rejects inline `setup-node` versions and requires `node-version-file: ".node-version"` whenever GitHub Actions provisions Node.js.
+- Workflow hygiene now verifies the release decision skill, README/AGENTS references, and owner-facing operation contract release-label wording so docs/skill-only release decisions do not silently drift back to `type:none`.
 - Release intent dry-run confirms `v0.1.0` plus `type:patch` resolves to `v0.1.1`.
 - Full release validation completes after this PR merges and the automatic `Release (LoadLynx)` run finishes.
+- Release backfill validation for PR #100 produced `v0.5.2`, including host-tools archives, firmware catalog/assets, Web bundle, installers, `SHA256SUMS`, and a source PR release completion comment.
