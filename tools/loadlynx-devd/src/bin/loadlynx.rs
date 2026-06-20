@@ -3,8 +3,8 @@ use clap::{ArgAction, CommandFactory, Parser, Subcommand, ValueEnum};
 use clap_complete::{Shell, generate};
 use dialoguer::{Confirm, Input, Select, theme::ColorfulTheme};
 use loadlynx_devd::{
-    FLASH_CONFIRMATION_TEXT, IpcRequest, TargetKind, default_ipc_endpoint, ipc_request,
-    list_digital_usb_port_candidates, write_default_digital_usb_port,
+    FLASH_CONFIRMATION_TEXT, HOST_TOOLS_VERSION, IpcRequest, TargetKind, default_ipc_endpoint,
+    ipc_request, list_digital_usb_port_candidates, write_default_digital_usb_port,
 };
 use reqwest::{Client, Url};
 use serde::{Deserialize, Serialize};
@@ -76,7 +76,7 @@ struct ResolvedDevdTarget {
 #[command(name = "loadlynx")]
 #[command(about = "LoadLynx LAN/USB/devd control CLI")]
 #[command(disable_version_flag = true)]
-#[command(version)]
+#[command(version = HOST_TOOLS_VERSION)]
 struct Cli {
     #[arg(long, global = true, default_value_t = default_ipc_endpoint(), hide = true)]
     ipc: String,

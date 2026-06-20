@@ -23,7 +23,8 @@
 - `channel:dev` creates a prerelease `dev-<timestamp>-<sha>`.
 - Stable version discovery ignores `dev-*` tags and other non-stable tags.
 - Official release artifacts include analog ELF, digital ELF, firmware catalog, host tools for supported host targets, user installer scripts, Web bundle, and `SHA256SUMS` covering every release asset.
-- Release builds inject the computed version into firmware and Web artifacts instead of rewriting package manifests.
+- Release builds inject the computed version into firmware, Web, and released host-tools version metadata instead of rewriting package manifests.
+- Released host tools must report that injected version through owner-facing `loadlynx -v` and `loadlynx-devd --version` output.
 
 ## Release Decision Matrix
 
@@ -48,6 +49,7 @@
 - A PR with `type:patch` and `channel:stable` on top of `v0.1.0` produces `v0.1.1`.
 - A merged stable PR creates a GitHub Release containing analog, digital, firmware catalog, host-tools, installer, Web, and `SHA256SUMS` artifacts.
 - A docs/skill PR that changes owner-facing released operation guidance is labeled `type:patch` or higher; `type:none` is rejected by review or contract checks for that class of change.
-- Firmware/Web release metadata reports the injected release version.
+- Firmware/Web/host-tools release metadata reports the injected release version.
+- Released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the crate package version.
 - The source PR receives the release completion comment.
 - Ordinary PR CI failures do not trigger Telegram notifications.

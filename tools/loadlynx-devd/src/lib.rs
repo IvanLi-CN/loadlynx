@@ -79,6 +79,13 @@ const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
 const SERIAL_WIFI_WAIT_OPERATION_WAIT_MS: u64 = 40_000;
 const LOADLYNX_PRESET_COUNT: usize = 5;
+pub const HOST_TOOLS_VERSION: &str = match option_env!("LOADLYNX_RELEASE_VERSION") {
+    Some(version) => version,
+    None => match option_env!("LOADLYNX_PROJECT_VERSION") {
+        Some(version) => version,
+        None => env!("CARGO_PKG_VERSION"),
+    },
+};
 
 pub fn default_ipc_endpoint() -> String {
     #[cfg(windows)]
