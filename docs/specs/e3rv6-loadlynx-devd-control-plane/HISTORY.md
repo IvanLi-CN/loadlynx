@@ -28,6 +28,8 @@ Real completion HIL showed that ESP32-S3 USB Serial/JTAG log noise can corrupt n
 
 Final preset-list HIL showed a repeatable USB Serial/JTAG failure mode where the list response yielded M2-M5 as standalone preset fragments while M1 was dropped by log interleaving. The daemon now keeps the completeness gate, accepts only real preset-shaped fragments, and may use a real `get_control` preset response with bounded retries to fill the active preset. This preserves correctness because partial lists remain errors unless the daemon proves all five preset records from device responses.
 
+Saved-device USB realtime reads exposed a narrower regression later: `loadlynx status --device ... --json` and `loadlynx control get --device ... --json` could still hit the full host-side operation timeout even when device discovery and LAN status were healthy. The accepted fix kept the owner-facing CLI unchanged and tightened both ends of the compat read path: devd now treats serial response gaps for those reads as bounded retries with operation-scoped recovery, and firmware keeps `get_status` / `get_control` on compact USB response shapes instead of depending on the broader HTTP body renderer.
+
 ## IPC-first host tools and Web Serial release path
 
 The host tools boundary changed to make released CLI/devd safer for ordinary users. `loadlynx-devd serve` is now an IPC daemon used by the CLI, while `loadlynx-devd bridge-http` is the loopback-only browser/debug bridge. This is a minor breaking change because ordinary CLI workflows no longer expose the legacy daemon-URL flag; the CLI uses `--ipc` and can auto-start a sibling devd process.

@@ -77,19 +77,6 @@ _require-esp-export:
     exit 2; \
   }
 
-_require-digital-wifi-config:
-  if [ -n "${DIGITAL_WIFI_SSID:-}" ] && [ -n "${DIGITAL_WIFI_PSK:-}" ]; then \
-    exit 0; \
-  fi; \
-  if [ -f .env ] && \
-     grep -Eq '^[[:space:]]*DIGITAL_WIFI_SSID=.+' .env && \
-     grep -Eq '^[[:space:]]*DIGITAL_WIFI_PSK=.+' .env; then \
-    exit 0; \
-  fi; \
-  echo "[error] digital Wi-Fi config is missing."; \
-  echo "[hint] copy .env.example to .env and set DIGITAL_WIFI_SSID / DIGITAL_WIFI_PSK"; \
-  exit 2
-
 _require-embassy-submodule:
   test -f third_party/embassy/embassy-embedded-hal/Cargo.toml || { \
     echo "[error] third_party/embassy is missing or not initialized."; \
@@ -253,7 +240,6 @@ d-clippy:
 d-build:
   just _require-esp-toolchain
   just _require-esp-export
-  just _require-digital-wifi-config
   set -eu; \
   . "$HOME/export-esp.sh"; \
   PROFILE="${PROFILE:-release}"; \

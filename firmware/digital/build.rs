@@ -73,21 +73,12 @@ fn main() {
         }
     }
 
-    let wifi_ssid = get_wifi_cfg("DIGITAL_WIFI_SSID", &cfg);
-    let wifi_psk = get_wifi_cfg("DIGITAL_WIFI_PSK", &cfg);
-
-    if wifi_ssid.is_none() || wifi_psk.is_none() {
-        eprintln!(
-            "error: Wi-Fi config missing. Set DIGITAL_WIFI_SSID and DIGITAL_WIFI_PSK in .env or environment."
-        );
-        std::process::exit(1);
+    if let Some(wifi_ssid) = get_wifi_cfg("DIGITAL_WIFI_SSID", &cfg) {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_SSID={}", wifi_ssid);
     }
-
-    let wifi_ssid = wifi_ssid.unwrap();
-    let wifi_psk = wifi_psk.unwrap();
-
-    println!("cargo:rustc-env=LOADLYNX_WIFI_SSID={}", wifi_ssid);
-    println!("cargo:rustc-env=LOADLYNX_WIFI_PSK={}", wifi_psk);
+    if let Some(wifi_psk) = get_wifi_cfg("DIGITAL_WIFI_PSK", &cfg) {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_PSK={}", wifi_psk);
+    }
 
     if let Some(hostname) = get_wifi_cfg("DIGITAL_WIFI_HOSTNAME", &cfg) {
         println!("cargo:rustc-env=LOADLYNX_WIFI_HOSTNAME={}", hostname);

@@ -77,11 +77,12 @@ pub struct WifiState {
 enum WifiCredentialSource {
     Factory,
     User,
+    None,
 }
 
 struct WifiCredentials {
-    ssid: String,
-    psk: String,
+    ssid: Option<String>,
+    psk: Option<String>,
     source: WifiCredentialSource,
 }
 
@@ -349,6 +350,31 @@ async fn wifi_task(
         let source = match credentials.source {
             WifiCredentialSource::Factory => "factory",
             WifiCredentialSource::User => "user",
+            WifiCredentialSource::None => "none",
+        };
+        let Some(ssid) = credentials.ssid.clone() else {
+            info!("Wi-Fi credentials unavailable (source=none); waiting for EEPROM/user config");
+            {
+                let mut guard = state.lock().await;
+                guard.state = WifiConnectionState::Idle;
+                guard.ipv4 = None;
+                guard.gateway = None;
+                guard.last_error = None;
+            }
+            Timer::after(Duration::from_secs(2)).await;
+            continue;
+        };
+        let Some(psk) = credentials.psk.clone() else {
+            warn!("Wi-Fi credentials missing PSK for source={}", source);
+            {
+                let mut guard = state.lock().await;
+                guard.state = WifiConnectionState::Idle;
+                guard.ipv4 = None;
+                guard.gateway = None;
+                guard.last_error = Some(WifiErrorKind::ConnectFailed);
+            }
+            Timer::after(Duration::from_secs(2)).await;
+            continue;
         };
         {
             let mut guard = state.lock().await;
@@ -360,8 +386,8 @@ async fn wifi_task(
 
         let client_config = ModeConfig::Client(
             ClientConfig::default()
-                .with_ssid(credentials.ssid.clone())
-                .with_password(credentials.psk.clone()),
+                .with_ssid(ssid.clone())
+                .with_password(psk.clone()),
         );
 
         if matches!(controller.is_started(), Ok(true)) {
@@ -396,7 +422,7 @@ async fn wifi_task(
 
         info!(
             "Connecting to Wi-Fi SSID=\"{}\" (source={})",
-            credentials.ssid.as_str(),
+            ssid.as_str(),
             source
         );
         match controller.connect_async().await {
@@ -455,8 +481,8 @@ async fn wifi_task(
 
                     let next = read_wifi_credentials(eeprom).await;
                     if next.source != credentials.source
-                        || next.ssid != credentials.ssid
-                        || next.psk != credentials.psk
+                        || next.ssid != Some(ssid.clone())
+                        || next.psk != Some(psk.clone())
                     {
                         info!("Wi-Fi credentials changed; reconnecting");
                         let _ = controller.disconnect_async().await;
@@ -491,15 +517,21 @@ async fn read_wifi_credentials(eeprom: &'static EepromMutex) -> WifiCredentials 
 
     if let Some((ssid, psk)) = user {
         WifiCredentials {
-            ssid,
-            psk,
+            ssid: Some(ssid),
+            psk: Some(psk),
             source: WifiCredentialSource::User,
+        }
+    } else if let (Some(ssid), Some(psk)) = (WIFI_SSID, WIFI_PSK) {
+        WifiCredentials {
+            ssid: Some(String::from(ssid)),
+            psk: Some(String::from(psk)),
+            source: WifiCredentialSource::Factory,
         }
     } else {
         WifiCredentials {
-            ssid: String::from(WIFI_SSID),
-            psk: String::from(WIFI_PSK),
-            source: WifiCredentialSource::Factory,
+            ssid: None,
+            psk: None,
+            source: WifiCredentialSource::None,
         }
     }
 }
@@ -1256,7 +1288,10 @@ async fn read_wifi_status_identity(eeprom: &'static EepromMutex) -> (String, &'s
         };
     match user {
         Some(ssid) => (ssid, "user"),
-        None => (String::from(WIFI_SSID), "factory"),
+        None => match WIFI_SSID {
+            Some(ssid) => (String::from(ssid), "factory"),
+            None => (String::new(), "none"),
+        },
     }
 }
 
@@ -1313,12 +1348,13 @@ pub(crate) async fn render_wifi_credentials_json(
     let source = match credentials.source {
         WifiCredentialSource::Factory => "factory",
         WifiCredentialSource::User => "user",
+        WifiCredentialSource::None => "none",
     };
     buf.clear();
     buf.push_str("{\"ssid\":\"");
-    write_json_string_escaped(buf, &credentials.ssid);
+    write_json_string_escaped(buf, credentials.ssid.as_deref().unwrap_or(""));
     buf.push_str("\",\"psk\":\"");
-    write_json_string_escaped(buf, &credentials.psk);
+    write_json_string_escaped(buf, credentials.psk.as_deref().unwrap_or(""));
     buf.push_str("\",\"source\":\"");
     buf.push_str(source);
     buf.push_str("\"}");

@@ -201,13 +201,13 @@ mod mdns;
 #[cfg(feature = "net_http")]
 mod net;
 
-// Wi‑Fi compile-time configuration injected by firmware/digital/build.rs.
-// Kept near the top so both main and the net module can rely on a single
-// source of truth for SSID/PSK/static IP.
+// Optional compile-time Wi‑Fi fallback injected by firmware/digital/build.rs.
+// EEPROM user credentials are preferred at runtime; these values are only a
+// fallback when no user blob exists.
 #[cfg(feature = "net_http")]
-pub const WIFI_SSID: &str = env!("LOADLYNX_WIFI_SSID");
+pub const WIFI_SSID: Option<&str> = option_env!("LOADLYNX_WIFI_SSID");
 #[cfg(feature = "net_http")]
-pub const WIFI_PSK: &str = env!("LOADLYNX_WIFI_PSK");
+pub const WIFI_PSK: Option<&str> = option_env!("LOADLYNX_WIFI_PSK");
 #[cfg(feature = "net_http")]
 pub const WIFI_HOSTNAME: Option<&str> = option_env!("LOADLYNX_WIFI_HOSTNAME");
 #[cfg(feature = "net_http")]
@@ -1631,6 +1631,28 @@ async fn write_usb_set_output_enabled_response(
 }
 
 #[cfg(feature = "net_http")]
+fn write_usb_preset_json(buf: &mut UsbJsonLine, preset: &control::Preset) {
+    buf.push('{').ok();
+    let _ = core::write!(buf, "\"preset_id\":{}", preset.preset_id);
+    buf.push_str(",\"mode\":\"").ok();
+    let mode = match preset.mode {
+        LoadMode::Cc => "cc",
+        LoadMode::Cv => "cv",
+        LoadMode::Cp => "cp",
+        LoadMode::Reserved(_) => "cc",
+    };
+    write_json_string_escaped(buf, mode);
+    buf.push('"').ok();
+    let _ = core::write!(buf, ",\"target_p_mw\":{}", preset.target_p_mw);
+    let _ = core::write!(buf, ",\"target_i_ma\":{}", preset.target_i_ma);
+    let _ = core::write!(buf, ",\"target_v_mv\":{}", preset.target_v_mv);
+    let _ = core::write!(buf, ",\"min_v_mv\":{}", preset.min_v_mv);
+    let _ = core::write!(buf, ",\"max_i_ma_total\":{}", preset.max_i_ma_total);
+    let _ = core::write!(buf, ",\"max_p_mw\":{}", preset.max_p_mw);
+    buf.push('}').ok();
+}
+
+#[cfg(feature = "net_http")]
 async fn write_usb_control_response(
     out: &mut UsbJsonLine,
     request_id: Option<&str>,
@@ -1639,20 +1661,60 @@ async fn write_usb_control_response(
     calibration: &'static CalibrationMutex,
     telemetry: &'static TelemetryMutex,
 ) {
-    let mut body = String::new();
-    let result = if let Some(line) = line {
-        net::handle_control_update(line, &mut body, control, calibration, telemetry).await
-    } else {
-        net::render_control_view_json(&mut body, control, calibration, telemetry).await
+    if let Some(line) = line {
+        let mut body = String::new();
+        let result =
+            net::handle_control_update(line, &mut body, control, calibration, telemetry).await;
+        write_usb_net_body_response(
+            out,
+            request_id,
+            result,
+            &body,
+            "CONTROL_FAILED",
+            "control request failed",
+        );
+        if body.starts_with('{') && body.contains("\"active_preset_id\"") {
+            // Success path falls through to compact USB shape below.
+        } else {
+            return;
+        }
+    }
+
+    let cal_mode = { calibration.lock().await.cal_mode };
+    let (active_preset_id, output_enabled, preset) = {
+        let guard = control.lock().await;
+        let effective = guard.effective_output_command(cal_mode);
+        (
+            guard.active_preset_id,
+            effective.output_enabled,
+            effective.preset,
+        )
     };
-    write_usb_net_body_response(
+    let uv_latched = {
+        let guard = telemetry.lock().await;
+        guard
+            .last_status
+            .map(|s| (s.state_flags & STATE_FLAG_UV_LATCHED) != 0)
+            .unwrap_or(false)
+    };
+
+    out.clear();
+    out.push_str("{\"type\":\"response\"").ok();
+    if let Some(id) = request_id {
+        out.push_str(",\"request_id\":\"").ok();
+        write_json_string_escaped(out, id);
+        out.push('"').ok();
+    }
+    out.push_str(",\"ok\":true,\"data\":{").ok();
+    let _ = core::write!(
         out,
-        request_id,
-        result,
-        &body,
-        "CONTROL_FAILED",
-        "control request failed",
+        "\"active_preset_id\":{},\"output_enabled\":{},\"uv_latched\":{},\"preset\":",
+        active_preset_id,
+        if output_enabled { "true" } else { "false" },
+        if uv_latched { "true" } else { "false" },
     );
+    write_usb_preset_json(out, &preset);
+    out.push_str("}}").ok();
 }
 
 #[cfg(feature = "net_http")]
@@ -1890,7 +1952,10 @@ async fn write_usb_wifi_response(
                 .map(|parts| (String::from(parts.ssid), String::from(parts.psk)));
             let (ssid, psk, source) = match credentials {
                 Some((ssid, psk)) => (ssid, psk, "user"),
-                None => (String::from(WIFI_SSID), String::from(WIFI_PSK), "factory"),
+                None => match (WIFI_SSID, WIFI_PSK) {
+                    (Some(ssid), Some(psk)) => (String::from(ssid), String::from(psk), "factory"),
+                    _ => (String::new(), String::new(), "none"),
+                },
             };
             out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
             write_json_string_escaped(out, &ssid);
@@ -1909,12 +1974,12 @@ async fn write_usb_wifi_response(
             };
             let status = { *wifi_state.lock().await };
             out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
-            write_json_string_escaped(out, user_ssid.as_deref().unwrap_or(WIFI_SSID));
+            write_json_string_escaped(out, user_ssid.as_deref().or(WIFI_SSID).unwrap_or(""));
             out.push_str("\",\"source\":\"").ok();
-            out.push_str(if user_ssid.is_some() {
-                "user"
-            } else {
-                "factory"
+            out.push_str(match (user_ssid.is_some(), WIFI_SSID.is_some()) {
+                (true, _) => "user",
+                (false, true) => "factory",
+                (false, false) => "none",
             })
             .ok();
             write_usb_wifi_status_tail(out, status);
@@ -1966,8 +2031,14 @@ async fn write_usb_wifi_response(
             mark_wifi_reconfigure_pending(wifi_state).await;
             let status = { *wifi_state.lock().await };
             out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
-            write_json_string_escaped(out, WIFI_SSID);
-            out.push_str("\",\"source\":\"factory").ok();
+            write_json_string_escaped(out, WIFI_SSID.unwrap_or(""));
+            out.push_str("\",\"source\":\"").ok();
+            out.push_str(if WIFI_SSID.is_some() {
+                "factory"
+            } else {
+                "none"
+            })
+            .ok();
             write_usb_wifi_status_tail(out, status);
         }
         _ => {
@@ -2254,8 +2325,8 @@ async fn usb_cdc_jsonl_task(
 }
 
 fn log_wifi_config() {
-    // These values are injected at compile time by firmware/digital/build.rs.
-    let ssid = env!("LOADLYNX_WIFI_SSID");
+    // These fallback values are injected at compile time by firmware/digital/build.rs.
+    let ssid = option_env!("LOADLYNX_WIFI_SSID");
     let hostname = option_env!("LOADLYNX_WIFI_HOSTNAME");
     let static_ip = option_env!("LOADLYNX_WIFI_STATIC_IP");
     let netmask = option_env!("LOADLYNX_WIFI_NETMASK");
@@ -2264,7 +2335,7 @@ fn log_wifi_config() {
     let psk_present = option_env!("LOADLYNX_WIFI_PSK").is_some();
 
     info!(
-        "Wi-Fi config: ssid=\"{}\", hostname={:?}, static_ip={:?}, netmask={:?}, gateway={:?}, dns={:?}, psk_present={}",
+        "Wi-Fi fallback config: ssid={:?}, hostname={:?}, static_ip={:?}, netmask={:?}, gateway={:?}, dns={:?}, psk_present={}",
         ssid, hostname, static_ip, netmask, gateway, dns, psk_present
     );
 }
