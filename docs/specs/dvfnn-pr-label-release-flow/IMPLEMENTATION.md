@@ -11,6 +11,7 @@
 - Added `.github/quality-gates.json` to declare `Label Gate` as the required release-intent check and to keep the review policy at `0` approvals for the protected `main` branch.
 - Added release intent tooling for label validation, version computation, and PR release comments.
 - Refactored release automation to consume merged PR labels and inject the computed release version into artifacts.
+- Bound host-tools Clap version output to release-injected metadata so released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the static crate package version.
 - Release asset assembly now publishes host-tools installer scripts, firmware catalog JSON, Web bundle, and `SHA256SUMS` covering all release files before creating the GitHub Release.
 - Added a repo-local declaration check so CI fails if the quality-gates contract drifts away from the expected PR-only + zero-approval policy.
 - The quality-gates declaration check now also verifies that each declared workflow name resolves to a local workflow file and that every declared branch-protection job name still exists in the actual GitHub Actions workflow even if the workflow is internally split into additional jobs.
@@ -45,3 +46,4 @@
 - Release intent dry-run confirms `v0.1.0` plus `type:patch` resolves to `v0.1.1`.
 - Full release validation completes after this PR merges and the automatic `Release (LoadLynx)` run finishes.
 - Release backfill validation for PR #100 produced `v0.5.2`, including host-tools archives, firmware catalog/assets, Web bundle, installers, `SHA256SUMS`, and a source PR release completion comment.
+- Host-tools release-version validation now includes rebuilding the CLI and daemon with `LOADLYNX_RELEASE_VERSION` set and checking that `loadlynx -v` plus `loadlynx-devd --version` report the injected release tag.

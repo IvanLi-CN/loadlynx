@@ -1,13 +1,14 @@
 use clap::{Parser, Subcommand};
 use loadlynx_devd::{
-    DEFAULT_BIND, DEFAULT_IPC_IDLE_TIMEOUT_SECS, DevdConfig, IpcConfig, default_ipc_endpoint,
-    serve, serve_ipc,
+    DEFAULT_BIND, DEFAULT_IPC_IDLE_TIMEOUT_SECS, DevdConfig, HOST_TOOLS_VERSION, IpcConfig,
+    default_ipc_endpoint, serve, serve_ipc,
 };
 use std::{net::SocketAddr, path::PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "loadlynx-devd")]
 #[command(about = "LoadLynx local device daemon")]
+#[command(version = HOST_TOOLS_VERSION)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
