@@ -22,6 +22,7 @@ use std::{
     thread,
     time::{Duration, Instant},
 };
+
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     net::TcpListener,
@@ -153,6 +154,8 @@ pub struct AppState {
     serial: Arc<Mutex<SerialOwnerRegistry>>,
     events: broadcast::Sender<DevdEvent>,
     repo_root: PathBuf,
+    #[cfg(test)]
+    mock_serial_responses: Arc<Mutex<VecDeque<SerialProtocolProbe>>>,
 }
 
 #[derive(Debug, Default)]
@@ -1010,6 +1013,8 @@ impl AppState {
             serial: Arc::new(Mutex::new(SerialOwnerRegistry::default())),
             events,
             repo_root,
+            #[cfg(test)]
+            mock_serial_responses: Arc::new(Mutex::new(VecDeque::new())),
         };
         seed_mock_device(&state);
         spawn_lease_reaper(state.clone());
@@ -1930,7 +1935,7 @@ async fn serial_owner_jsonl_request(
     if port_path.starts_with("mock://") {
         return Ok((
             request_id.clone(),
-            mock_serial_probe(&request_id, op, extra),
+            mock_serial_probe(state, &request_id, op, extra),
         ));
     }
     if let Some(reason) = serial_exclusive_reason(state, port_path) {
@@ -2180,6 +2185,63 @@ async fn request_usb_identity(
     }))
 }
 
+fn is_retryable_serial_gap_or_shape_error(error: &HttpError) -> bool {
+    matches!(
+        error.0.code.as_str(),
+        "serial_response_timeout"
+            | "serial_response_mismatch"
+            | "serial_response_missing"
+            | "serial_response_invalid"
+    )
+}
+
+async fn request_compat_status_data(
+    state: &AppState,
+    device_id: &str,
+    port_path: &str,
+) -> Result<Value, HttpError> {
+    let mut last_error = None;
+    for attempt in 0..3 {
+        let (request_id, probe) =
+            match serial_owner_jsonl_request(state, device_id, port_path, "get_status", None).await
+            {
+                Ok(result) => result,
+                Err(error) if attempt < 2 && is_retryable_serial_gap_or_shape_error(&error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+        let response = serial_response_for_request(&probe, &request_id)
+            .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
+            .or_else(|| infer_serial_response_from_text(&probe, &request_id));
+        record_serial_protocol_probe(
+            state,
+            device_id,
+            port_path,
+            if attempt == 0 {
+                "USB status request completed"
+            } else {
+                "USB status retry completed"
+            },
+            probe,
+        );
+        match status_data_from_serial_response(response) {
+            Ok(data) => return Ok(data),
+            Err(error) if attempt < 2 && is_retryable_serial_gap_or_shape_error(&error) => {
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            "USB status did not return a protocol response",
+        )
+    }))
+}
+
 async fn compat_status(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
@@ -2190,19 +2252,7 @@ async fn compat_status(
         select_serial_port_for_compat(&guard, &query, "status")?
     };
 
-    let (request_id, probe) =
-        serial_owner_jsonl_request(&state, &device_id, &port_path, "get_status", None).await?;
-    let response = serial_response_for_request(&probe, &request_id)
-        .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
-        .or_else(|| infer_serial_response_from_text(&probe, &request_id));
-    record_serial_protocol_probe(
-        &state,
-        &device_id,
-        &port_path,
-        "USB status request completed",
-        probe,
-    );
-    let data = status_data_from_serial_response(response)?;
+    let data = request_compat_status_data(&state, &device_id, &port_path).await?;
     let status = data.get("status").cloned().ok_or_else(|| {
         HttpError::retryable(
             "serial_response_invalid",
@@ -2353,6 +2403,48 @@ async fn compat_usb_json_request(
     ))
 }
 
+async fn compat_usb_json_request_with_retry(
+    state: &AppState,
+    query: &CompatQuery,
+    op: &str,
+    extra: Option<Value>,
+    success_message: &str,
+    operation: &str,
+    max_attempts: usize,
+) -> Result<(String, Value), HttpError> {
+    let mut last_error = None;
+    for attempt in 0..max_attempts.max(1) {
+        match compat_usb_json_request(
+            state,
+            query,
+            op,
+            extra.clone(),
+            if attempt == 0 {
+                success_message
+            } else {
+                "USB compat request retry completed"
+            },
+            operation,
+        )
+        .await
+        {
+            Ok(result) => return Ok(result),
+            Err(error)
+                if attempt + 1 < max_attempts && is_retryable_serial_gap_or_shape_error(&error) =>
+            {
+                last_error = Some(error);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_missing",
+            format!("{operation} did not return a protocol response"),
+        )
+    }))
+}
+
 async fn compat_wifi_get(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
@@ -2427,13 +2519,14 @@ async fn compat_control_get(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    let (_, data) = compat_usb_json_request(
+    let (_, data) = compat_usb_json_request_with_retry(
         &state,
         &query,
         "get_control",
         None,
         "USB control GET completed",
         "USB control GET",
+        3,
     )
     .await?;
     Ok(Json(data))
@@ -4175,7 +4268,47 @@ fn device_id_for_port(state: &AppState, port_path: &str) -> Option<String> {
         .map(|device| device.id.clone())
 }
 
-fn mock_serial_probe(request_id: &str, op: &str, extra: Option<Value>) -> SerialProtocolProbe {
+fn mock_serial_probe(
+    state: &AppState,
+    request_id: &str,
+    op: &str,
+    extra: Option<Value>,
+) -> SerialProtocolProbe {
+    #[cfg(test)]
+    if let Some(mut queued) = state
+        .mock_serial_responses
+        .lock()
+        .expect("mock serial responses lock")
+        .pop_front()
+    {
+        if let Some(frame) = queued
+            .frames
+            .iter_mut()
+            .find(|frame| frame.direction == "tx")
+        {
+            frame.frame = json!({"type": "request", "request_id": request_id, "op": op});
+        } else {
+            queued.frames.insert(
+                0,
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({"type": "request", "request_id": request_id, "op": op}),
+                },
+            );
+        }
+        for frame in queued
+            .frames
+            .iter_mut()
+            .filter(|frame| frame.direction == "rx")
+        {
+            if frame.frame.get("request_id").is_some() {
+                frame.frame["request_id"] = json!(request_id);
+            }
+        }
+        return queued;
+    }
+    #[cfg(not(test))]
+    let _ = state;
     let data = match op {
         "get_identity" => mock_identity("mock-loadlynx-devd", "Mock LoadLynx devd device"),
         "get_status" => json!({
@@ -6626,6 +6759,10 @@ mod tests {
         let first_lease = first["lease_id"].as_str().unwrap().to_string();
         let second_lease = second["lease_id"].as_str().unwrap().to_string();
         assert_ne!(first_lease, second_lease);
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
 
         let _ = compat_status(
             State(state.clone()),
@@ -6653,11 +6790,182 @@ mod tests {
             .unwrap()
             .trace
             .iter()
+            .skip(trace_len_before)
             .filter(|trace| trace.direction == "tx")
             .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert_eq!(request_ids.len(), 2);
         assert_ne!(request_ids[0], request_ids[1]);
+    }
+
+    #[tokio::test]
+    async fn compat_status_retries_after_response_gap_error() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![],
+                non_protocol_bytes: 64,
+                non_protocol_text: "binary noise only\n".to_string(),
+            });
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "analog_state": "ready",
+                        "control": {
+                            "active_preset_id": 1,
+                            "mode": "cc",
+                            "output_enabled": false,
+                            "target_i_ma": 2000
+                        },
+                        "hello_seen": true,
+                        "link_up": true,
+                        "status": {
+                            "state_flags": 2,
+                            "fault_flags": 0,
+                            "enable": false,
+                            "i_local_ma": 11,
+                            "i_remote_ma": 8,
+                            "v_local_mv": 12046,
+                            "v_remote_mv": -876,
+                            "calc_p_mw": 228
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["status"]["enable"], false);
+        assert_eq!(status["control"]["target_i_ma"], 2000);
+
+        let guard = state.inner.lock().expect("state lock");
+        let tx_request_ids = guard
+            .devices
+            .get("mock-loadlynx-devd")
+            .unwrap()
+            .trace
+            .iter()
+            .skip(trace_len_before)
+            .filter(|trace| trace.direction == "tx")
+            .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(tx_request_ids.len(), 2);
+        assert_ne!(tx_request_ids[0], tx_request_ids[1]);
+    }
+
+    #[tokio::test]
+    async fn compat_control_get_retries_after_response_gap_error() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![],
+                non_protocol_bytes: 32,
+                non_protocol_text: "dropped control response\n".to_string(),
+            });
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "active_preset_id": 1,
+                        "output_enabled": false,
+                        "uv_latched": false,
+                        "preset": {
+                            "preset_id": 1,
+                            "mode": "cc",
+                            "target_i_ma": 2000,
+                            "target_v_mv": 0,
+                            "target_p_mw": 0,
+                            "min_v_mv": 0,
+                            "max_i_ma_total": 10000,
+                            "max_p_mw": 120000
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(control) = compat_control_get(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(control["active_preset_id"], 1);
+        assert_eq!(control["preset"]["target_i_ma"], 2000);
+
+        let guard = state.inner.lock().expect("state lock");
+        let tx_request_ids = guard
+            .devices
+            .get("mock-loadlynx-devd")
+            .unwrap()
+            .trace
+            .iter()
+            .skip(trace_len_before)
+            .filter(|trace| trace.direction == "tx")
+            .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(tx_request_ids.len(), 2);
+        assert_ne!(tx_request_ids[0], tx_request_ids[1]);
     }
 
     #[tokio::test]
