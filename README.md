@@ -81,7 +81,7 @@ just loadlynx monitor digital --device <saved-id>
 
 `loadlynx-devd` 是 CLI 访问 ESP32-S3 USB CDC JSONL、本地 firmware flow、reset/monitor/logs 的守护。验证 CLI/devd 控制面时通过 `just loadlynx usb-port set digital <path>` 复用仓根项目开发端口缓存作为默认端口记忆。CLI/devd 的 ESP32-S3 digital firmware flash 持有 lease/session、校验 artifact hash，并对批准的项目开发端口调用 direct `espflash`；ELF artifact 使用 `espflash flash`，raw image artifact 必须带 `flash_address` 并使用 `espflash write-bin`。Analog firmware flow 也应通过 `loadlynx` CLI + `loadlynx-devd` 暴露；若当前命令缺失，应补齐 host-tool 能力，而不是引入外部硬件守护。
 
-普通用户需要操作硬件时，应从 GitHub Releases 使用 `install-loadlynx-host.sh` / `install-loadlynx-host.ps1` 安装 host tools；安装器会下载对应平台的 `loadlynx-host-tools-*.tar.gz`，用 release `SHA256SUMS` 校验后安装到用户目录，并只打印 PATH 提示，不自动修改 shell/profile。也可以手动下载 archive，但必须先用 `SHA256SUMS` 校验。发布包包含 `loadlynx-devd` 本地守护程序 / USB bridge，以及 `loadlynx` CLI 工具。
+普通用户在电脑上安装或更新 `loadlynx` / `loadlynx-devd` 程序，以及安装或更新 `loadlynx-user-operations` skill 时，统一看 [`docs/user/install-and-update.md`](docs/user/install-and-update.md)。该指南固定了 GitHub Release installer + `SHA256SUMS` 的程序安装合同，以及 `npx skills add ... -g` / `npx skills update ... -g` 的 skill 安装更新合同。发布包包含 `loadlynx-devd` 本地守护程序 / USB bridge，以及 `loadlynx` CLI 工具。
 
 CLI/devd 本地控制为 IPC-first：`loadlynx` 通过本地 IPC endpoint 与 sibling `loadlynx-devd serve` 通信，并可按需 auto-start；macOS/Linux 默认使用 Unix socket，Windows 默认使用 named pipe，`--ipc` / `--endpoint` 仅在需要覆盖默认 endpoint 时使用。`loadlynx-devd bridge-http` 仅用于浏览器/Web/debug bridge，必须绑定 loopback。用户侧通过 `loadlynx` CLI 操作设备：保存的 USB/devd 设备优先，HTTP 只作为显式 URL 或已保存 LAN transport fallback。
 

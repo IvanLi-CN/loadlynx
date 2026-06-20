@@ -47,6 +47,24 @@ LoadLynx may be used as a generic validation sink for external USB-C source devi
 
 Operation skills are owner-facing release contract material. When a skill/docs change alters released LoadLynx operation guidance, the PR must use `type:patch` or higher even if no product code changes. The release-decision skill carries that rule and the merged-PR backfill procedure; developer operations only references it and keeps artifact maintenance rules.
 
+## Computer install and update guide
+
+Owner-facing install/update guidance is now split out of the top-level `README.md` into
+`docs/user/install-and-update.md`. This keeps one stable human-facing page for "install on
+this computer" while leaving `README.md` as a short project entrypoint.
+
+The contract tightened in two places:
+
+- `程序` means the released `loadlynx` and `loadlynx-devd` host tools, installed and
+  updated through the GitHub Release installer scripts plus `SHA256SUMS`.
+- `skill` means `loadlynx-user-operations`, installed with
+  `npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-user-operations -g`
+  and updated with `npx skills update loadlynx-user-operations -g`.
+
+This change is intentionally owner-facing. Re-running `npx skills add` is no longer the
+documented update path for the user skill, and normal "install on this computer" guidance
+now defaults to global skill scope instead of project-local scope.
+
 ## Documentation Model
 
 `SPEC.md` is the active topic contract. Historical rationale, evolution notes, and records moved out of the topic contract are kept here.

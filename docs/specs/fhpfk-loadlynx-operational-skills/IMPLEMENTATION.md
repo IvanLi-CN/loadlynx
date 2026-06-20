@@ -4,11 +4,17 @@
 
 - `loadlynx-user-operations` now assumes an end-user machine and covers released host-tools installation, saved-device-first CLI access, USB/devd preference, HTTP fallback, GitHub Release firmware download, released CLI flash workflows, CLI device memory, released WiFi commands, and external USB-C source validation without requiring a source checkout.
 - `loadlynx-developer-operations` now requires project checkout detection before repo commands, allows cloning `https://github.com/IvanLi-CN/loadlynx.git` only when source work is needed, and keeps Just/source/HIL workflows behind developer context and hardware approval gates.
+- Owner-facing computer installation and update guidance now lives in `docs/user/install-and-update.md`, while `README.md` keeps only a short entry link.
 - Both skill folders include `SKILL.md` and `agents/openai.yaml`.
 - `loadlynx-release-decision` is the release-label companion skill for operation-skill changes. It keeps `type:none` decisions out of user-facing operation contract changes and documents merged-PR release backfill.
 - `AGENTS.md` routes released CLI-only user hardware operations to the user skill and source/Just/devd/firmware/HIL work to the developer skill.
 - Official release workflows build platform host-tools archives before creating a GitHub Release. Each archive includes `loadlynx-devd`, `loadlynx`, and a short package README. The release also publishes installer scripts, firmware catalog/assets, Web bundle, and `SHA256SUMS` covering every release asset.
 - The user skill and project README now point normal USB bridge setup at released host tools installed by `install-loadlynx-host.sh` / `install-loadlynx-host.ps1` or manually verified against `SHA256SUMS`, instead of source builds.
+- Public skill installation examples now use global-scope semantics for a normal computer install:
+  - `npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-user-operations -g`
+  - `npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-developer-operations -g`
+- The official user-skill update command is now documented as:
+  - `npx skills update loadlynx-user-operations -g`
 - The released CLI/devd boundary is native IPC-first. `loadlynx` can auto-start sibling `loadlynx-devd serve` on the default Unix socket / Windows named pipe, while `--ipc` remains an optional endpoint override rather than a normal user argument; `loadlynx-devd bridge-http` is reserved for browser/Web/debug bridge usage and must stay loopback-only.
 - The user skill treats pre-IPC HTTP-devd host tools as obsolete for skill-driven hardware operation. If `loadlynx --help` exposes `--devd`, or `loadlynx-devd --help` lacks `bridge-http`, the agent must stop and require an IPC-capable stable host-tools release instead of using a compatibility path.
 - The v0.3.0 GitHub Release has been backfilled with `SHA256SUMS` for installation recovery only; its host tools remain obsolete for the user skill because they expose the old `--devd` CLI surface.
@@ -25,9 +31,9 @@
 
 ## Verification
 
-- `quick_validate.py` passes for both skill directories.
-- `npx skills add . --list` discovers both skills.
-- Temporary-directory `npx skills add <repo-url> --skill ...` installs both skills and copies `SKILL.md` plus `agents/openai.yaml`; the published command uses `https://github.com/IvanLi-CN/loadlynx`.
+- Both operational skill directories still contain `SKILL.md` and `agents/openai.yaml`.
+- `npx skills add . --list` discovers the two operational skills and the currently public release-decision companion skill.
+- Temporary-directory `npx skills add <repo-url> --skill ... -g` installs both skills and copies `SKILL.md` plus `agents/openai.yaml`; the published command uses `https://github.com/IvanLi-CN/loadlynx`.
 - Release workflow validation includes local host-tools release build and YAML/diff checks.
 - `cargo test --manifest-path tools/loadlynx-devd/Cargo.toml --locked` covers CLI hardware registry parsing, schema migration, default hardware, transport selection, bind-probe lease restriction, saved USB identity confirmation, fresh devd scan-before-lease retry, path selection, IPC/CLI behavior, lease handling and flash gates.
 - `npm run test:workflow-hygiene` covers documentation drift guards for the released CLI/user skill surface: WiFi, `pd set`, `cv`, `loadlynx-devd serve`, `bridge-http`, stale ordinary daemon URL wording, and banned project-specific external DUT names.
@@ -55,7 +61,7 @@
 
 ### 实现里程碑
 
-- [x] M1: 保持两个 skill，改为用户版 / 开发者版。
+- [x] M1: 保持两个核心 operational skill，改为用户版 / 开发者版，并允许同仓公开 release companion skill。
 - [x] M2: 用户版写入 released host-tools 安装、saved device / USB 优先 / HTTP fallback、GitHub 固件下载、CLI 烧录、CLI WiFi 与 CLI 硬件记忆流程。
 - [x] M3: 开发者版写入 checkout 检测、必要时 clone、`just` 本地 devd/CLI/固件工作流。
 - [x] M4: 补齐 `agents/openai.yaml` 与 `vercel-labs/skills` 安装验证。
@@ -63,3 +69,4 @@
 - [x] M6: 实现 CLI 用户级硬件记忆：保存、列出可连接设备、列出最近连接设备、列出已记住设备、选择、更新、遗忘 USB 与 HTTP 设备，并保存到用户配置目录。
 - [x] M7: 增加通用外部 USB-C source validation 操作路径，使用 `pd set` + `cv` 刺激并把外部 DUT diagnostics 作为主判定。
 - [x] M8: 增加 release decision skill，明确 owner-facing/user-facing 操作合同变更必须 `type:patch` 或更高，并记录 PR #100 补发路径。
+- [x] M9: 新增 `docs/user/install-and-update.md`，把程序安装/更新与 `loadlynx-user-operations` skill 安装/更新统一为正式 owner-facing 入口；公开命令改为 global install + official `skills update`。
