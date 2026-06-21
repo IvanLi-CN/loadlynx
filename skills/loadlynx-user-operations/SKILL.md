@@ -12,7 +12,13 @@ Use this skill on a normal user's computer. All skill-driven hardware operation 
 - Install this skill with:
 
 ```bash
-npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-user-operations
+npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-user-operations -g
+```
+
+- Update this skill with:
+
+```bash
+npx skills update loadlynx-user-operations -g
 ```
 
 - Never require the user to clone the repository or install Rust, Bun, Just, `mcu-agentd`, `espflash`, or `probe-rs`.

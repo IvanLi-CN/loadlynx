@@ -1,5 +1,8 @@
 # 文档索引
 
+- 用户文档（User）
+  - 电脑安装与更新：`user/install-and-update.md`
+
 - 板级总览（Boards）
   - `boards/analog-board.md`
   - `boards/control-board.md`

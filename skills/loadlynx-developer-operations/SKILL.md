@@ -12,7 +12,7 @@ Use this skill for engineering, maintenance, release, and hardware-debug work. T
 - Install this skill with:
 
 ```bash
-npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-developer-operations
+npx skills add https://github.com/IvanLi-CN/loadlynx --skill loadlynx-developer-operations -g
 ```
 
 - Before any project command, prove the current directory is a LoadLynx checkout:
