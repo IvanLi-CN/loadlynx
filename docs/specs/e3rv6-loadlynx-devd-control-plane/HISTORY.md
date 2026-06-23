@@ -53,3 +53,9 @@ The generic `digital-esp32s3` identity remains rejected for bind and saved contr
 ## Documentation Model
 
 `SPEC.md` is the active topic contract. Historical rationale, evolution notes, and records moved out of the topic contract are kept here.
+
+## Formal HIL telemetry follow-up
+
+The Mains Aegis 12V formal HIL run exposed a host-tooling gap rather than a control-plane contract gap: owner-facing `status --device` was correct for spot reads, but formal multi-device telemetry needed a stable single-lease status poller that would not reopen the USB port for every sample. The accepted response was to add a hidden `loadlynx status-stream` command for internal/test use, not a new public control abstraction.
+
+The same HIL run also showed that the saved-device USB recovery path was still wasting time after the response was already recoverable from fragments or text. The implementation therefore moved the recoverable-response check earlier in the serial read loop and shortened the warmup drain window. The design intent stayed the same: bounded request-window recovery only, no stale-frame success, but less dead time during sustained telemetry polling.

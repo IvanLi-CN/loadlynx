@@ -1,4 +1,5 @@
 use super::*;
+use std::io::{self, Write};
 
 #[derive(Debug, Clone)]
 pub(crate) struct ApiSelector {
@@ -542,4 +543,47 @@ fn print_session_delta(
         }
     }
     Ok(())
+}
+
+pub(crate) async fn run_status_stream(
+    client: &Client,
+    resolved: ResolvedUsbHardware,
+    interval_s: f64,
+    format: MonitorFormat,
+) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let (lease, lease_device) = create_cli_lease_for_resolved_usb(client, &resolved).await?;
+    let _heartbeat =
+        spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+    let interval = std::time::Duration::from_secs_f64(interval_s.max(0.1));
+    let mut next_tick = tokio::time::Instant::now();
+    loop {
+        let status = request_devd_value(
+            &resolved.devd,
+            reqwest::Method::GET,
+            &format!(
+                "/api/v1/status?device_id={}&lease_id={}",
+                lease_device, lease.lease_id
+            ),
+            None,
+        )
+        .await?;
+        match format {
+            MonitorFormat::Jsonl => println!(
+                "{}",
+                serde_json::to_string(&json!({
+                    "kind": "status",
+                    "status": status,
+                }))?
+            ),
+            MonitorFormat::Human => println!("{}", serde_json::to_string_pretty(&status)?),
+        }
+        io::stdout().flush()?;
+        next_tick += interval;
+        let now = tokio::time::Instant::now();
+        if next_tick > now {
+            tokio::time::sleep_until(next_tick).await;
+        } else {
+            next_tick = now;
+        }
+    }
 }

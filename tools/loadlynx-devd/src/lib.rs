@@ -45,9 +45,9 @@ use compat_response::{
 };
 use serial_response::{
     ExtractedSerialFrame, SerialProtocolFrame, SerialProtocolProbe, extract_serial_json_frames,
-    infer_serial_response_from_fragments, infer_serial_response_from_text, sanitize_trace_text,
-    serial_probe_has_mismatched_response, serial_request_id_matches_op,
-    serial_response_for_request,
+    infer_serial_response_from_fragments, infer_serial_response_from_text,
+    probe_has_recoverable_response, sanitize_trace_text, serial_probe_has_mismatched_response,
+    serial_request_id_matches_op, serial_response_for_request,
 };
 
 pub const DEFAULT_BIND: &str = "127.0.0.1:30180";
@@ -71,7 +71,8 @@ const EVENT_LIMIT: usize = 1_000;
 const LOG_LIMIT: usize = 500;
 const TRACE_LIMIT: usize = 2_000;
 const SERIAL_PROBE_BAUD: u32 = 115_200;
-const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
+const SERIAL_PROBE_TIMEOUT_MS: u64 = 100;
+const SERIAL_DRAIN_TIMEOUT_MS: u64 = 25;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
 const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
 const SERIAL_PROBE_MAX_BYTES: usize = 32768;
@@ -4537,6 +4538,16 @@ fn read_serial_jsonl_until(
                                     if matched {
                                         return Ok(true);
                                     }
+                                    if let Some(id) = wanted_request_id
+                                        && probe_has_recoverable_response(
+                                            frames,
+                                            *non_protocol_bytes,
+                                            non_protocol_text,
+                                            id,
+                                        )
+                                    {
+                                        return Ok(true);
+                                    }
                                 }
                             }
                         }
@@ -4550,6 +4561,16 @@ fn read_serial_jsonl_until(
                             }
                         }
                     }
+                }
+                if let Some(id) = wanted_request_id
+                    && probe_has_recoverable_response(
+                        frames,
+                        *non_protocol_bytes,
+                        non_protocol_text,
+                        id,
+                    )
+                {
+                    return Ok(true);
                 }
             }
             Err(error) if error.kind() == io::ErrorKind::TimedOut => continue,
@@ -4612,7 +4633,7 @@ fn serial_jsonl_request_on_port(
     let mut non_protocol_bytes = 0usize;
     let mut non_protocol_text = String::new();
 
-    let warmup_deadline = Instant::now() + Duration::from_millis(SERIAL_PROBE_TIMEOUT_MS);
+    let warmup_deadline = Instant::now() + Duration::from_millis(SERIAL_DRAIN_TIMEOUT_MS);
     let _ = read_serial_jsonl_until(
         &mut *port,
         warmup_deadline,
@@ -6099,6 +6120,66 @@ mod tests {
         assert_eq!(identity["firmware"]["target"], "digital_esp32s3");
         assert_eq!(identity["recovered_from_fragments"], true);
         assert_eq!(identity["stable_identity"]["short_id"], "a1b2c3");
+    }
+
+    #[test]
+    fn probe_has_recoverable_response_detects_fragment_recovery() {
+        let request_id = "devd-get-status-123456";
+        let frames = vec![
+            SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({"type": "request", "request_id": request_id, "op": "get_status"}),
+            },
+            SerialProtocolFrame {
+                direction: "rx",
+                frame: json!({
+                    "active_preset_id": 1,
+                    "mode": "cc",
+                    "output_enabled": true,
+                    "target_i_ma": 2000,
+                    "target_v_mv": 0,
+                    "target_p_mw": 0,
+                    "min_v_mv": 0
+                }),
+            },
+            SerialProtocolFrame {
+                direction: "rx",
+                frame: json!({
+                    "state_flags": 6,
+                    "fault_flags": 0,
+                    "enable": true,
+                    "i_local_ma": 998,
+                    "i_remote_ma": 986,
+                    "v_local_mv": 11845,
+                    "v_remote_mv": -858,
+                    "calc_p_mw": 23500
+                }),
+            },
+        ];
+
+        assert!(probe_has_recoverable_response(&frames, 128, "", request_id));
+    }
+
+    #[test]
+    fn probe_has_recoverable_response_detects_text_recovery() {
+        let request_id = "devd-get-wifi-status-123456";
+        let frames = vec![SerialProtocolFrame {
+            direction: "tx",
+            frame: json!({"type": "request", "request_id": request_id, "op": "get_wifi_status"}),
+        }];
+
+        assert!(probe_has_recoverable_response(
+            &frames,
+            128,
+            "noise {\"type\":\"response\",\"request_id\":\"devd-get-wifi-status-12tate\":\"connected\",\"ip\":\"192.168.31.216\",\"last_error\":null}}\n",
+            request_id
+        ));
+        assert!(!probe_has_recoverable_response(
+            &frames,
+            0,
+            "noise only",
+            request_id
+        ));
     }
 
     #[test]
