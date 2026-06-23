@@ -62,8 +62,8 @@ use transport::{
     ApiSelector, create_cli_bind_probe_lease, ensure_one_api_selector, ensure_one_status_selector,
     freeze_api_selector, post_usb_operation_with_optional_lease, release_cli_lease,
     request_api_value, request_devd_usb_value, request_http_value, resolve_output_enable,
-    resolve_scanned_usb_device_for_saved_hardware, run_monitor, saved_usb_device_needs_relookup,
-    spawn_cli_lease_heartbeat,
+    resolve_scanned_usb_device_for_saved_hardware, run_monitor, run_status_stream,
+    saved_usb_device_needs_relookup, spawn_cli_lease_heartbeat,
 };
 
 #[derive(Debug, Clone)]
@@ -215,6 +215,15 @@ enum Command {
         #[arg(long, default_value_t = 200)]
         tail: usize,
         #[arg(long, value_enum, default_value_t = MonitorFormat::Human)]
+        format: MonitorFormat,
+    },
+    #[command(hide = true, name = "status-stream")]
+    StatusStream {
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long = "interval-s", default_value_t = 0.5)]
+        interval_s: f64,
+        #[arg(long, value_enum, default_value_t = MonitorFormat::Jsonl)]
         format: MonitorFormat,
     },
     #[command(hide = true)]
@@ -1049,6 +1058,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     BoardTarget::Analog => reject_unsupported_analog_monitor()?,
                 }
             }
+            Command::StatusStream {
+                device,
+                interval_s,
+                format,
+            } => {
+                let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
+                run_status_stream(&client, resolved, interval_s, format).await?
+            }
             Command::Cc {
                 target_i_ma,
                 url,
@@ -1658,6 +1675,7 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
             }
         }
         Command::Monitor { device, .. }
+        | Command::StatusStream { device, .. }
         | Command::Pd {
             command: PdCommand::Set { device, .. },
         } => usb_target_devd_endpoint(device.as_ref(), default_devd)
@@ -2605,6 +2623,56 @@ mod tests {
     }
 
     #[test]
+    fn initial_devd_endpoints_include_hidden_status_stream_usb_command() {
+        let _guard = TEST_ENV_LOCK.lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let previous_home = env::var_os("LOADLYNX_HOME");
+        unsafe { env::set_var("LOADLYNX_HOME", temp.path()) };
+        write_hardware_registry(
+            &temp.path().join("devices.json"),
+            &HardwareRegistry {
+                default_hardware_id: Some("loadlynx-a1b2c3".to_string()),
+                hardware: vec![SavedHardware {
+                    id: "loadlynx-a1b2c3".to_string(),
+                    name: None,
+                    identity: None,
+                    last_transport: Some(SavedTransport::Usb),
+                    transports: SavedTransports {
+                        usb: Some(SavedUsbTransport {
+                            device: "digital-1".to_string(),
+                            port_path: Some("mock://esp32s3".to_string()),
+                            devd: None,
+                        }),
+                        http: None,
+                    },
+                    last_seen_unix_seconds: None,
+                }],
+                ..HardwareRegistry::default()
+            },
+        )
+        .unwrap();
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "--ipc",
+            "/tmp/loadlynx.sock",
+            "status-stream",
+            "--device",
+            "loadlynx-a1b2c3",
+        ])
+        .expect("status-stream parse");
+        assert_eq!(
+            initial_devd_endpoints(&cli.command, &cli.ipc),
+            vec!["/tmp/loadlynx.sock"]
+        );
+
+        match previous_home {
+            Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
+            None => unsafe { env::remove_var("LOADLYNX_HOME") },
+        }
+    }
+
+    #[test]
     fn initial_devd_endpoints_skip_http_url_commands() {
         let cli = Cli::try_parse_from([
             "loadlynx",
@@ -3013,6 +3081,28 @@ mod tests {
                 assert_eq!(tail, 200);
             }
             _ => panic!("expected monitor command"),
+        }
+    }
+
+    #[test]
+    fn status_stream_defaults_to_jsonl_and_accepts_interval_override() {
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "status-stream",
+            "--device",
+            "digital-1",
+            "--interval-s",
+            "0.25",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::StatusStream {
+                format, interval_s, ..
+            } => {
+                assert!(matches!(format, MonitorFormat::Jsonl));
+                assert!((interval_s - 0.25).abs() < f64::EPSILON);
+            }
+            _ => panic!("expected status-stream command"),
         }
     }
 

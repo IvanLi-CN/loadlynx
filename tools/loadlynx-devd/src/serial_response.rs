@@ -1,12 +1,12 @@
 use serde_json::{Value, json};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SerialProtocolFrame {
     pub(crate) direction: &'static str,
     pub(crate) frame: Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SerialProtocolProbe {
     pub(crate) frames: Vec<SerialProtocolFrame>,
     pub(crate) non_protocol_bytes: usize,
@@ -342,6 +342,22 @@ pub(crate) fn infer_serial_response_from_fragments(
         "data": Value::Object(data),
         "recovered_from_fragments": true
     }))
+}
+
+pub(crate) fn probe_has_recoverable_response(
+    frames: &[SerialProtocolFrame],
+    non_protocol_bytes: usize,
+    non_protocol_text: &str,
+    request_id: &str,
+) -> bool {
+    let probe = SerialProtocolProbe {
+        frames: frames.to_vec(),
+        non_protocol_bytes,
+        non_protocol_text: non_protocol_text.to_string(),
+    };
+    serial_response_for_request(&probe, request_id).is_some()
+        || infer_serial_response_from_fragments(&probe, request_id).is_some()
+        || infer_serial_response_from_text(&probe, request_id).is_some()
 }
 
 fn is_stable_hardware_id(id: &str) -> bool {
