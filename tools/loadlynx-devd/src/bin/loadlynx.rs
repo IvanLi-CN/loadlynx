@@ -87,14 +87,16 @@ struct StatusStreamSample {
     payload: Value,
 }
 
-async fn collect_status_stream_samples<F, Fut>(
+async fn stream_status_samples<F, Fut, E>(
     interval_ms: u64,
     count: Option<usize>,
     mut fetch_status: F,
-) -> Result<Vec<StatusStreamSample>, Box<dyn std::error::Error + Send + Sync>>
+    mut emit_sample: E,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>>
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = Result<Value, Box<dyn std::error::Error + Send + Sync>>>,
+    E: FnMut(StatusStreamSample) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
 {
     let interval = std::time::Duration::from_millis(interval_ms.max(1));
     let deadline = count.unwrap_or(usize::MAX);
@@ -103,7 +105,6 @@ where
     ticker.tick().await;
 
     let start_ms = Utc::now().timestamp_millis();
-    let mut samples = Vec::new();
     let mut prev_received_at_ms = None;
     let mut seq = 0usize;
 
@@ -114,7 +115,7 @@ where
         let received_at_ms = Utc::now().timestamp_millis();
         let gap_ms = prev_received_at_ms.map(|prev| received_at_ms - prev);
         prev_received_at_ms = Some(received_at_ms);
-        samples.push(StatusStreamSample {
+        emit_sample(StatusStreamSample {
             seq,
             requested_at_ms,
             received_at_ms,
@@ -122,14 +123,14 @@ where
             interval_ms: interval_ms.max(1),
             gap_ms,
             payload,
-        });
+        })?;
         if seq >= deadline {
             break;
         }
         ticker.tick().await;
     }
 
-    Ok(samples)
+    Ok(seq)
 }
 
 #[derive(Debug, Parser)]
@@ -1025,7 +1026,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             } => {
                 ensure_one_status_selector(url.as_ref(), device.as_ref())?;
                 let interval_ms = interval_ms.max(1);
-                let mut seq = 0usize;
                 let selector = ApiSelector { url, device };
                 let frozen = freeze_api_selector(selector, &devd, allow_interactive)?;
                 let resolved = match frozen.url {
@@ -1051,7 +1051,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     create_cli_lease_for_resolved_usb(&client, &resolved).await?;
                 let heartbeat =
                     spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-                let samples = collect_status_stream_samples(interval_ms, count, || {
+                let seq = stream_status_samples(
+                    interval_ms,
+                    count,
+                    || {
                     let resolved = resolved.clone();
                     let lease_device = lease_device.clone();
                     let lease_id = lease.lease_id.clone();
@@ -1062,13 +1065,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         );
                         request_devd_value(&resolved.devd, reqwest::Method::GET, &path, None).await
                     }
-                })
+                    },
+                    |sample| {
+                        println!("{}", serde_json::to_string(&sample)?);
+                        io::stdout().flush()?;
+                        Ok(())
+                    },
+                )
                 .await?;
-                for sample in samples {
-                    seq = sample.seq;
-                    println!("{}", serde_json::to_string(&sample)?);
-                    io::stdout().flush()?;
-                }
                 let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
                 heartbeat.abort();
                 eprintln!(
@@ -4100,12 +4104,22 @@ mod tests {
             .build()
             .unwrap()
             .block_on(async {
-                collect_status_stream_samples(250, Some(2), || async {
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                    Ok(json!({"ok": true}))
-                })
+                let mut samples = Vec::new();
+                stream_status_samples(
+                    250,
+                    Some(2),
+                    || async {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        Ok(json!({"ok": true}))
+                    },
+                    |sample| {
+                        samples.push(sample);
+                        Ok(())
+                    },
+                )
                 .await
-                .expect("status stream samples")
+                .expect("status stream samples");
+                samples
             });
         assert_eq!(samples.len(), 2);
         let gap_ms = samples[1].gap_ms.expect("second sample gap");
