@@ -1051,7 +1051,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     create_cli_lease_for_resolved_usb(&client, &resolved).await?;
                 let heartbeat =
                     spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
-                let seq = stream_status_samples(
+                let stream_result = stream_status_samples(
                     interval_ms,
                     count,
                     || {
@@ -1072,9 +1072,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         Ok(())
                     },
                 )
-                .await?;
+                .await;
                 let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
                 heartbeat.abort();
+                let seq = stream_result?;
                 eprintln!(
                     "{}",
                     serde_json::to_string(&json!({"ok": true, "samples": seq}))?
