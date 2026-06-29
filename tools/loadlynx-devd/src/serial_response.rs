@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SerialProtocolFrame {
     pub(crate) direction: &'static str,
     pub(crate) frame: Value,

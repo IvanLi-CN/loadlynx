@@ -71,13 +71,16 @@ const EVENT_LIMIT: usize = 1_000;
 const LOG_LIMIT: usize = 500;
 const TRACE_LIMIT: usize = 2_000;
 const SERIAL_PROBE_BAUD: u32 = 115_200;
-const SERIAL_PROBE_TIMEOUT_MS: u64 = 500;
+// Keep serial reads short so recoverable USB JSONL responses do not inherit
+// a fixed half-second wait on every warmup/read slice.
+const SERIAL_PROBE_TIMEOUT_MS: u64 = 25;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
 const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
 const SERIAL_PROBE_MAX_BYTES: usize = 32768;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
 const SERIAL_WIFI_WAIT_OPERATION_WAIT_MS: u64 = 40_000;
+const STATUS_CACHE_MAX_AGE_MS: i64 = 500;
 const LOADLYNX_PRESET_COUNT: usize = 5;
 pub const HOST_TOOLS_VERSION: &str = match option_env!("LOADLYNX_RELEASE_VERSION") {
     Some(version) => version,
@@ -265,6 +268,10 @@ pub struct DeviceRecord {
     pub lan_endpoint: Option<String>,
     pub identity: Option<Value>,
     pub usb_pd_cache: Option<Value>,
+    pub status_cache: Option<Value>,
+    pub control_cache: Option<Value>,
+    pub status_meta_cache: Option<Value>,
+    pub status_cache_updated_at_ms: Option<i64>,
     pub selected_artifact_id: Option<String>,
     pub log_decode: LogDecodeState,
     pub logs: VecDeque<SessionLog>,
@@ -448,6 +455,10 @@ struct SessionQuery {
 struct CompatQuery {
     device_id: Option<String>,
     lease_id: Option<String>,
+    #[serde(default)]
+    fresh: bool,
+    #[serde(default)]
+    cache: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -540,21 +551,31 @@ async fn serve_ipc_unix(
     let idle_notify = Arc::new(Notify::new());
     loop {
         if active_connections.load(Ordering::SeqCst) == 0 {
-            tokio::select! {
-                accepted = listener.accept() => {
-                    let (stream, _peer) = accepted?;
-                    let state = state.clone();
-                    spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_unix(stream, state).await
-                    });
-                }
-                _ = sleep(config.idle_timeout) => {
-                    tracing::info!(
-                        "loadlynx-devd IPC idle timeout after {}s; exiting",
-                        config.idle_timeout.as_secs()
-                    );
-                    let _ = fs::remove_file(&path);
-                    return Ok(());
+            if config.idle_timeout.is_zero() {
+                let (stream, _peer) = listener.accept().await?;
+                let state = state.clone();
+                spawn_tracked_ipc_connection(
+                    active_connections.clone(),
+                    idle_notify.clone(),
+                    async move { handle_ipc_connection_unix(stream, state).await },
+                );
+            } else {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (stream, _peer) = accepted?;
+                        let state = state.clone();
+                        spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
+                            handle_ipc_connection_unix(stream, state).await
+                        });
+                    }
+                    _ = sleep(config.idle_timeout) => {
+                        tracing::info!(
+                            "loadlynx-devd IPC idle timeout after {}s; exiting",
+                            config.idle_timeout.as_secs()
+                        );
+                        let _ = fs::remove_file(&path);
+                        return Ok(());
+                    }
                 }
             }
         } else {
@@ -605,20 +626,30 @@ async fn serve_ipc_windows(
     loop {
         let server = tokio::net::windows::named_pipe::ServerOptions::new().create(&pipe_name)?;
         if active_connections.load(Ordering::SeqCst) == 0 {
-            tokio::select! {
-                connected = server.connect() => {
-                    connected?;
-                    let state = state.clone();
-                    spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
-                        handle_ipc_connection_windows(server, state).await
-                    });
-                }
-                _ = sleep(config.idle_timeout) => {
-                    tracing::info!(
-                        "loadlynx-devd IPC idle timeout after {}s; exiting",
-                        config.idle_timeout.as_secs()
-                    );
-                    return Ok(());
+            if config.idle_timeout.is_zero() {
+                server.connect().await?;
+                let state = state.clone();
+                spawn_tracked_ipc_connection(
+                    active_connections.clone(),
+                    idle_notify.clone(),
+                    async move { handle_ipc_connection_windows(server, state).await },
+                );
+            } else {
+                tokio::select! {
+                    connected = server.connect() => {
+                        connected?;
+                        let state = state.clone();
+                        spawn_tracked_ipc_connection(active_connections.clone(), idle_notify.clone(), async move {
+                            handle_ipc_connection_windows(server, state).await
+                        });
+                    }
+                    _ = sleep(config.idle_timeout) => {
+                        tracing::info!(
+                            "loadlynx-devd IPC idle timeout after {}s; exiting",
+                            config.idle_timeout.as_secs()
+                        );
+                        return Ok(());
+                    }
                 }
             }
         } else {
@@ -988,6 +1019,14 @@ fn compat_query_and_body(params: Value) -> Result<(CompatQuery, Value), HttpErro
             .get("lease_id")
             .and_then(Value::as_str)
             .map(str::to_string),
+        fresh: params
+            .get("fresh")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        cache: params
+            .get("cache")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
     };
     let body = params.get("body").cloned().unwrap_or(Value::Null);
     Ok((query, body))
@@ -1175,6 +1214,10 @@ async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
                 lan_endpoint: candidate.lan_base_url.clone(),
                 identity: None,
                 usb_pd_cache: None,
+                status_cache: None,
+                control_cache: None,
+                status_meta_cache: None,
+                status_cache_updated_at_ms: None,
                 selected_artifact_id: None,
                 log_decode: LogDecodeState::default(),
                 logs: VecDeque::new(),
@@ -1309,6 +1352,7 @@ async fn device_status(
         .devices
         .get(&id)
         .ok_or_else(|| HttpError::not_found("device_not_found", "device is not known"))?;
+    let cached = cached_status_bundle(device);
     Ok(Json(json!({
         "device_id": id,
         "connection": device.connection,
@@ -1317,7 +1361,11 @@ async fn device_status(
             "analog": device.analog_target,
             "lan": device.lan_endpoint
         },
-        "log_decode": device.log_decode
+        "log_decode": device.log_decode,
+        "status_cache": cached.as_ref().and_then(|value| value.get("status")).cloned(),
+        "control_cache": cached.as_ref().and_then(|value| value.get("control")).cloned(),
+        "status_meta_cache": cached.as_ref().and_then(|value| value.get("status_meta")).cloned(),
+        "status_cache_updated_at_ms": device.status_cache_updated_at_ms
     })))
 }
 
@@ -2234,7 +2282,20 @@ async fn request_compat_status_data(
             probe,
         );
         match status_data_from_serial_response(response) {
-            Ok(data) => return Ok(data),
+            Ok(data) => {
+                if let Some(device) = state
+                    .inner
+                    .lock()
+                    .expect("state lock")
+                    .devices
+                    .get_mut(device_id)
+                {
+                    let _ = maybe_update_device_status_cache(device, &data);
+                    let _ = maybe_update_device_control_cache(device, &data);
+                    return Ok(merge_cached_control_if_missing(device, data));
+                }
+                return Ok(data);
+            }
             Err(error) if attempt < 2 && is_retryable_serial_gap_or_shape_error(&error) => {
                 last_error = Some(error);
             }
@@ -2259,7 +2320,15 @@ async fn compat_status(
         select_serial_port_for_compat(&guard, &query, "status")?
     };
 
-    let data = request_compat_status_data(&state, &device_id, &port_path).await?;
+    let data = if query.cache && !query.fresh {
+        if let Some(cached) = fresh_cached_status_data(&state, &device_id) {
+            cached
+        } else {
+            request_compat_status_data(&state, &device_id, &port_path).await?
+        }
+    } else {
+        request_compat_status_data(&state, &device_id, &port_path).await?
+    };
     let status = data.get("status").cloned().ok_or_else(|| {
         HttpError::retryable(
             "serial_response_invalid",
@@ -2526,7 +2595,7 @@ async fn compat_control_get(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    let (_, data) = compat_usb_json_request_with_retry(
+    let (request_id, data) = compat_usb_json_request_with_retry(
         &state,
         &query,
         "get_control",
@@ -2536,6 +2605,25 @@ async fn compat_control_get(
         3,
     )
     .await?;
+    if let Some(device_id) = query.device_id.as_deref()
+        && let Some(device) = state
+            .inner
+            .lock()
+            .expect("state lock")
+            .devices
+            .get_mut(device_id)
+    {
+        let _ = maybe_update_device_control_cache(device, &data);
+        push_trace(
+            device,
+            "rx",
+            json!({
+                "type": "control_cache_refresh",
+                "request_id": request_id,
+                "cached": true
+            }),
+        );
+    }
     Ok(Json(data))
 }
 
@@ -2806,6 +2894,8 @@ async fn compat_diagnostics_export(
     let compat_query = CompatQuery {
         device_id: query.device_id.clone(),
         lease_id: query.lease_id.clone(),
+        fresh: false,
+        cache: false,
     };
     let (_, firmware) = compat_usb_json_request(
         &state,
@@ -3347,6 +3437,10 @@ fn session_json(
     json!({
         "connected": device.connection == ConnectionState::Connected,
         "log_decode": device.log_decode,
+        "status_cache": device.status_cache.clone(),
+        "control_cache": device.control_cache.clone(),
+        "status_meta_cache": device.status_meta_cache.clone(),
+        "status_cache_updated_at_ms": device.status_cache_updated_at_ms,
         "logs": tail(&device.logs, logs_limit.unwrap_or(200).min(LOG_LIMIT)),
         "trace": tail(&device.trace, trace_limit.unwrap_or(600).min(TRACE_LIMIT)),
     })
@@ -4069,6 +4163,128 @@ fn apply_artifact_match(device: &mut DeviceRecord, artifact: Option<&FirmwareArt
     };
 }
 
+fn status_cache_timestamp_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+fn maybe_update_device_status_cache(device: &mut DeviceRecord, value: &Value) -> bool {
+    let Some(status) = value.get("status").cloned() else {
+        return false;
+    };
+    device.status_cache = Some(status);
+    if let Some(control) = value.get("control").cloned() {
+        device.control_cache = Some(control);
+    }
+    device.status_meta_cache = Some(status_meta_from_status_bundle(value));
+    device.status_cache_updated_at_ms = Some(status_cache_timestamp_ms());
+    true
+}
+
+fn maybe_update_device_status_cache_from_status_payload(
+    device: &mut DeviceRecord,
+    status: &Value,
+    control: Option<Value>,
+) -> bool {
+    if status.get("state_flags").is_none()
+        || status.get("fault_flags").is_none()
+        || status.get("v_local_mv").is_none()
+        || status.get("i_local_ma").is_none()
+    {
+        return false;
+    }
+    device.status_cache = Some(status.clone());
+    if let Some(control) = control {
+        device.control_cache = Some(control);
+    }
+    device.status_meta_cache = None;
+    device.status_cache_updated_at_ms = Some(status_cache_timestamp_ms());
+    true
+}
+
+fn maybe_update_device_control_cache(device: &mut DeviceRecord, value: &Value) -> bool {
+    if value.get("active_preset_id").is_none() {
+        return false;
+    }
+    if value.get("preset").is_none()
+        && !(value.get("mode").is_some() && value.get("output_enabled").is_some())
+    {
+        return false;
+    }
+    device.control_cache = Some(value.clone());
+    true
+}
+
+fn cached_status_bundle(device: &DeviceRecord) -> Option<Value> {
+    let status = device.status_cache.clone()?;
+    let mut out = serde_json::Map::new();
+    out.insert("status".to_string(), status);
+    if let Some(control) = device.control_cache.clone() {
+        out.insert("control".to_string(), control);
+    }
+    if let Some(meta) = device.status_meta_cache.as_ref().and_then(Value::as_object) {
+        for key in [
+            "link_up",
+            "hello_seen",
+            "analog_state",
+            "fault_flags_decoded",
+        ] {
+            if let Some(value) = meta.get(key) {
+                out.insert(key.to_string(), value.clone());
+            }
+        }
+        out.insert("status_meta".to_string(), Value::Object(meta.clone()));
+    }
+    if let Some(updated_at_ms) = device.status_cache_updated_at_ms {
+        out.insert("cache_updated_at_ms".to_string(), json!(updated_at_ms));
+    }
+    out.insert("from_monitor_cache".to_string(), json!(true));
+    Some(Value::Object(out))
+}
+
+fn merge_cached_control_if_missing(device: &DeviceRecord, mut value: Value) -> Value {
+    if value.get("control").is_some() {
+        return value;
+    }
+    let Some(control) = device.control_cache.clone() else {
+        return value;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("control".to_string(), control);
+    }
+    value
+}
+
+fn status_meta_from_status_bundle(value: &Value) -> Value {
+    let mut meta = serde_json::Map::new();
+    for key in [
+        "link_up",
+        "hello_seen",
+        "analog_state",
+        "fault_flags_decoded",
+    ] {
+        if let Some(field) = value.get(key).cloned() {
+            meta.insert(key.to_string(), field);
+        }
+    }
+    Value::Object(meta)
+}
+
+fn fresh_cached_status_data(state: &AppState, device_id: &str) -> Option<Value> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard.devices.get(device_id)?;
+    let updated_at_ms = device.status_cache_updated_at_ms?;
+    let age_ms = status_cache_timestamp_ms() - updated_at_ms;
+    if age_ms > STATUS_CACHE_MAX_AGE_MS {
+        return None;
+    }
+    cached_status_bundle(device).map(|mut value| {
+        if let Some(object) = value.as_object_mut() {
+            object.insert("cache_age_ms".to_string(), json!(age_ms.max(0)));
+        }
+        value
+    })
+}
+
 fn identity_features_match(firmware: Option<&Value>, artifact_features: &[String]) -> bool {
     let Some(features) = firmware
         .and_then(|f| f.get("features"))
@@ -4479,10 +4695,46 @@ fn record_serial_protocol_probe(
                 {
                     device.usb_pd_cache = Some(data);
                 }
+                if event.direction == "rx"
+                    && event.frame.get("ok").and_then(Value::as_bool) == Some(true)
+                    && let Some(data) = event.frame.get("data")
+                {
+                    let _ = maybe_update_device_status_cache(device, data);
+                    let _ = maybe_update_device_control_cache(device, data);
+                } else if event.direction == "rx" {
+                    let _ = maybe_update_device_status_cache(device, &event.frame);
+                    let _ = maybe_update_device_control_cache(device, &event.frame);
+                    let control = event
+                        .frame
+                        .get("active_preset_id")
+                        .is_some()
+                        .then(|| event.frame.clone());
+                    let _ = maybe_update_device_status_cache_from_status_payload(
+                        device,
+                        &event.frame,
+                        control,
+                    );
+                }
                 push_trace(device, event.direction, event.frame);
             }
         }
     }
+}
+
+fn probe_has_satisfied_response(
+    frames: &[SerialProtocolFrame],
+    non_protocol_bytes: usize,
+    non_protocol_text: &str,
+    request_id: &str,
+) -> bool {
+    let probe = SerialProtocolProbe {
+        frames: frames.to_vec(),
+        non_protocol_bytes,
+        non_protocol_text: non_protocol_text.to_string(),
+    };
+    serial_response_for_request(&probe, request_id).is_some()
+        || infer_serial_response_from_fragments(&probe, request_id).is_some()
+        || infer_serial_response_from_text(&probe, request_id).is_some()
 }
 
 fn read_serial_jsonl_until(
@@ -4517,6 +4769,16 @@ fn read_serial_jsonl_until(
                                     non_protocol_text.push_str(&line);
                                     non_protocol_text.push('\n');
                                 }
+                                if wanted_request_id.is_some_and(|request_id| {
+                                    probe_has_satisfied_response(
+                                        frames,
+                                        *non_protocol_bytes,
+                                        non_protocol_text,
+                                        request_id,
+                                    )
+                                }) {
+                                    return Ok(true);
+                                }
                             } else {
                                 for ExtractedSerialFrame {
                                     frame,
@@ -4535,6 +4797,16 @@ fn read_serial_jsonl_until(
                                         frame,
                                     });
                                     if matched {
+                                        return Ok(true);
+                                    }
+                                    if wanted_request_id.is_some_and(|request_id| {
+                                        probe_has_satisfied_response(
+                                            frames,
+                                            *non_protocol_bytes,
+                                            non_protocol_text,
+                                            request_id,
+                                        )
+                                    }) {
                                         return Ok(true);
                                     }
                                 }
@@ -4627,15 +4899,26 @@ fn serial_jsonl_request_on_port(
     write_serial_request(&mut *port, &mut frames, request_id, op, extra)?;
     line_buf.clear();
     let deadline = Instant::now() + Duration::from_millis(protocol_timeout_ms);
-    let _ = read_serial_jsonl_until(
-        &mut *port,
-        deadline,
-        &mut line_buf,
-        &mut frames,
-        &mut non_protocol_bytes,
-        &mut non_protocol_text,
-        Some(request_id),
-    )?;
+    while Instant::now() < deadline {
+        let now = Instant::now();
+        let slice_deadline =
+            now + Duration::from_millis(50).min(deadline.saturating_duration_since(now));
+        if read_serial_jsonl_until(
+            &mut *port,
+            slice_deadline,
+            &mut line_buf,
+            &mut frames,
+            &mut non_protocol_bytes,
+            &mut non_protocol_text,
+            Some(request_id),
+        )? {
+            break;
+        }
+        if probe_has_satisfied_response(&frames, non_protocol_bytes, &non_protocol_text, request_id)
+        {
+            break;
+        }
+    }
 
     Ok(SerialProtocolProbe {
         frames,
@@ -4929,6 +5212,10 @@ fn seed_mock_device(state: &AppState) {
             "Mock LoadLynx devd device",
         )),
         usb_pd_cache: None,
+        status_cache: None,
+        control_cache: None,
+        status_meta_cache: None,
+        status_cache_updated_at_ms: None,
         selected_artifact_id: None,
         log_decode: LogDecodeState::default(),
         logs: VecDeque::new(),
@@ -5144,6 +5431,56 @@ mod tests {
             },
             files: vec![],
         }
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn ipc_serve_zero_idle_timeout_stays_alive_until_aborted() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = dir.path().join("loadlynx-devd.sock");
+        let endpoint = endpoint.to_string_lossy().to_string();
+        let task = tokio::spawn(serve_ipc(IpcConfig::new(endpoint.clone(), Duration::ZERO)));
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !task.is_finished(),
+            "idle_timeout=0 must disable idle shutdown"
+        );
+
+        let response = ipc_request(
+            &endpoint,
+            IpcRequest {
+                op: "health".to_string(),
+                params: json!({}),
+            },
+        )
+        .await
+        .unwrap();
+        assert!(response.ok);
+        assert!(
+            !task.is_finished(),
+            "server must remain alive after IPC request"
+        );
+
+        task.abort();
+    }
+
+    #[cfg(not(windows))]
+    #[tokio::test]
+    async fn ipc_serve_nonzero_idle_timeout_exits_when_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let endpoint = dir.path().join("loadlynx-devd.sock");
+        let endpoint = endpoint.to_string_lossy().to_string();
+        let task = tokio::spawn(serve_ipc(IpcConfig::new(
+            endpoint,
+            Duration::from_millis(25),
+        )));
+
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("server should exit after nonzero idle timeout")
+            .unwrap()
+            .unwrap();
     }
 
     #[test]
@@ -5494,6 +5831,10 @@ mod tests {
                 json!({"firmware": {"build_id": "b", "build_profile": "release", "features": ["net_http"]}}),
             ),
             usb_pd_cache: None,
+            status_cache: None,
+            control_cache: None,
+            status_meta_cache: None,
+            status_cache_updated_at_ms: None,
             selected_artifact_id: None,
             log_decode: LogDecodeState::default(),
             logs: VecDeque::new(),
@@ -6354,6 +6695,8 @@ mod tests {
                 &CompatQuery {
                     device_id: None,
                     lease_id: Some("bind-probe".to_string()),
+                    fresh: false,
+                    cache: false,
                 },
                 "status",
             )
@@ -6365,6 +6708,8 @@ mod tests {
                 &CompatQuery {
                     device_id: None,
                     lease_id: Some("bind-probe".to_string()),
+                    fresh: false,
+                    cache: false,
                 },
                 "identity",
             )
@@ -6771,20 +7116,24 @@ mod tests {
             guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
         };
 
-        let _ = compat_status(
+        let Json(first_status) = compat_status(
             State(state.clone()),
             Query(CompatQuery {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(first_lease),
+                fresh: false,
+                cache: false,
             }),
         )
         .await
         .unwrap();
-        let _ = compat_status(
+        let Json(second_status) = compat_status(
             State(state.clone()),
             Query(CompatQuery {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(second_lease),
+                fresh: false,
+                cache: false,
             }),
         )
         .await
@@ -6802,7 +7151,154 @@ mod tests {
             .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert_eq!(request_ids.len(), 2);
-        assert_ne!(request_ids[0], request_ids[1]);
+        assert_eq!(first_status["device_id"], "mock-loadlynx-devd");
+        assert_eq!(second_status["device_id"], "mock-loadlynx-devd");
+        assert_eq!(second_status["from_monitor_cache"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn compat_status_cache_opt_in_reuses_recent_status_sample() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(first) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let first_lease = first["lease_id"].as_str().unwrap().to_string();
+        let second_lease = second["lease_id"].as_str().unwrap().to_string();
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
+
+        let Json(first_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(first_lease),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(second_lease),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let guard = state.inner.lock().expect("state lock");
+        let request_ids = guard
+            .devices
+            .get("mock-loadlynx-devd")
+            .unwrap()
+            .trace
+            .iter()
+            .skip(trace_len_before)
+            .filter(|trace| trace.direction == "tx")
+            .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(request_ids.len(), 1);
+        assert_eq!(first_status["device_id"], "mock-loadlynx-devd");
+        assert_eq!(second_status["device_id"], "mock-loadlynx-devd");
+        assert_eq!(second_status["from_monitor_cache"], true);
+    }
+
+    #[tokio::test]
+    async fn compat_status_cache_preserves_offline_link_state() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "analog_state": "offline",
+                        "hello_seen": false,
+                        "link_up": false,
+                        "status": {
+                            "state_flags": 0,
+                            "fault_flags": 0,
+                            "enable": false,
+                            "i_local_ma": 0,
+                            "v_local_mv": 0
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(first_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id.clone()),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first_status["link_up"], false);
+        assert_eq!(second_status["from_monitor_cache"], true);
+        assert_eq!(second_status["link_up"], false);
+        assert_eq!(second_status["hello_seen"], false);
+        assert_eq!(second_status["analog_state"], "offline");
     }
 
     #[tokio::test]
@@ -6870,6 +7366,8 @@ mod tests {
             Query(CompatQuery {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(lease_id),
+                fresh: false,
+                cache: false,
             }),
         )
         .await
@@ -6891,6 +7389,198 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(tx_request_ids.len(), 2);
         assert_ne!(tx_request_ids[0], tx_request_ids[1]);
+    }
+
+    #[tokio::test]
+    async fn compat_status_refreshes_stale_cache_after_half_second() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let device = guard.devices.get_mut("mock-loadlynx-devd").unwrap();
+            device.status_cache = Some(json!({
+                "enable": true,
+                "fault_flags": 99,
+                "i_local_ma": 1,
+                "state_flags": 7,
+                "v_local_mv": 42
+            }));
+            device.control_cache = Some(json!({
+                "active_preset_id": 9,
+                "mode": "cv",
+                "output_enabled": true
+            }));
+            device.status_cache_updated_at_ms =
+                Some(Utc::now().timestamp_millis() - STATUS_CACHE_MAX_AGE_MS - 1);
+        }
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "analog_state": "ready",
+                        "control": {
+                            "active_preset_id": 1,
+                            "mode": "cc",
+                            "output_enabled": false,
+                            "target_i_ma": 2000
+                        },
+                        "hello_seen": true,
+                        "link_up": true,
+                        "status": {
+                            "state_flags": 2,
+                            "fault_flags": 0,
+                            "enable": false,
+                            "i_local_ma": 11,
+                            "i_remote_ma": 8,
+                            "v_local_mv": 12046,
+                            "v_remote_mv": -876,
+                            "calc_p_mw": 228
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
+        let Json(status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["status"]["enable"], false);
+        assert_eq!(status["control"]["target_i_ma"], 2000);
+        assert_eq!(status["cache_age_ms"], serde_json::Value::Null);
+
+        let guard = state.inner.lock().expect("state lock");
+        let tx_request_ids = guard
+            .devices
+            .get("mock-loadlynx-devd")
+            .unwrap()
+            .trace
+            .iter()
+            .skip(trace_len_before)
+            .filter(|trace| trace.direction == "tx")
+            .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(tx_request_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compat_status_refresh_without_control_preserves_control_cache() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let device = guard.devices.get_mut("mock-loadlynx-devd").unwrap();
+            device.status_cache = Some(json!({
+                "enable": true,
+                "fault_flags": 0,
+                "i_local_ma": 1,
+                "state_flags": 1,
+                "v_local_mv": 12000
+            }));
+            device.control_cache = Some(json!({
+                "active_preset_id": 9,
+                "mode": "cc",
+                "output_enabled": true,
+                "target_i_ma": 1000
+            }));
+            device.status_cache_updated_at_ms =
+                Some(Utc::now().timestamp_millis() - STATUS_CACHE_MAX_AGE_MS - 1);
+        }
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "hello_seen": true,
+                        "link_up": true,
+                        "status": {
+                            "state_flags": 2,
+                            "fault_flags": 0,
+                            "enable": false,
+                            "i_local_ma": 11,
+                            "i_remote_ma": 8,
+                            "v_local_mv": 12046,
+                            "v_remote_mv": -876,
+                            "calc_p_mw": 228
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["status"]["enable"], false);
+        assert_eq!(status["control"]["target_i_ma"], 1000);
+        let guard = state.inner.lock().expect("state lock");
+        assert_eq!(
+            guard.devices["mock-loadlynx-devd"].control_cache,
+            Some(json!({
+                "active_preset_id": 9,
+                "mode": "cc",
+                "output_enabled": true,
+                "target_i_ma": 1000
+            }))
+        );
     }
 
     #[tokio::test]
@@ -6952,6 +7642,8 @@ mod tests {
             Query(CompatQuery {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(lease_id),
+                fresh: false,
+                cache: false,
             }),
         )
         .await

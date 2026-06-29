@@ -133,19 +133,38 @@ pub(crate) async fn handle_device_command(
 
     match command {
         DeviceCommand::List => device_list_payload(&registry_path, &cwd),
-        DeviceCommand::Add { url, name } => {
+        DeviceCommand::Add {
+            url,
+            usb_port,
+            name,
+        } => {
             let mut registry = read_hardware_registry(&registry_path)?;
             let now = current_unix_seconds();
-            let saved = if let Some(url) = url {
-                bind_http_device(&mut registry, client, &url, name, now).await?
-            } else {
-                if !allow_interactive {
-                    return Err(
-                        "`loadlynx device add` without --url requires an interactive terminal"
-                            .into(),
-                    );
+            let selector_count = [url.is_some(), usb_port.is_some()]
+                .into_iter()
+                .filter(|selected| *selected)
+                .count();
+            if selector_count > 1 {
+                return Err("`loadlynx device add` accepts only one of --url or --usb-port".into());
+            }
+            let saved = match (url, usb_port) {
+                (Some(url), None) => {
+                    bind_http_device(&mut registry, client, &url, name, now).await?
                 }
-                bind_usb_device_interactive(&mut registry, client, devd, name, now).await?
+                (None, Some(port_path)) => {
+                    bind_usb_device_by_port_path(&mut registry, client, devd, &port_path, name, now)
+                        .await?
+                }
+                (None, None) => {
+                    if !allow_interactive {
+                        return Err(
+                            "`loadlynx device add` without --url or --usb-port requires an interactive terminal"
+                                .into(),
+                        );
+                    }
+                    bind_usb_device_interactive(&mut registry, client, devd, name, now).await?
+                }
+                (Some(_), Some(_)) => unreachable!("selector_count checked above"),
             };
             if registry.default_hardware_id.is_none() {
                 registry.default_hardware_id = Some(saved.id.clone());
@@ -289,6 +308,37 @@ async fn bind_usb_device_interactive(
     ))
 }
 
+async fn bind_usb_device_by_port_path(
+    registry: &mut HardwareRegistry,
+    client: &Client,
+    devd: &str,
+    port_path: &str,
+    name: Option<String>,
+    now: u64,
+) -> Result<SavedHardware, Box<dyn std::error::Error + Send + Sync>> {
+    let port_path = validate_explicit_usb_port(port_path)?;
+    let scan =
+        request_devd_value(devd, reqwest::Method::POST, "/api/v1/devices/scan", None).await?;
+    let selected = usb_add_candidate_for_port_path(&scan, &port_path)?;
+    let identity = read_usb_identity_for_bind(client, devd, &selected.candidate_id).await?;
+    let hardware_id = stable_hardware_id_from_identity(&identity)?;
+    let preferred_name = name.or_else(|| Some(selected.display_name.clone()));
+    Ok(upsert_hardware_transport(
+        registry,
+        hardware_id,
+        preferred_name,
+        Some(identity),
+        SavedTransport::Usb,
+        Some(SavedUsbTransport {
+            device: selected.candidate_id,
+            port_path: Some(port_path),
+            devd: Some(devd.to_string()),
+        }),
+        None,
+        now,
+    ))
+}
+
 async fn bind_http_device(
     registry: &mut HardwareRegistry,
     client: &Client,
@@ -316,6 +366,30 @@ async fn bind_http_device(
         }),
         now,
     ))
+}
+
+fn validate_explicit_usb_port(
+    port_path: &str,
+) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let port_path = port_path.trim();
+    if port_path.is_empty() {
+        return Err("USB port path must not be empty".into());
+    }
+    if port_path.contains('\0') || port_path.contains('\n') || port_path.contains('\r') {
+        return Err("USB port path must be a single path string".into());
+    }
+    Ok(port_path.to_string())
+}
+
+fn usb_add_candidate_for_port_path(
+    scan: &Value,
+    port_path: &str,
+) -> Result<UsbAddCandidate, Box<dyn std::error::Error + Send + Sync>> {
+    let candidates = usb_add_candidates_from_scan(scan)?;
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.port_path.as_deref() == Some(port_path))
+        .ok_or_else(|| format!("devd scan did not expose USB candidate at {port_path}").into())
 }
 
 fn usb_add_candidates_from_scan(
@@ -1147,5 +1221,30 @@ mod tests {
             }
             ResolvedHardware::Http { .. } => panic!("expected usb device"),
         }
+    }
+
+    #[test]
+    fn explicit_usb_port_candidate_resolves_from_default_scan() {
+        let scan = json!({
+            "devices": [{
+                "id": "digital-1",
+                "display_name": "ESP32-S3 USB CDC (/dev/cu.usbmodem212101)",
+                "digital_target": {"port_path": "/dev/cu.usbmodem212101"}
+            }]
+        });
+
+        let candidate = usb_add_candidate_for_port_path(&scan, "/dev/cu.usbmodem212101").unwrap();
+
+        assert_eq!(candidate.candidate_id, "digital-1");
+        assert_eq!(
+            candidate.port_path.as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
+    }
+
+    #[test]
+    fn explicit_usb_port_rejects_empty_or_multiline_values() {
+        assert!(validate_explicit_usb_port("  ").is_err());
+        assert!(validate_explicit_usb_port("/dev/cu.usbmodem1\n/dev/other").is_err());
     }
 }
