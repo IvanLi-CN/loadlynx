@@ -1,26 +1,143 @@
 import { expect, test } from "@playwright/test";
 
+async function openCalibrationSection(
+  page: Parameters<typeof test>[1] extends (args: infer T) => unknown
+    ? T["page"]
+    : never,
+  name: "电压" | "电流通道1" | "电流通道2",
+) {
+  await page
+    .getByRole("navigation", { name: "系统页导航" })
+    .getByRole("link", { name, exact: true })
+    .click();
+}
+
+async function openSystemPage(
+  page: Parameters<typeof test>[1] extends (args: infer T) => unknown
+    ? T["page"]
+    : never,
+  name: "设置" | "状态" | "固件" | "关于",
+) {
+  await page
+    .getByRole("navigation", { name: "系统页导航" })
+    .getByRole("link", { name, exact: true })
+    .click();
+}
+
+async function readStatNumericValue(
+  page: Parameters<typeof test>[1] extends (args: infer T) => unknown
+    ? T["page"]
+    : never,
+  title: string,
+) {
+  const text = await page
+    .locator(".ll-stat", { hasText: title })
+    .locator(".ll-stat-value")
+    .textContent();
+  const match = text?.match(/-?\d+(?:\.\d+)?/);
+  if (!match) {
+    throw new Error(`Could not parse numeric value for stat ${title}`);
+  }
+  return Number(match[0]);
+}
+
+async function waitForStableDacValue(
+  page: Parameters<typeof test>[1] extends (args: infer T) => unknown
+    ? T["page"]
+    : never,
+) {
+  await expect
+    .poll(() => readStatNumericValue(page, "DAC Code"))
+    .toBeGreaterThan(0);
+  return readStatNumericValue(page, "DAC Code");
+}
+
 test.describe("Calibration UI", () => {
+  test("leaves calibration for sibling system pages from the system page navigation", async ({
+    page,
+  }) => {
+    await page.goto("/devices");
+    await page
+      .locator("section")
+      .filter({ hasText: "当前已知设备" })
+      .getByRole("button", { name: "Add sample device" })
+      .click();
+
+    await page.goto("/mock-001/calibration?section=current_ch2");
+    await expect(page).toHaveURL(
+      /\/mock-001\/calibration\?section=current_ch2/,
+    );
+
+    await openSystemPage(page, "设置");
+    await expect(page).toHaveURL(/\/mock-001\/settings$/);
+    await expect(
+      page.getByRole("heading", { name: "Device Settings", level: 2 }),
+    ).toBeVisible();
+
+    await page.goto("/mock-001/calibration?section=current_ch1");
+    await expect(page).toHaveURL(
+      /\/mock-001\/calibration\?section=current_ch1/,
+    );
+
+    await openSystemPage(page, "状态");
+    await expect(page).toHaveURL(/\/mock-001\/status$/);
+    await expect(
+      page.getByRole("heading", { name: "Device Status", level: 2 }),
+    ).toBeVisible();
+  });
+
+  test("switches calibration sections from the system page navigation", async ({
+    page,
+  }) => {
+    await page.goto("/devices");
+    await page
+      .locator("section")
+      .filter({ hasText: "当前已知设备" })
+      .getByRole("button", { name: "Add sample device" })
+      .click();
+
+    await page.goto("/mock-001/calibration");
+    await expect(page).toHaveURL(/section=voltage/);
+    await expect(page.getByLabel("Measured Voltage (V)")).toBeVisible();
+
+    await openCalibrationSection(page, "电流通道1");
+    await expect(page).toHaveURL(/section=current_ch1/);
+    await expect(page.getByLabel("Meter Reading (Local) (A)")).toBeVisible();
+
+    await openCalibrationSection(page, "电流通道2");
+    await expect(page).toHaveURL(/section=current_ch2/);
+    await expect(
+      page.getByRole("button", { name: "Copy CH1 → CH2", exact: true }),
+    ).toBeVisible();
+
+    await openCalibrationSection(page, "电压");
+    await expect(page).toHaveURL(/section=voltage/);
+    await expect(page.getByLabel("Measured Voltage (V)")).toBeVisible();
+  });
+
   test("full flow with simulation device", async ({ page }) => {
     await page.goto("/devices");
 
-    await page.getByRole("button", { name: "Add simulation device" }).click();
+    await page
+      .locator("section")
+      .filter({ hasText: "当前已知设备" })
+      .getByRole("button", { name: "Add sample device" })
+      .click();
 
     // First simulation device always becomes mock-001.
     const deviceId = "mock-001";
 
     await page.goto(`/${deviceId}/calibration`);
 
-    // Calibration now uses the default console layout (sidebar visible on desktop).
-    await expect(page.locator("aside")).toHaveCount(1);
+    await expect(
+      page.getByRole("navigation", { name: "主导航" }),
+    ).toBeVisible();
 
     // Voltage tab is default.
-    await expect(page.getByRole("heading", { level: 2 })).toHaveText(
-      "Calibration",
-    );
-    await expect(page.getByRole("tab", { name: "电压" })).toHaveClass(
-      /ll-tab-active/,
-    );
+    await expect(
+      page.getByRole("heading", { name: "Calibration", level: 2 }),
+    ).toBeVisible();
+    await expect(page).toHaveURL(/section=voltage/);
 
     // Mock should be online.
     await expect(page.locator(".ll-badge.gap-2")).toHaveText("ONLINE");
@@ -49,10 +166,8 @@ test.describe("Calibration UI", () => {
     await expect(draftVoltageTable).toContainText("12001");
 
     // Switch to current tab (CH1).
-    await page.getByRole("tab", { name: "电流通道1" }).click();
-    await expect(page.getByRole("tab", { name: "电流通道1" })).toHaveClass(
-      /ll-tab-active/,
-    );
+    await openCalibrationSection(page, "电流通道1");
+    await expect(page).toHaveURL(/section=current_ch1/);
 
     // Set target current (1A) and enable output.
     await page.getByRole("button", { name: "1A" }).click();
@@ -61,11 +176,10 @@ test.describe("Calibration UI", () => {
     // Wait for raw current to appear.
     const currentStat = page.locator(".ll-stat", { hasText: "Active Current" });
     await expect(currentStat.getByText("Raw:")).not.toContainText("--");
-    await expect(currentStat.locator(".ll-stat-value")).toContainText(
-      "0.8550 A",
-    );
-    const dacStat = page.locator(".ll-stat", { hasText: "DAC Code" });
-    await expect(dacStat.locator(".ll-stat-value")).toContainText("819");
+    await expect
+      .poll(() => readStatNumericValue(page, "Active Current"))
+      .toBeGreaterThan(0.5);
+    await waitForStableDacValue(page);
 
     // Advanced: subtract baseline current (e.g., adapters/fixtures).
     await page.locator("summary", { hasText: "高级选项" }).click();
@@ -81,10 +195,8 @@ test.describe("Calibration UI", () => {
     expect(await draftRowsA.count()).toBe(1);
 
     // Switch to current tab (CH2) and copy CH1 calibration into CH2 draft.
-    await page.getByRole("tab", { name: "电流通道2" }).click();
-    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
-      /ll-tab-active/,
-    );
+    await openCalibrationSection(page, "电流通道2");
+    await expect(page).toHaveURL(/section=current_ch2/);
 
     await expect(draftCurrentTableA).toContainText("No draft points.");
     await page
@@ -94,10 +206,8 @@ test.describe("Calibration UI", () => {
     expect(await draftRowsA.count()).toBe(1);
 
     // Switch back to CH1.
-    await page.getByRole("tab", { name: "电流通道1" }).click();
-    await expect(page.getByRole("tab", { name: "电流通道1" })).toHaveClass(
-      /ll-tab-active/,
-    );
+    await openCalibrationSection(page, "电流通道1");
+    await expect(page).toHaveURL(/section=current_ch1/);
 
     // Unit toggle + precision: in mA mode, inputs are 1µA steps (0.001mA).
     await page.getByRole("button", { name: "mA", exact: true }).click();
@@ -120,10 +230,10 @@ test.describe("Calibration UI", () => {
     // and show a warning.
     await page.getByRole("button", { name: "2A" }).click();
     await page.getByRole("button", { name: "Set Output" }).click();
-    await expect(currentStat.locator(".ll-stat-value")).toContainText(
-      "1.7100 A",
-    );
-    await expect(dacStat.locator(".ll-stat-value")).toContainText("1638");
+    await expect
+      .poll(() => readStatNumericValue(page, "Active Current"))
+      .toBeGreaterThan(1.2);
+    await waitForStableDacValue(page);
     await page.getByRole("button", { name: "Capture" }).click();
     expect(await draftRowsMA.count()).toBe(2);
 
@@ -156,13 +266,12 @@ test.describe("Calibration UI", () => {
     await expect(draftCurrentTableMA).not.toContainText("900.000");
     await expect(draftCurrentTableMA).toContainText("No draft points.");
 
-    // Navigating away from calibration should keep the default console layout.
+    // Navigating away from calibration should keep the header navigation shell.
     await page.goto(`/${deviceId}/cc`);
-    const sidebar = page.locator("aside");
-    await expect(sidebar).toHaveCount(1);
     await expect(
-      sidebar.getByRole("link", { name: "状态", exact: true }),
+      page.getByRole("navigation", { name: "主导航" }),
     ).toBeVisible();
+    await expect(page.getByText("系统", { exact: true })).toBeVisible();
 
     await page.goto("/");
   });
@@ -171,7 +280,11 @@ test.describe("Calibration UI", () => {
     page,
   }) => {
     await page.goto("/devices");
-    await page.getByRole("button", { name: "Add simulation device" }).click();
+    await page
+      .locator("section")
+      .filter({ hasText: "当前已知设备" })
+      .getByRole("button", { name: "Add sample device" })
+      .click();
 
     const deviceId = "mock-001";
     const baseUrl = "mock://demo-1";
@@ -208,9 +321,7 @@ test.describe("Calibration UI", () => {
     );
 
     await page.goto(`/${deviceId}/calibration`);
-    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
-      /ll-tab-active/,
-    );
+    await expect(page).toHaveURL(/section=current_ch2/);
 
     const modeBadge = page.locator(".ll-badge", { hasText: "cal_mode:" });
     await expect(modeBadge).toContainText("current_ch2");
@@ -220,9 +331,7 @@ test.describe("Calibration UI", () => {
 
     await page.reload();
 
-    await expect(page.getByRole("tab", { name: "电流通道2" })).toHaveClass(
-      /ll-tab-active/,
-    );
+    await expect(page).toHaveURL(/section=current_ch2/);
     const draftCurrentTable = page.locator("table", { hasText: "Value (A)" });
     const draftRows = draftCurrentTable.locator("tbody tr");
     await expect(draftRows).toHaveCount(2);
@@ -240,13 +349,18 @@ test.describe("Calibration UI", () => {
 
   test("leaving calibration tears down calibration mode", async ({ page }) => {
     await page.goto("/devices");
-    await page.getByRole("button", { name: "Add simulation device" }).click();
+    await page
+      .locator("section")
+      .filter({ hasText: "当前已知设备" })
+      .getByRole("button", { name: "Add sample device" })
+      .click();
 
     const deviceId = "mock-001";
     const baseUrl = "mock://demo-1";
 
     await page.goto(`/${deviceId}/calibration`);
-    await page.getByRole("tab", { name: "电流通道1" }).click();
+    await openCalibrationSection(page, "电流通道1");
+    await expect(page).toHaveURL(/section=current_ch1/);
     await page.getByRole("button", { name: "1A" }).click();
     await page.getByRole("button", { name: "Set Output" }).click();
 

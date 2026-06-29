@@ -34,6 +34,11 @@ const LOADLYNX_VIEWPORTS = {
     styles: { width: "1440px", height: "900px" },
     type: "desktop",
   },
+  loadlynxDesktopUltra: {
+    name: "LoadLynx / Ultra-wide (1728x1117)",
+    styles: { width: "1728px", height: "1117px" },
+    type: "desktop",
+  },
   loadlynxBp1024: {
     name: "LoadLynx / Breakpoint (1024)",
     styles: { width: "1024px", height: "800px" },

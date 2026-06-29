@@ -60,8 +60,8 @@ export function CalibrationDeviceViewPanel(input: {
 
         <h4 className="font-bold text-sm">
           {deviceProfileSource === "factory-default"
-            ? "Device defaults (factory reference, read-only)"
-            : "Device profile (read-only)"}
+            ? "Device defaults"
+            : "Device profile"}
         </h4>
 
         {children}

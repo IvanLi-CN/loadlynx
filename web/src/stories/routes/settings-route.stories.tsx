@@ -36,6 +36,7 @@ export const SoftResetDialog: Story = {
     const canvas = within(canvasElement);
 
     await waitFor(() => {
+      canvas.getByText("LoadLynx Web Console");
       canvas.getByRole("button", { name: "Soft Reset" });
     });
 

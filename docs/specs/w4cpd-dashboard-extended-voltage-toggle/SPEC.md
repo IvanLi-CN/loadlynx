@@ -12,14 +12,14 @@
 ### Goals
 
 - 把主界面左侧原位控件改成“扩展电压”开关，用于控制是否允许从 Safe5V 进入已保存的非 Safe5V PD 配置。
-- 把右侧原位圆形按钮改成 PD 设置入口，进入现有 PD settings 页面。
+- 把右侧原位圆形按钮改成 PD 设置入口，进入当前仪表盘内的 PD panel（兼容上仍可通过历史 `/pd` 深链抵达）。
 - 移除主界面的 on-screen LOAD 按钮，但保留触摸弹簧/物理 LOAD 控制路径。
 - 为后续实现冻结 Safe5V 门控、三态颜色、持久化规则与最小 HTTP API 变更。
 
 ### Non-goals
 
 - 本规格不改动触摸弹簧/物理 LOAD 控制逻辑。
-- 本规格不重做 PD settings 页面布局，只重定义主界面入口与 `Apply` 的 Safe5V 门控语义。
+- 本规格不重做 PD panel 布局，只重定义主界面入口与 `Apply` 的 Safe5V 门控语义。
 - 本规格不引入新的协议层错误分类，也不扩展模拟侧 PD wire format。
 
 ## 范围（Scope）
@@ -42,7 +42,7 @@
 ### MUST
 
 - 左侧原位按钮必须是“扩展电压”开关，而不是新的额外控件。
-- 右侧原位圆形按钮必须变成 PD 设置入口。
+- 右侧原位圆形按钮必须变成 PD panel 入口。
 - `allow_extended_voltage=false` 时，所有自动/手动 PD 下发路径都必须只使用 Safe5V fixed 策略。
 - `allow_extended_voltage` 必须持久化，且旧 EEPROM 数据迁移默认值为 `false`。
 - 红色失败态必须复用现有失败判定窗口与失败来源，不能新增新的协议层错误分类。
@@ -67,7 +67,7 @@
   - `off -> on`：若当前已 attach，立即按 `pd_saved` 发起重协商；若未 attach，仅保存状态，等待下次 attach 自动应用。
   - `on -> off`：若当前已 attach，立即切回 Safe5V；若未 attach，仅保存状态。
 - 主界面右侧原位圆形按钮：
-  - 点击时进入现有 `PD settings` 页面。
+  - 点击时进入当前仪表盘内的 `PD panel`。
   - 不再承担 on-screen LOAD 开关语义。
 - `PD settings` 页面：
   - 继续编辑 `pd_saved`。
@@ -109,7 +109,7 @@
 | 接口（Name） | 类型（Kind） | 范围（Scope） | 变更（Change） | 契约文档（Contract Doc） | 负责人（Owner） | 使用方（Consumers） | 备注（Notes） |
 | --- | --- | --- | --- | --- | --- | --- | --- |
 | `DashboardExtendedVoltageToggle` | UI Component | internal | New | ./contracts/ui-components.md | digital UI | dashboard main screen | 左侧原位按钮的语义从 PD 状态/入口改为 Safe5V 门控开关 |
-| `DashboardPdSettingsEntry` | UI Component | internal | Modify | ./contracts/ui-components.md | digital UI | dashboard main screen | 右侧原位圆形按钮改成 PD settings 入口 |
+| `DashboardPdSettingsEntry` | UI Component | internal | Modify | ./contracts/ui-components.md | digital UI | dashboard main screen | 右侧原位圆形按钮改成 PD panel 入口 |
 | `/api/v1/pd` | HTTP API | external | Modify | ./contracts/http-apis.md | digital net | web / automation / diagnostics | 新增 `allow_extended_voltage` 字段 |
 
 ### 契约文档（按 Kind 拆分）
@@ -137,7 +137,7 @@
   Then 左侧原位按钮显示红色失败态，且该失败态会在手动关闭、成功协商、detach、新会话或重启时清除。
 - Given 主界面
   When 点击右侧原位圆形按钮
-  Then 进入现有 `PD settings` 页面，而不是切换 LOAD。
+  Then 进入当前仪表盘内的 `PD panel`，而不是切换 LOAD。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 

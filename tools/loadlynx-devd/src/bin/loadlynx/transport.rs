@@ -471,11 +471,14 @@ pub(crate) async fn run_monitor(
     resolved: ResolvedUsbHardware,
     tail: usize,
     format: MonitorFormat,
+    status_interval_ms: u64,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     let (lease, lease_device) = create_cli_lease_for_resolved_usb(client, &resolved).await?;
     let _heartbeat =
         spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
     let mut seen = HashSet::new();
+    let status_interval_ms = status_interval_ms.max(100);
+    let mut next_status_at = tokio::time::Instant::now();
     loop {
         let session = request_devd_value(
             &resolved.devd,
@@ -490,7 +493,22 @@ pub(crate) async fn run_monitor(
         )
         .await?;
         print_session_delta(&session, &mut seen, &format)?;
-        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+        if tokio::time::Instant::now() >= next_status_at {
+            let status = request_devd_value(
+                &resolved.devd,
+                reqwest::Method::GET,
+                &format!(
+                    "/api/v1/status?device_id={}&lease_id={}",
+                    lease_device, lease.lease_id
+                ),
+                None,
+            )
+            .await?;
+            print_monitor_status(&status, &format)?;
+            next_status_at =
+                tokio::time::Instant::now() + std::time::Duration::from_millis(status_interval_ms);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 }
 
@@ -539,6 +557,51 @@ fn print_session_delta(
                     }
                 }
             }
+        }
+    }
+    Ok(())
+}
+
+fn print_monitor_status(
+    status: &Value,
+    format: &MonitorFormat,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    match format {
+        MonitorFormat::Jsonl => println!(
+            "{}",
+            serde_json::to_string(&json!({"kind": "status", "item": status}))?
+        ),
+        MonitorFormat::Human => {
+            let control = status.get("control").and_then(Value::as_object);
+            let raw_status = status.get("status").and_then(Value::as_object);
+            println!(
+                "{} [status] output={} mode={} target_i_ma={} v_local_mv={} i_local_ma={}",
+                Utc::now().to_rfc3339(),
+                control
+                    .and_then(|value| value.get("output_enabled"))
+                    .and_then(Value::as_bool)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                control
+                    .and_then(|value| value.get("mode"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("?"),
+                control
+                    .and_then(|value| value.get("target_i_ma"))
+                    .and_then(Value::as_u64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                raw_status
+                    .and_then(|value| value.get("v_local_mv"))
+                    .and_then(Value::as_i64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+                raw_status
+                    .and_then(|value| value.get("i_local_ma"))
+                    .and_then(Value::as_i64)
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "?".to_string()),
+            );
         }
     }
     Ok(())

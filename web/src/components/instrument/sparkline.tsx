@@ -9,6 +9,20 @@ type SparklineProps = {
   showBackground?: boolean;
 };
 
+export type SparklineGeometry = {
+  width: number;
+  height: number;
+  topInset: number;
+  bottomInset: number;
+};
+
+export const DEFAULT_SPARKLINE_GEOMETRY: SparklineGeometry = {
+  width: 240,
+  height: 44,
+  topInset: 3,
+  bottomInset: 3,
+};
+
 function clamp01(v: number): number {
   return Math.min(1, Math.max(0, v));
 }
@@ -17,13 +31,13 @@ export function Sparkline({
   points,
   min,
   max,
-  height = 44,
+  height = DEFAULT_SPARKLINE_GEOMETRY.height,
   className,
   tone = "cyan",
   variant = "line",
   showBackground = false,
 }: SparklineProps) {
-  const width = 240;
+  const width = DEFAULT_SPARKLINE_GEOMETRY.width;
   const hasData =
     points.length >= 2 && Number.isFinite(min) && Number.isFinite(max);
   const range = max - min;
@@ -38,7 +52,12 @@ export function Sparkline({
       .map((v, idx) => {
         const x = idx * step;
         const t = clamp01((v - min) / safeRange);
-        const y = (1 - t) * (height - 6) + 3;
+        const y =
+          (1 - t) *
+            (height -
+              DEFAULT_SPARKLINE_GEOMETRY.topInset -
+              DEFAULT_SPARKLINE_GEOMETRY.bottomInset) +
+          DEFAULT_SPARKLINE_GEOMETRY.topInset;
         return `${idx === 0 ? "M" : "L"}${x.toFixed(2)},${y.toFixed(2)}`;
       })
       .join(" ");

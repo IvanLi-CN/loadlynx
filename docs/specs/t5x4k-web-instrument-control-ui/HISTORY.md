@@ -20,3 +20,4 @@
 - 2026-01-20: Tuned instrument palette + pill bar layout and adjusted numeric decimal separators for closer match with the mock design.
 - 2026-01-20: Increased instrument label weight and narrowed decimal dot spacing.
 - 2026-01-20: Web e2e (Playwright) green — 13 passed, 1 skipped.
+- 2026-06-20: Promoted `device-cc` to the owner-facing `仪表盘`, embedded the full USB-PD panel into the dashboard, and aligned shell semantics with `m3n8p`.

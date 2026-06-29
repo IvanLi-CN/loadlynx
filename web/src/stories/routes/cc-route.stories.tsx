@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor, within } from "storybook/test";
+import { expect, waitFor, within } from "storybook/test";
 import type { StoredDevice } from "../../devices/device-store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
@@ -10,6 +10,9 @@ function CcRouteStory() {
 const meta = {
   title: "Routes/CC",
   component: CcRouteStory,
+  globals: {
+    loadlynxLocale: "en",
+  },
 } satisfies Meta<typeof CcRouteStory>;
 
 export default meta;
@@ -18,17 +21,23 @@ type Story = StoryObj<typeof meta>;
 
 export const Default: Story = {
   play: async ({ canvas, userEvent }) => {
-    await canvas.findByText(/MODE & OUTPUT/i, undefined, { timeout: 5_000 });
-    await canvas.findByText(/PRESETS/i, undefined, { timeout: 5_000 });
-    await canvas.findByRole("button", { name: "CC" }, { timeout: 5_000 });
-    await canvas.findByRole("button", { name: "CV" }, { timeout: 5_000 });
-    await canvas.findByRole("button", { name: "CP" }, { timeout: 5_000 });
-    const crBtn = await canvas.findByRole(
+    await canvas.findByText(/Mode, output and setpoints/i, undefined, {
+      timeout: 5_000,
+    });
+    await canvas.findByRole(
       "button",
+      { name: /Current device/i },
+      { timeout: 5_000 },
+    );
+    await canvas.findByRole("radio", { name: "CC" }, { timeout: 5_000 });
+    await canvas.findByRole("radio", { name: "CV" }, { timeout: 5_000 });
+    await canvas.findByRole("radio", { name: "CP" }, { timeout: 5_000 });
+    const crBtn = await canvas.findByRole(
+      "radio",
       { name: "CR" },
       { timeout: 5_000 },
     );
-    if (!(crBtn as HTMLButtonElement).disabled) {
+    if (!(crBtn as HTMLInputElement).disabled) {
       throw new Error("Expected CR button to be visible but read-only");
     }
 
@@ -42,37 +51,37 @@ export const Default: Story = {
       { timeout: 5_000 },
     );
 
-    const outputToggle = await canvas.findByRole("checkbox", {
-      name: /Output enabled/i,
+    const outputToggle = await canvas.findByRole("switch", {
+      name: /Load output switch|负载主开关/i,
     });
 
-    await waitFor(
-      () => {
-        const toggle = canvas.getByRole("checkbox", {
-          name: /Output enabled/i,
-        }) as HTMLInputElement;
-        if (toggle.disabled) {
-          throw new Error("Expected Output enabled toggle to be enabled");
-        }
-      },
-      { timeout: 5_000 },
-    );
-
-    if ((outputToggle as HTMLInputElement).checked) {
-      throw new Error("Expected Output enabled to start unchecked");
-    }
+    await expect(outputToggle).toBeEnabled();
+    const initialOutputState = outputToggle.getAttribute("aria-checked");
     await userEvent.click(outputToggle);
     await waitFor(
       () => {
-        const toggled = canvas.getByRole("checkbox", {
-          name: /Output enabled/i,
-        }) as HTMLInputElement;
-        if (!toggled.checked) {
-          throw new Error("Expected Output enabled to be checked after click");
+        const toggled = canvas.getByRole("switch", {
+          name: /Load output switch|负载主开关/i,
+        });
+        if (toggled.getAttribute("aria-checked") === initialOutputState) {
+          throw new Error("Expected output switch state to change after click");
         }
       },
       { timeout: 5_000 },
     );
+  },
+};
+
+export const PdPanelEmbedded: Story = {
+  render: () => <RouteStoryHarness initialPath="/mock-001/cc?panel=pd" />,
+  play: async ({ canvas }) => {
+    await canvas.findByRole("heading", { name: "USB-PD" }, { timeout: 5_000 });
+    const closeButtons = await canvas.findAllByRole("button", {
+      name: /Close dashboard tools/i,
+    });
+    if (closeButtons.length < 2) {
+      throw new Error("Expected drawer backdrop and close button controls");
+    }
   },
 };
 
@@ -104,13 +113,15 @@ export const CpUnsupported: Story = {
     />
   ),
   play: async ({ canvas }) => {
-    await canvas.findByText(/MODE & OUTPUT/i, undefined, { timeout: 5_000 });
+    await canvas.findByText(/Mode, output and setpoints/i, undefined, {
+      timeout: 5_000,
+    });
     const cpBtn = await canvas.findByRole(
-      "button",
+      "radio",
       { name: "CP" },
       { timeout: 5_000 },
     );
-    if (!(cpBtn as HTMLButtonElement).disabled) {
+    if (!(cpBtn as HTMLInputElement).disabled) {
       throw new Error(
         "Expected CP button to be disabled when cp_supported=false",
       );
@@ -123,7 +134,7 @@ export const LinkDown: Story = {
     <RouteStoryHarness initialPath="/mock-001/cc" devices={DEVICE_LINK_DOWN} />
   ),
   play: async ({ canvas }) => {
-    await canvas.findByText(/HTTP error: LINK_DOWN/i);
+    await canvas.findByText(/Link unavailable|UART link is down/i);
   },
 };
 
@@ -135,7 +146,12 @@ export const AnalogNotReady: Story = {
     />
   ),
   play: async ({ canvas }) => {
-    await canvas.findByText(/HTTP error: ANALOG_NOT_READY/i);
+    const matches = await canvas.findAllByText(
+      /Cal missing|ANALOG_NOT_READY|NOT_ATTACHED/i,
+    );
+    if (matches.length === 0) {
+      throw new Error("Expected analog-not-ready state to be visible");
+    }
   },
 };
 
@@ -147,32 +163,57 @@ export const LimitViolationBlocked: Story = {
     />
   ),
   play: async ({ canvas, userEvent }) => {
-    await canvas.findByText(/PRESETS/i, undefined, { timeout: 5_000 });
-
     await userEvent.click(
       await canvas.findByRole("button", { name: /Advanced/i }),
     );
-
-    const modeSelect = await canvas.findByRole("combobox", { name: /^Mode$/i });
-    await userEvent.selectOptions(modeSelect, "cp");
-
-    await userEvent.clear(await canvas.findByLabelText(/Max power/i));
-    await userEvent.type(await canvas.findByLabelText(/Max power/i), "1000");
-
-    await userEvent.clear(await canvas.findByLabelText(/Target power/i));
-    await userEvent.type(await canvas.findByLabelText(/Target power/i), "2000");
-
-    await canvas.findByText(/target_p_mw must be ≤ max_p_mw/i);
-
+    await userEvent.click(
+      await canvas.findByRole(
+        "button",
+        { name: /Expand/i },
+        { timeout: 5_000 },
+      ),
+    );
     const advancedRegion = await canvas.findByRole("region", {
       name: /Advanced/i,
     });
     const advanced = within(advancedRegion);
-    const saveBtn = await advanced.findByRole("button", {
-      name: /Save Draft/i,
+    await userEvent.click(
+      await advanced.findByRole("radio", { name: "CP" }, { timeout: 5_000 }),
+    );
+
+    const targetPowerInput = (
+      await advanced.findAllByLabelText(/Target power/i)
+    ).find((node) => node instanceof HTMLInputElement && node.type === "text");
+    if (!(targetPowerInput instanceof HTMLInputElement)) {
+      throw new Error("Expected Target power textbox inside Advanced region");
+    }
+    await userEvent.clear(targetPowerInput);
+    await userEvent.type(targetPowerInput, "2000");
+    await userEvent.tab();
+
+    const maxPowerInput = (
+      await advanced.findAllByLabelText(/Max power/i)
+    ).find((node) => node instanceof HTMLInputElement && node.type === "text");
+    if (!(maxPowerInput instanceof HTMLInputElement)) {
+      throw new Error("Expected Max power textbox inside Advanced region");
+    }
+    await userEvent.clear(maxPowerInput);
+    await userEvent.type(maxPowerInput, "1000");
+    await userEvent.tab();
+
+    await waitFor(() => {
+      if (targetPowerInput.value !== "1000") {
+        throw new Error(
+          `Expected target power to clamp to max power, got ${targetPowerInput.value}`,
+        );
+      }
     });
-    if (!(saveBtn as HTMLButtonElement).disabled) {
-      throw new Error("Expected Save Draft to be disabled on limit violation");
+
+    const saveBtn = await advanced.findByRole("button", {
+      name: /Save Active Slot|Save Slot/i,
+    });
+    if ((saveBtn as HTMLButtonElement).disabled) {
+      throw new Error("Expected save action to stay enabled after clamping");
     }
   },
 };

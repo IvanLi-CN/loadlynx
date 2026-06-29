@@ -4,6 +4,37 @@ function packageChunkName(id: string): string | null {
   }
 
   if (
+    id.includes("/node_modules/react/") ||
+    id.includes("/node_modules/react-dom/")
+  ) {
+    return "react-vendor";
+  }
+
+  if (id.includes("/node_modules/recharts/")) {
+    if (
+      id.includes("/node_modules/recharts/es6/chart/") ||
+      id.includes("/node_modules/recharts/es6/cartesian/") ||
+      id.includes("/node_modules/recharts/es6/component/") ||
+      id.includes("/node_modules/recharts/es6/container/") ||
+      id.includes("/node_modules/recharts/es6/context/")
+    ) {
+      return "recharts-core-vendor";
+    }
+    return "recharts-runtime-vendor";
+  }
+
+  if (
+    id.includes("/node_modules/victory-vendor/") ||
+    id.includes("/node_modules/d3-")
+  ) {
+    return "chart-runtime-vendor";
+  }
+
+  if (id.includes("/node_modules/react-smooth/")) {
+    return "chart-motion-vendor";
+  }
+
+  if (
     id.includes("/node_modules/@tanstack/react-router/") ||
     id.includes("/node_modules/@tanstack/router-core/") ||
     id.includes("/node_modules/@tanstack/react-query/") ||
@@ -28,6 +59,13 @@ function packageChunkName(id: string): string | null {
     id.includes("/node_modules/decimal.js/")
   ) {
     return "app-vendor";
+  }
+
+  if (
+    id.includes("/node_modules/@tanstack/react-query-devtools/") ||
+    id.includes("/node_modules/@tanstack/react-router-devtools/")
+  ) {
+    return "tanstack-devtools-vendor";
   }
 
   if (id.includes("/node_modules/esptool-js/")) {

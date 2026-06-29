@@ -19,6 +19,7 @@ export interface StoredDevice {
 
 const STORAGE_KEY = "loadlynx.devices";
 const DEMO_STORAGE_KEY = "loadlynx.demo.devices";
+const LAST_ACTIVE_DEVICE_KEY = "loadlynx.last-active-device-id";
 
 export const DEMO_DEVICES: StoredDevice[] = [
   {
@@ -36,6 +37,8 @@ export const DEMO_DEVICES: StoredDevice[] = [
 export interface DeviceStore {
   getDevices(): StoredDevice[];
   setDevices(devices: StoredDevice[]): void;
+  getLastActiveDeviceId(): string | null;
+  setLastActiveDeviceId(deviceId: string | null): void;
 }
 
 function cloneStoredDevice(device: StoredDevice): StoredDevice {
@@ -126,10 +129,16 @@ function sanitizeDevices(input: unknown): StoredDevice[] {
 export class LocalStorageDeviceStore implements DeviceStore {
   readonly #storage: Storage;
   readonly #key: string;
+  readonly #lastActiveDeviceKey: string;
 
-  constructor(storage: Storage, key: string = STORAGE_KEY) {
+  constructor(
+    storage: Storage,
+    key: string = STORAGE_KEY,
+    lastActiveDeviceKey: string = LAST_ACTIVE_DEVICE_KEY,
+  ) {
     this.#storage = storage;
     this.#key = key;
+    this.#lastActiveDeviceKey = lastActiveDeviceKey;
   }
 
   getDevices(): StoredDevice[] {
@@ -152,10 +161,32 @@ export class LocalStorageDeviceStore implements DeviceStore {
       // Best-effort only; UI can still function from in-memory state.
     }
   }
+
+  getLastActiveDeviceId(): string | null {
+    try {
+      const raw = this.#storage.getItem(this.#lastActiveDeviceKey);
+      return raw && raw.trim().length > 0 ? raw : null;
+    } catch {
+      return null;
+    }
+  }
+
+  setLastActiveDeviceId(deviceId: string | null): void {
+    try {
+      if (!deviceId) {
+        this.#storage.removeItem(this.#lastActiveDeviceKey);
+        return;
+      }
+      this.#storage.setItem(this.#lastActiveDeviceKey, deviceId);
+    } catch {
+      // Best-effort only; UI can still function from in-memory state.
+    }
+  }
 }
 
 export class MemoryDeviceStore implements DeviceStore {
   #devices: StoredDevice[];
+  #lastActiveDeviceId: string | null = null;
 
   constructor(initialDevices: StoredDevice[] = []) {
     this.#devices = initialDevices.map(cloneStoredDevice);
@@ -168,17 +199,37 @@ export class MemoryDeviceStore implements DeviceStore {
   setDevices(devices: StoredDevice[]): void {
     this.#devices = devices.map(cloneStoredDevice);
   }
+
+  getLastActiveDeviceId(): string | null {
+    return this.#lastActiveDeviceId;
+  }
+
+  setLastActiveDeviceId(deviceId: string | null): void {
+    this.#lastActiveDeviceId = deviceId;
+  }
 }
 
 export class DemoAwareDeviceStore implements DeviceStore {
   readonly #storage: Storage;
   readonly #realStore: DeviceStore;
   readonly #demoStore: DeviceStore;
+  readonly #realLastActiveStore: LocalStorageDeviceStore;
+  readonly #demoLastActiveStore: LocalStorageDeviceStore;
 
   constructor(storage: Storage) {
     this.#storage = storage;
-    this.#realStore = new LocalStorageDeviceStore(storage, STORAGE_KEY);
-    this.#demoStore = new LocalStorageDeviceStore(storage, DEMO_STORAGE_KEY);
+    this.#realLastActiveStore = new LocalStorageDeviceStore(
+      storage,
+      STORAGE_KEY,
+      LAST_ACTIVE_DEVICE_KEY,
+    );
+    this.#demoLastActiveStore = new LocalStorageDeviceStore(
+      storage,
+      DEMO_STORAGE_KEY,
+      `${LAST_ACTIVE_DEVICE_KEY}.demo`,
+    );
+    this.#realStore = this.#realLastActiveStore;
+    this.#demoStore = this.#demoLastActiveStore;
   }
 
   getDevices(): StoredDevice[] {
@@ -206,6 +257,14 @@ export class DemoAwareDeviceStore implements DeviceStore {
     store.setDevices(
       store === this.#demoStore ? devices.filter(isDemoDevice) : devices,
     );
+  }
+
+  getLastActiveDeviceId(): string | null {
+    return this.#getActiveStore().getLastActiveDeviceId();
+  }
+
+  setLastActiveDeviceId(deviceId: string | null): void {
+    this.#getActiveStore().setLastActiveDeviceId(deviceId);
   }
 
   #getActiveStore(): DeviceStore {

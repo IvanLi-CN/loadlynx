@@ -1,5 +1,8 @@
 # Web：Responsive Drawer Sidebar（ConsoleLayout 导航）
 
+> 已被 [`m3n8p-web-top-nav-device-workspace`](../m3n8p-web-top-nav-device-workspace/SPEC.md) 取代。
+> 本文保留旧的 sidebar / drawer 规划作为历史记录，不再是当前 Web Console shell 的有效契约。
+
 ## 背景
 
 当前 Web Console 的左侧导航在非 tool 布局下始终为固定宽度侧栏。中小屏（分屏/小笔记本/手机）会显著挤压内容区，缺少抽屉（drawer）与折叠（icon rail）形态，导致可用性与空间利用不佳。
