@@ -133,6 +133,15 @@ where
     Ok(seq)
 }
 
+fn devd_status_path(device_id: &str, lease_id: &str, fresh: bool) -> String {
+    let mut url = Url::parse("http://loadlynx.local/api/v1/status").expect("static status URL");
+    url.query_pairs_mut()
+        .append_pair("device_id", device_id)
+        .append_pair("lease_id", lease_id)
+        .append_pair("fresh", if fresh { "true" } else { "false" });
+    format!("{}?{}", url.path(), url.query().unwrap_or_default())
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "loadlynx")]
 #[command(about = "LoadLynx LAN/USB/devd control CLI")]
@@ -1055,16 +1064,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     interval_ms,
                     count,
                     || {
-                    let resolved = resolved.clone();
-                    let lease_device = lease_device.clone();
-                    let lease_id = lease.lease_id.clone();
-                    async move {
-                        let path = format!(
-                            "/api/v1/status?device_id={}&lease_id={}&fresh=true",
-                            lease_device, lease_id
-                        );
-                        request_devd_value(&resolved.devd, reqwest::Method::GET, &path, None).await
-                    }
+                        let resolved = resolved.clone();
+                        let lease_device = lease_device.clone();
+                        let lease_id = lease.lease_id.clone();
+                        async move {
+                            let path = devd_status_path(&lease_device, &lease_id, true);
+                            request_devd_value(&resolved.devd, reqwest::Method::GET, &path, None)
+                                .await
+                        }
                     },
                     |sample| {
                         println!("{}", serde_json::to_string(&sample)?);
@@ -2821,6 +2828,27 @@ mod tests {
         assert_eq!(
             request.params.get("lease_id").and_then(Value::as_str),
             Some("lease-1")
+        );
+    }
+
+    #[test]
+    fn devd_status_path_encodes_query_values() {
+        let path = devd_status_path("dev/with?reserved&chars", "lease/value&1", true);
+        let request = ipc_request_for_devd_call(reqwest::Method::GET, &path, None)
+            .expect("native status IPC request");
+
+        assert_eq!(request.op, "compat.status");
+        assert_eq!(
+            request.params.get("device_id").and_then(Value::as_str),
+            Some("dev/with?reserved&chars")
+        );
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("lease/value&1")
+        );
+        assert_eq!(
+            request.params.get("fresh").and_then(Value::as_bool),
+            Some(true)
         );
     }
 
