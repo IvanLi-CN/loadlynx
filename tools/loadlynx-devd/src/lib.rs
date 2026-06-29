@@ -270,6 +270,7 @@ pub struct DeviceRecord {
     pub usb_pd_cache: Option<Value>,
     pub status_cache: Option<Value>,
     pub control_cache: Option<Value>,
+    pub status_meta_cache: Option<Value>,
     pub status_cache_updated_at_ms: Option<i64>,
     pub selected_artifact_id: Option<String>,
     pub log_decode: LogDecodeState,
@@ -1215,6 +1216,7 @@ async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
                 usb_pd_cache: None,
                 status_cache: None,
                 control_cache: None,
+                status_meta_cache: None,
                 status_cache_updated_at_ms: None,
                 selected_artifact_id: None,
                 log_decode: LogDecodeState::default(),
@@ -1362,6 +1364,7 @@ async fn device_status(
         "log_decode": device.log_decode,
         "status_cache": cached.as_ref().and_then(|value| value.get("status")).cloned(),
         "control_cache": cached.as_ref().and_then(|value| value.get("control")).cloned(),
+        "status_meta_cache": cached.as_ref().and_then(|value| value.get("status_meta")).cloned(),
         "status_cache_updated_at_ms": device.status_cache_updated_at_ms
     })))
 }
@@ -3435,6 +3438,7 @@ fn session_json(
         "log_decode": device.log_decode,
         "status_cache": device.status_cache.clone(),
         "control_cache": device.control_cache.clone(),
+        "status_meta_cache": device.status_meta_cache.clone(),
         "status_cache_updated_at_ms": device.status_cache_updated_at_ms,
         "logs": tail(&device.logs, logs_limit.unwrap_or(200).min(LOG_LIMIT)),
         "trace": tail(&device.trace, trace_limit.unwrap_or(600).min(TRACE_LIMIT)),
@@ -4168,6 +4172,7 @@ fn maybe_update_device_status_cache(device: &mut DeviceRecord, value: &Value) ->
     };
     device.status_cache = Some(status);
     device.control_cache = value.get("control").cloned();
+    device.status_meta_cache = Some(status_meta_from_status_bundle(value));
     device.status_cache_updated_at_ms = Some(status_cache_timestamp_ms());
     true
 }
@@ -4188,6 +4193,7 @@ fn maybe_update_device_status_cache_from_status_payload(
     if let Some(control) = control {
         device.control_cache = Some(control);
     }
+    device.status_meta_cache = None;
     device.status_cache_updated_at_ms = Some(status_cache_timestamp_ms());
     true
 }
@@ -4212,13 +4218,39 @@ fn cached_status_bundle(device: &DeviceRecord) -> Option<Value> {
     if let Some(control) = device.control_cache.clone() {
         out.insert("control".to_string(), control);
     }
-    out.insert("link_up".to_string(), json!(true));
-    out.insert("hello_seen".to_string(), json!(true));
+    if let Some(meta) = device.status_meta_cache.as_ref().and_then(Value::as_object) {
+        for key in [
+            "link_up",
+            "hello_seen",
+            "analog_state",
+            "fault_flags_decoded",
+        ] {
+            if let Some(value) = meta.get(key) {
+                out.insert(key.to_string(), value.clone());
+            }
+        }
+        out.insert("status_meta".to_string(), Value::Object(meta.clone()));
+    }
     if let Some(updated_at_ms) = device.status_cache_updated_at_ms {
         out.insert("cache_updated_at_ms".to_string(), json!(updated_at_ms));
     }
     out.insert("from_monitor_cache".to_string(), json!(true));
     Some(Value::Object(out))
+}
+
+fn status_meta_from_status_bundle(value: &Value) -> Value {
+    let mut meta = serde_json::Map::new();
+    for key in [
+        "link_up",
+        "hello_seen",
+        "analog_state",
+        "fault_flags_decoded",
+    ] {
+        if let Some(field) = value.get(key).cloned() {
+            meta.insert(key.to_string(), field);
+        }
+    }
+    Value::Object(meta)
 }
 
 fn fresh_cached_status_data(state: &AppState, device_id: &str) -> Option<Value> {
@@ -5166,6 +5198,7 @@ fn seed_mock_device(state: &AppState) {
         usb_pd_cache: None,
         status_cache: None,
         control_cache: None,
+        status_meta_cache: None,
         status_cache_updated_at_ms: None,
         selected_artifact_id: None,
         log_decode: LogDecodeState::default(),
@@ -5784,6 +5817,7 @@ mod tests {
             usb_pd_cache: None,
             status_cache: None,
             control_cache: None,
+            status_meta_cache: None,
             status_cache_updated_at_ms: None,
             selected_artifact_id: None,
             log_decode: LogDecodeState::default(),
@@ -7177,6 +7211,78 @@ mod tests {
         assert_eq!(first_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["from_monitor_cache"], true);
+    }
+
+    #[tokio::test]
+    async fn compat_status_cache_preserves_offline_link_state() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "analog_state": "offline",
+                        "hello_seen": false,
+                        "link_up": false,
+                        "status": {
+                            "state_flags": 0,
+                            "fault_flags": 0,
+                            "enable": false,
+                            "i_local_ma": 0,
+                            "v_local_mv": 0
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(first_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id.clone()),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(first_status["link_up"], false);
+        assert_eq!(second_status["from_monitor_cache"], true);
+        assert_eq!(second_status["link_up"], false);
+        assert_eq!(second_status["hello_seen"], false);
+        assert_eq!(second_status["analog_state"], "offline");
     }
 
     #[tokio::test]
