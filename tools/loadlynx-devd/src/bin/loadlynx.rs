@@ -98,6 +98,9 @@ where
     Fut: Future<Output = Result<Value, Box<dyn std::error::Error + Send + Sync>>>,
     E: FnMut(StatusStreamSample) -> Result<(), Box<dyn std::error::Error + Send + Sync>>,
 {
+    if count == Some(0) {
+        return Ok(0);
+    }
     let interval = std::time::Duration::from_millis(interval_ms.max(1));
     let deadline = count.unwrap_or(usize::MAX);
     let mut ticker = tokio::time::interval(interval);
@@ -4162,5 +4165,31 @@ mod tests {
             (200..=400).contains(&gap_ms),
             "expected ticker-based cadence near 250ms, got {gap_ms}ms"
         );
+    }
+
+    #[test]
+    fn status_stream_zero_count_returns_without_fetching() {
+        let (seq, fetches) = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                let fetches = std::cell::Cell::new(0usize);
+                let seq = stream_status_samples(
+                    250,
+                    Some(0),
+                    || {
+                        fetches.set(fetches.get() + 1);
+                        async { Ok(json!({"ok": true})) }
+                    },
+                    |_| Ok(()),
+                )
+                .await
+                .expect("zero-count status stream");
+                (seq, fetches.get())
+            });
+
+        assert_eq!(seq, 0);
+        assert_eq!(fetches, 0);
     }
 }
