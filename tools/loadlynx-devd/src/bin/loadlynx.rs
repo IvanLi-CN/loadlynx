@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::{
     collections::HashSet,
-    env, fs, io,
+    env, fs,
+    future::Future,
+    io,
     io::{IsTerminal, Read, Write},
     path::{Path, PathBuf},
     process::Stdio,
@@ -59,9 +61,10 @@ use render::{print_cli_error, print_cli_payload};
 #[cfg(test)]
 use transport::validate_cli_lease_identity;
 use transport::{
-    ApiSelector, create_cli_bind_probe_lease, ensure_one_api_selector, ensure_one_status_selector,
-    freeze_api_selector, post_usb_operation_with_optional_lease, release_cli_lease,
-    request_api_value, request_devd_usb_value, request_http_value, resolve_output_enable,
+    ApiSelector, create_cli_bind_probe_lease, create_cli_lease_for_resolved_usb,
+    ensure_one_api_selector, ensure_one_status_selector, freeze_api_selector,
+    post_usb_operation_with_optional_lease, release_cli_lease, request_api_value,
+    request_devd_usb_value, request_http_value, resolve_output_enable,
     resolve_scanned_usb_device_for_saved_hardware, run_monitor, saved_usb_device_needs_relookup,
     spawn_cli_lease_heartbeat,
 };
@@ -70,6 +73,63 @@ use transport::{
 struct ResolvedDevdTarget {
     devd: String,
     device: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct StatusStreamSample {
+    seq: usize,
+    requested_at_ms: i64,
+    received_at_ms: i64,
+    elapsed_ms: i64,
+    interval_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    gap_ms: Option<i64>,
+    payload: Value,
+}
+
+async fn collect_status_stream_samples<F, Fut>(
+    interval_ms: u64,
+    count: Option<usize>,
+    mut fetch_status: F,
+) -> Result<Vec<StatusStreamSample>, Box<dyn std::error::Error + Send + Sync>>
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = Result<Value, Box<dyn std::error::Error + Send + Sync>>>,
+{
+    let interval = std::time::Duration::from_millis(interval_ms.max(1));
+    let deadline = count.unwrap_or(usize::MAX);
+    let mut ticker = tokio::time::interval(interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    ticker.tick().await;
+
+    let start_ms = Utc::now().timestamp_millis();
+    let mut samples = Vec::new();
+    let mut prev_received_at_ms = None;
+    let mut seq = 0usize;
+
+    loop {
+        seq += 1;
+        let requested_at_ms = Utc::now().timestamp_millis();
+        let payload = fetch_status().await?;
+        let received_at_ms = Utc::now().timestamp_millis();
+        let gap_ms = prev_received_at_ms.map(|prev| received_at_ms - prev);
+        prev_received_at_ms = Some(received_at_ms);
+        samples.push(StatusStreamSample {
+            seq,
+            requested_at_ms,
+            received_at_ms,
+            elapsed_ms: received_at_ms - start_ms,
+            interval_ms: interval_ms.max(1),
+            gap_ms,
+            payload,
+        });
+        if seq >= deadline {
+            break;
+        }
+        ticker.tick().await;
+    }
+
+    Ok(samples)
 }
 
 #[derive(Debug, Parser)]
@@ -105,6 +165,16 @@ enum Command {
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
+    },
+    StatusStream {
+        #[arg(long, hide = true)]
+        url: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long, default_value_t = 250)]
+        interval_ms: u64,
+        #[arg(long)]
+        count: Option<usize>,
     },
     Flash {
         target: BoardTarget,
@@ -254,6 +324,8 @@ enum DeviceCommand {
     Add {
         #[arg(long, hide = true)]
         url: Option<String>,
+        #[arg(long = "usb-port-path")]
+        usb_port_path: Option<String>,
         #[arg(long)]
         name: Option<String>,
     },
@@ -723,7 +795,10 @@ fn ipc_request_for_devd_call(
             "serial.lease.release"
         }
         ("GET", ["api", "v1", "identity"]) => "compat.identity",
-        ("GET", ["api", "v1", "status"]) => "compat.status",
+        ("GET", ["api", "v1", "status"]) => {
+            coerce_bool_query_param(&mut params, "fresh")?;
+            "compat.status"
+        }
         ("GET", ["api", "v1", "network"]) => "compat.network",
         ("GET", ["api", "v1", "serial", "session"]) => "compat.session",
         ("GET", ["api", "v1", "pd"]) => "compat.pd.get",
@@ -817,6 +892,22 @@ fn coerce_numeric_query_param(
         return Ok(());
     };
     params.insert(field.to_string(), json!(value.parse::<usize>()?));
+    Ok(())
+}
+
+fn coerce_bool_query_param(
+    params: &mut Map<String, Value>,
+    field: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let Some(value) = params.get(field).and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let parsed = match value {
+        "true" => true,
+        "false" => false,
+        _ => return Err(format!("invalid boolean query param {field}={value}").into()),
+    };
+    params.insert(field.to_string(), json!(parsed));
     Ok(())
 }
 
@@ -925,6 +1016,66 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         }
                     }
                 }
+            }
+            Command::StatusStream {
+                url,
+                device,
+                interval_ms,
+                count,
+            } => {
+                ensure_one_status_selector(url.as_ref(), device.as_ref())?;
+                let interval_ms = interval_ms.max(1);
+                let mut seq = 0usize;
+                let selector = ApiSelector { url, device };
+                let frozen = freeze_api_selector(selector, &devd, allow_interactive)?;
+                let resolved = match frozen.url {
+                    Some(url) => {
+                        return Err(format!(
+                            "status-stream only supports USB/devd targets; got LAN url {url}"
+                        )
+                        .into());
+                    }
+                    None => resolve_saved_hardware_selection(
+                        frozen.device,
+                        &devd,
+                        allow_interactive,
+                    )?,
+                };
+                let resolved = match resolved {
+                    ResolvedHardware::Usb(resolved) => resolved,
+                    ResolvedHardware::Http { .. } => {
+                        return Err("status-stream only supports USB/devd targets".into());
+                    }
+                };
+                let (lease, lease_device) =
+                    create_cli_lease_for_resolved_usb(&client, &resolved).await?;
+                let heartbeat =
+                    spawn_cli_lease_heartbeat(client.clone(), resolved.devd.clone(), lease.clone());
+                let samples = collect_status_stream_samples(interval_ms, count, || {
+                    let resolved = resolved.clone();
+                    let lease_device = lease_device.clone();
+                    let lease_id = lease.lease_id.clone();
+                    async move {
+                        let path = format!(
+                            "/api/v1/status?device_id={}&lease_id={}&fresh=true",
+                            lease_device, lease_id
+                        );
+                        request_devd_value(&resolved.devd, reqwest::Method::GET, &path, None).await
+                    }
+                })
+                .await?;
+                for sample in samples {
+                    seq = sample.seq;
+                    println!("{}", serde_json::to_string(&sample)?);
+                    io::stdout().flush()?;
+                }
+                let _ = release_cli_lease(&client, &resolved.devd, &lease.lease_id).await;
+                heartbeat.abort();
+                eprintln!(
+                    "{}",
+                    serde_json::to_string(&json!({"ok": true, "samples": seq}))?
+                );
+                json!({"__loadlynx_cli_already_printed": true})
             }
             Command::Flash {
                 target,
@@ -1632,10 +1783,13 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
             DeviceCommand::List | DeviceCommand::Use { .. } | DeviceCommand::Remove { .. } => {
                 Vec::new()
             }
-            DeviceCommand::Add { url, .. } => {
+            DeviceCommand::Add {
+                url, usb_port_path, ..
+            } => {
                 if url.is_some() {
                     Vec::new()
                 } else {
+                    let _ = usb_port_path;
                     vec![default_devd.to_string()]
                 }
             }
@@ -1643,6 +1797,11 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
         Command::Discover { .. } => vec![default_devd.to_string()],
         Command::Devices => Vec::new(),
         Command::Status { url, device } => {
+            selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
+                .into_iter()
+                .collect()
+        }
+        Command::StatusStream { url, device, .. } => {
             selector_devd_endpoint(url.as_ref(), device.as_ref(), default_devd)
                 .into_iter()
                 .collect()
@@ -2639,6 +2798,30 @@ mod tests {
     }
 
     #[test]
+    fn ipc_request_for_devd_call_coerces_status_fresh_to_bool() {
+        let request = ipc_request_for_devd_call(
+            reqwest::Method::GET,
+            "/api/v1/status?device_id=loadlynx-a1b2c3&lease_id=lease-1&fresh=true",
+            None,
+        )
+        .expect("native status IPC request");
+
+        assert_eq!(request.op, "compat.status");
+        assert_eq!(
+            request.params.get("fresh").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            request.params.get("device_id").and_then(Value::as_str),
+            Some("loadlynx-a1b2c3")
+        );
+        assert_eq!(
+            request.params.get("lease_id").and_then(Value::as_str),
+            Some("lease-1")
+        );
+    }
+
+    #[test]
     fn ipc_query_params_preserve_numeric_ids_as_strings() {
         let request = ipc_request_for_devd_call(
             reqwest::Method::GET,
@@ -3246,10 +3429,40 @@ mod tests {
         let cli = Cli::try_parse_from(["loadlynx", "device", "add", "--name", "Bench"]).unwrap();
         match cli.command {
             Command::Device {
-                command: DeviceCommand::Add { url, name },
+                command:
+                    DeviceCommand::Add {
+                        url,
+                        usb_port_path,
+                        name,
+                    },
             } => {
                 assert!(url.is_none());
+                assert!(usb_port_path.is_none());
                 assert_eq!(name.as_deref(), Some("Bench"));
+            }
+            _ => panic!("expected device add command"),
+        }
+
+        let cli = Cli::try_parse_from([
+            "loadlynx",
+            "device",
+            "add",
+            "--usb-port-path",
+            "/dev/cu.usbmodem212101",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Device {
+                command:
+                    DeviceCommand::Add {
+                        url,
+                        usb_port_path,
+                        name,
+                    },
+            } => {
+                assert!(url.is_none());
+                assert_eq!(usb_port_path.as_deref(), Some("/dev/cu.usbmodem212101"));
+                assert!(name.is_none());
             }
             _ => panic!("expected device add command"),
         }
@@ -3261,6 +3474,22 @@ mod tests {
                 assert_eq!(device.as_deref(), Some("loadlynx-abc123"));
             }
             _ => panic!("expected status command"),
+        }
+
+        let cli = Cli::try_parse_from(["loadlynx", "status-stream", "--device", "loadlynx-abc123"])
+            .unwrap();
+        match cli.command {
+            Command::StatusStream {
+                device,
+                interval_ms,
+                count,
+                ..
+            } => {
+                assert_eq!(device.as_deref(), Some("loadlynx-abc123"));
+                assert_eq!(interval_ms, 250);
+                assert!(count.is_none());
+            }
+            _ => panic!("expected status-stream command"),
         }
 
         let cli = Cli::try_parse_from(["loadlynx", "devices"]).unwrap();
@@ -3864,5 +4093,28 @@ mod tests {
             Some(value) => unsafe { env::set_var("LOADLYNX_HOME", value) },
             None => unsafe { env::remove_var("LOADLYNX_HOME") },
         }
+    }
+
+    #[test]
+    fn status_stream_samples_follow_ticker_cadence() {
+        let samples = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .unwrap()
+            .block_on(async {
+                collect_status_stream_samples(250, Some(2), || async {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    Ok(json!({"ok": true}))
+                })
+                .await
+                .expect("status stream samples")
+            });
+        assert_eq!(samples.len(), 2);
+        let gap_ms = samples[1].gap_ms.expect("second sample gap");
+        eprintln!("status_stream_gap_ms={gap_ms}");
+        assert!(
+            (200..=400).contains(&gap_ms),
+            "expected ticker-based cadence near 250ms, got {gap_ms}ms"
+        );
     }
 }

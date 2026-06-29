@@ -262,7 +262,7 @@ async fn create_cli_lease_with_expected(
     )?)
 }
 
-async fn create_cli_lease_for_resolved_usb(
+pub(crate) async fn create_cli_lease_for_resolved_usb(
     client: &Client,
     resolved: &ResolvedUsbHardware,
 ) -> Result<(CliLease, String), Box<dyn std::error::Error + Send + Sync>> {
