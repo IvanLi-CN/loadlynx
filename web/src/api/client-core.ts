@@ -12,6 +12,9 @@ export const ENABLE_MOCK_DEVTOOLS =
   (import.meta.env.DEV &&
     import.meta.env.VITE_ENABLE_MOCK_DEVTOOLS !== "false");
 
+export const ENABLE_APP_DEVTOOLS =
+  import.meta.env.VITE_ENABLE_APP_DEVTOOLS === "true";
+
 export function isMockBaseUrl(baseUrl: string): boolean {
   if (!baseUrl) {
     return false;

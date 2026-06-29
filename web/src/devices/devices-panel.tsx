@@ -28,7 +28,7 @@ export function DevicesPanel() {
             {addDemoDevice.isPending ? (
               <span className="ll-loading ll-loading-spinner ll-loading-xs" />
             ) : null}
-            Add demo device
+            Add sample device
           </button>
         ) : null}
       </header>
@@ -37,7 +37,7 @@ export function DevicesPanel() {
         <div className="ll-panel-body p-4">
           {devices.length === 0 ? (
             <p className="text-sm text-base-content/70">
-              No devices yet. Add a demo device to populate the list.
+              No devices yet. Add a sample device to populate the list.
             </p>
           ) : (
             <div className="overflow-x-auto">

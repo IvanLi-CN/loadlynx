@@ -31,7 +31,7 @@
 
 ### MUST
 
-- 在 `ConsoleLayout` 的抽屉（drawer）底部提供版本展示位，默认显示构建期注入的 `VITE_APP_VERSION`（通过 `import.meta.env` 读取，版本信息编译进前端产物）。
+- 在 `ConsoleLayout` 的 owner-facing shell 中提供版本展示位，默认显示构建期注入的 `VITE_APP_VERSION`（通过 `import.meta.env` 读取，版本信息编译进前端产物）。
 - 点击版本展示位打开 GitHub 溯源页面（优先精确定位到当前构建对应的 Git 引用；详见“开放问题”中对 tag/commit 的决策）。
 - 版本展示在以下场景均不应报错（best-effort）：
   - `VITE_APP_VERSION` / `VITE_APP_GIT_SHA` 缺失（例如本地未注入）
@@ -40,7 +40,7 @@
 
 ## 已确认口径（Decisions）
 
-- 版本展示位位置：抽屉（drawer）底部。
+- 版本展示位位置：shell 底部 footer 区域（当前为右下角 footer）。
 - 跳转策略：Option B（“`v*` tag 优先，否则 commit”）。
 
 ## 接口契约（Interfaces & Contracts）
@@ -59,7 +59,7 @@
 
 ## 验收标准（Acceptance Criteria）
 
-- Given 打开 Web Console 任意页面，When 页面渲染完成，Then 在抽屉底部可见版本号展示位，且内容与构建期注入的 `import.meta.env.VITE_APP_VERSION` 一致。
+- Given 打开 Web Console 任意页面，When 页面渲染完成，Then 在 shell footer 可见版本号展示位，且内容与构建期注入的 `import.meta.env.VITE_APP_VERSION` 一致。
 - Given 点击版本号展示位，When 浏览器打开链接，Then 跳转到 GitHub 溯源页面（具体跳转目标按本计划的“开放问题”决策执行）。
 - Given 构建期注入缺失（例如本地未设置 env vars），When 打开页面，Then 不影响主界面正常使用，且版本展示位以“隐藏或降级文本”的方式处理（不抛异常、不白屏）。
 - Given Storybook 运行时，When 打开任意 story，Then 不显示版本展示位。
@@ -75,5 +75,5 @@
 
 ## 假设（Assumptions）
 
-- 默认放在 `ConsoleLayout` 抽屉底部（主人已选 B），使用小号文字/徽标样式，不抢占主操作区域。
+- 默认放在 `ConsoleLayout` footer 右下角，使用小号文字/徽标样式，不抢占主操作区域。
 - `v*` tag 的判定规则：tag 名以 `v` 开头（例如 `v1.2.3` 或 `v1.2.3-rc.20260120123456`）；其他 tag（如 `dev-...`）不视为“稳定发布 tag”。

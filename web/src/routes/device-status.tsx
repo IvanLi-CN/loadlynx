@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { useTranslation } from "react-i18next";
 import type { HttpApiError } from "../api/client.ts";
 import { isHttpApiError } from "../api/client.ts";
 import { findVisibleSavedFixedPdo } from "../api/pd-display.ts";
@@ -24,6 +25,7 @@ const PD_REFETCH_MS = 1500;
 const RETRY_DELAY_MS = 500;
 
 export function DeviceStatusRoute() {
+  const { t } = useTranslation();
   const { deviceId, device, baseUrl } = useDeviceContext();
   const isPageVisible = usePageVisibility();
   const identityQuery = useDeviceIdentityByBaseUrl(deviceId, baseUrl);
@@ -433,11 +435,12 @@ export function DeviceStatusRoute() {
             </div>
             <div className="ml-auto">
               <Link
-                to="/$deviceId/pd"
+                to="/$deviceId/cc"
                 params={{ deviceId }}
+                search={{ panel: "pd" }}
                 className="ll-button ll-button-sm ll-button-outline"
               >
-                Open PD settings
+                {t("status.openPdPanel")}
               </Link>
             </div>
           </div>

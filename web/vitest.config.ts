@@ -4,9 +4,11 @@ import { fileURLToPath } from "node:url";
 import { storybookTest } from "@storybook/addon-vitest/vitest-plugin";
 import { defineConfig, mergeConfig } from "vitest/config";
 
+import { resolvePort } from "./scripts/ports.ts";
 import { createViteConfig } from "./vite.config";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
+const storybookTestPort = resolvePort("storybookTest").port;
 
 export default mergeConfig(
   createViteConfig(),
@@ -37,6 +39,10 @@ export default mergeConfig(
             fileParallelism: false,
             browser: {
               enabled: true,
+              api: {
+                port: storybookTestPort,
+                strictPort: true,
+              },
               provider: "playwright",
               headless: true,
               instances: [{ browser: "chromium" }],

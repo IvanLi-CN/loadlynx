@@ -62,11 +62,24 @@
 - `modeLabel: "CC" | "CV" | "CP" | "CR"`
 - `setpointLabel: string`
 - `uptimeLabel: string` — 例如 `"01:24:18"`
-- `trend: { points: number[]; min: number; max: number }`
+- `trendSeries: { voltage; current; power }`
+- `trendSeries.<metric>`:
+  - `points: number[]`
+  - `times: number[]`
+  - `currentValue: number | null`
+  - `referenceValue: number`
+  - `referenceKind: "target_v" | "min_v" | "target_i" | "max_i" | "target_p" | "max_p"`
+  - `referenceLabel: string`
+  - `domainMin: number`
+  - `domainMax: number`
 
 **Behavior**
 
-- `trend.points` 为空时显示空线与 `No data` 说明。
+- 趋势区叠加显示 `voltage / current / power` 三条线，共享 X 轴。
+- X 轴固定为最近 30 秒。
+- 每条线都显示一条当前生效的横向虚线参考值。
+- 不显示共享数值 Y 轴；每条线按自身单位独立归一化到同一绘图区。
+- 趋势区无有效样本时显示空图与 `No data` 说明。
 
 ---
 

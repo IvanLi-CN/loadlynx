@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { within } from "storybook/test";
+import { waitFor, within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function DeviceLayoutStory(props: { initialPath: string }) {
@@ -27,7 +27,12 @@ export const NotFound: Story = {
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
-    await canvas.findByRole("heading", { name: "Device not found" });
-    await canvas.findByRole("link", { name: "Back to devices" });
+    await waitFor(
+      () => {
+        canvas.getByRole("heading", { name: "Device not found" });
+        canvas.getByRole("link", { name: "Back to Overview" });
+      },
+      { timeout: 5_000 },
+    );
   },
 };

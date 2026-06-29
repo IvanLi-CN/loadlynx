@@ -10,6 +10,20 @@
 
 This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes.
 
+2026-06-20 update:
+
+- `device-cc` is now surfaced to owners as `仪表盘`, while retaining the `/$deviceId/cc` route for compatibility.
+- The full USB-PD query / validation / Apply workflow is embedded into the dashboard via `PdControlPanel`.
+- The dashboard now lives under the top-nav shell introduced by `m3n8p`, rather than under a left sidebar shell.
+
+2026-06-22 update:
+
+- The dashboard information architecture is being tightened around three explicit priorities:
+  - `P0 primary information`: device-critical live measurements and the time-series view.
+  - `P1 secondary information`: thermal, fault, link, protection and PD summary context.
+  - `P2 control/general information`: all write actions, mode changes, setpoints and advanced controls.
+- The left column is the operator's read-first surface; the right column is the control-first surface.
+
 ## Milestones
 
 No explicit milestones were recorded in the legacy plan.

@@ -39,7 +39,7 @@
 
 ### Out of scope
 
-- 右侧 `PD Settings` 页面内的文案与布局（已由 #j24my/#ye27x 管控）。
+- 仪表盘内 `PD Panel` 的文案与布局（已由 #j24my/#ye27x / #rbcuw 管控）。
 - Web 端显示（如需同步另开计划）。
 
 ## 需求（Requirements）

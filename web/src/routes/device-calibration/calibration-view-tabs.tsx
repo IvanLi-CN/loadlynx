@@ -11,6 +11,8 @@ export function CalibrationViewTabs(input: {
         type="button"
         role="tab"
         className={`ll-tab ${activeView === "draft" ? "ll-tab-active" : ""}`}
+        aria-selected={activeView === "draft"}
+        tabIndex={activeView === "draft" ? 0 : -1}
         onClick={() => onSelectView("draft")}
       >
         本地草稿
@@ -19,6 +21,8 @@ export function CalibrationViewTabs(input: {
         type="button"
         role="tab"
         className={`ll-tab ${activeView === "device" ? "ll-tab-active" : ""}`}
+        aria-selected={activeView === "device"}
+        tabIndex={activeView === "device" ? 0 : -1}
         onClick={() => onSelectView("device")}
       >
         设备数据

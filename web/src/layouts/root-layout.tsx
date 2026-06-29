@@ -3,6 +3,7 @@ import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
 import { Outlet, useRouterState } from "@tanstack/react-router";
 import { TanStackRouterDevtools } from "@tanstack/react-router-devtools";
 import { useEffect } from "react";
+import { ENABLE_APP_DEVTOOLS } from "../api/client.ts";
 import { invalidateDevicesQueryCache } from "../devices/query-cache.ts";
 import {
   parseDemoModeParam,
@@ -44,7 +45,7 @@ export function RootLayout() {
       <Outlet />
       <PwaUpdatePrompt />
 
-      {import.meta.env.DEV && !storybookRuntime ? (
+      {import.meta.env.DEV && ENABLE_APP_DEVTOOLS && !storybookRuntime ? (
         <>
           <ReactQueryDevtools initialIsOpen={false} />
           <TanStackRouterDevtools initialIsOpen={false} />
