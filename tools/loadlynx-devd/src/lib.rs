@@ -2292,6 +2292,7 @@ async fn request_compat_status_data(
                 {
                     let _ = maybe_update_device_status_cache(device, &data);
                     let _ = maybe_update_device_control_cache(device, &data);
+                    return Ok(merge_cached_control_if_missing(device, data));
                 }
                 return Ok(data);
             }
@@ -4171,7 +4172,9 @@ fn maybe_update_device_status_cache(device: &mut DeviceRecord, value: &Value) ->
         return false;
     };
     device.status_cache = Some(status);
-    device.control_cache = value.get("control").cloned();
+    if let Some(control) = value.get("control").cloned() {
+        device.control_cache = Some(control);
+    }
     device.status_meta_cache = Some(status_meta_from_status_bundle(value));
     device.status_cache_updated_at_ms = Some(status_cache_timestamp_ms());
     true
@@ -4236,6 +4239,19 @@ fn cached_status_bundle(device: &DeviceRecord) -> Option<Value> {
     }
     out.insert("from_monitor_cache".to_string(), json!(true));
     Some(Value::Object(out))
+}
+
+fn merge_cached_control_if_missing(device: &DeviceRecord, mut value: Value) -> Value {
+    if value.get("control").is_some() {
+        return value;
+    }
+    let Some(control) = device.control_cache.clone() else {
+        return value;
+    };
+    if let Some(object) = value.as_object_mut() {
+        object.insert("control".to_string(), control);
+    }
+    value
 }
 
 fn status_meta_from_status_bundle(value: &Value) -> Value {
@@ -7476,6 +7492,95 @@ mod tests {
             .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
             .collect::<Vec<_>>();
         assert_eq!(tx_request_ids.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn compat_status_refresh_without_control_preserves_control_cache() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let device = guard.devices.get_mut("mock-loadlynx-devd").unwrap();
+            device.status_cache = Some(json!({
+                "enable": true,
+                "fault_flags": 0,
+                "i_local_ma": 1,
+                "state_flags": 1,
+                "v_local_mv": 12000
+            }));
+            device.control_cache = Some(json!({
+                "active_preset_id": 9,
+                "mode": "cc",
+                "output_enabled": true,
+                "target_i_ma": 1000
+            }));
+            device.status_cache_updated_at_ms =
+                Some(Utc::now().timestamp_millis() - STATUS_CACHE_MAX_AGE_MS - 1);
+        }
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "hello_seen": true,
+                        "link_up": true,
+                        "status": {
+                            "state_flags": 2,
+                            "fault_flags": 0,
+                            "enable": false,
+                            "i_local_ma": 11,
+                            "i_remote_ma": 8,
+                            "v_local_mv": 12046,
+                            "v_remote_mv": -876,
+                            "calc_p_mw": 228
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["status"]["enable"], false);
+        assert_eq!(status["control"]["target_i_ma"], 1000);
+        let guard = state.inner.lock().expect("state lock");
+        assert_eq!(
+            guard.devices["mock-loadlynx-devd"].control_cache,
+            Some(json!({
+                "active_preset_id": 9,
+                "mode": "cc",
+                "output_enabled": true,
+                "target_i_ma": 1000
+            }))
+        );
     }
 
     #[tokio::test]
