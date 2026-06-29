@@ -807,6 +807,7 @@ fn ipc_request_for_devd_call(
         ("GET", ["api", "v1", "identity"]) => "compat.identity",
         ("GET", ["api", "v1", "status"]) => {
             coerce_bool_query_param(&mut params, "fresh")?;
+            coerce_bool_query_param(&mut params, "cache")?;
             "compat.status"
         }
         ("GET", ["api", "v1", "network"]) => "compat.network",
@@ -2808,10 +2809,10 @@ mod tests {
     }
 
     #[test]
-    fn ipc_request_for_devd_call_coerces_status_fresh_to_bool() {
+    fn ipc_request_for_devd_call_coerces_status_flags_to_bool() {
         let request = ipc_request_for_devd_call(
             reqwest::Method::GET,
-            "/api/v1/status?device_id=loadlynx-a1b2c3&lease_id=lease-1&fresh=true",
+            "/api/v1/status?device_id=loadlynx-a1b2c3&lease_id=lease-1&fresh=true&cache=true",
             None,
         )
         .expect("native status IPC request");
@@ -2819,6 +2820,10 @@ mod tests {
         assert_eq!(request.op, "compat.status");
         assert_eq!(
             request.params.get("fresh").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            request.params.get("cache").and_then(Value::as_bool),
             Some(true)
         );
         assert_eq!(
