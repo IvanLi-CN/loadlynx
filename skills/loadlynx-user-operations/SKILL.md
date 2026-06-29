@@ -32,7 +32,7 @@ loadlynx-devd --help
 loadlynx -v
 ```
 
-- The current stable CLI surface should expose top-level commands such as `devices`, `device`, `status`, `cc`, `cv`, `cp`, `pd`, `wifi`, `control`, `preset`, and `flash`.
+- The current stable CLI surface should expose top-level commands such as `devices`, `device`, `status`, `status-stream`, `cc`, `cv`, `cp`, `pd`, `wifi`, `control`, `preset`, and `flash`.
 - `loadlynx-devd --help` must expose both `serve` and `bridge-http`.
 - If the requested workflow depends on a command that is absent, stop and report that the installed release does not support it. Do not invent commands, fall back to Web UI, or switch to source/developer instructions.
 
@@ -94,6 +94,7 @@ loadlynx-devd bridge-http --bind 127.0.0.1:30180
 loadlynx devices
 loadlynx device list
 loadlynx device add --name <name>
+loadlynx device add --usb-port <path> --name <name>
 loadlynx device add --url http://<device-host-or-ip> --name <name>
 loadlynx device use <id>
 loadlynx device use --global <id>
@@ -102,6 +103,7 @@ loadlynx device remove <id>
 ```
 
 - `loadlynx devices --json` and `loadlynx device list --json` expose the persisted device list plus the current global default.
+- `loadlynx device add --usb-port <path> --name <name>` is the formal non-interactive path for saving a known USB serial port path. Use it in automation when the owner has specified the exact port.
 - `loadlynx device add` without extra selectors is interactive; in non-interactive automation it fails by design. Do not fake around that with manual JSON edits.
 - Prefer using a saved `--device <id>` target instead of repeatedly retyping hostnames or URLs.
 
@@ -113,10 +115,12 @@ loadlynx device remove <id>
 ```bash
 loadlynx devices
 loadlynx status --device <id>
+loadlynx status-stream --device <id> --interval-ms <ms> [--count <n>] --json
 loadlynx control get --device <id>
 ```
 
 - `loadlynx status --device <id> --json` is the primary released read path for live telemetry, fault flags, link state, temperatures, voltage, current, power, and enable state.
+- `loadlynx status-stream --device <id> --interval-ms <ms> --json` is the primary released continuous telemetry path for tests that need stable sample cadence. With `--json`, stdout is NDJSON: one compact JSON status sample per line for the whole sample stream. Diagnostics and final summaries belong on stderr, not stdout, so downstream collectors can parse stdout as pure NDJSON.
 - `loadlynx control get --device <id> --json` reports the current mode, output-enabled state, active preset, and control snapshot.
 - Electronic-load control:
 
