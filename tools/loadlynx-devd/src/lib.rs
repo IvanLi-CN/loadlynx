@@ -456,6 +456,8 @@ struct CompatQuery {
     lease_id: Option<String>,
     #[serde(default)]
     fresh: bool,
+    #[serde(default)]
+    cache: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1018,6 +1020,10 @@ fn compat_query_and_body(params: Value) -> Result<(CompatQuery, Value), HttpErro
             .map(str::to_string),
         fresh: params
             .get("fresh")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        cache: params
+            .get("cache")
             .and_then(Value::as_bool)
             .unwrap_or(false),
     };
@@ -2310,7 +2316,7 @@ async fn compat_status(
         select_serial_port_for_compat(&guard, &query, "status")?
     };
 
-    let data = if !query.fresh {
+    let data = if query.cache && !query.fresh {
         if let Some(cached) = fresh_cached_status_data(&state, &device_id) {
             cached
         } else {
@@ -2885,6 +2891,7 @@ async fn compat_diagnostics_export(
         device_id: query.device_id.clone(),
         lease_id: query.lease_id.clone(),
         fresh: false,
+        cache: false,
     };
     let (_, firmware) = compat_usb_json_request(
         &state,
@@ -6639,6 +6646,7 @@ mod tests {
                     device_id: None,
                     lease_id: Some("bind-probe".to_string()),
                     fresh: false,
+                    cache: false,
                 },
                 "status",
             )
@@ -6651,6 +6659,7 @@ mod tests {
                     device_id: None,
                     lease_id: Some("bind-probe".to_string()),
                     fresh: false,
+                    cache: false,
                 },
                 "identity",
             )
@@ -7063,6 +7072,7 @@ mod tests {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(first_lease),
                 fresh: false,
+                cache: false,
             }),
         )
         .await
@@ -7073,6 +7083,80 @@ mod tests {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(second_lease),
                 fresh: false,
+                cache: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let guard = state.inner.lock().expect("state lock");
+        let request_ids = guard
+            .devices
+            .get("mock-loadlynx-devd")
+            .unwrap()
+            .trace
+            .iter()
+            .skip(trace_len_before)
+            .filter(|trace| trace.direction == "tx")
+            .filter_map(|trace| trace.payload.get("request_id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+        assert_eq!(request_ids.len(), 2);
+        assert_eq!(first_status["device_id"], "mock-loadlynx-devd");
+        assert_eq!(second_status["device_id"], "mock-loadlynx-devd");
+        assert_eq!(second_status["from_monitor_cache"], serde_json::Value::Null);
+    }
+
+    #[tokio::test]
+    async fn compat_status_cache_opt_in_reuses_recent_status_sample() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(first) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        let first_lease = first["lease_id"].as_str().unwrap().to_string();
+        let second_lease = second["lease_id"].as_str().unwrap().to_string();
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
+
+        let Json(first_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(first_lease),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+        let Json(second_status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(second_lease),
+                fresh: false,
+                cache: true,
             }),
         )
         .await
@@ -7161,6 +7245,7 @@ mod tests {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(lease_id),
                 fresh: false,
+                cache: false,
             }),
         )
         .await
@@ -7263,6 +7348,7 @@ mod tests {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(lease_id),
                 fresh: false,
+                cache: true,
             }),
         )
         .await
@@ -7346,6 +7432,7 @@ mod tests {
                 device_id: Some("mock-loadlynx-devd".to_string()),
                 lease_id: Some(lease_id),
                 fresh: false,
+                cache: false,
             }),
         )
         .await
