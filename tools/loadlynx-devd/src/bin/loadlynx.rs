@@ -324,8 +324,8 @@ enum DeviceCommand {
     Add {
         #[arg(long, hide = true)]
         url: Option<String>,
-        #[arg(long = "usb-port-path")]
-        usb_port_path: Option<String>,
+        #[arg(long = "usb-port")]
+        usb_port: Option<String>,
         #[arg(long)]
         name: Option<String>,
     },
@@ -1783,13 +1783,11 @@ fn initial_devd_endpoints(command: &Command, default_devd: &str) -> Vec<String> 
             DeviceCommand::List | DeviceCommand::Use { .. } | DeviceCommand::Remove { .. } => {
                 Vec::new()
             }
-            DeviceCommand::Add {
-                url, usb_port_path, ..
-            } => {
+            DeviceCommand::Add { url, usb_port, .. } => {
                 if url.is_some() {
                     Vec::new()
                 } else {
-                    let _ = usb_port_path;
+                    let _ = usb_port;
                     vec![default_devd.to_string()]
                 }
             }
@@ -3432,12 +3430,12 @@ mod tests {
                 command:
                     DeviceCommand::Add {
                         url,
-                        usb_port_path,
+                        usb_port,
                         name,
                     },
             } => {
                 assert!(url.is_none());
-                assert!(usb_port_path.is_none());
+                assert!(usb_port.is_none());
                 assert_eq!(name.as_deref(), Some("Bench"));
             }
             _ => panic!("expected device add command"),
@@ -3447,7 +3445,7 @@ mod tests {
             "loadlynx",
             "device",
             "add",
-            "--usb-port-path",
+            "--usb-port",
             "/dev/cu.usbmodem212101",
         ])
         .unwrap();
@@ -3456,12 +3454,12 @@ mod tests {
                 command:
                     DeviceCommand::Add {
                         url,
-                        usb_port_path,
+                        usb_port,
                         name,
                     },
             } => {
                 assert!(url.is_none());
-                assert_eq!(usb_port_path.as_deref(), Some("/dev/cu.usbmodem212101"));
+                assert_eq!(usb_port.as_deref(), Some("/dev/cu.usbmodem212101"));
                 assert!(name.is_none());
             }
             _ => panic!("expected device add command"),

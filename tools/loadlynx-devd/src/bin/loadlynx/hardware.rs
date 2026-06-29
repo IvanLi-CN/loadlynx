@@ -135,21 +135,19 @@ pub(crate) async fn handle_device_command(
         DeviceCommand::List => device_list_payload(&registry_path, &cwd),
         DeviceCommand::Add {
             url,
-            usb_port_path,
+            usb_port,
             name,
         } => {
             let mut registry = read_hardware_registry(&registry_path)?;
             let now = current_unix_seconds();
-            let selector_count = [url.is_some(), usb_port_path.is_some()]
+            let selector_count = [url.is_some(), usb_port.is_some()]
                 .into_iter()
                 .filter(|selected| *selected)
                 .count();
             if selector_count > 1 {
-                return Err(
-                    "`loadlynx device add` accepts only one of --url or --usb-port-path".into(),
-                );
+                return Err("`loadlynx device add` accepts only one of --url or --usb-port".into());
             }
-            let saved = match (url, usb_port_path) {
+            let saved = match (url, usb_port) {
                 (Some(url), None) => {
                     bind_http_device(&mut registry, client, &url, name, now).await?
                 }
@@ -160,7 +158,7 @@ pub(crate) async fn handle_device_command(
                 (None, None) => {
                     if !allow_interactive {
                         return Err(
-                            "`loadlynx device add` without --url or --usb-port-path requires an interactive terminal"
+                            "`loadlynx device add` without --url or --usb-port requires an interactive terminal"
                                 .into(),
                         );
                     }
@@ -318,7 +316,7 @@ async fn bind_usb_device_by_port_path(
     name: Option<String>,
     now: u64,
 ) -> Result<SavedHardware, Box<dyn std::error::Error + Send + Sync>> {
-    let port_path = validate_explicit_usb_port_path(port_path)?;
+    let port_path = validate_explicit_usb_port(port_path)?;
     let scan =
         request_devd_value(devd, reqwest::Method::POST, "/api/v1/devices/scan", None).await?;
     let selected = usb_add_candidate_for_port_path(&scan, &port_path)?;
@@ -370,7 +368,7 @@ async fn bind_http_device(
     ))
 }
 
-fn validate_explicit_usb_port_path(
+fn validate_explicit_usb_port(
     port_path: &str,
 ) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let port_path = port_path.trim();
@@ -1226,7 +1224,7 @@ mod tests {
     }
 
     #[test]
-    fn explicit_usb_port_path_candidate_resolves_from_default_scan() {
+    fn explicit_usb_port_candidate_resolves_from_default_scan() {
         let scan = json!({
             "devices": [{
                 "id": "digital-1",
@@ -1245,8 +1243,8 @@ mod tests {
     }
 
     #[test]
-    fn explicit_usb_port_path_rejects_empty_or_multiline_values() {
-        assert!(validate_explicit_usb_port_path("  ").is_err());
-        assert!(validate_explicit_usb_port_path("/dev/cu.usbmodem1\n/dev/other").is_err());
+    fn explicit_usb_port_rejects_empty_or_multiline_values() {
+        assert!(validate_explicit_usb_port("  ").is_err());
+        assert!(validate_explicit_usb_port("/dev/cu.usbmodem1\n/dev/other").is_err());
     }
 }

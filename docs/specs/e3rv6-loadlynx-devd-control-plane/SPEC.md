@@ -183,7 +183,7 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx devices`
 - `loadlynx device list`
 - `loadlynx device add`
-- `loadlynx device add --usb-port-path /dev/cu.usbmodemXXXX`
+- `loadlynx device add --usb-port /dev/cu.usbmodemXXXX`
 - `loadlynx device add --url http://loadlynx-xxxxxx.local`
 - `loadlynx device use <device-id>`
 - `loadlynx device use --global <device-id>`
@@ -208,7 +208,7 @@ CLI commands should map 1:1 to devd/LAN operations:
 - `loadlynx soft-reset --device <id> --reason manual`
 - `loadlynx diagnostics export --device <id>`
 
-Temporary devd candidate IDs are discovery outputs, not operation targets. A USB candidate may only enter user operations through `loadlynx device add`; the bind flow must read identity over a short bind-probe lease and reject firmware that does not expose a stable `identity.device_id` such as `loadlynx-<short-id>`. `loadlynx device add --usb-port-path <path>` is the non-interactive USB bind form for automation and HIL: devd still scans candidates, matches the explicit port path, and then runs the same identity-confirming bind-probe flow. Bind-probe leases are restricted to identity binding and must not authorize normal control, diagnostics, reset or flash operations. Saved device records use that stable ID as the registry key, may hold both USB and HTTP transport locators, remember `last_transport`, and expose a global default plus nearest-ancestor `.loadlynx` local selection for selector-free automation. Saved USB operations on a fresh auto-started devd may trigger scan before lease creation, then must confirm the current firmware identity still matches the saved device ID; a missing lease identity is a failed confirmation, not a permissive legacy fallback.
+Temporary devd candidate IDs are discovery outputs, not operation targets. A USB candidate may only enter user operations through `loadlynx device add`; the bind flow must read identity over a short bind-probe lease and reject firmware that does not expose a stable `identity.device_id` such as `loadlynx-<short-id>`. `loadlynx device add --usb-port <path>` is the non-interactive USB bind form for automation and HIL: devd still scans candidates, matches the explicit port path, and then runs the same identity-confirming bind-probe flow. Bind-probe leases are restricted to identity binding and must not authorize normal control, diagnostics, reset or flash operations. Saved device records use that stable ID as the registry key, may hold both USB and HTTP transport locators, remember `last_transport`, and expose a global default plus nearest-ancestor `.loadlynx` local selection for selector-free automation. Saved USB operations on a fresh auto-started devd may trigger scan before lease creation, then must confirm the current firmware identity still matches the saved device ID; a missing lease identity is a failed confirmation, not a permissive legacy fallback.
 
 LAN WiFi writes require the explicit `--allow-insecure-lan-wifi` CLI flag. USB/devd WiFi writes do not require that LAN safety override because they are local physical access operations.
 
