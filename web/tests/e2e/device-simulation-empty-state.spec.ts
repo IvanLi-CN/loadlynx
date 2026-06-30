@@ -9,7 +9,7 @@ test.describe("Simulation device empty state", () => {
     await page.evaluate(() => window.localStorage.clear());
     await page.reload();
     await expect(
-      page.getByRole("heading", { name: /LoadLynx Web Console/i, level: 1 }),
+      page.getByRole("heading", { name: /Overview|总览/i }).first(),
     ).toBeVisible();
   });
 
