@@ -3,13 +3,6 @@ function packageChunkName(id: string): string | null {
     return null;
   }
 
-  if (
-    id.includes("/node_modules/react/") ||
-    id.includes("/node_modules/react-dom/")
-  ) {
-    return "react-vendor";
-  }
-
   if (id.includes("/node_modules/recharts/")) {
     if (
       id.includes("/node_modules/recharts/es6/chart/") ||
@@ -38,9 +31,34 @@ function packageChunkName(id: string): string | null {
     id.includes("/node_modules/@tanstack/react-router/") ||
     id.includes("/node_modules/@tanstack/router-core/") ||
     id.includes("/node_modules/@tanstack/react-query/") ||
-    id.includes("/node_modules/@tanstack/query-core/")
+    id.includes("/node_modules/@tanstack/query-core/") ||
+    id.includes("/node_modules/@tanstack/store/") ||
+    id.includes("/node_modules/@tanstack/react-store/") ||
+    id.includes("/node_modules/@tanstack/history/")
   ) {
     return "tanstack-vendor";
+  }
+
+  if (
+    id.includes("/node_modules/@reduxjs/") ||
+    id.includes("/node_modules/react-redux/") ||
+    id.includes("/node_modules/redux/") ||
+    id.includes("/node_modules/redux-thunk/") ||
+    id.includes("/node_modules/reselect/") ||
+    id.includes("/node_modules/immer/")
+  ) {
+    return "state-vendor";
+  }
+
+  if (id.includes("/node_modules/es-toolkit/")) {
+    return "utility-vendor";
+  }
+
+  if (
+    id.includes("/node_modules/pako/") ||
+    id.includes("/node_modules/atob-lite/")
+  ) {
+    return "compression-vendor";
   }
 
   if (
