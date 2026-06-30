@@ -3,6 +3,8 @@ import { exportDiagnostics } from "./client.ts";
 import {
   type DevdStatusPayload,
   getOrCreateMockDevice,
+  mockGetStatus,
+  mockUpdateControl,
   normalizeDevdIdentity,
   normalizeDevdStatus,
 } from "./client-mock.ts";
@@ -178,6 +180,78 @@ test("mock device status starts from a valid protocol mode and decoded flags arr
   expect(device.identity.usb_bridge?.transport).toBe("usb_cdc_jsonl");
   expect(device.pd?.epr_active).toBe(false);
   expect(device.pd?.epr_avs_pdos).toEqual([]);
+});
+
+test("demo mock devices boot into distinct live bench scenarios", async () => {
+  const ccDevice = getOrCreateMockDevice("mock://demo-1");
+  const cpDevice = getOrCreateMockDevice("mock://demo-2");
+
+  expect(ccDevice.output_enabled).toBe(true);
+  expect(ccDevice.active_preset_id).toBe(1);
+  expect(cpDevice.output_enabled).toBe(true);
+  expect(cpDevice.active_preset_id).toBe(3);
+
+  ccDevice.simulation.lastWallClockMs = Date.now() - 1000;
+  cpDevice.simulation.lastWallClockMs = Date.now() - 1000;
+
+  const ccStatus = await mockGetStatus("mock://demo-1");
+  const cpStatus = await mockGetStatus("mock://demo-2");
+
+  expect(ccStatus.raw.enable).toBe(true);
+  expect(ccStatus.raw.i_local_ma + ccStatus.raw.i_remote_ma).toBeGreaterThan(
+    1_000,
+  );
+  expect(cpStatus.raw.enable).toBe(true);
+  expect(cpStatus.raw.mode).toBe(3);
+  expect(cpStatus.raw.calc_p_mw).toBeGreaterThan(25_000);
+  expect(cpStatus.raw.v_remote_mv).toBeGreaterThan(
+    ccStatus.raw.v_remote_mv + 4_000,
+  );
+});
+
+test("mock status evolves into realistic non-zero readings when output is enabled", async () => {
+  const baseUrl = "mock://demo-1";
+  const device = getOrCreateMockDevice(baseUrl);
+  device.simulation.lastWallClockMs = Date.now() - 1000;
+
+  await mockUpdateControl(baseUrl, { output_enabled: true });
+  const status = await mockGetStatus(baseUrl);
+
+  expect(status.raw.enable).toBe(true);
+  expect(status.raw.mode).toBe(1);
+  expect(status.raw.v_remote_mv).toBeGreaterThan(10_500);
+  expect(status.raw.v_remote_mv).toBeLessThan(12_200);
+  expect(status.raw.i_local_ma + status.raw.i_remote_ma).toBeGreaterThan(1_000);
+  expect(status.raw.calc_p_mw).toBeGreaterThan(10_000);
+  expect(status.raw.sink_core_temp_mc).toBeGreaterThan(
+    device.simulation.profile.ambientTempMc + 5_000,
+  );
+  expect(status.state_flags_decoded).toContain("ENABLED");
+  expect(status.state_flags_decoded).toContain("REMOTE_ACTIVE");
+  expect(status.state_flags_decoded).toContain("LINK_GOOD");
+});
+
+test("different mock demo devices expose distinct operating scenarios", async () => {
+  const ccBaseUrl = "mock://demo-1";
+  const cpBaseUrl = "mock://demo-2";
+
+  getOrCreateMockDevice(ccBaseUrl).simulation.lastWallClockMs =
+    Date.now() - 1000;
+  getOrCreateMockDevice(cpBaseUrl).simulation.lastWallClockMs =
+    Date.now() - 1000;
+
+  await mockUpdateControl(ccBaseUrl, { output_enabled: true });
+  await mockUpdateControl(cpBaseUrl, { output_enabled: true });
+
+  const ccStatus = await mockGetStatus(ccBaseUrl);
+  const cpStatus = await mockGetStatus(cpBaseUrl);
+
+  expect(ccStatus.raw.mode).toBe(1);
+  expect(cpStatus.raw.mode).toBe(3);
+  expect(cpStatus.raw.v_remote_mv).toBeGreaterThan(
+    ccStatus.raw.v_remote_mv + 4_000,
+  );
+  expect(cpStatus.raw.calc_p_mw).toBeGreaterThan(ccStatus.raw.calc_p_mw);
 });
 
 test("mock diagnostics export matches firmware-facing diagnostics contract", async () => {

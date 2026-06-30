@@ -1,13 +1,23 @@
 import { expect, type Page, test } from "@playwright/test";
 
 async function openFirstDeviceControl(page: Page) {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("loadlynx.locale", "zh-CN");
+  });
   await page.goto("/");
   await expect(page.locator("text=LoadLynx Web Console")).toBeVisible();
 
-  const openControlBtn = page.locator("text=Open CC Control").first();
+  const openControlBtn = page
+    .getByRole("link", {
+      name: "打开仪表盘",
+    })
+    .first();
 
   if ((await openControlBtn.count()) === 0) {
-    const addDemoBtn = page.locator("text=Add demo device");
+    const addDemoBtn = page
+      .locator("section")
+      .filter({ hasText: "当前已知设备" })
+      .getByRole("button", { name: "Add sample device" });
     if (await addDemoBtn.isVisible()) {
       await addDemoBtn.click();
     }
@@ -18,11 +28,27 @@ async function openFirstDeviceControl(page: Page) {
   await expect(page.url()).toContain("/cc");
 }
 
+async function openPresetDrawer(page: Page) {
+  const trigger = page.getByRole("button", { name: /预设|Presets/ }).first();
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  await expect(
+    page.getByRole("dialog", { name: /预设|Presets/ }),
+  ).toBeVisible();
+}
+
+function getPresetDrawer(page: Page) {
+  return page.getByRole("dialog", { name: /预设|Presets/ });
+}
+
 async function setOutputEnabled(page: Page, enabled: boolean) {
-  const outputToggle = page.getByRole("checkbox", { name: "Output enabled" });
+  const outputToggle = page.getByRole("switch", {
+    name: /Load output switch|负载主开关/,
+  });
   await expect(outputToggle).toBeEnabled();
 
-  const wasChecked = await outputToggle.isChecked();
+  const wasChecked =
+    (await outputToggle.getAttribute("aria-checked")) === "true";
   if (wasChecked !== enabled) {
     await outputToggle.click();
   }
@@ -32,31 +58,27 @@ async function setOutputEnabled(page: Page, enabled: boolean) {
   );
 }
 
-async function expandAdvanced(page: Page) {
-  const btn = page.getByRole("button", { name: /Advanced/i }).first();
-  await btn.scrollIntoViewIfNeeded();
-  await btn.click();
-  await expect(page.locator("#preset-mode")).toBeVisible();
-}
-
 test.describe("Presets + Unified Control (mock://)", () => {
   test.beforeEach(async ({ page }) => {
     await openFirstDeviceControl(page);
   });
 
   test("presets list loads and has 5 entries", async ({ page }) => {
-    const presets = page.getByRole("region", { name: "Presets" });
-    await expect(presets.getByRole("button", { name: "#1" })).toBeEnabled();
-    await expect(presets.getByRole("button", { name: "#5" })).toBeEnabled();
-    await expect(presets.getByRole("button", { name: "#6" })).toBeDisabled();
+    await openPresetDrawer(page);
+    const drawer = getPresetDrawer(page);
+    await expect(drawer.getByRole("button", { name: "#1" })).toBeEnabled();
+    await expect(drawer.getByRole("button", { name: "#5" })).toBeEnabled();
+    await expect(drawer.getByRole("button", { name: "#6" })).toBeDisabled();
   });
 
   test("apply preset forces output_enabled=false", async ({ page }) => {
     await setOutputEnabled(page, true);
 
-    const presets = page.getByRole("region", { name: "Presets" });
-    await presets.getByRole("button", { name: "#2" }).click();
-    await presets.getByRole("button", { name: "Apply Preset" }).click();
+    await openPresetDrawer(page);
+    const drawer = getPresetDrawer(page);
+    await drawer.getByRole("button", { name: "#2" }).click();
+    await drawer.getByRole("button", { name: /Apply Preset|应用预设/ }).click();
+    await expect(drawer.getByText("已应用槽位 #2，输出已关闭。")).toBeVisible();
 
     await expect(page.getByTestId("control-active-preset")).toContainText("2");
     await expect(page.getByTestId("control-output-enabled")).toContainText(
@@ -72,25 +94,39 @@ test.describe("Presets + Unified Control (mock://)", () => {
   test("switching a preset CC<->CV and applying reflects in ControlView", async ({
     page,
   }) => {
-    const presets = page.getByRole("region", { name: "Presets" });
-    await presets.getByRole("button", { name: "#3" }).click();
+    await openPresetDrawer(page);
+    const drawer = getPresetDrawer(page);
+    await drawer.getByRole("button", { name: "#3" }).click();
 
-    await expandAdvanced(page);
-    await page.locator("#preset-mode").selectOption("cv");
-    await page.locator("#preset-target-v").fill("15000");
-    await page.locator("#preset-min-v").fill("0");
-    await page.locator("#preset-max-i").fill("8000");
-    await page.locator("#preset-max-p").fill("120000");
-    await presets.getByRole("button", { name: "Save Draft" }).click();
-    await presets.getByRole("button", { name: "Apply Preset" }).click();
+    await drawer.getByLabel("CV").check({ force: true });
+    await drawer
+      .getByRole("textbox", { name: "Target voltage (mV)" })
+      .fill("15000");
+    await drawer.getByRole("textbox", { name: "Min voltage (mV)" }).fill("0");
+    await drawer
+      .getByRole("textbox", { name: "Max current total (mA)" })
+      .fill("8000");
+    await drawer
+      .getByRole("textbox", { name: "Max power (mW)" })
+      .fill("120000");
+    await drawer.getByRole("button", { name: /Save Slot|保存槽位/ }).click();
+    await expect(drawer.getByText("已保存到槽位 #3。")).toBeVisible();
+    await drawer.getByRole("button", { name: /Apply Preset|应用预设/ }).click();
+    await expect(drawer.getByText("已应用槽位 #3，输出已关闭。")).toBeVisible();
 
     await expect(page.getByTestId("control-active-preset")).toContainText("3");
     await expect(page.getByTestId("control-active-mode")).toContainText("cv");
 
-    await page.locator("#preset-mode").selectOption("cc");
-    await page.locator("#preset-target-i").fill("2500");
-    await presets.getByRole("button", { name: "Save Draft" }).click();
-    await presets.getByRole("button", { name: "Apply Preset" }).click();
+    await drawer.getByLabel("CC").check({ force: true });
+    await drawer
+      .getByRole("textbox", { name: "Target current (mA)" })
+      .fill("2500");
+    await drawer
+      .getByRole("button", { name: /Save Active Slot|保存当前激活槽位/ })
+      .click();
+    await expect(
+      drawer.getByText("已保存槽位 #3，实时控制已同步更新。"),
+    ).toBeVisible();
 
     await expect(page.getByTestId("control-active-mode")).toContainText("cc");
   });
@@ -98,17 +134,25 @@ test.describe("Presets + Unified Control (mock://)", () => {
   test("switching a preset to CP and applying reflects in ControlView", async ({
     page,
   }) => {
-    const presets = page.getByRole("region", { name: "Presets" });
-    await presets.getByRole("button", { name: "#4" }).click();
+    await openPresetDrawer(page);
+    const drawer = getPresetDrawer(page);
+    await drawer.getByRole("button", { name: "#4" }).click();
 
-    await expandAdvanced(page);
-    await page.locator("#preset-mode").selectOption("cp");
-    await page.locator("#preset-target-p").fill("25000");
-    await page.locator("#preset-min-v").fill("0");
-    await page.locator("#preset-max-i").fill("8000");
-    await page.locator("#preset-max-p").fill("120000");
-    await presets.getByRole("button", { name: "Save Draft" }).click();
-    await presets.getByRole("button", { name: "Apply Preset" }).click();
+    await drawer.getByLabel("CP").check({ force: true });
+    await drawer
+      .getByRole("textbox", { name: "Target power (mW)" })
+      .fill("25000");
+    await drawer.getByRole("textbox", { name: "Min voltage (mV)" }).fill("0");
+    await drawer
+      .getByRole("textbox", { name: "Max current total (mA)" })
+      .fill("8000");
+    await drawer
+      .getByRole("textbox", { name: "Max power (mW)" })
+      .fill("120000");
+    await drawer.getByRole("button", { name: /Save Slot|保存槽位/ }).click();
+    await expect(drawer.getByText("已保存到槽位 #4。")).toBeVisible();
+    await drawer.getByRole("button", { name: /Apply Preset|应用预设/ }).click();
+    await expect(drawer.getByText("已应用槽位 #4，输出已关闭。")).toBeVisible();
 
     await expect(page.getByTestId("control-active-preset")).toContainText("4");
     await expect(page.getByTestId("control-active-mode")).toContainText("cp");

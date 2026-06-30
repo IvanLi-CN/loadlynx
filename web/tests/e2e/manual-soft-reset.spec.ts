@@ -26,17 +26,14 @@ test.describe("Manual Soft Reset (HIL)", () => {
 
     await page.getByRole("button", { name: "Add device" }).click();
 
-    // Wait for the new device row and open CC control.
+    // Wait for the new device row and open the dashboard.
     await expect(page.getByText("Real Device (manual)")).toBeVisible();
-    await page.getByRole("link", { name: "Open CC Control" }).last().click();
+    await page.getByRole("link", { name: "打开仪表盘" }).last().click();
 
-    // We should be on the CC control page for this device.
-    await expect(
-      page.getByRole("heading", { name: "Device control" }),
-    ).toBeVisible();
+    await expect(page.url()).toContain("/cc");
 
-    // Navigate to Settings in the sidebar (avoid matching the route hint code).
-    await page.getByRole("link", { name: "Settings" }).click();
+    await page.getByRole("button", { name: "系统" }).click();
+    await page.getByRole("link", { name: "设置" }).click();
     await expect(
       page.getByRole("heading", { name: "Device Settings" }),
     ).toBeVisible();

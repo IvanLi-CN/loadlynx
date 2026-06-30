@@ -1,9 +1,11 @@
 # LoadLynx Web Console
 
-This `web/` directory hosts the LoadLynx network control web console. At this
-stage it provides the browser console for device discovery, CC control, status,
-USB-PD settings, firmware dry-runs, Web Serial ESP32-S3 flashing, calibration
-and settings.
+This `web/` directory hosts the LoadLynx network control web console. It now
+uses a top-shell information architecture with `Overview`, `Dashboard`, and
+`System` as the primary owner-facing workspaces. The app provides multi-device
+overview and switching, the instrument-style dashboard with embedded USB-PD
+controls, status/settings/calibration/firmware/about system pages, firmware
+dry-runs, and Web Serial ESP32-S3 flashing.
 
 ## Tech stack
 
@@ -45,10 +47,11 @@ Useful direct routes:
 - `/devices?demo=true`
 - `/mock-001/cc`
 - `/mock-001/status`
-- `/mock-001/pd`
+- `/mock-001/cc?panel=pd`
 - `/mock-001/settings`
 - `/mock-001/firmware`
 - `/mock-001/calibration`
+- `/mock-001/about`
 
 ## Lockfile policy
 
@@ -66,6 +69,11 @@ bun install
 bun run dev
 ```
 
+Use `bun run dev` for everyday frontend development. This is the Vite
+development server and the only local Web entry that provides HMR/live reload.
+If code changes are not updating in the browser, first confirm you are on
+`bun run dev` rather than `bun run preview`.
+
 For local hardware-backed Web development, start the HTTP bridge separately and
 point Vite at it:
 
@@ -74,6 +82,10 @@ just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors
 VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:30180 bun run dev
 ```
 
+`bun run preview` is not a development server. It serves the built `dist`
+bundle for production-style verification after `bun run build`, and it does not
+provide HMR.
+
 `loadlynx-devd serve` is the IPC daemon for CLI workflows. It uses a Unix
 socket on macOS/Linux and a named pipe on Windows by default; Web/browser paths
 use `loadlynx-devd bridge-http` or Web Serial. The HTTP bridge must stay on
@@ -81,11 +93,11 @@ loopback.
 
 Core scripts:
 
-- `bun run dev` – start the Vite development server.
+- `bun run dev` – start the Vite development server for local frontend development with HMR.
 - `bun run build` – type-check and build for production.
 - `bun run check:bundle:app` – verify built app JS chunks stay within the app bundle budget.
 - `bun run check:bundle:storybook` – verify Storybook preview chunks stay within budget and separately cap the framework mocker runtime.
-- `bun run preview` – preview the built app.
+- `bun run preview` – preview the built app bundle after `bun run build`; no HMR.
 - `bun run test:preview-smoke` – serve the built `dist` bundle with `vite preview` and fail on uncaught runtime errors or console errors during first paint.
 - `bun run lint` – run `biome lint .`.
 - `bun run format` – run `biome format --write .`.
@@ -122,9 +134,11 @@ Examples:
 - `LOADLYNX_WEB_DEV_PORT=39999 bun run dev`
 - `LOADLYNX_STORYBOOK_PORT=39998 bun run storybook`
 
-## USB‑PD Settings
+## USB‑PD Panel
 
-- Entry point: `Status` → `USB‑PD` card → `Open PD settings` (route: `/$deviceId/pd`).
+- Canonical entry: `Dashboard` → embedded `USB-PD Panel` (`/$deviceId/cc?panel=pd`).
+- Secondary entry: `Status` → `USB‑PD` card → `Open PD panel`.
+- Compatibility entry: historical `/$deviceId/pd` redirects to `/$deviceId/cc?panel=pd`.
 - Required device endpoints (see `docs/interfaces/network-http-api.md`):
   - `GET /api/v1/pd` — read attach/contract/capabilities/saved config
   - `POST /api/v1/pd` — apply config; Web uses `POST` + `Content-Type: text/plain` with a JSON string body to avoid private-network preflight issues.

@@ -32,7 +32,7 @@
 | z5ey6 | MCU↔MCU 串口通信问题说明与排查方案（记录规范 & 实测数据） | active | `z5ey6-uart-comm-troubleshooting/SPEC.md` | `z5ey6-uart-comm-troubleshooting/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | h3gz5 | USB‑PD Sink：5V/20V 两态切换（STM32G431 UCPD） | active | `h3gz5-usb-pd-sink-toggle/SPEC.md` | `h3gz5-usb-pd-sink-toggle/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | cqu4e | Web UI Layout 规范化（Layouts 抽象） | active | `cqu4e-web-layouts/SPEC.md` | `cqu4e-web-layouts/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
-| t4zh9 | Web：Responsive Drawer Sidebar（ConsoleLayout 导航） | active | `t4zh9-web-responsive-drawer-sidebar/SPEC.md` | `t4zh9-web-responsive-drawer-sidebar/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
+| t4zh9 | Web：Responsive Drawer Sidebar（ConsoleLayout 导航） | superseded(#m3n8p) | `t4zh9-web-responsive-drawer-sidebar/SPEC.md` | `t4zh9-web-responsive-drawer-sidebar/IMPLEMENTATION.md` | 旧 drawer / sidebar shell 已被顶部导航与设备工作面规格取代，保留历史 traceability。 |
 | j24my | USB‑PD 设置面板：Fixed PDO / PPS APDO（UI + UART 协议 + HTTP API） | active | `j24my-usb-pd-pps-and-fixed-settings/SPEC.md` | `j24my-usb-pd-pps-and-fixed-settings/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | rbcuw | Web：USB‑PD 设置页（对接 /api/v1/pd） | active | `rbcuw-web-usb-pd-settings/SPEC.md` | `rbcuw-web-usb-pd-settings/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | guysf | 数字板：屏幕自动调暗与熄屏 | active | `guysf-auto-screen-dim-off/SPEC.md` | `guysf-auto-screen-dim-off/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
@@ -61,3 +61,4 @@
 | br7kq | LoadLynx Backup & Restore | active | `br7kq-loadlynx-backup-restore/SPEC.md` | `br7kq-loadlynx-backup-restore/IMPLEMENTATION.md` | CLI/Web JSON backup restore；恢复前强制关闭负载；WiFi PSK 明文备份 |
 | n9v2q | Web Console Cyberpunk Redesign | active | `n9v2q-web-cyberpunk-redesign/SPEC.md` | `n9v2q-web-cyberpunk-redesign/IMPLEMENTATION.md` | 全 Web Console 赛博朋克重做；移除 daisyUI/Iconify；新增 shadcn 风格组件与 i18n |
 | n5nwv | Web production preview smoke 与 chunk-cycle regression | active | `n5nwv-web-production-preview-smoke/SPEC.md` | `n5nwv-web-production-preview-smoke/IMPLEMENTATION.md` | 修复 production-only 首屏崩溃；新增 dist preview smoke 并接入 web-check / web-pages |
+| m3n8p | Web Console 顶部导航与设备工作面 | active | `m3n8p-web-top-nav-device-workspace/SPEC.md` | `m3n8p-web-top-nav-device-workspace/IMPLEMENTATION.md` | 顶部导航壳层、总览/仪表盘/系统 IA、设备 sheet/returnTo 切换与 about 页。 |

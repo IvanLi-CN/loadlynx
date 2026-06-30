@@ -4,6 +4,9 @@ test.describe("Demo mode", () => {
   test("uses normal console routes while switching the API data mode", async ({
     page,
   }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("loadlynx.locale", "en");
+    });
     let realProbeCount = 0;
     await page.route("http://192.0.2.10/**", async (route) => {
       realProbeCount += 1;
@@ -34,7 +37,12 @@ test.describe("Demo mode", () => {
 
     await page.goto("/devices?demo=false");
     await expect(page.getByText("Cached Real Device")).toBeVisible();
-    await expect(page.getByText("Offline")).toBeVisible();
+    await expect(
+      page
+        .locator("article")
+        .filter({ hasText: "Cached Real Device" })
+        .getByText("Offline", { exact: true }),
+    ).toBeVisible();
     realProbeCount = 0;
 
     await page.goto("/devices?demo=true");
@@ -44,25 +52,26 @@ test.describe("Demo mode", () => {
       page.evaluate(() => window.localStorage.getItem("loadlynx.demoMode")),
     ).resolves.toBe("true");
     await expect(page.getByText("Demo Device #1")).toBeVisible();
-    await expect(page.getByText("mock://demo-1")).toBeVisible();
+    await expect(page.getByText("mock-001")).toBeVisible();
     await expect(page.getByText("Real Device In Demo")).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Add device" }),
     ).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Refresh" })).toBeDisabled();
     await expect(
-      page.getByRole("button", { name: "Scan devd" }),
+      page.getByRole("button", { name: "Scan network..." }),
     ).toBeDisabled();
-    await expect(
-      page.getByRole("button", { name: "Scan current network..." }),
-    ).toBeDisabled();
+    realProbeCount = 0;
+    await page.waitForTimeout(250);
     await expect.poll(() => realProbeCount).toBe(0);
 
-    await page.getByRole("link", { name: "Open CC Control" }).first().click();
+    await page.getByRole("link", { name: "Open Dashboard" }).first().click();
     await expect(page).toHaveURL(/\/mock-001\/cc$/);
+    await expect(page.getByText("Mode, output and setpoints")).toBeVisible();
     await expect(
-      page.getByRole("region", { name: "Mode and output" }),
+      page.getByRole("region", { name: "Live control" }),
     ).toBeVisible();
-    await expect(page.getByText("profile mock")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Presets" })).toBeVisible();
 
     await page.goto("/devices?demo=false");
     await expect(page).toHaveURL(/\/devices$/);

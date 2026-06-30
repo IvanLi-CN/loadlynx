@@ -123,6 +123,10 @@ just devd-bridge-http --bind 127.0.0.1:30180 --allow-dev-cors
 (cd web && VITE_LOADLYNX_DEVD_URL=http://127.0.0.1:30180 bun run dev)
 ```
 
+开发 Web UI 时必须使用 `bun run dev`。这是唯一提供 Vite HMR/live reload
+的本地入口。`bun run preview` 只用于 `bun run build` 之后验证构建产物，
+不提供热更新，不能替代日常开发服务器。
+
 真机验证应证明 devd 对指定串口完成 USB CDC JSONL 通信，例如收到 `hello` 或成功执行 `get_identity` / `get_status`。仅证明串口能打开、出现候选设备、创建 lease/session，或只完成 firmware dry-run，不足以说明 CLI/devd 真机链路可用。
 
 ## 质量门与日常验证

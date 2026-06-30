@@ -27,6 +27,7 @@ export {
   __testClearDeviceQueues,
   __testEnqueueForDevice,
   __testHttpJsonQueued,
+  ENABLE_APP_DEVTOOLS,
   ENABLE_MOCK,
   ENABLE_MOCK_DEVTOOLS,
   HttpApiError,

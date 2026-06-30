@@ -25,6 +25,7 @@ import {
   normalizeDevdIdentity,
   normalizeDevdStatus,
 } from "./client-mock.ts";
+import { subscribeMockStatusStream } from "./mock-status-stream.ts";
 import type {
   ApplyPresetRequest,
   CcControlView,
@@ -112,27 +113,12 @@ export function subscribeStatusStream(
   onError?: (error: Event | Error) => void,
 ): () => void {
   if (isMockBaseUrl(baseUrl)) {
-    let stopped = false;
-    const timer = setInterval(async () => {
-      if (stopped) {
-        return;
-      }
-      try {
-        const next = await mockGetStatus(baseUrl);
-        onMessage(next);
-      } catch (error) {
-        if (onError) {
-          onError(
-            error instanceof Error ? error : new Error("mock stream error"),
-          );
-        }
-      }
-    }, 300);
-
-    return () => {
-      stopped = true;
-      clearInterval(timer);
-    };
+    return subscribeMockStatusStream({
+      baseUrl,
+      onMessage,
+      onError,
+      readStatus: mockGetStatus,
+    });
   }
 
   if (isDevdCompatBaseUrl(baseUrl)) {

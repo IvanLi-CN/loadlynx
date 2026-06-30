@@ -1,5 +1,8 @@
 # Web：USB‑PD 设置页（对接 /api/v1/pd）
 
+> 当前 owner-facing 产品语义已调整为“仪表盘内的 USB-PD panel”，而非独立一级页面。
+> 本 spec 继续约束 USB-PD 查询 / 配置 / Apply 的功能契约；入口与 shell 归属以 [`m3n8p-web-top-nav-device-workspace`](../m3n8p-web-top-nav-device-workspace/SPEC.md) 为准。
+
 ## 背景 / 问题陈述
 
 - 目前 `web/` 已有可用的设备状态与控制页面（例如 CC、Presets、Calibration），但缺少对 USB‑PD Sink 的“可视化状态 + 可控配置”入口。
@@ -25,7 +28,7 @@
 
 ### In scope
 
-- Web 路由/页面：新增设备级 USB‑PD 设置页（入口：status 页二级入口）。
+- Web 路由/页面：提供设备级 USB‑PD 设置工作面（入口包括 status 页二级入口与仪表盘内嵌 panel）。
 - Web API client：
   - 增加 `/api/v1/pd` 的读写封装函数与 TypeScript 类型；
   - 写入使用 `POST + Content-Type: text/plain`（遵循既有“避免私网预检”的约定）。
@@ -53,7 +56,7 @@
 
 - 信息架构与导航层级必须一致：
   - Status 页存在 USB‑PD 区块，且提供二级入口（按钮文案与交互一致）。
-  - USB‑PD 设置页为独立页面，有 Back 返回；包含 Fixed/PPS 两个 tab。
+  - USB‑PD 设置工作面包含 Fixed/PPS 两个 tab；它可以以内嵌 panel 呈现，也可以通过兼容路由打开。
 - 关键布局结构必须一致（同屏元素与相对位置不应改变）：
   - 桌面：左右两栏（能力列表 vs 配置区），底部 Apply；Saved 与 Active（合同）区块分离展示。
   - 移动：在窄屏下仍可完成“选择能力 → 编辑参数 → Apply”，不隐藏关键状态（Attach/合同/Saved/错误）。
@@ -63,7 +66,7 @@
 - 允许的偏差范围（避免被像素级噪音卡死）：
   - 字体与字号：以仓库现有字体栈为准；允许在 ±1 个字号档内微调以适配真实组件。
   - 间距：允许在 8px 网格内做小幅调整（例如 padding/margin ±8px），但不得改变整体栅格与分区。
-  - 文案：可在不改变语义的前提下做微调（例如 “Open settings” vs “Open PD settings”），但交互意图必须一致。
+  - 文案：可在不改变语义的前提下做微调（例如 “Open settings” vs “Open PD panel”），但交互意图必须一致。
   - 视觉层级：允许减少过多的 “card 边框/阴影” 层级，优先用扁平分区（背景块）收口；但不改变信息架构与栅格分区。
 
 ### 验收方式（实施阶段）
@@ -211,7 +214,7 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given Web 端已选中一个真实设备（非 `mock://`）且设备实现了 `/api/v1/pd`
-  When 打开 USB‑PD 设置页
+  When 打开 USB‑PD 设置工作面
   Then 页面能正确展示 Attach、合同信息、能力列表与已保存配置，并在网络异常时显示可理解的错误提示。
 
 - Given Source 支持多个 Fixed PDO

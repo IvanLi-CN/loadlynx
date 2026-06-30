@@ -24,6 +24,7 @@ export const DEFAULT_MOCK_DEVICES: StoredDevice[] = [
 export function RouteStoryHarness(props: {
   initialPath: string;
   devices?: StoredDevice[];
+  lastActiveDeviceId?: string | null;
   beforeMount?: (stores: {
     deviceStore: MemoryDeviceStore;
     calibrationStore: MemoryCalibrationStore;
@@ -49,6 +50,9 @@ export function RouteStoryHarness(props: {
   const [calibrationStore] = useState(() => new MemoryCalibrationStore());
 
   useState(() => {
+    if (props.lastActiveDeviceId !== undefined) {
+      deviceStore.setLastActiveDeviceId(props.lastActiveDeviceId);
+    }
     props.beforeMount?.({ deviceStore, calibrationStore });
     return null;
   });
