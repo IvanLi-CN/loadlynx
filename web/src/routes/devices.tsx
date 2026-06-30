@@ -39,6 +39,18 @@ import { readStoredDemoMode } from "../lib/demo-mode.ts";
 import { isUnsupportedOperationError } from "../lib/http-error.ts";
 
 type OverviewIntent = ReturnType<typeof getDeviceRouteIntentFromHref>;
+type OverviewTranslator = ReturnType<typeof useTranslation>["t"];
+
+type OverviewTopRightDetailParams = {
+  t: OverviewTranslator;
+  status: FastStatusView | undefined;
+  statusError: HttpApiError | null;
+  identityError: HttpApiError | null;
+  identityLoading: boolean;
+  linkValue: string;
+  protectionValue: string;
+  fallbackDetail: string;
+};
 
 function getOverviewIntent(searchStr: string): OverviewIntent {
   if (!searchStr) {
@@ -47,6 +59,37 @@ function getOverviewIntent(searchStr: string): OverviewIntent {
 
   const params = new URLSearchParams(searchStr);
   return getDeviceRouteIntentFromHref(params.get("returnTo"));
+}
+
+export function getOverviewTopRightDetail({
+  t,
+  status,
+  statusError,
+  identityError,
+  identityLoading,
+  linkValue,
+  protectionValue,
+  fallbackDetail,
+}: OverviewTopRightDetailParams): string {
+  if (status || statusError) {
+    return `${linkValue} · ${protectionValue}`;
+  }
+
+  if (identityLoading) {
+    return t("overview.checkingRequest");
+  }
+
+  if (identityError) {
+    if (
+      identityError.status === 0 &&
+      (identityError.code ?? "NETWORK_ERROR") === "NETWORK_ERROR"
+    ) {
+      return t("overview.networkRetry");
+    }
+    return identityError.code ?? t("overview.offline");
+  }
+
+  return fallbackDetail;
 }
 
 export function DevicesRoute() {
@@ -745,7 +788,7 @@ function OverviewDeviceCard(props: {
   const connectionLabels = getConnectionLabels(device);
   let statusTone = "ok" as "ok" | "warn" | "danger";
   let statusLabel = t("overview.online");
-  let statusDetail = identity?.network.ip ?? device.baseUrl;
+  let statusDetail = identity?.network.ip ?? t("overview.noLiveIdentity");
   const dashboardLabel = selectionMode
     ? t("overview.selectionAction")
     : t("overview.dashboardAction");
@@ -769,12 +812,6 @@ function OverviewDeviceCard(props: {
   const modeSummary = getOverviewModeSummary(t, control, modeLabel);
   const linkSummary = getOverviewLinkSummary(t, status, statusQuery.error);
   const protectionSummary = getOverviewProtectionSummary(t, status, control);
-  const endpointSummary =
-    status || statusQuery.error
-      ? `${linkSummary.value} · ${protectionSummary.value}`
-      : statusDetail;
-  const topRightDetail =
-    status || statusQuery.error ? endpointSummary : statusDetail;
 
   if (identityQuery.isLoading || identityQuery.isFetching) {
     statusTone = "warn";
@@ -820,6 +857,16 @@ function OverviewDeviceCard(props: {
       }
     }
   }
+  const topRightDetail = getOverviewTopRightDetail({
+    t,
+    status,
+    statusError: statusQuery.error,
+    identityError: identityQuery.error,
+    identityLoading: identityQuery.isLoading || identityQuery.isFetching,
+    linkValue: linkSummary.value,
+    protectionValue: protectionSummary.value,
+    fallbackDetail: statusDetail,
+  });
 
   return (
     <article
