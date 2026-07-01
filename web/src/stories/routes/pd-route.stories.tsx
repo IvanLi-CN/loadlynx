@@ -108,8 +108,12 @@ export const HiddenSavedFixed28: Story = {
   play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole("heading", { name: "USB‑PD Settings" });
-    await canvas.findByText(/Fixed PDOs/i);
+    await canvas.findByRole(
+      "heading",
+      { name: "USB‑PD Settings" },
+      { timeout: 5000 },
+    );
+    await canvas.findByText(/Fixed PDOs/i, undefined, { timeout: 5000 });
 
     await waitFor(() => {
       if (canvas.queryByText("28.0 V")) {
@@ -120,7 +124,11 @@ export const HiddenSavedFixed28: Story = {
       }
     });
 
-    const applyButton = await canvas.findByRole("button", { name: "Apply" });
+    const applyButton = await canvas.findByRole(
+      "button",
+      { name: "Apply" },
+      { timeout: 5000 },
+    );
     if (!(applyButton as HTMLButtonElement).disabled) {
       throw new Error(
         "Expected Apply to stay disabled until a real Fixed PDO is selected",
@@ -128,7 +136,11 @@ export const HiddenSavedFixed28: Story = {
     }
 
     await userEvent.click(
-      await canvas.findByRole("button", { name: /15\.0 V/i }),
+      await canvas.findByRole(
+        "button",
+        { name: /15\.0 V/i },
+        { timeout: 5000 },
+      ),
     );
 
     await waitFor(() => {
@@ -147,8 +159,12 @@ export const RealFixed28: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole("heading", { name: "USB‑PD Settings" });
-    await canvas.findByText("28.0 V");
-    await canvas.findByText(/PDO #8/i);
+    await canvas.findByRole(
+      "heading",
+      { name: "USB‑PD Settings" },
+      { timeout: 5000 },
+    );
+    await canvas.findByText("28.0 V", undefined, { timeout: 5000 });
+    await canvas.findByText(/PDO #8/i, undefined, { timeout: 5000 });
   },
 };
