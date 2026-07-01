@@ -61,3 +61,4 @@
 | br7kq | LoadLynx Backup & Restore | active | `br7kq-loadlynx-backup-restore/SPEC.md` | `br7kq-loadlynx-backup-restore/IMPLEMENTATION.md` | CLI/Web JSON backup restore；恢复前强制关闭负载；WiFi PSK 明文备份 |
 | n9v2q | Web Console Cyberpunk Redesign | active | `n9v2q-web-cyberpunk-redesign/SPEC.md` | `n9v2q-web-cyberpunk-redesign/IMPLEMENTATION.md` | 全 Web Console 赛博朋克重做；移除 daisyUI/Iconify；新增 shadcn 风格组件与 i18n |
 | n5nwv | Web production preview smoke 与 chunk-cycle regression | active | `n5nwv-web-production-preview-smoke/SPEC.md` | `n5nwv-web-production-preview-smoke/IMPLEMENTATION.md` | 修复 production-only 首屏崩溃；新增 dist preview smoke 并接入 web-check / web-pages |
+| xpm5n | Web PWA Offline Shell and Update Prompt | active | `xpm5n-web-pwa-offline-updates/SPEC.md` | `xpm5n-web-pwa-offline-updates/IMPLEMENTATION.md` | PWA app shell、prompt-style 更新、离线 reload smoke、Storybook 更新提示证据 |

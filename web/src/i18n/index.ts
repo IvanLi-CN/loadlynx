@@ -31,6 +31,17 @@ export const resources = {
         noDevicesAvailable: "无可用设备",
         language: "语言",
       },
+      pwa: {
+        offlineReadyTitle: "离线应用壳已就绪",
+        offlineReadyBody: "下次即使前端服务器不可达，也可先打开控制台。",
+        updateReadyTitle: "新版本已缓存",
+        updateReadyBody: "后台缓存已完成。升级会刷新页面并切换到新版本。",
+        registrationErrorTitle: "离线缓存不可用",
+        registrationErrorBody:
+          "当前浏览器未能启用 PWA 缓存，控制台仍可在线使用。",
+        updateAction: "升级",
+        dismissAction: "关闭",
+      },
       demo: {
         shell: {
           subtitle: "纯前端 mock 数据，无硬件访问，无 devd 连接",
@@ -102,6 +113,19 @@ export const resources = {
         selectDevice: "Select a device...",
         noDevicesAvailable: "No devices available",
         language: "Language",
+      },
+      pwa: {
+        offlineReadyTitle: "Offline app shell ready",
+        offlineReadyBody:
+          "The console can open first even when the frontend server is unreachable.",
+        updateReadyTitle: "New version cached",
+        updateReadyBody:
+          "The update is ready in the background. Upgrade refreshes into the new version.",
+        registrationErrorTitle: "Offline cache unavailable",
+        registrationErrorBody:
+          "PWA caching could not be enabled. The console still works online.",
+        updateAction: "Upgrade",
+        dismissAction: "Dismiss",
       },
       demo: {
         shell: {

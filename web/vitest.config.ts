@@ -34,6 +34,7 @@ export default mergeConfig(
           ],
           test: {
             name: "storybook",
+            fileParallelism: false,
             browser: {
               enabled: true,
               provider: "playwright",
