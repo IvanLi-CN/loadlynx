@@ -2,7 +2,7 @@ import { expect, type Page, test } from "@playwright/test";
 
 async function openFirstDeviceControl(page: Page) {
   await page.goto("/");
-  await expect(page.locator("text=LoadLynx Web Console")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Devices" })).toBeVisible();
 
   const openControlBtn = page.locator("text=Open CC Control").first();
 

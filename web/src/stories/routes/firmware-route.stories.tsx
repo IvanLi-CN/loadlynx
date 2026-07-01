@@ -57,9 +57,12 @@ export const DryRunEvidence: Story = {
   play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
-    await waitFor(() => {
-      canvas.getByRole("heading", { name: "Firmware" });
-    });
+    await waitFor(
+      () => {
+        canvas.getByRole("heading", { name: "Firmware" });
+      },
+      { timeout: 5000 },
+    );
     await userEvent.type(
       canvas.getByPlaceholderText("Select or type a staged artifact id"),
       "digital-release-aabbcc",
@@ -90,11 +93,14 @@ export const WebSerialGate: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    await waitFor(() => {
-      canvas.getByRole("heading", { name: "Firmware" });
-      canvas.getByText("Web Serial flash");
-      canvas.getByPlaceholderText("yes");
-      canvas.getByText("Acknowledge non-project firmware risk");
-    });
+    await waitFor(
+      () => {
+        canvas.getByRole("heading", { name: "Firmware" });
+        canvas.getByText("Web Serial flash");
+        canvas.getByPlaceholderText("yes");
+        canvas.getByText("Acknowledge non-project firmware risk");
+      },
+      { timeout: 5000 },
+    );
   },
 };

@@ -3,8 +3,7 @@ import { expect, test } from "@playwright/test";
 test.describe("Device Pages", () => {
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
-    // Wait for device list to load (mock data usually loads fast but good to be safe)
-    await expect(page.locator("text=LoadLynx Web Console")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Devices" })).toBeVisible();
 
     // Connect to first device
     const openControlBtn = page.locator("text=Open CC Control").first();
