@@ -9,6 +9,7 @@ import {
   resolveDemoMode,
   stripDemoModeParam,
 } from "../lib/demo-mode.ts";
+import { PwaUpdatePrompt } from "../pwa/pwa-update-prompt.tsx";
 
 function isStorybookRuntime(): boolean {
   return globalThis.__LOADLYNX_STORYBOOK__ === true;
@@ -41,6 +42,7 @@ export function RootLayout() {
   return (
     <div className="ll-app-shell flex flex-col min-h-screen antialiased">
       <Outlet />
+      <PwaUpdatePrompt />
 
       {import.meta.env.DEV && !storybookRuntime ? (
         <>

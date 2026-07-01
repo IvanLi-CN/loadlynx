@@ -5,7 +5,7 @@ problem_type: production_runtime_crash
 component: vite-build
 tags: [vite, manual-chunks, react, github-pages, playwright, smoke-test]
 status: active
-related_specs: [n5nwv, m8k2v, rjkcw]
+related_specs: [n5nwv, m8k2v, rjkcw, xpm5n]
 symptoms:
   - GitHub Pages served HTML/JS/CSS successfully but the page stayed blank.
   - dev server worked while built preview crashed on first paint.
@@ -35,12 +35,14 @@ React runtime code and helper modules that expected a single initialization path
 - If bundle budgets need more headroom, split only pure non-React dependencies into extra chunks.
 - Add a dedicated production preview smoke that runs against built `dist` through `vite preview`, not the dev server.
 - Make the smoke fail on both uncaught `pageerror` and browser `console error`, so white-screen regressions are caught before deploy.
+- For PWA apps, include a production preview smoke that waits for service worker control, switches the browser offline, reloads, and verifies the app shell still mounts while API fetches remain network-only.
 
 ## Guardrails / Reuse Notes
 
 - Treat `bun run build && bun run preview` as the canonical reproduction path for any “works in dev, blank in prod” report.
 - Do not classify a fully fetched white screen as “performance” until production preview proves the app actually mounted.
 - Manual chunk boundaries around `react` / `react-dom` are high risk unless the emitted graph is inspected for cycles.
+- PWA client helpers such as `workbox-window` can be split into a dedicated vendor chunk to preserve bundle budgets, but React should stay on the normal vendor path.
 - CI should run production preview smoke before publishing static artifacts; bundle budgets alone do not prove runtime health.
 
 ## References
@@ -48,4 +50,6 @@ React runtime code and helper modules that expected a single initialization path
 - `web/scripts/chunking.ts`
 - `web/playwright.preview.config.ts`
 - `web/tests/e2e/preview-smoke.spec.ts`
+- `web/tests/e2e/pwa-preview.spec.ts`
 - `docs/specs/n5nwv-web-production-preview-smoke/SPEC.md`
+- `docs/specs/xpm5n-web-pwa-offline-updates/SPEC.md`
