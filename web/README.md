@@ -15,6 +15,7 @@ and settings.
 - i18next + react-i18next for `zh-CN` default UI and `en` fallback
 - TanStack Router + TanStack Query
 - Storybook for component/route evidence
+- vite-plugin-pwa + Workbox for production app-shell caching and controlled updates
 - Bun 1.3.14 (pinned in the repo-root `.bun-version`) as runtime and package manager
 - Biome for linting/formatting
 - Vitest for unit tests and Storybook story tests
@@ -105,6 +106,24 @@ Core scripts:
 - `bun run test:storybook:ci` enforces the Storybook budget automatically after `build-storybook`.
 - Vite's generic chunk-size warning is not the source of truth for Storybook in this repository; the bundle budget scripts above are.
 
+## PWA offline shell and updates
+
+Production Web builds are real PWAs. `bun run build` writes `public/version.json` before Vite runs, then emits `dist/manifest.webmanifest`, `dist/sw.js` and `dist/workbox-*.js`.
+
+PWA behavior:
+
+- The app shell and built static assets are precached after the first successful visit.
+- Offline reload can reopen the console shell even when the frontend server is unreachable.
+- Device HTTP APIs, devd endpoints, firmware artifacts and Web Serial sessions are not runtime-cached.
+- `/version.json` is generated before build for the current server artifact but is not precached by the service worker.
+- App updates use prompt mode: a new service worker can cache the next build in the background, and the UI refreshes only after the user clicks `升级` / `Upgrade`.
+- Storybook uses a no-op PWA registration mock. Storybook is not itself built as a PWA target.
+
+Validation:
+
+- `bun run test:preview-smoke` includes an offline reload scenario and verifies API and `/version.json` fetches are not returned from cache while offline.
+- `bun run test:storybook:ci` covers the update-ready, offline-ready, registration-error and hidden prompt states.
+
 ## Ports
 
 To avoid common default ports and accidental “port drift”, LoadLynx uses fixed high ports by default and
@@ -161,7 +180,7 @@ Examples:
 ## CI versioning
 
 - GitHub Actions calls `.github/scripts/compute-version.sh` to emit `APP_EFFECTIVE_VERSION` (from `APP_BASE_VERSION` or `package.json` plus git metadata).
-- `scripts/write-version.mjs` consumes `APP_EFFECTIVE_VERSION` during `bun run build` to write `dist/public/version.json`.
+- `scripts/write-version.mjs` consumes `APP_EFFECTIVE_VERSION` during `bun run build` to write `public/version.json` before Vite copies it into `dist/version.json`.
 - Official GitHub Releases bypass the package base version and inject the release workflow's computed version/tag directly through `APP_EFFECTIVE_VERSION`, `VITE_APP_VERSION`, and `VITE_APP_GIT_TAG`.
 
 ## UI version + GitHub source link

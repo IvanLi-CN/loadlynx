@@ -1,4 +1,5 @@
 /// <reference types="vite/client" />
+/// <reference types="vite-plugin-pwa/react" />
 
 declare global {
   // Global marker used to enable Storybook-specific guardrails (no real network, no LAN scan, etc.)

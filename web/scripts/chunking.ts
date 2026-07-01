@@ -34,6 +34,10 @@ function packageChunkName(id: string): string | null {
     return "esptool-vendor";
   }
 
+  if (id.includes("/node_modules/workbox-window/")) {
+    return "pwa-vendor";
+  }
+
   if (
     id.includes("/node_modules/@storybook/") ||
     id.includes("/node_modules/storybook/") ||
