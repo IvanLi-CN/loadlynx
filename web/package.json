@@ -46,7 +46,7 @@
     "tailwind-merge": "^3.6.0"
   },
   "devDependencies": {
-    "@biomejs/biome": "^2.4.16",
+    "@biomejs/biome": "2.4.16",
     "@playwright/test": "^1.57.0",
     "@storybook/addon-vitest": "10.4.2",
     "@storybook/react-vite": "^10.4.2",

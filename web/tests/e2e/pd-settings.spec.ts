@@ -18,6 +18,7 @@ test("PD settings page can read/apply and surfaces errors", async ({
   await page.addInitScript(() => {
     const globalWithState = window as unknown as {
       __pdPostContentTypes: string[];
+      __pdLastPayload?: Record<string, unknown>;
       __pdState: unknown;
     };
     globalWithState.__pdPostContentTypes = [];
@@ -121,6 +122,7 @@ test("PD settings page can read/apply and surfaces errors", async ({
         }
 
         const payload = parsed as Record<string, unknown>;
+        globalWithState.__pdLastPayload = payload;
         const mode = typeof payload.mode === "string" ? payload.mode : null;
         const objectPos =
           typeof payload.object_pos === "number" ? payload.object_pos : null;
@@ -180,6 +182,23 @@ test("PD settings page can read/apply and surfaces errors", async ({
   await expect(page.getByText("Profile list")).toBeVisible();
 
   const pdPanel = page.locator('[aria-label="USB-PD control panel"]');
+  await expect(pdPanel.getByText("Selected · PDO #5")).toBeVisible();
+
+  await pdPanel
+    .getByRole("button", { name: "Apply profile", exact: true })
+    .click();
+  await expect(pdPanel.getByText("Apply succeeded.")).toBeVisible();
+  const initialApplyPayload = await page.evaluate(() => {
+    const win = window as unknown as {
+      __pdLastPayload?: Record<string, unknown>;
+    };
+    return win.__pdLastPayload;
+  });
+  expect(initialApplyPayload).toMatchObject({
+    mode: "fixed",
+    object_pos: 5,
+  });
+
   // Select a fixed PDO, set Ireq and apply.
   await page.getByRole("button", { name: /#1.*5\.0 V.*3000 mA/i }).click();
   await expect(pdPanel.getByText("Selected · PDO #1")).toBeVisible();

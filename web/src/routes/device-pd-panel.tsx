@@ -94,6 +94,8 @@ export function PdControlPanel(props: {
   );
 
   const pd = pdQuery.data;
+  const [selectedProfileKind, setSelectedProfileKind] =
+    useState<PdApplyTab>("fixed");
   const [selectedFixedPos, setSelectedFixedPos] = useState<number | null>(null);
   const [selectedPpsPos, setSelectedPpsPos] = useState<number | null>(null);
   const [fixedIReqMa, setFixedIReqMa] = useState<number>(0);
@@ -117,6 +119,7 @@ export function PdControlPanel(props: {
     if (lastDraftSeedRef.current === pdDraftSeed) return;
     lastDraftSeedRef.current = pdDraftSeed;
 
+    setSelectedProfileKind(pd.saved.mode);
     setSelectedFixedPos(findVisibleSavedFixedPdo(pd)?.pos ?? null);
     setSelectedPpsPos(findPpsPdo(pd, pd.saved.pps_object_pos)?.pos ?? null);
     setFixedIReqMa(pd.saved.i_req_ma);
@@ -205,11 +208,18 @@ export function PdControlPanel(props: {
   const activeContractText = formatContract(pd);
   const selectedFixed = pd ? findFixedPdo(pd, selectedFixedPos) : null;
   const selectedPps = pd ? findPpsPdo(pd, selectedPpsPos) : null;
-  const currentSelection: PdSelection = selectedPps
-    ? { kind: "pps", pos: selectedPps.pos }
-    : selectedFixed
-      ? { kind: "fixed", pos: selectedFixed.pos }
-      : null;
+  const currentSelection: PdSelection =
+    selectedProfileKind === "pps"
+      ? selectedPps
+        ? { kind: "pps", pos: selectedPps.pos }
+        : selectedFixed
+          ? { kind: "fixed", pos: selectedFixed.pos }
+          : null
+      : selectedFixed
+        ? { kind: "fixed", pos: selectedFixed.pos }
+        : selectedPps
+          ? { kind: "pps", pos: selectedPps.pos }
+          : null;
   const currentSelectionKind: PdApplyTab = currentSelection?.kind ?? "fixed";
   const visibleSavedFixed = pd ? findVisibleSavedFixedPdo(pd) : null;
   const updatedText = pdQuery.dataUpdatedAt
@@ -413,6 +423,7 @@ export function PdControlPanel(props: {
                             selected ? "ll-pd-panel__option--selected" : "",
                           ].join(" ")}
                           onClick={() => {
+                            setSelectedProfileKind("fixed");
                             setSelectedFixedPos(entry.pos);
                             setSelectedPpsPos(null);
                           }}
@@ -459,6 +470,7 @@ export function PdControlPanel(props: {
                             selected ? "ll-pd-panel__option--selected" : "",
                           ].join(" ")}
                           onClick={() => {
+                            setSelectedProfileKind("pps");
                             setSelectedPpsPos(entry.pos);
                             setSelectedFixedPos(null);
                           }}

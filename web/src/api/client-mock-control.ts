@@ -329,6 +329,13 @@ export async function mockUpdateCc(
   const nextTargetIMa = payload.target_i_ma;
   const nextEnable = nextTargetIMa === 0 ? false : payload.enable;
   const nextEffectiveIMa = nextEnable ? nextTargetIMa : 0;
+  const activePreset = mockGetActivePreset(state);
+
+  activePreset.mode = "cc";
+  activePreset.target_i_ma = nextTargetIMa;
+  activePreset.max_i_ma_total = payload.max_i_ma ?? activePreset.max_i_ma_total;
+  activePreset.max_p_mw = payload.max_p_mw ?? activePreset.max_p_mw;
+  state.output_enabled = nextEnable;
 
   const nextCc: CcControlView = {
     ...state.cc,
@@ -337,8 +344,8 @@ export async function mockUpdateCc(
     effective_i_ma: nextEffectiveIMa,
     limit_profile: {
       ...state.cc.limit_profile,
-      max_i_ma: payload.max_i_ma ?? state.cc.limit_profile.max_i_ma,
-      max_p_mw: payload.max_p_mw ?? state.cc.limit_profile.max_p_mw,
+      max_i_ma: activePreset.max_i_ma_total,
+      max_p_mw: activePreset.max_p_mw,
       ovp_mv: payload.ovp_mv ?? state.cc.limit_profile.ovp_mv,
       temp_trip_mc: payload.temp_trip_mc ?? state.cc.limit_profile.temp_trip_mc,
       thermal_derate_pct:

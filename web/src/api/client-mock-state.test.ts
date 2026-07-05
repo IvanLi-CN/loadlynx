@@ -4,6 +4,7 @@ import {
   type DevdStatusPayload,
   getOrCreateMockDevice,
   mockGetStatus,
+  mockUpdateCc,
   mockUpdateControl,
   normalizeDevdIdentity,
   normalizeDevdStatus,
@@ -229,6 +230,29 @@ test("mock status evolves into realistic non-zero readings when output is enable
   expect(status.state_flags_decoded).toContain("ENABLED");
   expect(status.state_flags_decoded).toContain("REMOTE_ACTIVE");
   expect(status.state_flags_decoded).toContain("LINK_GOOD");
+});
+
+test("mock legacy CC updates stay visible across status polls", async () => {
+  const baseUrl = "mock://legacy-cc-update";
+  const device = getOrCreateMockDevice(baseUrl);
+  device.active_preset_id = 1;
+  device.output_enabled = false;
+
+  const updated = await mockUpdateCc(baseUrl, {
+    enable: true,
+    target_i_ma: 2400,
+  });
+  expect(updated.enable).toBe(true);
+  expect(updated.target_i_ma).toBe(2400);
+
+  const status = await mockGetStatus(baseUrl);
+  const afterPoll = getOrCreateMockDevice(baseUrl);
+  expect(status.raw.enable).toBe(true);
+  expect(afterPoll.output_enabled).toBe(true);
+  expect(afterPoll.cc.enable).toBe(true);
+  expect(afterPoll.cc.target_i_ma).toBe(2400);
+  expect(afterPoll.presets[0]?.mode).toBe("cc");
+  expect(afterPoll.presets[0]?.target_i_ma).toBe(2400);
 });
 
 test("different mock demo devices expose distinct operating scenarios", async () => {
