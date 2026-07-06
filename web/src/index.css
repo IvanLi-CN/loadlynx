@@ -18,6 +18,16 @@
     --ease-console: cubic-bezier(0.16, 1, 0.3, 1);
 }
 
+@keyframes ll-route-pending {
+    0% {
+        transform: translateX(-105%);
+    }
+
+    100% {
+        transform: translateX(210%);
+    }
+}
+
 @layer base {
     :root {
         color-scheme: dark;

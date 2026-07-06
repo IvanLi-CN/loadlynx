@@ -8,6 +8,7 @@ import {
   type RouterHistory,
   redirect,
 } from "@tanstack/react-router";
+import { RoutePendingView } from "./components/layout/route-pending-view.tsx";
 import { ConsoleLayout } from "./layouts/console-layout.tsx";
 import { DeviceLayout } from "./layouts/device-layout.tsx";
 import { RootLayout } from "./layouts/root-layout.tsx";
@@ -29,9 +30,17 @@ const consoleRoute = createRoute({
   component: ConsoleLayout,
 });
 
+function pendingRoute(title: string, description?: string) {
+  return {
+    pendingComponent: () => (
+      <RoutePendingView title={title} description={description} />
+    ),
+  };
+}
 const indexRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "/",
+  ...pendingRoute("正在打开设备列表", "正在准备设备与 devd 状态"),
   component: lazyRouteComponent(
     () => import("./routes/devices.tsx"),
     "DevicesRoute",
@@ -41,6 +50,7 @@ const indexRoute = createRoute({
 const devicesRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "devices",
+  ...pendingRoute("正在打开设备列表", "正在准备设备与 devd 状态"),
   component: lazyRouteComponent(
     () => import("./routes/devices.tsx"),
     "DevicesRoute",
@@ -56,6 +66,7 @@ const deviceRoute = createRoute({
 const deviceCcRoute = createRoute({
   getParentRoute: () => deviceRoute,
   path: "cc",
+  ...pendingRoute("正在打开 CC 控制", "正在加载控制面板"),
   component: lazyRouteComponent(
     () => import("./routes/device-cc.tsx"),
     "DeviceCcRoute",
@@ -84,6 +95,7 @@ const systemRoute = createRoute({
 const deviceStatusRoute = createRoute({
   getParentRoute: () => systemRoute,
   path: "status",
+  ...pendingRoute("正在打开状态页", "正在加载实时状态面板"),
   component: lazyRouteComponent(
     () => import("./routes/device-status.tsx"),
     "DeviceStatusRoute",
@@ -93,6 +105,7 @@ const deviceStatusRoute = createRoute({
 const deviceSettingsRoute = createRoute({
   getParentRoute: () => systemRoute,
   path: "settings",
+  ...pendingRoute("正在打开设置", "正在加载设备设置"),
   component: lazyRouteComponent(
     () => import("./routes/device-settings.tsx"),
     "DeviceSettingsRoute",
@@ -102,6 +115,7 @@ const deviceSettingsRoute = createRoute({
 const deviceCalibrationRoute = createRoute({
   getParentRoute: () => systemRoute,
   path: "calibration",
+  ...pendingRoute("正在打开校准", "正在加载校准工作区"),
   validateSearch: (
     search: Record<string, unknown>,
   ): { section?: CalibrationSection } => {
@@ -124,6 +138,7 @@ const deviceCalibrationRoute = createRoute({
 const deviceFirmwareRoute = createRoute({
   getParentRoute: () => systemRoute,
   path: "firmware",
+  ...pendingRoute("正在打开 Firmware", "正在加载固件操作面板"),
   component: lazyRouteComponent(
     () => import("./routes/device-firmware.tsx"),
     "DeviceFirmwareRoute",
@@ -169,6 +184,10 @@ export function createAppRouter(
     routeTree,
     context: { queryClient },
     history: history ?? createBrowserHistory(),
+    defaultPreload: "intent",
+    defaultPendingComponent: () => <RoutePendingView />,
+    defaultPendingMs: 0,
+    defaultPendingMinMs: 180,
   });
 }
 

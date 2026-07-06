@@ -137,7 +137,11 @@ export const HiddenSavedFixed28: Story = {
     }
 
     await userEvent.click(
-      await canvas.findByRole("button", { name: /15\.0 V/i }),
+      await canvas.findByRole(
+        "button",
+        { name: /15\.0 V/i },
+        { timeout: 5000 },
+      ),
     );
 
     await waitFor(() => {

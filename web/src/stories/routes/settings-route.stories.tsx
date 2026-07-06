@@ -61,10 +61,13 @@ export const WifiAndDiagnostics: Story = {
   play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
-    await waitFor(() => {
-      canvas.getByRole("heading", { name: "WiFi" });
-      canvas.getByRole("button", { name: "Export Diagnostics" });
-    });
+    await waitFor(
+      () => {
+        canvas.getByRole("heading", { name: "WiFi" });
+        canvas.getByRole("button", { name: "Export Diagnostics" });
+      },
+      { timeout: 5000 },
+    );
 
     await userEvent.type(canvas.getByPlaceholderText("SSID"), "BenchNet");
     await userEvent.type(canvas.getByPlaceholderText("PSK"), "not-shown");
@@ -88,10 +91,13 @@ export const BackupRestorePreview: Story = {
   play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
-    await waitFor(() => {
-      canvas.getByText("Backup & Restore");
-      canvas.getByRole("button", { name: "Export Backup" });
-    });
+    await waitFor(
+      () => {
+        canvas.getByText("Backup & Restore");
+        canvas.getByRole("button", { name: "Export Backup" });
+      },
+      { timeout: 5000 },
+    );
 
     const backup = {
       kind: "loadlynx.backup",
@@ -143,9 +149,12 @@ export const BackupRestoreCompleted: Story = {
   play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
-    await waitFor(() => {
-      canvas.getByText("Backup & Restore");
-    });
+    await waitFor(
+      () => {
+        canvas.getByText("Backup & Restore");
+      },
+      { timeout: 5000 },
+    );
 
     const backup = {
       kind: "loadlynx.backup",
@@ -181,9 +190,12 @@ export const BackupRestoreSafetyBlocked: Story = {
   play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
-    await waitFor(() => {
-      canvas.getByText("Backup & Restore");
-    });
+    await waitFor(
+      () => {
+        canvas.getByText("Backup & Restore");
+      },
+      { timeout: 5000 },
+    );
 
     const backup = {
       kind: "loadlynx.backup",

@@ -4,25 +4,27 @@ test.describe("Device Pages", () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
       window.localStorage.setItem("loadlynx.locale", "en");
+      window.localStorage.setItem("loadlynx.demoMode", "true");
+      window.localStorage.setItem(
+        "loadlynx.demo.devices",
+        JSON.stringify([
+          {
+            id: "mock-001",
+            name: "Demo Device #1",
+            baseUrl: "mock://demo-1",
+          },
+        ]),
+      );
     });
     await page.goto("/");
     await expect(page.locator("text=LoadLynx Web Console")).toBeVisible();
+    await expect(page.getByText(/Demo Device #1/i)).toBeVisible();
 
     const openDashboardBtn = page
       .getByRole("link", {
-        name: "Open Dashboard",
+        name: /Open Dashboard|打开仪表盘/,
       })
       .first();
-
-    if ((await openDashboardBtn.count()) === 0) {
-      const addDemoBtn = page
-        .locator("section")
-        .filter({ hasText: "当前已知设备" })
-        .getByRole("button", { name: "Add sample device" });
-      if (await addDemoBtn.isVisible()) {
-        await addDemoBtn.click();
-      }
-    }
 
     await expect(openDashboardBtn).toBeVisible();
     await openDashboardBtn.click();
