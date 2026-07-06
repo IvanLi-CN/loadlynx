@@ -37,3 +37,8 @@ No explicit milestones were recorded in the legacy plan.
 - Created: 2025-12-25
 - Last: 2025-12-26
 - Source: migrated from `web-layouts.md` (removed)
+
+### 后续对齐
+
+- 2026-06-20: Active shell truth moved to `m3n8p`; `ConsoleLayout` now means a sticky top-nav shell rather than a sidebar shell, while `DeviceLayout` and `PageContainer` layering remain valid.
+- 2026-06-20: `PageContainer` became the canonical width token owner for page-level centering. Added `default / workspace / full` variants so wide-screen behavior is explicit instead of page-local.

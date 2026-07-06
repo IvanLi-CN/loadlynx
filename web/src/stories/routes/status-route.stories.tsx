@@ -1,4 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
+import { within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function StatusRouteStory() {
@@ -58,7 +59,12 @@ const meta = {
 export default meta;
 type Story = StoryObj<typeof meta>;
 
-export const Default: Story = {};
+export const Default: Story = {
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await canvas.findByRole("link", { name: "打开 PD 面板" });
+  },
+};
 
 export const PdUnsupported: Story = {
   render: () => <StatusRoutePdUnsupportedStory />,

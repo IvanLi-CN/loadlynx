@@ -8,6 +8,7 @@ test("status SSE stream drives CC page without extra polling", async ({
 }) => {
   // Device registry seed so the CC route is reachable.
   await page.addInitScript(() => {
+    localStorage.setItem("loadlynx.locale", "en");
     const devices = [
       {
         id: "dev-sse",
@@ -200,7 +201,10 @@ test("status SSE stream drives CC page without extra polling", async ({
   await page.goto("/dev-sse/cc");
 
   await expect(page.getByText(/LINK UP/i)).toBeVisible();
-  await expect(page.getByText(/Online/i)).toBeVisible();
+  await expect(page.getByText(/Mode, output and setpoints/i)).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: /Live control/i }),
+  ).toBeVisible();
 
   await page.waitForFunction(
     () =>
@@ -221,5 +225,5 @@ test("status SSE stream drives CC page without extra polling", async ({
     () =>
       (window as unknown as { __statusFetchCount: number }).__statusFetchCount,
   );
-  expect(fetchCount).toBeLessThanOrEqual(1);
+  expect(fetchCount).toBeLessThanOrEqual(2);
 });

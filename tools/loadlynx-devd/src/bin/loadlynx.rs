@@ -299,6 +299,8 @@ enum Command {
         tail: usize,
         #[arg(long, value_enum, default_value_t = MonitorFormat::Human)]
         format: MonitorFormat,
+        #[arg(long, default_value_t = 500)]
+        status_interval_ms: u64,
     },
     #[command(hide = true)]
     Calibration {
@@ -1207,11 +1209,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 device,
                 tail,
                 format,
+                status_interval_ms,
             } => {
                 match target {
                     BoardTarget::Digital => {
                         let resolved = resolve_usb_target(device, &devd, allow_interactive)?;
-                        run_monitor(&client, resolved, tail, format).await?
+                        run_monitor(
+                            &client,
+                            resolved,
+                            tail,
+                            format,
+                            status_interval_ms,
+                        )
+                        .await?
                     }
                     BoardTarget::Analog => reject_unsupported_analog_monitor()?,
                 }
@@ -3226,13 +3236,21 @@ mod tests {
             "digital-1",
             "--format",
             "jsonl",
+            "--status-interval-ms",
+            "250",
             "digital",
         ])
         .unwrap();
         match cli.command {
-            Command::Monitor { format, tail, .. } => {
+            Command::Monitor {
+                format,
+                tail,
+                status_interval_ms,
+                ..
+            } => {
                 assert!(matches!(format, MonitorFormat::Jsonl));
                 assert_eq!(tail, 200);
+                assert_eq!(status_interval_ms, 250);
             }
             _ => panic!("expected monitor command"),
         }

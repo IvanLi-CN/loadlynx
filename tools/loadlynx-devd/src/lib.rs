@@ -76,6 +76,9 @@ const SERIAL_PROBE_BAUD: u32 = 115_200;
 const SERIAL_PROBE_TIMEOUT_MS: u64 = 25;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
 const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
+const SERIAL_STATUS_POLL_INTERVAL_MS: u64 = 200;
+const SERIAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 750;
+const SERIAL_STATUS_CACHE_MAX_AGE_MS: i64 = 1_500;
 const SERIAL_PROBE_MAX_BYTES: usize = 32768;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
@@ -272,6 +275,10 @@ pub struct DeviceRecord {
     pub control_cache: Option<Value>,
     pub status_meta_cache: Option<Value>,
     pub status_cache_updated_at_ms: Option<i64>,
+    pub usb_status_cache: Option<Value>,
+    pub usb_status_generation: u64,
+    pub usb_status_sampled_at_ms: Option<i64>,
+    pub usb_status_source: Option<String>,
     pub selected_artifact_id: Option<String>,
     pub log_decode: LogDecodeState,
     pub logs: VecDeque<SessionLog>,
@@ -1218,6 +1225,10 @@ async fn scan_devices(State(state): State<AppState>) -> Result<Json<Value>, Http
                 control_cache: None,
                 status_meta_cache: None,
                 status_cache_updated_at_ms: None,
+                usb_status_cache: None,
+                usb_status_generation: 0,
+                usb_status_sampled_at_ms: None,
+                usb_status_source: None,
                 selected_artifact_id: None,
                 log_decode: LogDecodeState::default(),
                 logs: VecDeque::new(),
@@ -2320,49 +2331,25 @@ async fn compat_status(
         select_serial_port_for_compat(&guard, &query, "status")?
     };
 
-    let data = if query.cache && !query.fresh {
+    if query.cache && !query.fresh {
         if let Some(cached) = fresh_cached_status_data(&state, &device_id) {
-            cached
-        } else {
-            request_compat_status_data(&state, &device_id, &port_path).await?
+            return Ok(Json(finalize_status_output(&device_id, cached)?));
         }
-    } else {
-        request_compat_status_data(&state, &device_id, &port_path).await?
-    };
-    let status = data.get("status").cloned().ok_or_else(|| {
-        HttpError::retryable(
-            "serial_response_invalid",
-            "USB status response did not include status",
-        )
-    })?;
-    let link_up = data.get("link_up").and_then(Value::as_bool).unwrap_or(true);
-    let hello_seen = data
-        .get("hello_seen")
-        .and_then(Value::as_bool)
-        .unwrap_or(link_up);
-    let analog_state = data
-        .get("analog_state")
-        .and_then(Value::as_str)
-        .unwrap_or(if link_up { "ready" } else { "offline" })
-        .to_string();
-    let mut output = data;
-    if let Some(object) = output.as_object_mut() {
-        object.insert("device_id".to_string(), json!(device_id));
-        object.insert("status".to_string(), status);
-        object
-            .entry("link_up".to_string())
-            .or_insert_with(|| json!(link_up));
-        object
-            .entry("hello_seen".to_string())
-            .or_insert_with(|| json!(hello_seen));
-        object
-            .entry("analog_state".to_string())
-            .or_insert_with(|| json!(analog_state));
-        object
-            .entry("fault_flags_decoded".to_string())
-            .or_insert_with(|| json!([]));
+        if let Some(cached) =
+            cached_usb_status_output(&state, &device_id, SERIAL_STATUS_CACHE_MAX_AGE_MS)
+        {
+            return Ok(Json(cached));
+        }
     }
-    Ok(Json(output))
+
+    let data = request_compat_status_data(&state, &device_id, &port_path).await?;
+    let output = finalize_status_output(&device_id, data)?;
+    update_usb_status_cache(&state, &device_id, output, "compat_status_request");
+    Ok(Json(
+        cached_usb_status_output(&state, &device_id, -1).ok_or_else(|| {
+            HttpError::retryable("status_cache_missing", "USB status cache was not updated")
+        })?,
+    ))
 }
 
 async fn compat_network(
@@ -4737,6 +4724,98 @@ fn probe_has_satisfied_response(
         || infer_serial_response_from_text(&probe, request_id).is_some()
 }
 
+fn finalize_status_output(device_id: &str, data: Value) -> Result<Value, HttpError> {
+    let status = data.get("status").cloned().ok_or_else(|| {
+        HttpError::retryable(
+            "serial_response_invalid",
+            "USB status response did not include status",
+        )
+    })?;
+    let link_up = data.get("link_up").and_then(Value::as_bool).unwrap_or(true);
+    let hello_seen = data
+        .get("hello_seen")
+        .and_then(Value::as_bool)
+        .unwrap_or(link_up);
+    let analog_state = data
+        .get("analog_state")
+        .and_then(Value::as_str)
+        .unwrap_or(if link_up { "ready" } else { "offline" })
+        .to_string();
+    let mut output = data;
+    if let Some(object) = output.as_object_mut() {
+        object.insert("device_id".to_string(), json!(device_id));
+        object.insert("status".to_string(), status);
+        object
+            .entry("link_up".to_string())
+            .or_insert_with(|| json!(link_up));
+        object
+            .entry("hello_seen".to_string())
+            .or_insert_with(|| json!(hello_seen));
+        object
+            .entry("analog_state".to_string())
+            .or_insert_with(|| json!(analog_state));
+        object
+            .entry("fault_flags_decoded".to_string())
+            .or_insert_with(|| json!([]));
+    }
+    Ok(output)
+}
+
+fn update_usb_status_cache(state: &AppState, device_id: &str, output: Value, source: &str) {
+    let sampled_at_ms = now_unix_ms();
+    let mut guard = state.inner.lock().expect("state lock");
+    let Some(device) = guard.devices.get_mut(device_id) else {
+        return;
+    };
+    device.usb_status_generation = device.usb_status_generation.saturating_add(1);
+    device.usb_status_sampled_at_ms = Some(sampled_at_ms);
+    device.usb_status_source = Some(source.to_string());
+    device.usb_status_cache = Some(output);
+}
+
+fn attach_status_cache_metadata(
+    output: &mut Value,
+    generation: u64,
+    sampled_at_ms: Option<i64>,
+    source: Option<&str>,
+) {
+    let Some(object) = output.as_object_mut() else {
+        return;
+    };
+    object.insert("status_sample_generation".to_string(), json!(generation));
+    object.insert("status_cached".to_string(), json!(true));
+    if let Some(sampled_at_ms) = sampled_at_ms {
+        object.insert("status_sampled_at_ms".to_string(), json!(sampled_at_ms));
+        if let Some(sampled_at_utc) = sampled_at_utc(sampled_at_ms) {
+            object.insert("status_sampled_at_utc".to_string(), json!(sampled_at_utc));
+        }
+        object.insert(
+            "status_sample_age_ms".to_string(),
+            json!((now_unix_ms() - sampled_at_ms).max(0)),
+        );
+    }
+    if let Some(source) = source {
+        object.insert("status_sample_source".to_string(), json!(source));
+    }
+}
+
+fn cached_usb_status_output(state: &AppState, device_id: &str, max_age_ms: i64) -> Option<Value> {
+    let guard = state.inner.lock().expect("state lock");
+    let device = guard.devices.get(device_id)?;
+    let sampled_at_ms = device.usb_status_sampled_at_ms?;
+    if max_age_ms >= 0 && now_unix_ms().saturating_sub(sampled_at_ms) > max_age_ms {
+        return None;
+    }
+    let mut output = device.usb_status_cache.clone()?;
+    attach_status_cache_metadata(
+        &mut output,
+        device.usb_status_generation,
+        device.usb_status_sampled_at_ms,
+        device.usb_status_source.as_deref(),
+    );
+    Some(output)
+}
+
 fn read_serial_jsonl_until(
     port: &mut dyn serialport::SerialPort,
     deadline: Instant,
@@ -4927,6 +5006,46 @@ fn serial_jsonl_request_on_port(
     })
 }
 
+fn serial_status_poll_on_port(
+    port: &mut dyn serialport::SerialPort,
+    request_id: &str,
+) -> io::Result<SerialProtocolProbe> {
+    let mut frames = Vec::new();
+    let mut line_buf = Vec::new();
+    let mut non_protocol_bytes = 0usize;
+    let mut non_protocol_text = String::new();
+
+    let drain_deadline = Instant::now() + Duration::from_millis(10);
+    let _ = read_serial_jsonl_until(
+        &mut *port,
+        drain_deadline,
+        &mut line_buf,
+        &mut frames,
+        &mut non_protocol_bytes,
+        &mut non_protocol_text,
+        None,
+    )?;
+    line_buf.clear();
+
+    write_serial_request(&mut *port, &mut frames, request_id, "get_status", None)?;
+    let deadline = Instant::now() + Duration::from_millis(SERIAL_STATUS_REQUEST_TIMEOUT_MS);
+    let _ = read_serial_jsonl_until(
+        &mut *port,
+        deadline,
+        &mut line_buf,
+        &mut frames,
+        &mut non_protocol_bytes,
+        &mut non_protocol_text,
+        Some(request_id),
+    )?;
+
+    Ok(SerialProtocolProbe {
+        frames,
+        non_protocol_bytes,
+        non_protocol_text,
+    })
+}
+
 fn serial_worker_loop(
     state: AppState,
     port_path: String,
@@ -4936,6 +5055,7 @@ fn serial_worker_loop(
     let port_key = canonical_port_key(&port_path);
     let mut port = None;
     let mut last_idle_open_attempt = None;
+    let mut last_status_poll_attempt = None;
     let mut idle_line_buf = Vec::new();
     let mut idle_frames = Vec::new();
     let mut idle_non_protocol_text = String::new();
@@ -5005,6 +5125,7 @@ fn serial_worker_loop(
                         })
                     }
                 };
+                last_status_poll_attempt = None;
                 let _ = command.reply.send(result);
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
@@ -5019,7 +5140,7 @@ fn serial_worker_loop(
                         port = Some(opened);
                     }
                 }
-                let Some(port) = port.as_mut() else {
+                let Some(open_port) = port.as_mut() else {
                     continue;
                 };
                 idle_frames.clear();
@@ -5027,7 +5148,7 @@ fn serial_worker_loop(
                 idle_non_protocol_text.clear();
                 let deadline = Instant::now() + Duration::from_millis(25);
                 if read_serial_jsonl_until(
-                    port.as_mut(),
+                    open_port.as_mut(),
                     deadline,
                     &mut idle_line_buf,
                     &mut idle_frames,
@@ -5052,6 +5173,39 @@ fn serial_worker_loop(
                         },
                     );
                 }
+                if !has_active_lease_for_port(&state, &port_path) {
+                    continue;
+                }
+                if last_status_poll_attempt.is_some_and(|attempt: Instant| {
+                    attempt.elapsed() < Duration::from_millis(SERIAL_STATUS_POLL_INTERVAL_MS)
+                }) {
+                    continue;
+                }
+                let Some(device_id) = device_id_for_port(&state, &port_path) else {
+                    continue;
+                };
+                let request_id = next_request_id("status-cache");
+                match serial_status_poll_on_port(open_port.as_mut(), &request_id) {
+                    Ok(probe) => {
+                        let response = serial_response_for_request(&probe, &request_id)
+                            .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
+                            .or_else(|| infer_serial_response_from_text(&probe, &request_id));
+                        if let Ok(data) = status_data_from_serial_response(response)
+                            && let Ok(output) = finalize_status_output(&device_id, data)
+                        {
+                            update_usb_status_cache(
+                                &state,
+                                &device_id,
+                                output,
+                                "serial_owner_status_poll",
+                            );
+                        }
+                    }
+                    Err(_) => {
+                        port = None;
+                    }
+                }
+                last_status_poll_attempt = Some(Instant::now());
             }
             Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -5216,6 +5370,10 @@ fn seed_mock_device(state: &AppState) {
         control_cache: None,
         status_meta_cache: None,
         status_cache_updated_at_ms: None,
+        usb_status_cache: None,
+        usb_status_generation: 0,
+        usb_status_sampled_at_ms: None,
+        usb_status_source: None,
         selected_artifact_id: None,
         log_decode: LogDecodeState::default(),
         logs: VecDeque::new(),
@@ -5359,6 +5517,14 @@ fn next_id() -> String {
         "devd-{}",
         Utc::now().timestamp_nanos_opt().unwrap_or_default()
     )
+}
+
+fn now_unix_ms() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+fn sampled_at_utc(sampled_at_ms: i64) -> Option<String> {
+    chrono::DateTime::<Utc>::from_timestamp_millis(sampled_at_ms).map(|dt| dt.to_rfc3339())
 }
 
 fn now() -> String {
@@ -5835,6 +6001,10 @@ mod tests {
             control_cache: None,
             status_meta_cache: None,
             status_cache_updated_at_ms: None,
+            usb_status_cache: None,
+            usb_status_generation: 0,
+            usb_status_sampled_at_ms: None,
+            usb_status_source: None,
             selected_artifact_id: None,
             log_decode: LogDecodeState::default(),
             logs: VecDeque::new(),
@@ -6668,6 +6838,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn compat_status_prefers_fresh_cached_usb_status() {
+        let state = AppState::new(PathBuf::from("."));
+        {
+            let mut guard = state.inner.lock().expect("state lock");
+            let device = guard.devices.get_mut("mock-loadlynx-devd").unwrap();
+            device.usb_status_cache = Some(json!({
+                "device_id": "mock-loadlynx-devd",
+                "analog_state": "ready",
+                "control": {"output_enabled": true, "target_i_ma": 1500},
+                "status": {"enable": true, "v_local_mv": 11888, "i_local_ma": 742, "fault_flags": 0}
+            }));
+            device.usb_status_generation = 41;
+            device.usb_status_sampled_at_ms = Some(now_unix_ms());
+            device.usb_status_source = Some("unit_test_cache".to_string());
+            guard.leases.insert(
+                "lease-1".to_string(),
+                WebLease {
+                    lease_id: "lease-1".to_string(),
+                    device_id: "mock-loadlynx-devd".to_string(),
+                    identity_device_id: None,
+                    bind_probe: false,
+                    legacy_preflash_only: false,
+                    port_path: Some("mock://esp32s3".to_string()),
+                    expires_at: Instant::now() + Duration::from_secs(30),
+                },
+            );
+        }
+
+        let Json(status) = compat_status(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: None,
+                lease_id: Some("lease-1".to_string()),
+                fresh: false,
+                cache: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(status["status_sample_generation"], 41);
+        assert_eq!(status["status_sample_source"], "unit_test_cache");
+        assert_eq!(status["status"]["v_local_mv"], 11888);
+
+        let guard = state.inner.lock().expect("state lock");
+        assert!(
+            guard.devices["mock-loadlynx-devd"]
+                .trace
+                .iter()
+                .all(|trace| trace.direction != "tx")
+        );
+    }
+
+    #[tokio::test]
     async fn bind_probe_lease_is_restricted_to_identity_binding() {
         let state = AppState::new(PathBuf::from("."));
         {
@@ -7083,7 +7307,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn same_device_allows_multiple_leases_and_unique_request_ids() {
+    async fn same_device_allows_multiple_leases_and_shared_cached_status() {
         let state = AppState::new(PathBuf::from("."));
         let Json(first) = create_lease(
             State(state.clone()),
@@ -7154,6 +7378,9 @@ mod tests {
         assert_eq!(first_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["from_monitor_cache"], serde_json::Value::Null);
+        let device = guard.devices.get("mock-loadlynx-devd").unwrap();
+        assert!(device.usb_status_generation >= 1);
+        assert!(device.usb_status_cache.is_some());
     }
 
     #[tokio::test]
@@ -7299,6 +7526,10 @@ mod tests {
         assert_eq!(second_status["link_up"], false);
         assert_eq!(second_status["hello_seen"], false);
         assert_eq!(second_status["analog_state"], "offline");
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard.devices.get("mock-loadlynx-devd").unwrap();
+        assert!(device.usb_status_generation >= 1);
+        assert!(device.usb_status_cache.is_some());
     }
 
     #[tokio::test]

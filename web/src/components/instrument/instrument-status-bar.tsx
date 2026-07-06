@@ -1,7 +1,4 @@
 export type InstrumentStatusBarProps = {
-  deviceName: string;
-  deviceIp: string | null;
-  firmwareVersion: string | null;
   modeLabel: "CC" | "CV" | "CP" | "CR" | "UNKNOWN";
   linkState: "up" | "down" | "unknown";
   outputState: { enabled: boolean; setpointLabel: string | null };
@@ -11,9 +8,6 @@ export type InstrumentStatusBarProps = {
 };
 
 export function InstrumentStatusBar({
-  deviceName,
-  deviceIp,
-  firmwareVersion,
   modeLabel,
   linkState,
   outputState,
@@ -70,31 +64,20 @@ export function InstrumentStatusBar({
 
   return (
     <header className="instrument-card px-6 py-4">
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-4 lg:gap-6">
-        <div className="min-w-0">
-          <div className="instrument-label">Device</div>
-          <div className="mt-1 truncate text-sm font-semibold text-slate-100">
-            {deviceName}
-          </div>
-          <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-slate-200/55">
-            <span className="font-mono">{deviceIp ?? "—"}</span>
-            <span aria-hidden="true">•</span>
-            <span className="truncate">
-              Firmware{" "}
-              <span className="font-mono">{firmwareVersion ?? "—"}</span>
-            </span>
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3 lg:gap-6">
+        <div>
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="instrument-label">Run State</div>
+              <div className="mt-1 text-sm font-semibold text-slate-100">
+                {runStateText}
+              </div>
+            </div>
             {stale ? (
-              <span className="ml-1 rounded-full border border-amber-400/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] text-amber-200">
+              <span className="rounded-full border border-amber-400/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] text-amber-200">
                 STALE
               </span>
             ) : null}
-          </div>
-        </div>
-
-        <div>
-          <div className="instrument-label">Run State</div>
-          <div className="mt-1 text-sm font-semibold text-slate-100">
-            {runStateText}
           </div>
           <div className="mt-2">
             <span className={`${pillBase} ${linkPillClass} w-full`}>

@@ -1,22 +1,20 @@
-import { Languages } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { Select } from "../ui/field.tsx";
 
 const LOCALES = [
-  { code: "zh-CN", label: "中文" },
-  { code: "en", label: "EN" },
+  { code: "zh-CN", label: "🇨🇳 中文" },
+  { code: "en", label: "🇺🇸 EN" },
 ] as const;
 
 export function LanguageSwitcher() {
   const { i18n, t } = useTranslation();
 
   return (
-    <label className="ll-form-control min-w-24" htmlFor="loadlynx-language">
+    <label
+      className="ll-form-control min-w-[120px]"
+      htmlFor="loadlynx-language"
+    >
       <span className="sr-only">{t("shell.language")}</span>
-      <span className="flex items-center gap-1 text-[10px] font-mono uppercase tracking-[0.12em] text-base-content/60">
-        <Languages size={13} aria-hidden="true" />
-        {t("shell.language")}
-      </span>
       <Select
         id="loadlynx-language"
         name="locale"

@@ -75,15 +75,14 @@ export function DeviceLayout() {
           <code className="font-mono bg-base-200 px-1 rounded">
             {deviceId ?? "unknown"}
           </code>{" "}
-          does not exist in the local registry. Please return to the device list
-          and add or select a device.
+          is not available. Return to Overview to choose another device.
         </p>
         <div>
           <Link
             to="/devices"
             className="ll-button ll-button-sm ll-button-outline"
           >
-            Back to devices
+            Back to Overview
           </Link>
         </div>
       </div>

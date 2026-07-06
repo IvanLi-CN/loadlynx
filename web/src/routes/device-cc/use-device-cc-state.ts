@@ -1,5 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
+import { useTranslation } from "react-i18next";
 import type { HttpApiError } from "../../api/client.ts";
 import {
   __debugSetUvLatched,
@@ -39,31 +47,70 @@ import {
   getNetworkErrorHint,
   isUnsupportedOperationError,
 } from "../../lib/http-error.ts";
+import { clampPresetDraft, type PresetDraft } from "./preset-constraints.ts";
+import {
+  formatPresetRawValue,
+  makePresetInputMemoryKey,
+  type PresetEditableField,
+  type PresetInputMemoryStore,
+  type PresetInputUnitKind,
+  parsePresetInputValue,
+  readPresetInputMemory,
+  reconcilePresetInputMemory,
+  writePresetInputMemory,
+} from "./preset-input-memory.ts";
+import {
+  getStatusRenderDelay,
+  STREAM_UI_INTERVAL_MS,
+} from "./status-stream-gate.ts";
+import {
+  buildTrendSeries,
+  shouldAppendTrendSample,
+  snapshotTrendSeriesDomains,
+  stabilizeTrendSeriesDomains,
+  TREND_WINDOW_SECONDS,
+  type TrendDomainMemoryMap,
+  type TrendSample,
+  trimTrendSamplesToWindow,
+} from "./trend-domain.ts";
 
 type EditableLoadMode = Exclude<LoadMode, "cr">;
 type UpdateControlMutation = ReturnType<
   typeof useMutation<ControlView, Error, ControlUpdateRequest>
 >;
+export type DashboardMetricKey = "voltage" | "current" | "power" | "resistance";
 
 const FAST_STATUS_REFETCH_MS = 400;
 const PD_REFETCH_MS = 1500;
 const RETRY_DELAY_MS = 500;
 const jitterRetryDelay = () => 200 + Math.random() * 300;
 const TREND_MAX_POINTS = 96;
+const EMPTY_PRESET: PresetDraft = {
+  mode: "cc",
+  target_i_ma: 0,
+  target_v_mv: 0,
+  target_p_mw: 0,
+  min_v_mv: 0,
+  max_i_ma_total: 0,
+  max_p_mw: 0,
+};
 
-function pushTrendPoint(prev: number[], value: number | null): number[] {
-  if (value == null || !Number.isFinite(value)) {
-    return prev;
-  }
-  const next = prev.length >= TREND_MAX_POINTS ? prev.slice(1) : prev.slice();
-  next.push(value);
-  return next;
+function computeTrendBounds(points: number[]): {
+  min: number;
+  max: number;
+  pad: number;
+} {
+  const min = points.length > 0 ? Math.min(...points) : 0;
+  const max = points.length > 0 ? Math.max(...points) : 1;
+  const pad = max > min ? (max - min) * 0.05 : 1;
+  return { min, max, pad };
 }
 
 export interface DeviceCcViewState {
   identity: Identity | undefined;
   status: FastStatusView | undefined | null;
   control: ControlView | undefined;
+  activePresetDraft: PresetDraft | null;
   pd: PdView | null;
   topError: { summary: string; hint: string | null } | null;
   isLinkDownLike: boolean | null;
@@ -95,10 +142,17 @@ export interface DeviceCcViewState {
   protectionState: { summary: string; level: "danger" | "warn" | "ok" };
   activeSetpointLabel: string | null;
   headline: { value: number | null; unit: "A" | "V" | "W" | "Ω" };
-  activeTrendPoints: number[];
-  trendMin: number;
-  trendMax: number;
-  trendPad: number;
+  defaultChartMetric: DashboardMetricKey;
+  primaryMetrics: Array<{
+    key: DashboardMetricKey;
+    label: string;
+    value: number | null;
+    unit: "V" | "A" | "W" | "Ω";
+    digits: number;
+    detail: string | null;
+    emphasized: boolean;
+  }>;
+  trendSeries: ReturnType<typeof buildTrendSeries>;
   thermalTrendPoints: number[];
   thermalTrendMin: number;
   thermalTrendMax: number;
@@ -134,6 +188,7 @@ export interface DeviceCcViewState {
     loopText: string;
     lastApplyText: string;
   };
+  presetActionNotice: string | null;
 }
 
 export interface DeviceCcMutationState {
@@ -155,6 +210,21 @@ export interface DeviceCcMutationState {
   setDraftPresetMaxIMaTotal: (value: number) => void;
   draftPresetMaxPMw: number;
   setDraftPresetMaxPMw: (value: number) => void;
+  getPresetDisplayValue: (
+    field: PresetEditableField,
+    rawValue: number,
+  ) => string;
+  setPresetDisplayDraft: (field: PresetEditableField, text: string) => void;
+  commitPresetDisplayDraft: (
+    field: PresetEditableField,
+    unitKind: PresetInputUnitKind,
+    fallbackValue: number,
+    setValue: (value: number) => void,
+  ) => void;
+  presetDisplayError: (
+    field: PresetEditableField,
+    fallbackError?: string | null,
+  ) => string | null;
   updateControlMutation: UpdateControlMutation;
   updatePresetMutation: ReturnType<typeof useMutation<Preset, Error, Preset>>;
   applyPresetMutation: ReturnType<
@@ -162,6 +232,7 @@ export interface DeviceCcMutationState {
   >;
   debugUvMutation: ReturnType<typeof useMutation<ControlView, Error, boolean>>;
   handleSavePreset: () => void;
+  savePresetDraft: (presetId: PresetId, draft: PresetDraft) => void;
   handleApplyPreset: () => void;
   explainHttpError: (error: HttpApiError) => string | null;
 }
@@ -174,16 +245,59 @@ export function useDeviceCcState(
   view: DeviceCcViewState;
   mutation: DeviceCcMutationState;
 } {
+  const { t } = useTranslation();
   const queryClient = useQueryClient();
   const [streamStatus, setStreamStatus] = useState<FastStatusView | null>(null);
+  const pendingStreamStatusRef = useRef<FastStatusView | null>(null);
+  const streamCommitAtMsRef = useRef<number | null>(null);
+  const streamFlushTimerRef = useRef<number | null>(null);
+  const [presetInputMemory, setPresetInputMemory] =
+    useState<PresetInputMemoryStore>(() =>
+      readPresetInputMemory(window.localStorage),
+    );
+  const [presetInputDrafts, setPresetInputDrafts] = useState<
+    Partial<Record<PresetEditableField, string>>
+  >({});
+  const [presetInputErrors, setPresetInputErrors] = useState<
+    Partial<Record<PresetEditableField, string | null>>
+  >({});
 
   useEffect(() => {
     if (baseUrl === undefined) {
       setStreamStatus(null);
+      pendingStreamStatusRef.current = null;
+      streamCommitAtMsRef.current = null;
+      if (streamFlushTimerRef.current != null) {
+        window.clearTimeout(streamFlushTimerRef.current);
+        streamFlushTimerRef.current = null;
+      }
       return;
     }
     setStreamStatus(null);
   }, [baseUrl]);
+
+  const clearStreamFlushTimer = useCallback(() => {
+    if (streamFlushTimerRef.current != null) {
+      window.clearTimeout(streamFlushTimerRef.current);
+      streamFlushTimerRef.current = null;
+    }
+  }, []);
+
+  const commitStreamStatus = useCallback(
+    (nextStatus: FastStatusView | null) => {
+      streamCommitAtMsRef.current = window.performance.now();
+      startTransition(() => {
+        setStreamStatus(nextStatus);
+      });
+    },
+    [],
+  );
+
+  useEffect(() => {
+    return () => {
+      clearStreamFlushTimer();
+    };
+  }, [clearStreamFlushTimer]);
 
   const identityQuery = useDeviceIdentityByBaseUrl(deviceId, baseUrl);
 
@@ -216,6 +330,40 @@ export function useDeviceCcState(
   const [draftPresetMinVMv, setDraftPresetMinVMv] = useState(0);
   const [draftPresetMaxIMaTotal, setDraftPresetMaxIMaTotal] = useState(0);
   const [draftPresetMaxPMw, setDraftPresetMaxPMw] = useState(0);
+  const [presetActionNotice, setPresetActionNotice] = useState<string | null>(
+    null,
+  );
+  const presetActionNoticeTimerRef = useRef<number | null>(null);
+
+  const showPresetActionNotice = useCallback((message: string) => {
+    if (presetActionNoticeTimerRef.current != null) {
+      window.clearTimeout(presetActionNoticeTimerRef.current);
+    }
+    setPresetActionNotice(message);
+    presetActionNoticeTimerRef.current = window.setTimeout(() => {
+      setPresetActionNotice(null);
+      presetActionNoticeTimerRef.current = null;
+    }, 2400);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (presetActionNoticeTimerRef.current != null) {
+        window.clearTimeout(presetActionNoticeTimerRef.current);
+      }
+    };
+  }, []);
+
+  const persistPresetInputMemory = useCallback(
+    (updater: (prev: PresetInputMemoryStore) => PresetInputMemoryStore) => {
+      setPresetInputMemory((prev) => {
+        const next = updater(prev);
+        writePresetInputMemory(window.localStorage, next);
+        return next;
+      });
+    },
+    [],
+  );
 
   useEffect(() => {
     const control = controlQuery.data;
@@ -231,12 +379,85 @@ export function useDeviceCcState(
     if (!presets) {
       return;
     }
+
+    persistPresetInputMemory((prev) =>
+      reconcilePresetInputMemory({
+        store: prev,
+        deviceId,
+        baseUrl,
+        presets,
+      }),
+    );
+
     const preset = presets.find(
       (entry) => entry.preset_id === selectedPresetId,
     );
     if (!preset) {
       return;
     }
+    const nextPreset = clampPresetDraft(preset);
+    setDraftPresetMode(nextPreset.mode);
+    setDraftPresetTargetIMa(nextPreset.target_i_ma);
+    setDraftPresetTargetVMv(nextPreset.target_v_mv);
+    setDraftPresetTargetPMw(nextPreset.target_p_mw);
+    setDraftPresetMinVMv(nextPreset.min_v_mv);
+    setDraftPresetMaxIMaTotal(nextPreset.max_i_ma_total);
+    setDraftPresetMaxPMw(nextPreset.max_p_mw);
+  }, [
+    baseUrl,
+    deviceId,
+    persistPresetInputMemory,
+    presetsQuery.data,
+    selectedPresetId,
+  ]);
+
+  const getPresetMemoryKey = (field: PresetEditableField) =>
+    makePresetInputMemoryKey({
+      deviceId,
+      baseUrl,
+      presetId: selectedPresetId,
+      field,
+    });
+
+  const getPresetDisplayValue = (
+    field: PresetEditableField,
+    rawValue: number,
+  ): string => {
+    const draft = presetInputDrafts[field];
+    if (draft !== undefined) {
+      return draft;
+    }
+
+    const memory = presetInputMemory[getPresetMemoryKey(field)];
+    if (memory && memory.value === rawValue) {
+      return memory.text;
+    }
+
+    return formatPresetRawValue(rawValue);
+  };
+
+  const setPresetDisplayDraft = (field: PresetEditableField, text: string) => {
+    setPresetInputDrafts((prev) => ({
+      ...prev,
+      [field]: text,
+    }));
+    setPresetInputErrors((prev) => ({
+      ...prev,
+      [field]: null,
+    }));
+  };
+
+  const currentDraftPreset = (): PresetDraft => ({
+    mode: draftPresetMode,
+    target_i_ma: draftPresetTargetIMa,
+    target_v_mv: draftPresetTargetVMv,
+    target_p_mw: draftPresetTargetPMw,
+    min_v_mv: draftPresetMinVMv,
+    max_i_ma_total: draftPresetMaxIMaTotal,
+    max_p_mw: draftPresetMaxPMw,
+  });
+
+  const applyDraftPreset = (preset: PresetDraft) => {
     setDraftPresetMode(preset.mode);
     setDraftPresetTargetIMa(preset.target_i_ma);
     setDraftPresetTargetVMv(preset.target_v_mv);
@@ -244,7 +465,79 @@ export function useDeviceCcState(
     setDraftPresetMinVMv(preset.min_v_mv);
     setDraftPresetMaxIMaTotal(preset.max_i_ma_total);
     setDraftPresetMaxPMw(preset.max_p_mw);
-  }, [presetsQuery.data, selectedPresetId]);
+  };
+
+  const computeNextDraftPreset = (patch: Partial<PresetDraft>): PresetDraft =>
+    clampPresetDraft({
+      ...currentDraftPreset(),
+      ...patch,
+    });
+
+  const commitDraftPresetPatch = (patch: Partial<PresetDraft>): PresetDraft => {
+    const next = computeNextDraftPreset(patch);
+    applyDraftPreset(next);
+    return next;
+  };
+
+  const commitPresetDisplayDraft = (
+    field: PresetEditableField,
+    unitKind: PresetInputUnitKind,
+    fallbackValue: number,
+    setValue: (value: number) => void,
+  ) => {
+    const currentRaw =
+      presetInputDrafts[field] ?? getPresetDisplayValue(field, fallbackValue);
+    const parsed = parsePresetInputValue(currentRaw, unitKind);
+    if (!parsed.ok) {
+      setPresetInputErrors((prev) => ({
+        ...prev,
+        [field]: parsed.error,
+      }));
+      setPresetInputDrafts((prev) => ({
+        ...prev,
+        [field]: currentRaw,
+      }));
+      return;
+    }
+
+    const next = computeNextDraftPreset({
+      [field]: parsed.value,
+    } as Partial<PresetDraft>);
+    const nextValue = next[field];
+    setValue(nextValue);
+    setPresetInputErrors((prev) => ({
+      ...prev,
+      [field]: null,
+    }));
+    setPresetInputDrafts((prev) => {
+      const next = { ...prev };
+      delete next[field];
+      return next;
+    });
+
+    const memoryKey = getPresetMemoryKey(field);
+    if (nextValue === parsed.value) {
+      persistPresetInputMemory((prev) => ({
+        ...prev,
+        [memoryKey]: {
+          value: nextValue,
+          text: parsed.displayText,
+        },
+      }));
+      return;
+    }
+
+    persistPresetInputMemory((prev) => {
+      const nextStore = { ...prev };
+      delete nextStore[memoryKey];
+      return nextStore;
+    });
+  };
+
+  const presetDisplayError = (
+    field: PresetEditableField,
+    fallbackError: string | null = null,
+  ) => presetInputErrors[field] ?? fallbackError;
 
   const updatePresetMutation = useMutation({
     mutationFn: async (payload: Preset) => {
@@ -282,6 +575,16 @@ export function useDeviceCcState(
         baseUrl,
         ...DEVICE_QUERY_PARTS.status,
       );
+      const savedActivePresetId = controlQuery.data?.active_preset_id ?? null;
+      showPresetActionNotice(
+        savedActivePresetId === nextPreset.preset_id
+          ? t("dashboard.presets.savedActiveNotice", {
+              slot: nextPreset.preset_id,
+            })
+          : t("dashboard.presets.savedNotice", {
+              slot: nextPreset.preset_id,
+            }),
+      );
     },
   });
 
@@ -308,6 +611,11 @@ export function useDeviceCcState(
         deviceId,
         baseUrl,
         ...DEVICE_QUERY_PARTS.status,
+      );
+      showPresetActionNotice(
+        t("dashboard.presets.appliedNotice", {
+          slot: nextControl.active_preset_id,
+        }),
       );
     },
   });
@@ -378,7 +686,9 @@ export function useDeviceCcState(
   });
 
   useEffect(() => {
-    if (!baseUrl || !identityQuery.isSuccess) {
+    if (!baseUrl || !identityQuery.isSuccess || !isPageVisible) {
+      clearStreamFlushTimer();
+      pendingStreamStatusRef.current = null;
       return undefined;
     }
 
@@ -386,22 +696,64 @@ export function useDeviceCcState(
     const unsubscribe = subscribeStatusStream(
       baseUrl,
       (view) => {
-        if (!cancelled) {
-          setStreamStatus(view);
+        if (cancelled) {
+          return;
         }
+
+        const nowMs = window.performance.now();
+        const delayMs = getStatusRenderDelay(
+          streamCommitAtMsRef.current,
+          nowMs,
+          STREAM_UI_INTERVAL_MS,
+        );
+
+        if (delayMs === 0) {
+          clearStreamFlushTimer();
+          pendingStreamStatusRef.current = null;
+          commitStreamStatus(view);
+          return;
+        }
+
+        pendingStreamStatusRef.current = view;
+        if (streamFlushTimerRef.current != null) {
+          return;
+        }
+
+        streamFlushTimerRef.current = window.setTimeout(() => {
+          streamFlushTimerRef.current = null;
+          if (cancelled || pendingStreamStatusRef.current == null) {
+            return;
+          }
+          const nextPending = pendingStreamStatusRef.current;
+          pendingStreamStatusRef.current = null;
+          commitStreamStatus(nextPending);
+        }, delayMs);
       },
       () => {
-        if (!cancelled) {
-          setStreamStatus(null);
+        if (cancelled) {
+          return;
         }
+        clearStreamFlushTimer();
+        pendingStreamStatusRef.current = null;
+        startTransition(() => {
+          setStreamStatus(null);
+        });
       },
     );
 
     return () => {
       cancelled = true;
+      clearStreamFlushTimer();
+      pendingStreamStatusRef.current = null;
       unsubscribe();
     };
-  }, [baseUrl, identityQuery.isSuccess]);
+  }, [
+    baseUrl,
+    clearStreamFlushTimer,
+    commitStreamStatus,
+    identityQuery.isSuccess,
+    isPageVisible,
+  ]);
 
   const firstHttpError: HttpApiError | null = (() => {
     const errors: Array<unknown> = [
@@ -428,14 +780,16 @@ export function useDeviceCcState(
     ) {
       return {
         summary,
-        hint: `可能是短暂的网络抖动，已自动重试；若仍无法连接，请检查网络与 IP 设置。${baseUrl ? `（${getNetworkErrorHint(baseUrl)}）` : ""}`,
+        hint: t("dashboard.errors.networkRetry", {
+          hint: baseUrl ? `（${getNetworkErrorHint(baseUrl)}）` : "",
+        }),
       } as const;
     }
 
     if (isUnsupportedOperationError(firstHttpError)) {
       return {
         summary,
-        hint: "固件版本不支持该 API，请升级固件后重试。",
+        hint: t("dashboard.errors.unsupportedApi"),
       } as const;
     }
 
@@ -513,28 +867,38 @@ export function useDeviceCcState(
           : "A";
 
   const lastTrendUptimeMsRef = useRef<number | null>(null);
-  const [trend, setTrend] = useState<{
-    v: number[];
-    i: number[];
-    p: number[];
-    r: number[];
-    t: number[];
-  }>({ v: [], i: [], p: [], r: [], t: [] });
+  const [trendSamples, setTrendSamples] = useState<TrendSample[]>([]);
+  const trendDomainMemoryRef = useRef<TrendDomainMemoryMap>({});
 
   useEffect(() => {
     const uptimeMs = status?.raw.uptime_ms ?? null;
-    if (uptimeMs == null || lastTrendUptimeMsRef.current === uptimeMs) {
+    const previousUptimeMs = lastTrendUptimeMsRef.current;
+    if (
+      uptimeMs == null ||
+      !shouldAppendTrendSample(previousUptimeMs, uptimeMs)
+    ) {
       return;
     }
     lastTrendUptimeMsRef.current = uptimeMs;
 
-    setTrend((prev) => ({
-      v: pushTrendPoint(prev.v, localVoltageV),
-      i: pushTrendPoint(prev.i, totalCurrentA),
-      p: pushTrendPoint(prev.p, totalPowerW),
-      r: pushTrendPoint(prev.r, resistanceOhms),
-      t: pushTrendPoint(prev.t, tempCoreC),
-    }));
+    setTrendSamples((prev) => {
+      const shouldResetWindow =
+        previousUptimeMs != null &&
+        uptimeMs != null &&
+        uptimeMs < previousUptimeMs;
+      const base = shouldResetWindow ? [] : prev;
+      const next =
+        base.length >= TREND_MAX_POINTS ? base.slice(1) : base.slice();
+      next.push({
+        time: uptimeMs / 1_000,
+        voltage: localVoltageV,
+        current: totalCurrentA,
+        power: totalPowerW,
+        resistance: resistanceOhms,
+        thermal: tempCoreC,
+      });
+      return trimTrendSamplesToWindow(next, TREND_WINDOW_SECONDS);
+    });
   }, [
     localVoltageV,
     resistanceOhms,
@@ -545,8 +909,7 @@ export function useDeviceCcState(
   ]);
 
   const handleSavePreset = () => {
-    updatePresetMutation.mutate({
-      preset_id: selectedPresetId,
+    savePresetDraft(selectedPresetId, {
       mode: draftPresetMode,
       target_i_ma: draftPresetTargetIMa,
       target_v_mv: draftPresetTargetVMv,
@@ -554,6 +917,19 @@ export function useDeviceCcState(
       min_v_mv: draftPresetMinVMv,
       max_i_ma_total: draftPresetMaxIMaTotal,
       max_p_mw: draftPresetMaxPMw,
+    });
+  };
+
+  const savePresetDraft = (presetId: PresetId, draft: PresetDraft) => {
+    updatePresetMutation.mutate({
+      preset_id: presetId,
+      mode: draft.mode,
+      target_i_ma: draft.target_i_ma,
+      target_v_mv: draft.target_v_mv,
+      target_p_mw: draft.target_p_mw,
+      min_v_mv: draft.min_v_mv,
+      max_i_ma_total: draft.max_i_ma_total,
+      max_p_mw: draft.max_p_mw,
     });
   };
 
@@ -620,9 +996,7 @@ export function useDeviceCcState(
       return `${(control.preset.target_p_mw / 1000).toFixed(2)} W`;
     }
     if (controlMode === "cr") {
-      return resistanceOhms == null
-        ? "CR read-only"
-        : `${resistanceOhms.toFixed(2)} Ω`;
+      return resistanceOhms == null ? "CR" : `${resistanceOhms.toFixed(2)} Ω`;
     }
     return `${(control.preset.target_i_ma / 1000).toFixed(3)} A`;
   })();
@@ -636,28 +1010,99 @@ export function useDeviceCcState(
           ? { value: resistanceOhms, unit: "Ω" as const }
           : { value: totalCurrentA, unit: "A" as const };
 
-  const activeTrendPoints =
+  const defaultChartMetric: DashboardMetricKey =
     controlMode === "cv"
-      ? trend.v
+      ? "voltage"
       : controlMode === "cp"
-        ? trend.p
+        ? "power"
         : controlMode === "cr"
-          ? trend.r
-          : trend.i;
-  const trendMin =
-    activeTrendPoints.length > 0 ? Math.min(...activeTrendPoints) : 0;
-  const trendMax =
-    activeTrendPoints.length > 0 ? Math.max(...activeTrendPoints) : 1;
-  const trendPad = trendMax > trendMin ? (trendMax - trendMin) * 0.05 : 1;
-  const thermalTrendPoints = trend.t;
-  const thermalTrendMin =
-    thermalTrendPoints.length > 0 ? Math.min(...thermalTrendPoints) : 0;
-  const thermalTrendMax =
-    thermalTrendPoints.length > 0 ? Math.max(...thermalTrendPoints) : 1;
-  const thermalTrendPad =
-    thermalTrendMax > thermalTrendMin
-      ? (thermalTrendMax - thermalTrendMin) * 0.05
-      : 1;
+          ? "resistance"
+          : "current";
+
+  const primaryMetrics: DeviceCcViewState["primaryMetrics"] = [
+    {
+      key: "voltage",
+      label: "Voltage",
+      value: localVoltageV,
+      unit: "V",
+      digits: 3,
+      detail:
+        remoteVoltageV != null
+          ? `Remote ${formatWithUnit(remoteVoltageV, 3, "V")}`
+          : null,
+      emphasized: defaultChartMetric === "voltage",
+    },
+    {
+      key: "current",
+      label: "Current",
+      value: totalCurrentA,
+      unit: "A",
+      digits: 3,
+      detail:
+        remoteCurrentA != null
+          ? `Remote ${formatWithUnit(remoteCurrentA, 3, "A")}`
+          : null,
+      emphasized: defaultChartMetric === "current",
+    },
+    {
+      key: "power",
+      label: "Power",
+      value: totalPowerW,
+      unit: "W",
+      digits: 2,
+      detail: "Calculated load power",
+      emphasized: defaultChartMetric === "power",
+    },
+    {
+      key: "resistance",
+      label: "Resistance",
+      value: resistanceOhms,
+      unit: "Ω",
+      digits: 2,
+      detail: "Calculated from V / I",
+      emphasized: defaultChartMetric === "resistance",
+    },
+  ];
+
+  const thermalTrendPoints = trendSamples
+    .map((sample) => sample.thermal)
+    .filter(
+      (value): value is number => value != null && Number.isFinite(value),
+    );
+  const thermalTrendBounds = computeTrendBounds(thermalTrendPoints);
+  const thermalTrendMin = thermalTrendBounds.min;
+  const thermalTrendMax = thermalTrendBounds.max;
+  const thermalTrendPad = thermalTrendBounds.pad;
+  const trendSeries = useMemo(
+    () =>
+      stabilizeTrendSeriesDomains(
+        buildTrendSeries({
+          samples: trendSamples,
+          mode: controlMode,
+          targetVoltageV: draftPresetTargetVMv / 1_000,
+          minVoltageV: draftPresetMinVMv / 1_000,
+          targetCurrentA: draftPresetTargetIMa / 1_000,
+          maxCurrentA: draftPresetMaxIMaTotal / 1_000,
+          targetPowerW: draftPresetTargetPMw / 1_000,
+          maxPowerW: draftPresetMaxPMw / 1_000,
+        }),
+        trendDomainMemoryRef.current,
+      ),
+    [
+      controlMode,
+      draftPresetMaxIMaTotal,
+      draftPresetMaxPMw,
+      draftPresetMinVMv,
+      draftPresetTargetIMa,
+      draftPresetTargetPMw,
+      draftPresetTargetVMv,
+      trendSamples,
+    ],
+  );
+
+  useEffect(() => {
+    trendDomainMemoryRef.current = snapshotTrendSeriesDomains(trendSeries);
+  }, [trendSeries]);
 
   const pdPanel = (() => {
     if (pd) {
@@ -744,6 +1189,17 @@ export function useDeviceCcState(
     updateControlMutation.isPending ||
     applyPresetMutation.isPending;
 
+  const activePresetDraft = (() => {
+    const activePresetId = control?.active_preset_id;
+    if (activePresetId == null) {
+      return control?.preset ? clampPresetDraft(control.preset) : null;
+    }
+    const presetFromList = presetsQuery.data?.find(
+      (entry) => entry.preset_id === activePresetId,
+    );
+    return clampPresetDraft(presetFromList ?? control?.preset ?? EMPTY_PRESET);
+  })();
+
   const setpoints = [
     {
       label: "Target Current",
@@ -793,6 +1249,7 @@ export function useDeviceCcState(
       identity,
       status,
       control,
+      activePresetDraft,
       pd,
       topError,
       isLinkDownLike: Boolean(
@@ -828,10 +1285,9 @@ export function useDeviceCcState(
       protectionState,
       activeSetpointLabel,
       headline,
-      activeTrendPoints,
-      trendMin,
-      trendMax,
-      trendPad,
+      defaultChartMetric,
+      primaryMetrics,
+      trendSeries,
       thermalTrendPoints,
       thermalTrendMin,
       thermalTrendMax,
@@ -844,6 +1300,7 @@ export function useDeviceCcState(
       setpoints,
       limits,
       diagnostics,
+      presetActionNotice,
     },
     mutation: {
       showOutputReenableHint,
@@ -851,24 +1308,57 @@ export function useDeviceCcState(
       selectedPresetId,
       setSelectedPresetId,
       draftPresetMode,
-      setDraftPresetMode: (mode) => setDraftPresetMode(mode),
+      setDraftPresetMode: (mode) => {
+        commitDraftPresetPatch({
+          mode,
+        });
+      },
       draftPresetTargetIMa,
-      setDraftPresetTargetIMa,
+      setDraftPresetTargetIMa: (value) => {
+        commitDraftPresetPatch({
+          target_i_ma: value,
+        });
+      },
       draftPresetTargetVMv,
-      setDraftPresetTargetVMv,
+      setDraftPresetTargetVMv: (value) => {
+        commitDraftPresetPatch({
+          target_v_mv: value,
+        });
+      },
       draftPresetTargetPMw,
-      setDraftPresetTargetPMw,
+      setDraftPresetTargetPMw: (value) => {
+        commitDraftPresetPatch({
+          target_p_mw: value,
+        });
+      },
       draftPresetMinVMv,
-      setDraftPresetMinVMv,
+      setDraftPresetMinVMv: (value) => {
+        commitDraftPresetPatch({
+          min_v_mv: value,
+        });
+      },
       draftPresetMaxIMaTotal,
-      setDraftPresetMaxIMaTotal,
+      setDraftPresetMaxIMaTotal: (value) => {
+        commitDraftPresetPatch({
+          max_i_ma_total: value,
+        });
+      },
       draftPresetMaxPMw,
-      setDraftPresetMaxPMw,
+      setDraftPresetMaxPMw: (value) => {
+        commitDraftPresetPatch({
+          max_p_mw: value,
+        });
+      },
+      getPresetDisplayValue,
+      setPresetDisplayDraft,
+      commitPresetDisplayDraft,
+      presetDisplayError,
       updateControlMutation,
       updatePresetMutation,
       applyPresetMutation,
       debugUvMutation,
       handleSavePreset,
+      savePresetDraft,
       handleApplyPreset,
       explainHttpError,
     },

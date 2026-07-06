@@ -8,6 +8,7 @@
 
 - Preserve the legacy spec ID `0012` and slug `web-responsive-drawer-sidebar` for traceability.
 - Keep the original planning scope traceable while assigning long-lived requirements to `SPEC.md` and implementation/history records to companion documents.
+- 2026-06-20: Superseded by `m3n8p-web-top-nav-device-workspace`; the active shell no longer uses a sidebar, icon rail, or navigation drawer.
 
 ## Documentation Model
 

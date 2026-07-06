@@ -24,12 +24,38 @@ export interface MockDeviceState {
   calibration: MockCalibrationState;
   wifi: WifiStatus;
   wifiPsk: string;
+  simulation: MockSimulationState;
 }
 
 export interface MockCalibrationState {
   factory: CalibrationProfileWire;
   ram: CalibrationProfileWire;
   eeprom: CalibrationProfileWire | null;
+}
+
+export interface MockSimulationProfile {
+  scenarioId: string;
+  openCircuitMv: number;
+  sourceResistanceMilliohm: number;
+  localSenseBiasMv: number;
+  rippleMv: number;
+  currentNoiseMa: number;
+  localCurrentShare: number;
+  ambientTempMc: number;
+  coreTempRisePerW: number;
+  exhaustTempRisePerW: number;
+  mcuTempRisePerW: number;
+  phaseOffset: number;
+}
+
+export interface MockSimulationState {
+  profile: MockSimulationProfile;
+  lastWallClockMs: number;
+}
+
+interface MockScenarioBootState {
+  activePresetId: PresetId;
+  outputEnabled: boolean;
 }
 
 export type DevdIdentityPayload = Partial<Identity> & {
@@ -85,6 +111,62 @@ function createInitialCalibrationProfileWire(): CalibrationProfileWire {
   };
 }
 
+function createMockSimulationProfile(
+  baseUrl: string,
+  index: number,
+): MockSimulationProfile {
+  const normalized = baseUrl.toLowerCase();
+  const isDemo2 = normalized.includes("demo-2");
+
+  if (isDemo2) {
+    return {
+      scenarioId: "bench-24v-cp",
+      openCircuitMv: 19_800,
+      sourceResistanceMilliohm: 820,
+      localSenseBiasMv: 55,
+      rippleMv: 110,
+      currentNoiseMa: 55,
+      localCurrentShare: 0.88,
+      ambientTempMc: 27_800,
+      coreTempRisePerW: 540,
+      exhaustTempRisePerW: 340,
+      mcuTempRisePerW: 190,
+      phaseOffset: 1.35 + index * 0.31,
+    };
+  }
+
+  return {
+    scenarioId: "bench-12v-cc",
+    openCircuitMv: 12_120,
+    sourceResistanceMilliohm: 135,
+    localSenseBiasMv: 42,
+    rippleMv: 65,
+    currentNoiseMa: 32,
+    localCurrentShare: 0.91,
+    ambientTempMc: 28_600,
+    coreTempRisePerW: 710,
+    exhaustTempRisePerW: 460,
+    mcuTempRisePerW: 220,
+    phaseOffset: 0.55 + index * 0.21,
+  };
+}
+
+function createMockScenarioBootState(
+  profile: MockSimulationProfile,
+): MockScenarioBootState {
+  if (profile.scenarioId === "bench-24v-cp") {
+    return {
+      activePresetId: 3,
+      outputEnabled: true,
+    };
+  }
+
+  return {
+    activePresetId: 1,
+    outputEnabled: true,
+  };
+}
+
 const mockDevices = new Map<string, MockDeviceState>();
 
 export function clampI16(value: number): number {
@@ -94,7 +176,10 @@ export function clampI16(value: number): number {
   return Math.max(-32768, Math.min(32767, value));
 }
 
-function createInitialStatus(baseUrl?: string): FastStatusView {
+function createInitialStatus(
+  baseUrl: string | undefined,
+  profile: MockSimulationProfile,
+): FastStatusView {
   const raw: FastStatusJson = {
     uptime_ms: 123_456,
     mode: 1,
@@ -103,14 +188,14 @@ function createInitialStatus(baseUrl?: string): FastStatusView {
     target_value: 0,
     i_local_ma: 0,
     i_remote_ma: 0,
-    v_local_mv: 12_000,
-    v_remote_mv: 11_950,
+    v_local_mv: profile.openCircuitMv + profile.localSenseBiasMv,
+    v_remote_mv: profile.openCircuitMv,
     calc_p_mw: 0,
     dac_headroom_mv: 500,
     loop_error: 0,
-    sink_core_temp_mc: 45_000,
-    sink_exhaust_temp_mc: 42_000,
-    mcu_temp_mc: 40_000,
+    sink_core_temp_mc: profile.ambientTempMc + 2_400,
+    sink_exhaust_temp_mc: profile.ambientTempMc + 1_200,
+    mcu_temp_mc: profile.ambientTempMc + 1_600,
     fault_flags: 0,
   };
 
@@ -224,14 +309,15 @@ function createInitialPd(baseUrl: string): PdView | null {
   return view;
 }
 
-function createInitialCc(): CcControlView {
+function createInitialCc(profile: MockSimulationProfile): CcControlView {
+  const isHighPowerBench = profile.scenarioId === "bench-24v-cp";
   return {
     enable: false,
-    target_i_ma: 1_500,
+    target_i_ma: isHighPowerBench ? 2_400 : 1_850,
     effective_i_ma: 0,
     limit_profile: {
-      max_i_ma: 5_000,
-      max_p_mw: 60_000,
+      max_i_ma: isHighPowerBench ? 6_000 : 5_000,
+      max_p_mw: isHighPowerBench ? 120_000 : 60_000,
       ovp_mv: 40_000,
       temp_trip_mc: 80_000,
       thermal_derate_pct: 100,
@@ -241,26 +327,119 @@ function createInitialCc(): CcControlView {
       power_mode: "protect",
     },
     i_total_ma: 0,
-    v_main_mv: 12_000,
+    v_main_mv: profile.openCircuitMv,
     p_main_mw: 0,
   };
 }
 
-function createInitialPresets(): Preset[] {
-  const presets: Preset[] = [];
-  for (let idx = 1 as PresetId; idx <= 5; idx = (idx + 1) as PresetId) {
-    presets.push({
-      preset_id: idx,
-      mode: "cc",
-      target_i_ma: 1_500 + (idx - 1) * 250,
-      target_v_mv: 12_000,
-      target_p_mw: 10_000 + (idx - 1) * 2_000,
-      min_v_mv: 0,
-      max_i_ma_total: 10_000,
-      max_p_mw: 150_000,
-    });
+function createInitialPresets(profile: MockSimulationProfile): Preset[] {
+  if (profile.scenarioId === "bench-24v-cp") {
+    return [
+      {
+        preset_id: 1,
+        mode: "cc",
+        target_i_ma: 1_200,
+        target_v_mv: 16_000,
+        target_p_mw: 18_000,
+        min_v_mv: 14_000,
+        max_i_ma_total: 4_500,
+        max_p_mw: 65_000,
+      },
+      {
+        preset_id: 2,
+        mode: "cv",
+        target_i_ma: 1_000,
+        target_v_mv: 15_000,
+        target_p_mw: 22_000,
+        min_v_mv: 13_500,
+        max_i_ma_total: 2_800,
+        max_p_mw: 50_000,
+      },
+      {
+        preset_id: 3,
+        mode: "cp",
+        target_i_ma: 2_100,
+        target_v_mv: 18_000,
+        target_p_mw: 42_000,
+        min_v_mv: 13_000,
+        max_i_ma_total: 3_600,
+        max_p_mw: 60_000,
+      },
+      {
+        preset_id: 4,
+        mode: "cp",
+        target_i_ma: 2_500,
+        target_v_mv: 19_000,
+        target_p_mw: 58_000,
+        min_v_mv: 12_500,
+        max_i_ma_total: 4_200,
+        max_p_mw: 75_000,
+      },
+      {
+        preset_id: 5,
+        mode: "cc",
+        target_i_ma: 2_900,
+        target_v_mv: 12_000,
+        target_p_mw: 30_000,
+        min_v_mv: 11_000,
+        max_i_ma_total: 5_200,
+        max_p_mw: 90_000,
+      },
+    ];
   }
-  return presets;
+
+  return [
+    {
+      preset_id: 1,
+      mode: "cc",
+      target_i_ma: 1_850,
+      target_v_mv: 11_500,
+      target_p_mw: 16_000,
+      min_v_mv: 10_800,
+      max_i_ma_total: 4_500,
+      max_p_mw: 42_000,
+    },
+    {
+      preset_id: 2,
+      mode: "cv",
+      target_i_ma: 900,
+      target_v_mv: 9_000,
+      target_p_mw: 8_000,
+      min_v_mv: 7_500,
+      max_i_ma_total: 1_800,
+      max_p_mw: 18_000,
+    },
+    {
+      preset_id: 3,
+      mode: "cp",
+      target_i_ma: 2_300,
+      target_v_mv: 12_000,
+      target_p_mw: 28_000,
+      min_v_mv: 9_500,
+      max_i_ma_total: 3_200,
+      max_p_mw: 36_000,
+    },
+    {
+      preset_id: 4,
+      mode: "cc",
+      target_i_ma: 3_100,
+      target_v_mv: 10_500,
+      target_p_mw: 24_000,
+      min_v_mv: 9_800,
+      max_i_ma_total: 3_800,
+      max_p_mw: 32_000,
+    },
+    {
+      preset_id: 5,
+      mode: "cp",
+      target_i_ma: 1_500,
+      target_v_mv: 12_000,
+      target_p_mw: 12_000,
+      min_v_mv: 10_500,
+      max_i_ma_total: 2_500,
+      max_p_mw: 20_000,
+    },
+  ];
 }
 
 function createInitialIdentity(baseUrl: string, index: number): Identity {
@@ -413,10 +592,12 @@ export function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
 
   const index = mockDevices.size + 1;
   const identity = createInitialIdentity(baseUrl, index);
-  const status = createInitialStatus(baseUrl);
-  const cc = createInitialCc();
+  const simulationProfile = createMockSimulationProfile(baseUrl, index);
+  const bootState = createMockScenarioBootState(simulationProfile);
+  const status = createInitialStatus(baseUrl, simulationProfile);
+  const cc = createInitialCc(simulationProfile);
   const pd = createInitialPd(baseUrl);
-  const presets = createInitialPresets();
+  const presets = createInitialPresets(simulationProfile);
   const factoryProfile = createInitialCalibrationProfileWire();
   const calibration: MockCalibrationState = {
     factory: structuredClone(factoryProfile),
@@ -437,13 +618,17 @@ export function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     cc,
     pd,
     presets,
-    active_preset_id: 1,
-    output_enabled: false,
+    active_preset_id: bootState.activePresetId,
+    output_enabled: bootState.outputEnabled,
     uv_latched: false,
     calibrationMode: "off",
     calibration,
     wifi,
     wifiPsk: "factory-mock-psk",
+    simulation: {
+      profile: simulationProfile,
+      lastWallClockMs: Date.now(),
+    },
   };
 
   if (baseUrl.toLowerCase().includes("calibration-output-applied")) {
@@ -467,6 +652,7 @@ export function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
         calc_p_mw: 22_800,
       },
     };
+    state.output_enabled = true;
   }
 
   mockDevices.set(baseUrl, state);

@@ -1,3 +1,6 @@
+import { LoadOutputSwitch } from "./load-output-switch.tsx";
+import { ModeSliderSelector } from "./mode-slider-selector.tsx";
+
 type EditableControlMode = "CC" | "CV" | "CP";
 type VisibleControlMode = EditableControlMode | "CR";
 
@@ -12,41 +15,6 @@ export type ControlModePanelProps = {
   showOutputReenableHint?: boolean;
 };
 
-function ModeButton({
-  mode,
-  active,
-  disabled,
-  onClick,
-}: {
-  mode: VisibleControlMode;
-  active: boolean;
-  disabled: boolean;
-  onClick: () => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={[
-        "rounded-lg border px-3 py-1 text-xs font-semibold tracking-wide",
-        active
-          ? "border-[rgba(111,234,249,0.28)] bg-[rgba(111,234,249,0.10)] text-slate-100"
-          : "border-slate-400/10 bg-black/20 text-slate-200/60",
-        disabled ? "opacity-40 cursor-not-allowed" : "cursor-pointer",
-      ].join(" ")}
-      disabled={disabled}
-      onClick={onClick}
-    >
-      {mode}
-    </button>
-  );
-}
-
-function isEditableControlMode(
-  mode: VisibleControlMode,
-): mode is EditableControlMode {
-  return mode === "CC" || mode === "CV" || mode === "CP";
-}
-
 export function ControlModePanel({
   availableModes,
   activeMode,
@@ -57,29 +25,19 @@ export function ControlModePanel({
   outputHint,
   showOutputReenableHint = false,
 }: ControlModePanelProps) {
-  const allModes: VisibleControlMode[] = ["CC", "CV", "CP", "CR"];
   return (
     <section aria-label="Mode and output" className="instrument-card p-5">
       <div className="instrument-label">Mode &amp; Output</div>
 
-      <div className="mt-4 flex flex-wrap gap-2">
-        {allModes.map((mode) => {
-          const supported =
-            isEditableControlMode(mode) && availableModes.includes(mode);
-          return (
-            <ModeButton
-              key={mode}
-              mode={mode}
-              active={mode === activeMode}
-              disabled={!supported}
-              onClick={() => {
-                if (isEditableControlMode(mode)) {
-                  onModeChange(mode);
-                }
-              }}
-            />
-          );
-        })}
+      <div className="mt-4">
+        <ModeSliderSelector
+          availableModes={availableModes}
+          activeMode={activeMode}
+          onModeChange={onModeChange}
+          size="sm"
+          widthMode="fit"
+          ariaLabel="Control mode selector"
+        />
       </div>
 
       <div className="mt-5 border-t border-slate-400/10 pt-4">
@@ -96,35 +54,19 @@ export function ControlModePanel({
             </div>
           </div>
 
-          <label className="relative inline-flex h-6 w-11 cursor-pointer items-center">
-            <input
-              type="checkbox"
-              className="absolute inset-0 z-10 h-full w-full cursor-pointer opacity-0"
-              aria-label="Output enabled"
+          <div className="w-full max-w-[18rem]">
+            <LoadOutputSwitch
               checked={outputEnabled}
               disabled={outputToggleDisabled}
-              onChange={(event) => onOutputToggle(event.target.checked)}
+              onCheckedChange={onOutputToggle}
+              offLabel="Off"
+              onLabel="On"
+              offHint="Standby"
+              onHint="Armed"
+              ariaLabel="Load output switch"
+              size="sm"
             />
-            <span
-              className={[
-                "pointer-events-none relative inline-flex h-6 w-11 items-center rounded-full border transition-colors",
-                outputEnabled
-                  ? "border-[rgba(131,255,210,0.26)] bg-[rgba(131,255,210,0.10)]"
-                  : "border-slate-400/15 bg-slate-500/10",
-                outputToggleDisabled ? "opacity-50" : "",
-              ].join(" ")}
-            >
-              <span
-                className={[
-                  "inline-block h-5 w-5 transform rounded-full shadow transition-transform",
-                  outputEnabled
-                    ? "bg-[rgba(131,255,210,0.92)] shadow-[0_0_18px_rgba(131,255,210,0.35)]"
-                    : "bg-slate-100/90",
-                  outputEnabled ? "translate-x-5" : "translate-x-1",
-                ].join(" ")}
-              />
-            </span>
-          </label>
+          </div>
         </div>
 
         {showOutputReenableHint ? (
