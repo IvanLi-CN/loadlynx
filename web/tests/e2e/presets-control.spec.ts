@@ -3,25 +3,26 @@ import { expect, type Page, test } from "@playwright/test";
 async function openFirstDeviceControl(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.setItem("loadlynx.locale", "zh-CN");
+    window.localStorage.setItem("loadlynx.demoMode", "true");
+    window.localStorage.setItem(
+      "loadlynx.demo.devices",
+      JSON.stringify([
+        {
+          id: "mock-001",
+          name: "Demo Device #1",
+          baseUrl: "mock://demo-1",
+        },
+      ]),
+    );
   });
-  await page.goto("/");
-  await expect(page.getByRole("heading", { name: "Devices" })).toBeVisible();
+  await page.goto("/devices?demo=true");
+  await expect(page.getByText("Demo Device #1")).toBeVisible();
 
   const openControlBtn = page
     .getByRole("link", {
       name: "打开仪表盘",
     })
     .first();
-
-  if ((await openControlBtn.count()) === 0) {
-    const addDemoBtn = page
-      .locator("section")
-      .filter({ hasText: "当前已知设备" })
-      .getByRole("button", { name: "Add sample device" });
-    if (await addDemoBtn.isVisible()) {
-      await addDemoBtn.click();
-    }
-  }
 
   await expect(openControlBtn).toBeVisible();
   await openControlBtn.click();
