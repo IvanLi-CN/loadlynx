@@ -4,6 +4,7 @@ test("PD settings page can read/apply and surfaces errors", async ({
   page,
 }) => {
   await page.addInitScript(() => {
+    window.localStorage.setItem("loadlynx.locale", "en");
     const devices = [
       {
         id: "dev-pd",
@@ -17,6 +18,7 @@ test("PD settings page can read/apply and surfaces errors", async ({
   await page.addInitScript(() => {
     const globalWithState = window as unknown as {
       __pdPostContentTypes: string[];
+      __pdLastPayload?: Record<string, unknown>;
       __pdState: unknown;
     };
     globalWithState.__pdPostContentTypes = [];
@@ -120,6 +122,7 @@ test("PD settings page can read/apply and surfaces errors", async ({
         }
 
         const payload = parsed as Record<string, unknown>;
+        globalWithState.__pdLastPayload = payload;
         const mode = typeof payload.mode === "string" ? payload.mode : null;
         const objectPos =
           typeof payload.object_pos === "number" ? payload.object_pos : null;
@@ -171,30 +174,49 @@ test("PD settings page can read/apply and surfaces errors", async ({
 
   await page.goto("/dev-pd/pd");
 
-  await expect(page.locator("h2")).toContainText("USB‑PD Settings");
-  await expect(page.locator("text=ATTACHED")).toBeVisible();
+  await expect(page).toHaveURL(/\/dev-pd\/cc\?panel=pd$/);
+  await expect(
+    page.getByRole("heading", { name: "USB-PD", level: 2 }),
+  ).toBeVisible();
+  await expect(page.getByRole("dialog", { name: "USB-PD" })).toBeVisible();
+  await expect(page.getByText("Profile list")).toBeVisible();
 
-  await page.getByRole("button", { name: "Fixed" }).click();
+  const pdPanel = page.locator('[aria-label="USB-PD control panel"]');
+  await expect(pdPanel.getByText("Selected · PDO #5")).toBeVisible();
 
-  // Select PDO #5, set Ireq and apply.
-  await page
-    .locator("button")
-    .filter({ hasText: "20.0 V" })
-    .filter({ hasText: "5" })
-    .first()
+  await pdPanel
+    .getByRole("button", { name: "Apply profile", exact: true })
     .click();
-  const fixedIreqInput = page.getByRole("spinbutton").first();
+  await expect(pdPanel.getByText("Apply succeeded.")).toBeVisible();
+  const initialApplyPayload = await page.evaluate(() => {
+    const win = window as unknown as {
+      __pdLastPayload?: Record<string, unknown>;
+    };
+    return win.__pdLastPayload;
+  });
+  expect(initialApplyPayload).toMatchObject({
+    mode: "fixed",
+    object_pos: 5,
+  });
+
+  // Select a fixed PDO, set Ireq and apply.
+  await page.getByRole("button", { name: /#1.*5\.0 V.*3000 mA/i }).click();
+  await expect(pdPanel.getByText("Selected · PDO #1")).toBeVisible();
+  const fixedIreqInput = pdPanel.getByRole("textbox", { name: "Ireq (mA)" });
   await fixedIreqInput.fill("1500");
-  await page.getByRole("button", { name: "Apply" }).click();
-  await expect(page.locator(".ll-alert-success")).toBeVisible();
+  await pdPanel
+    .getByRole("button", { name: "Apply profile", exact: true })
+    .click();
+  await expect(pdPanel.getByText("Apply succeeded.")).toBeVisible();
 
   // Force an error response and verify UI surfaces it without wiping input.
   await fixedIreqInput.fill("1450");
-  await page.getByRole("button", { name: "Apply" }).click();
-  await expect(page.locator(".ll-alert-error")).toBeVisible();
-  await expect(page.locator(".ll-alert-error")).toContainText(
-    "LIMIT_VIOLATION",
-  );
+  await pdPanel
+    .getByRole("button", { name: "Apply profile", exact: true })
+    .click();
+  const applyError = pdPanel.getByText(/Apply failed:/);
+  await expect(applyError).toBeVisible();
+  await expect(applyError).toContainText("LIMIT_VIOLATION");
   await expect(fixedIreqInput).toHaveValue("1450");
 
   // Ensure we used POST + Content-Type: text/plain (no private network preflight).

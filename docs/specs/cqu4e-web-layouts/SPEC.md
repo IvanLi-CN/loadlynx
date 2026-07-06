@@ -2,6 +2,8 @@
 
 ## 背景与问题
 
+> 当前有效 shell 契约已由 [`m3n8p-web-top-nav-device-workspace`](../m3n8p-web-top-nav-device-workspace/SPEC.md) 接管。本文继续作为布局分层与 pathless layout 抽象的长期约束，不再声明 sidebar / drawer 为当前产品真相。
+
 当前 `web/` 的布局主要由根路由组件（`AppLayout`）提供，但它同时承担了：
 
 - **App Shell**：顶栏/侧栏/内容区的整体骨架；
@@ -31,7 +33,7 @@
    - 只负责全局背景、Devtools、`<Outlet />`，不承担业务副作用。
    - 作为 TanStack Router 的 root route component。
 2. **ConsoleLayout（App Shell）**
-   - 顶栏 + 侧栏 + 主内容区（`<Outlet />`）。
+   - sticky 顶部导航壳层 + 主内容区（`<Outlet />`）。
    - 作为 **pathless layout route**（不改变 URL）。
 3. **DeviceLayout（设备域布局）**
    - 作为 `$deviceId` 的父 layout，统一处理：
@@ -42,7 +44,7 @@
    - 约束：包括 calibration 在内的所有 `/$deviceId/*` 子页面都应优先通过 `DeviceLayout` 上下文获取 `device/baseUrl`，避免重复的 “再查一次 devices 列表/再判空”。
 4. **Calibration（设备子页面，工具模式变体）**
    - calibration 仍属于 `/$deviceId/*` 的设备子页面，**必须复用 `DeviceLayout`**（设备查找/错误处理/上下文统一由 DeviceLayout 提供）。
-   - 作为“工具模式（tool layout）”的代表页面：内容区 **全宽**，并向 App Shell 请求 **隐藏常驻侧栏/rail**（但保留抽屉入口，见下文的布局变体与响应式侧栏设计）。
+   - 作为“工具模式（tool layout）”的代表页面：内容区 **全宽**，并向 App Shell 请求隐藏沉浸式辅助 UI；当前 shell 已无常驻侧栏/rail。
 
 ## 路由结构（保持 URL 不变）
 
@@ -61,15 +63,15 @@
 
 为避免把 calibration 变成“另一个 App”，本方案仍复用 `ConsoleLayout` 的顶栏，并且 calibration **仍在 `DeviceLayout` 之下**；同时允许 `ConsoleLayout` 基于路由元信息切换布局变体：
 
-- **默认变体（shell）**：顶栏 + 侧栏 + 内容区（内容区内再用 `PageContainer` 做 `max-w-5xl` 收敛）
-- **工具变体（tool）**：顶栏 + 内容区（隐藏常驻侧栏/rail），内容区 **不限制宽度**（用于 Calibration 这类长表格/多列操作）；响应式抽屉入口见 `docs/specs/t4zh9-web-responsive-drawer-sidebar/SPEC.md`。
+- **默认变体（shell）**：sticky 顶栏 + 内容区（内容区内再用 `PageContainer` 做 `max-w-5xl` 收敛）
+- **工具变体（tool）**：sticky 顶栏 + 内容区，内容区 **不限制宽度**（用于 Calibration 这类长表格/多列操作）。
 
-另见：`docs/specs/t4zh9-web-responsive-drawer-sidebar/SPEC.md`（响应式 drawer / icon rail / 大屏固定侧栏的交互与断点规范）。
+另见：`docs/specs/m3n8p-web-top-nav-device-workspace/SPEC.md`（当前顶部导航 shell / 设备切换 / 系统域契约）。
 
 实现建议（实现阶段落地）：
 
 - 在 `calibration` route 上设置 `staticData`（例如 `{ layout: "tool" }`）
-- `ConsoleLayout` 通过 router state / matches 读取当前激活的 `staticData`，据此决定是否渲染侧栏
+- `ConsoleLayout` 通过 router state / matches 读取当前激活的 `staticData`，据此决定是否切换 shell 变体
 - `PageContainer` 提供 `variant="default" | "full"`，在工具页使用 `full`（避免 max width 限制）
 
 ## 模块边界与文件建议
@@ -105,9 +107,39 @@
 
 建议引入 `PageContainer` 作为页面内容的统一“外层容器”：
 
-- 默认内容宽度：`max-w-5xl`（Devices/CC/Status/Settings）
-- 默认间距：`gap-6`（纵向分组），标题区与内容区分离
-- Calibration 使用工具模式：`PageContainer` 全宽（见“布局变体”）
+- `PageContainer` 是页面级宽度真相源，必须负责 `mx-auto` 居中，而不是把居中责任下放给各个页面。
+- 默认内容宽度：`--ll-page-max-default = 80rem / 1280px`
+  - 适用：`状态 / 设置 / 固件 / 关于` 这类阅读与表单混合页
+- workspace 内容宽度：`--ll-page-max-workspace = 106.5rem / 1704px`
+  - 适用：`总览` 这类多卡片、多列设备工作面
+- full 容器：不设页面级上限，但密集仪表页面必须在内部 frame 自行定义并居中自己的最大宽度
+  - 适用：`仪表盘`、`校准`
+- 默认纵向间距：`gap-6`；更长页面可放宽到 `gap-8`
+- 禁止同一页面同时混用“shell 1700px + inner 1280px + arbitrary mx-auto”而没有显式意图说明；这会在宽桌面上制造肉眼可见的不对称留白
+
+### Responsive Breakpoints
+
+- `320-767px`：mobile
+  - 页面必须单列；主导航在 header 内横向滚动
+- `768-1023px`：tablet / small laptop
+  - 允许壳层换行，但左右 gutter 仍必须对称
+- `1024-1439px`：desktop
+  - 桌面设备 sheet 启用；多列布局在此区间开始稳定展开
+- `1440-1728px`：wide desktop
+  - 页面继续保持居中；新增宽度只转为等量左右边距
+- `1729px+`：ultra-wide fallback
+  - shell 与页面容器停止增长；额外空间留作对称外边距，不再继续拉伸阅读区
+
+### 兼容屏幕基线
+
+- `375x800`
+- `768x1024`
+- `900x800`
+- `1200x800`
+- `1440x900`
+- `1728x1117`
+
+Storybook viewport 集必须覆盖这些基线中的代表值；至少要能验证 mobile、tablet、desktop、wide desktop 与 ultra-wide fallback。
 
 迁移时优先把各页面里分散的 `max-w-* mx-auto` 收敛到 `PageContainer`，减少视觉不一致。
 
@@ -131,7 +163,7 @@
 
 ## 已确认决策
 
-- Calibration：选择 **工具模式（B）**（隐藏侧栏 + 全宽内容）
+- Calibration：选择 **工具模式（B）**（全宽内容）
 - 默认内容宽度基线：`max-w-5xl`
 
 ## 风险点与待确认

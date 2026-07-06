@@ -3,13 +3,13 @@ import { waitFor, within } from "storybook/test";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function PdRouteDefaultStory() {
-  return <RouteStoryHarness initialPath="/mock-001/pd" />;
+  return <RouteStoryHarness initialPath="/mock-001/cc?panel=pd" />;
 }
 
 function PdRouteExtendedVoltageStory() {
   return (
     <RouteStoryHarness
-      initialPath="/mock-001/pd"
+      initialPath="/mock-001/cc?panel=pd"
       devices={[
         {
           id: "mock-001",
@@ -24,7 +24,7 @@ function PdRouteExtendedVoltageStory() {
 function PdRouteUnsupportedStory() {
   return (
     <RouteStoryHarness
-      initialPath="/mock-001/pd"
+      initialPath="/mock-001/cc?panel=pd"
       devices={[
         {
           id: "mock-001",
@@ -39,7 +39,7 @@ function PdRouteUnsupportedStory() {
 function PdRouteLinkDownStory() {
   return (
     <RouteStoryHarness
-      initialPath="/mock-001/pd"
+      initialPath="/mock-001/cc?panel=pd"
       devices={[
         {
           id: "mock-001",
@@ -54,7 +54,7 @@ function PdRouteLinkDownStory() {
 function PdRouteHiddenFixed28Story() {
   return (
     <RouteStoryHarness
-      initialPath="/mock-001/pd"
+      initialPath="/mock-001/cc?panel=pd"
       devices={[
         {
           id: "mock-001",
@@ -69,7 +69,7 @@ function PdRouteHiddenFixed28Story() {
 function PdRouteRealFixed28Story() {
   return (
     <RouteStoryHarness
-      initialPath="/mock-001/pd"
+      initialPath="/mock-001/cc?panel=pd"
       devices={[
         {
           id: "mock-001",
@@ -82,7 +82,7 @@ function PdRouteRealFixed28Story() {
 }
 
 const meta = {
-  title: "Routes/USB‑PD",
+  title: "Routes/Dashboard PD Panel",
   component: PdRouteDefaultStory,
 } satisfies Meta<typeof PdRouteDefaultStory>;
 
@@ -108,12 +108,15 @@ export const HiddenSavedFixed28: Story = {
   play: async ({ canvasElement, userEvent }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole(
-      "heading",
-      { name: "USB‑PD Settings" },
-      { timeout: 5000 },
+    await waitFor(
+      () => {
+        canvas.getByText("LoadLynx Web Console");
+        canvas.getByRole("heading", { name: "USB-PD" });
+        canvas.getByText(/配置列表/i);
+        canvas.getByText(/Fixed PDO/i);
+      },
+      { timeout: 5_000 },
     );
-    await canvas.findByText(/Fixed PDOs/i, undefined, { timeout: 5000 });
 
     await waitFor(() => {
       if (canvas.queryByText("28.0 V")) {
@@ -124,14 +127,12 @@ export const HiddenSavedFixed28: Story = {
       }
     });
 
-    const applyButton = await canvas.findByRole(
-      "button",
-      { name: "Apply" },
-      { timeout: 5000 },
-    );
-    if (!(applyButton as HTMLButtonElement).disabled) {
+    const applyButton = await canvas.findByRole("button", {
+      name: "Apply profile",
+    });
+    if ((applyButton as HTMLButtonElement).disabled) {
       throw new Error(
-        "Expected Apply to stay disabled until a real Fixed PDO is selected",
+        "Expected Apply to stay enabled when a visible fallback Fixed PDO is selected",
       );
     }
 
@@ -145,7 +146,7 @@ export const HiddenSavedFixed28: Story = {
 
     await waitFor(() => {
       const nextApplyButton = canvas.getByRole("button", {
-        name: "Apply",
+        name: "Apply profile",
       }) as HTMLButtonElement;
       if (nextApplyButton.disabled) {
         throw new Error("Expected Apply to enable after selecting a real PDO");
@@ -159,12 +160,16 @@ export const RealFixed28: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
 
-    await canvas.findByRole(
-      "heading",
-      { name: "USB‑PD Settings" },
-      { timeout: 5000 },
+    await waitFor(
+      () => {
+        canvas.getByText("LoadLynx Web Console");
+        canvas.getByRole("heading", { name: "USB-PD" });
+        canvas.getByText(/配置列表/i);
+        canvas.getByText("28.0 V");
+        canvas.getByText(/已保存配置/i);
+        canvas.getByText(/Fixed · PDO #8 · 28\.0 V · 3000 mA/i);
+      },
+      { timeout: 5_000 },
     );
-    await canvas.findByText("28.0 V", undefined, { timeout: 5000 });
-    await canvas.findByText(/PDO #8/i, undefined, { timeout: 5000 });
   },
 };

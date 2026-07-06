@@ -1,6 +1,6 @@
 import type { ReactNode } from "react";
 
-type PageContainerVariant = "default" | "full";
+type PageContainerVariant = "default" | "workspace" | "full";
 
 export type PageContainerProps = {
   variant?: PageContainerVariant;
@@ -13,18 +13,15 @@ export function PageContainer({
   className,
   children,
 }: PageContainerProps) {
-  const outerClassName = [
-    "w-full",
-    // NOTE: ConsoleLayout currently pads <main> with p-3 sm:p-4 md:p-6.
-    // PageContainer becomes the single source of truth for horizontal padding by
-    // neutralizing the parent's horizontal padding and re-applying it here.
-    "-mx-3 sm:-mx-4 md:-mx-6",
-    "px-3 sm:px-4 md:px-6",
-  ].join(" ");
+  const outerClassName = "w-full";
 
   const innerClassName = [
-    "w-full min-w-0",
-    variant === "full" ? "max-w-none" : "max-w-7xl",
+    "mx-auto w-full min-w-0",
+    variant === "full"
+      ? "max-w-none"
+      : variant === "workspace"
+        ? "max-w-[var(--ll-page-max-workspace)]"
+        : "max-w-[var(--ll-page-max-default)]",
     className,
   ]
     .filter(Boolean)
@@ -32,7 +29,9 @@ export function PageContainer({
 
   return (
     <div className={outerClassName}>
-      <div className={innerClassName}>{children}</div>
+      <div data-ll-page-container={variant} className={innerClassName}>
+        {children}
+      </div>
     </div>
   );
 }

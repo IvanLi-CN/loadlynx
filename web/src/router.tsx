@@ -6,15 +6,19 @@ import {
   createRouter,
   lazyRouteComponent,
   type RouterHistory,
+  redirect,
 } from "@tanstack/react-router";
 import { RoutePendingView } from "./components/layout/route-pending-view.tsx";
 import { ConsoleLayout } from "./layouts/console-layout.tsx";
 import { DeviceLayout } from "./layouts/device-layout.tsx";
 import { RootLayout } from "./layouts/root-layout.tsx";
+import { SystemLayout } from "./layouts/system-layout.tsx";
 
 export interface RouterContext {
   queryClient: QueryClient;
 }
+
+export type CalibrationSection = "voltage" | "current_ch1" | "current_ch2";
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: RootLayout,
@@ -33,8 +37,6 @@ function pendingRoute(title: string, description?: string) {
     ),
   };
 }
-
-// Index route: for now just show the devices view.
 const indexRoute = createRoute({
   getParentRoute: () => consoleRoute,
   path: "/",
@@ -71,8 +73,27 @@ const deviceCcRoute = createRoute({
   ),
 });
 
-const deviceStatusRoute = createRoute({
+const devicePdRoute = createRoute({
   getParentRoute: () => deviceRoute,
+  path: "pd",
+  beforeLoad: ({ params }) => {
+    throw redirect({
+      to: "/$deviceId/cc",
+      params: { deviceId: params.deviceId },
+      search: { panel: "pd" },
+      replace: true,
+    });
+  },
+});
+
+const systemRoute = createRoute({
+  getParentRoute: () => deviceRoute,
+  id: "system",
+  component: SystemLayout,
+});
+
+const deviceStatusRoute = createRoute({
+  getParentRoute: () => systemRoute,
   path: "status",
   ...pendingRoute("正在打开状态页", "正在加载实时状态面板"),
   component: lazyRouteComponent(
@@ -81,18 +102,8 @@ const deviceStatusRoute = createRoute({
   ),
 });
 
-const devicePdRoute = createRoute({
-  getParentRoute: () => deviceRoute,
-  path: "pd",
-  ...pendingRoute("正在打开 USB-PD", "正在加载 USB-PD 面板"),
-  component: lazyRouteComponent(
-    () => import("./routes/device-pd.tsx"),
-    "DevicePdRoute",
-  ),
-});
-
 const deviceSettingsRoute = createRoute({
-  getParentRoute: () => deviceRoute,
+  getParentRoute: () => systemRoute,
   path: "settings",
   ...pendingRoute("正在打开设置", "正在加载设备设置"),
   component: lazyRouteComponent(
@@ -102,9 +113,22 @@ const deviceSettingsRoute = createRoute({
 });
 
 const deviceCalibrationRoute = createRoute({
-  getParentRoute: () => deviceRoute,
+  getParentRoute: () => systemRoute,
   path: "calibration",
   ...pendingRoute("正在打开校准", "正在加载校准工作区"),
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { section?: CalibrationSection } => {
+    const section = search.section;
+    if (
+      section === "voltage" ||
+      section === "current_ch1" ||
+      section === "current_ch2"
+    ) {
+      return { section };
+    }
+    return {};
+  },
   component: lazyRouteComponent(
     () => import("./routes/device-calibration.tsx"),
     "DeviceCalibrationRoute",
@@ -112,7 +136,7 @@ const deviceCalibrationRoute = createRoute({
 });
 
 const deviceFirmwareRoute = createRoute({
-  getParentRoute: () => deviceRoute,
+  getParentRoute: () => systemRoute,
   path: "firmware",
   ...pendingRoute("正在打开 Firmware", "正在加载固件操作面板"),
   component: lazyRouteComponent(
@@ -121,13 +145,27 @@ const deviceFirmwareRoute = createRoute({
   ),
 });
 
-const deviceRouteTree = deviceRoute.addChildren([
-  deviceCcRoute,
+const deviceAboutRoute = createRoute({
+  getParentRoute: () => systemRoute,
+  path: "about",
+  component: lazyRouteComponent(
+    () => import("./routes/device-about.tsx"),
+    "DeviceAboutRoute",
+  ),
+});
+
+const systemRouteTree = systemRoute.addChildren([
   deviceStatusRoute,
-  devicePdRoute,
   deviceSettingsRoute,
   deviceCalibrationRoute,
   deviceFirmwareRoute,
+  deviceAboutRoute,
+]);
+
+const deviceRouteTree = deviceRoute.addChildren([
+  deviceCcRoute,
+  devicePdRoute,
+  systemRouteTree,
 ]);
 
 const consoleRouteTree = consoleRoute.addChildren([
@@ -155,7 +193,6 @@ export function createAppRouter(
 
 declare module "@tanstack/react-router" {
   interface Register {
-    // This infers the Router instance type across the project.
     router: ReturnType<typeof createAppRouter>;
   }
 }

@@ -18,7 +18,10 @@ test("production preview mounts without runtime crashes @preview-smoke", async (
   await page.goto("/");
 
   await expect(
-    page.getByRole("heading", { name: /LoadLynx Web Console/i, level: 1 }),
+    page.getByRole("link", { name: /Overview|总览/i }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: /Overview|总览/i }).first(),
   ).toBeVisible();
   await expect(pageErrors).toEqual([]);
   await expect(consoleErrors).toEqual([]);

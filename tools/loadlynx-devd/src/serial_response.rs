@@ -6,7 +6,7 @@ pub(crate) struct SerialProtocolFrame {
     pub(crate) frame: Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SerialProtocolProbe {
     pub(crate) frames: Vec<SerialProtocolFrame>,
     pub(crate) non_protocol_bytes: usize,

@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
-import { useRouterState } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { useEffect, useMemo, useRef } from "react";
 import {
   getCalibrationProfile,
   type HttpApiError,
@@ -16,10 +16,10 @@ import {
 } from "../devices/device-query-key.ts";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
 import { usePageVisibility } from "../lib/page-visibility.ts";
+import type { CalibrationSection } from "../router.tsx";
 import { CalibrationActivePanel } from "./device-calibration/calibration-active-panel.tsx";
 import { CalibrationDialogs } from "./device-calibration/calibration-dialogs.tsx";
 import { CalibrationOverviewPanel } from "./device-calibration/calibration-overview-panel.tsx";
-import { CalibrationTabList } from "./device-calibration/calibration-tab-list.tsx";
 import { CalibrationToastStack } from "./device-calibration/calibration-toast-stack.tsx";
 import { collectCalibrationDraftIssues } from "./device-calibration/draft-issues.ts";
 import {
@@ -49,17 +49,20 @@ function DeviceCalibrationPage({
   baseUrl: string;
 }) {
   const calibrationStore = useCalibrationStore();
+  const navigate = useNavigate();
   const pathname = useRouterState({
     select: (state) => state.location.pathname,
   });
-  const [activeTab, setActiveTab] = useState<CalibrationTab>(() => {
-    if (typeof window === "undefined") {
-      return "voltage";
-    }
-    return (
-      calibrationStore.getDraft(deviceId, baseUrl)?.active_tab ?? "voltage"
-    );
+  const search = useRouterState({
+    select: (state) =>
+      state.location.search as { section?: CalibrationSection },
   });
+  const storedDraft = useMemo(
+    () => calibrationStore.getDraft(deviceId, baseUrl),
+    [baseUrl, calibrationStore, deviceId],
+  );
+  const activeTab: CalibrationTab =
+    search.section ?? storedDraft?.active_tab ?? "voltage";
   const latestPathnameRef = useRef(pathname);
   latestPathnameRef.current = pathname;
   const isPageVisible = usePageVisibility();
@@ -180,7 +183,6 @@ function DeviceCalibrationPage({
     isOffline,
     onAlert: showAlert,
     refetchProfile: profileQuery.refetch as RefetchProfile,
-    setActiveTab,
   });
 
   const draftIssues = useMemo(
@@ -210,6 +212,21 @@ function DeviceCalibrationPage({
     void ensureActiveTabCalMode("Sync", { silent: true });
   }, [ensureActiveTabCalMode]);
 
+  useEffect(() => {
+    if (!pathname.endsWith("/calibration")) {
+      return;
+    }
+    if (search.section === activeTab) {
+      return;
+    }
+    void navigate({
+      to: "/$deviceId/calibration",
+      params: { deviceId },
+      search: { section: activeTab },
+      replace: true,
+    });
+  }, [activeTab, deviceId, navigate, pathname, search.section]);
+
   return (
     <PageContainer variant="full" className="flex flex-col gap-6">
       <div className="flex items-center justify-between">
@@ -237,8 +254,6 @@ function DeviceCalibrationPage({
         profileUpdatedAt={profileQuery.dataUpdatedAt}
         statusMatchesActiveTab={statusMatchesActiveTab}
       />
-
-      <CalibrationTabList activeTab={activeTab} onSelectTab={setActiveTab} />
 
       <CalibrationActivePanel
         activeTab={activeTab}

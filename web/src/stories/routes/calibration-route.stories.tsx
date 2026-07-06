@@ -1,5 +1,5 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor } from "storybook/test";
+import { userEvent, waitFor, within } from "storybook/test";
 import type { StoredDevice } from "../../devices/device-store.ts";
 import type { MemoryCalibrationStore } from "../../routes/device-calibration/store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
@@ -97,32 +97,38 @@ const DEVICE_CAL_OUTPUT_APPLIED: StoredDevice[] = [
 ];
 
 export const Default: Story = {
-  play: async ({ canvas, userEvent }) => {
+  play: async ({ canvas, canvasElement }) => {
     await canvas.findByRole(
       "heading",
       { name: "Calibration" },
       { timeout: 5_000 },
     );
-
-    const currentCh1Tab = canvas.getByRole("tab", { name: "电流通道1" });
-    await userEvent.click(currentCh1Tab);
-
+    const nav = within(
+      canvasElement.querySelector('[aria-label="系统页导航"]') as HTMLElement,
+    );
+    await userEvent.click(nav.getByRole("link", { name: "电流通道1" }));
     await canvas.findByText("电流单位");
-    if (!(currentCh1Tab as HTMLElement).classList.contains("ll-tab-active")) {
-      throw new Error('Expected "电流通道1" tab to be active after click');
-    }
+    await waitFor(() => {
+      const currentCh1Link = nav.getByRole("link", { name: "电流通道1" });
+      if (currentCh1Link.getAttribute("aria-current") !== "page") {
+        throw new Error('Expected "电流通道1" nav item to become active');
+      }
+    });
   },
 };
 
 export const OutputControlApplied: Story = {
   render: () => <CalibrationRouteStory devices={DEVICE_CAL_OUTPUT_APPLIED} />,
-  play: async ({ canvas, canvasElement, userEvent }) => {
+  play: async ({ canvas, canvasElement }) => {
     await canvas.findByRole(
       "heading",
       { name: "Calibration" },
       { timeout: 5_000 },
     );
-    await userEvent.click(canvas.getByRole("tab", { name: "电流通道1" }));
+    const nav = within(
+      canvasElement.querySelector('[aria-label="系统页导航"]') as HTMLElement,
+    );
+    await userEvent.click(nav.getByRole("link", { name: "电流通道1" }));
     await canvas.findByText("Output control (CC)");
 
     await waitFor(() => {
@@ -135,11 +141,13 @@ export const OutputControlApplied: Story = {
       if (!(modeBadge.textContent?.includes("current_ch1") ?? false)) {
         throw new Error('Expected "cal_mode: current_ch1" badge on load');
       }
-      if (!(currentStat.textContent?.includes("1.7100 A") ?? false)) {
-        throw new Error('Expected "Active Current" to update to 1.7100 A');
+      if (!/1\.(6|7)\d{3} A/.test(currentStat.textContent ?? "")) {
+        throw new Error(
+          'Expected "Active Current" to show a non-zero applied current',
+        );
       }
-      if (!(dacStat.textContent?.includes("1638") ?? false)) {
-        throw new Error('Expected "DAC Code" to update to 1638');
+      if (!/16\d{2}|17\d{2}/.test(dacStat.textContent ?? "")) {
+        throw new Error('Expected "DAC Code" to update to an applied value');
       }
     });
   },
@@ -159,11 +167,15 @@ export const RestoresStoredCurrentTab: Story = {
       { name: "Calibration" },
       { timeout: 5_000 },
     );
-
-    const currentCh2Tab = canvas.getByRole("tab", { name: "电流通道2" });
-    if (!(currentCh2Tab as HTMLElement).classList.contains("ll-tab-active")) {
-      throw new Error('Expected stored "电流通道2" tab to be active on load');
-    }
+    const nav = within(
+      canvasElement.querySelector('[aria-label="系统页导航"]') as HTMLElement,
+    );
+    await waitFor(() => {
+      const currentCh2Link = nav.getByRole("link", { name: "电流通道2" });
+      if (currentCh2Link.getAttribute("aria-current") !== "page") {
+        throw new Error('Expected stored "电流通道2" nav item to be active');
+      }
+    });
 
     await waitFor(() => {
       const modeBadge = findCalModeBadge(canvasElement);

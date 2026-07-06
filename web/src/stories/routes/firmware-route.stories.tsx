@@ -72,7 +72,7 @@ export const DryRunEvidence: Story = {
       "/tmp/loadlynx-firmware-catalog.json",
     );
     await userEvent.click(
-      canvas.getByRole("button", { name: "Verify flash dry-run" }),
+      canvas.getByRole("button", { name: "Check firmware" }),
     );
 
     await waitFor(() => {

@@ -39,7 +39,6 @@ export function useCalibrationDraft(input: {
   isOffline: boolean;
   onAlert: (title: string, body: string, details?: string[]) => void;
   refetchProfile: RefetchProfile;
-  setActiveTab: (tab: CalibrationTab) => void;
 }) {
   const {
     activeTab,
@@ -52,7 +51,6 @@ export function useCalibrationDraft(input: {
     isOffline,
     onAlert,
     refetchProfile,
-    setActiveTab,
   } = input;
 
   const [draftProfile, setDraftProfile] = useState<CalibrationProfile>(() =>
@@ -227,14 +225,12 @@ export function useCalibrationDraft(input: {
     setDraftStorageReady(false);
     const stored = calibrationStore.getDraft(deviceId, baseUrl);
     if (stored) {
-      setActiveTab(stored.active_tab);
       setDraftProfile(restoreCalibrationDraftProfile(stored));
     } else {
-      setActiveTab("voltage");
       setDraftProfile(makeEmptyDraftProfile());
     }
     setDraftStorageReady(true);
-  }, [baseUrl, calibrationStore, clearToasts, deviceId, setActiveTab]);
+  }, [baseUrl, calibrationStore, clearToasts, deviceId]);
 
   useEffect(() => {
     if (!draftStorageReady) {

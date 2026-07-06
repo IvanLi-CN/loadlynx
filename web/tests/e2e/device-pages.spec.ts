@@ -2,69 +2,95 @@ import { expect, test } from "@playwright/test";
 
 test.describe("Device Pages", () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      window.localStorage.setItem("loadlynx.locale", "en");
+      window.localStorage.setItem("loadlynx.demoMode", "true");
+      window.localStorage.setItem(
+        "loadlynx.demo.devices",
+        JSON.stringify([
+          {
+            id: "mock-001",
+            name: "Demo Device #1",
+            baseUrl: "mock://demo-1",
+          },
+        ]),
+      );
+    });
     await page.goto("/");
-    await expect(page.getByRole("heading", { name: "Devices" })).toBeVisible();
+    await expect(page.locator("text=LoadLynx Web Console")).toBeVisible();
+    await expect(page.getByText(/Demo Device #1/i)).toBeVisible();
 
-    // Connect to first device
-    const openControlBtn = page.locator("text=Open CC Control").first();
+    const openDashboardBtn = page
+      .getByRole("link", {
+        name: /Open Dashboard|打开仪表盘/,
+      })
+      .first();
 
-    // If no device is present, try to add a demo device
-    if ((await openControlBtn.count()) === 0) {
-      const addDemoBtn = page.locator("text=Add demo device");
-      if (await addDemoBtn.isVisible()) {
-        await addDemoBtn.click();
-      }
-    }
-
-    await expect(openControlBtn).toBeVisible();
-    await openControlBtn.click();
-
-    // Should land on CC Control by default
+    await expect(openDashboardBtn).toBeVisible();
+    await openDashboardBtn.click();
     await expect(page.url()).toContain("/cc");
   });
 
   test("should navigate to Status page and show content", async ({ page }) => {
-    // Click on "Status" in sidebar
-    await page.click("role=link[name=状态]");
+    await page.getByRole("button", { name: "System" }).click();
+    await page.getByRole("link", { name: "Status" }).click();
 
     await expect(page.url()).toContain("/status");
-    await expect(page.locator("h2")).toContainText("Device Status");
+    await expect(
+      page.getByRole("heading", { name: "Device Status", level: 2 }),
+    ).toBeVisible();
 
     // Check for key sections
-    await expect(page.locator("text=Overview")).toBeVisible();
-    await expect(page.locator("text=Temperature & Faults")).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Overview", level: 3 }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "Temperature & Faults", level: 3 }),
+    ).toBeVisible();
 
     // Check for specific data (assuming mock data is present)
     // Voltage unit check
-    await expect(page.locator("text=Voltage")).toBeVisible();
+    await expect(page.getByText("Total Current")).toBeVisible();
   });
 
   test("should open PD settings from Status page secondary entry", async ({
     page,
   }) => {
-    await page.click("role=link[name=状态]");
+    await page.getByRole("button", { name: "System" }).click();
+    await page.getByRole("link", { name: "Status" }).click();
     await expect(page.url()).toContain("/status");
 
-    const openPdBtn = page.getByRole("link", { name: "Open PD settings" });
+    const openPdBtn = page.getByRole("link", { name: "Open PD panel" });
     await expect(openPdBtn).toBeVisible();
     await openPdBtn.click();
 
-    await expect(page.url()).toContain("/pd");
-    await expect(page.locator("h2")).toContainText("USB‑PD Settings");
-    await expect(page.getByRole("button", { name: "Fixed" })).toBeVisible();
+    await expect(page.url()).toContain("/cc?panel=pd");
     await expect(
-      page.getByRole("button", { name: "PPS", exact: true }),
+      page.getByRole("heading", { name: "USB-PD", level: 2 }),
+    ).toBeVisible();
+    await expect(page.getByRole("dialog", { name: "USB-PD" })).toBeVisible();
+    await expect(
+      page.locator('[aria-label="USB-PD control panel"]'),
+    ).toBeVisible();
+    await expect(page.getByText("Profile list")).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /#1 5\.0 V 3000 mA/ }),
+    ).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: /#3 3\.3–21\.0 V 3000 mA/ }),
     ).toBeVisible();
   });
 
   test("should navigate to Settings page and show content", async ({
     page,
   }) => {
-    // Click on "Settings" in sidebar
-    await page.click("role=link[name=设置]");
+    await page.getByRole("button", { name: "System" }).click();
+    await page.getByRole("link", { name: "Settings" }).click();
 
     await expect(page.url()).toContain("/settings");
-    await expect(page.locator("h2")).toContainText("Device Settings");
+    await expect(
+      page.getByRole("heading", { name: "Device Settings", level: 2 }),
+    ).toBeVisible();
 
     // Check for key cards
     await expect(page.locator("text=Device Identity")).toBeVisible();
@@ -91,7 +117,8 @@ test.describe("Device Pages", () => {
   test("should preview and restore backup sections from Settings", async ({
     page,
   }) => {
-    await page.click("role=link[name=设置]");
+    await page.getByRole("button", { name: "System" }).click();
+    await page.getByRole("link", { name: "Settings" }).click();
 
     await expect(page.url()).toContain("/settings");
     await expect(page.getByText("Backup & Restore")).toBeVisible();

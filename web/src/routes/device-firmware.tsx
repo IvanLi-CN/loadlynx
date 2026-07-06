@@ -52,17 +52,14 @@ export function DeviceFirmwareRoute() {
       <header className="flex flex-col gap-2">
         <h2 className="text-2xl font-bold">Firmware</h2>
         <p className="text-sm text-base-content/70">
-          Flash through the local devd bridge or a Web Serial browser session.
-          Real digital flashes require artifact hash evidence, explicit
-          confirmation, and post-flash identity capture.
+          Update firmware through devd or Web Serial.
         </p>
       </header>
 
       {!canUseDevd ? (
         <div role="alert" className="ll-alert ll-alert-warning">
           <span>
-            This device is not bound to an active devd USB lease. Connect it
-            from the Devices page before using devd firmware operations.
+            Connect this device through devd before using firmware actions here.
           </span>
         </div>
       ) : null}
@@ -126,9 +123,7 @@ export function DeviceFirmwareRoute() {
               checked={dryRun}
               onChange={(event) => setDryRun(event.target.checked)}
             />
-            <span className="ll-label-text">
-              Dry-run only: verify target evidence without touching hardware
-            </span>
+            <span className="ll-label-text">Check only</span>
           </label>
 
           {devdNeedsGate ? (
@@ -214,7 +209,7 @@ export function DeviceFirmwareRoute() {
               {selectArtifactMutation.isPending || flashMutation.isPending ? (
                 <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
               ) : null}
-              {dryRun ? "Verify flash dry-run" : "Flash firmware"}
+              {dryRun ? "Check firmware" : "Flash firmware"}
             </button>
           </div>
 
@@ -247,16 +242,14 @@ export function DeviceFirmwareRoute() {
           <div>
             <h3 className="ll-panel-title text-base">Web Serial flash</h3>
             <p className="text-sm text-base-content/70">
-              Uses browser-granted serial access and local files. It does not
-              save OS port paths.
+              Flash directly from the browser with local files.
             </p>
           </div>
 
           {!webSerialSupported ? (
             <div role="alert" className="ll-alert ll-alert-warning text-sm">
               <span>
-                This browser does not support Web Serial. Use Chrome/Edge, or
-                install the released CLI/devd host tools.
+                This browser does not support Web Serial. Use Chrome or Edge.
               </span>
             </div>
           ) : null}

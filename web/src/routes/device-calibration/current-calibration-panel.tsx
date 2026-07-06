@@ -582,8 +582,10 @@ export function CurrentCalibrationPanel({
 
             <div className="divider my-0"></div>
 
-            <div className="flex items-center justify-between gap-3">
-              <div className="text-sm font-bold">电流单位</div>
+            <div className="flex items-center justify-between gap-3 flex-wrap">
+              <div className="text-sm font-bold whitespace-nowrap shrink-0">
+                电流单位
+              </div>
               <div className="ll-join">
                 <button
                   type="button"
