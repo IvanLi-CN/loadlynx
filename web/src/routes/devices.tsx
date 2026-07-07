@@ -252,11 +252,11 @@ export function DevicesRoute() {
           </div>
           <div className="rounded-2xl border border-base-300/70 bg-base-200/30 px-4 py-3 text-xs text-base-content/60">
             <div className="font-mono uppercase tracking-[0.14em] text-base-content/45">
-              {selectionMode ? t("devices.selectedView") : "Devices"}
+              {selectionMode ? t("devices.selectedView") : t("devices.label")}
             </div>
             <div className="mt-2">
               {selectionMode
-                ? `${selectionIntent.route.toUpperCase()}${selectionIntent.panel ? " · PD Panel" : ""}`
+                ? `${selectionIntent.route.toUpperCase()}${selectionIntent.panel ? ` · ${t("devices.pdPanel")}` : ""}`
                 : t("devices.deviceCount", { count: devices.length })}
             </div>
           </div>

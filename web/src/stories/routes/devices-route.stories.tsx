@@ -89,7 +89,7 @@ export const DevdDiscovery: Story = {
   play: async ({ canvas, userEvent }) => {
     const scanDevdButton = await canvas.findByRole(
       "button",
-      { name: "Refresh" },
+      { name: /刷新|Refresh/ },
       { timeout: 5_000 },
     );
     await userEvent.click(scanDevdButton);
@@ -97,7 +97,7 @@ export const DevdDiscovery: Story = {
     await waitFor(
       () => {
         canvas.getByText("Mock LoadLynx devd device");
-        canvas.getByRole("button", { name: "Add from devd" });
+        canvas.getByRole("button", { name: /从 devd 添加|Add from devd/ });
       },
       { timeout: 5_000 },
     );
@@ -111,18 +111,18 @@ export const DevdLeaseCreated: Story = {
   play: async ({ canvas, userEvent }) => {
     const scanDevdButton = await canvas.findByRole(
       "button",
-      { name: "Refresh" },
+      { name: /刷新|Refresh/ },
       { timeout: 5_000 },
     );
     await userEvent.click(scanDevdButton);
     await waitFor(
       () => {
-        canvas.getByRole("button", { name: "Add from devd" });
+        canvas.getByRole("button", { name: /从 devd 添加|Add from devd/ });
       },
       { timeout: 5_000 },
     );
     await userEvent.click(
-      canvas.getByRole("button", { name: "Add from devd" }),
+      canvas.getByRole("button", { name: /从 devd 添加|Add from devd/ }),
     );
 
     await waitFor(
