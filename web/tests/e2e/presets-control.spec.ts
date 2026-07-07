@@ -16,13 +16,16 @@ async function openFirstDeviceControl(page: Page) {
     );
   });
   await page.goto("/devices?demo=true");
-  await expect(page.getByText("Demo Device #1")).toBeVisible();
+  const demoDeviceCard = page
+    .getByRole("article")
+    .filter({ hasText: "mock-001" });
+  await expect(
+    demoDeviceCard.getByRole("heading", { name: "Demo Device #1" }),
+  ).toBeVisible();
 
-  const openControlBtn = page
-    .getByRole("link", {
-      name: "打开仪表盘",
-    })
-    .first();
+  const openControlBtn = demoDeviceCard.getByRole("link", {
+    name: "打开仪表盘",
+  });
 
   await expect(openControlBtn).toBeVisible();
   await openControlBtn.click();

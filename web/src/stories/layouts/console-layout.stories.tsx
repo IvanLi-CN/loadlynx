@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
-import { waitFor } from "storybook/test";
+import { waitFor, within } from "storybook/test";
+import type { StoredDevice } from "../../devices/device-store.ts";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function ConsoleLayoutStory(props: { initialPath: string }) {
@@ -17,6 +18,43 @@ const meta = {
 export default meta;
 
 type Story = StoryObj<typeof meta>;
+
+const MULTI_TRANSPORT_DEVICES: StoredDevice[] = [
+  {
+    id: "device-001",
+    name: "LoadLynx d68638",
+    baseUrl: "http://192.168.31.216",
+    identityDeviceId: "loadlynx-d68638",
+    connectionMarks: ["lan", "usb"],
+    lan: {
+      baseUrl: "http://192.168.31.216",
+    },
+    devd: {
+      baseUrl: "http://127.0.0.1:30180",
+      deviceId: "digital-2bdf",
+      leaseId: "lease-1",
+    },
+  },
+];
+
+const USB_ACTIVE_WITH_STALE_LAN_DEVICE: StoredDevice[] = [
+  {
+    id: "device-002",
+    name: "ESP32-S3 USB CDC (/dev/cu.usbmodem212101)",
+    baseUrl:
+      "http://127.0.0.1:19390/?device_id=loadlynx-d68638&lease_id=lease-1",
+    identityDeviceId: "loadlynx-d68638",
+    connectionMarks: ["lan", "usb"],
+    lan: {
+      baseUrl: "http://192.168.31.216",
+    },
+    devd: {
+      baseUrl: "http://127.0.0.1:19390",
+      deviceId: "loadlynx-d68638",
+      leaseId: "lease-1",
+    },
+  },
+];
 
 export const Large: Story = {
   globals: {
@@ -112,5 +150,72 @@ export const OverviewKeepsLastActiveDevice: Story = {
       },
       { timeout: 5_000 },
     );
+  },
+};
+
+export const ConnectionSwitcherSheet: Story = {
+  render: () => (
+    <RouteStoryHarness
+      initialPath="/device-001/settings"
+      devices={MULTI_TRANSPORT_DEVICES}
+    />
+  ),
+  globals: {
+    viewport: { value: "loadlynxLarge", isRotated: false },
+  },
+  play: async ({ canvas, userEvent }) => {
+    const deviceButton = await canvas.findByRole("button", {
+      name: /当前设备：/,
+    });
+    await userEvent.click(deviceButton);
+
+    const dialog = await canvas.findByRole("dialog", { name: "当前设备" });
+    const drawer = within(dialog);
+    await waitFor(() => {
+      drawer.getByRole("heading", { name: "选择设备" });
+      drawer.getByRole("group", { name: "连接方式" });
+      drawer.getByRole("button", { name: "WiFi" });
+      drawer.getByRole("button", { name: "USB" });
+      drawer.getByRole("button", { name: "Serial" });
+    });
+  },
+};
+
+export const ConnectionSwitcherRejectsStaleWifi: Story = {
+  render: () => (
+    <RouteStoryHarness
+      initialPath="/device-002/settings"
+      devices={USB_ACTIVE_WITH_STALE_LAN_DEVICE}
+    />
+  ),
+  globals: {
+    viewport: { value: "loadlynxLarge", isRotated: false },
+  },
+  play: async ({ canvas, userEvent }) => {
+    const deviceButton = await canvas.findByRole("button", {
+      name: /当前设备：/,
+    });
+    await userEvent.click(deviceButton);
+
+    const dialog = await canvas.findByRole("dialog", { name: "当前设备" });
+    const drawer = within(dialog);
+    const wifiButton = await drawer.findByRole("button", { name: "WiFi" });
+    await userEvent.click(wifiButton);
+
+    await waitFor(
+      () => {
+        drawer.getByRole("heading", { name: "选择设备" });
+        drawer.getByText("无法切换到 WiFi");
+        drawer.getByText(/这个 WiFi 通道当前不可达/);
+      },
+      { timeout: 5_000 },
+    );
+
+    await waitFor(() => {
+      const currentPath = drawer.getByText(/当前：USB/);
+      if (!currentPath) {
+        throw new Error("Expected current management path to remain USB");
+      }
+    });
   },
 };

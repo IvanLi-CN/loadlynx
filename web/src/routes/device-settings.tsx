@@ -1,5 +1,7 @@
-import { useMutation, useQuery } from "@tanstack/react-query";
-import { useState } from "react";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { Cable } from "lucide-react";
+import { useEffect, useState } from "react";
 import {
   BACKUP_SECTION_KEYS,
   deleteWifiConfig,
@@ -7,9 +9,9 @@ import {
   exportDiagnostics,
   getBackupUnknownWarnings,
   getSupportedBackupSections,
+  getWifiStatus,
   isDevdCompatBaseUrl,
   isHttpApiError,
-  isMockBaseUrl,
   makeManualSoftResetRequest,
   makeWifiSetRequest,
   postSoftReset,
@@ -23,22 +25,38 @@ import type {
   LoadLynxBackup,
   SoftResetRequest,
   WifiSetRequest,
+  WifiStatus,
 } from "../api/types.ts";
 import { ConfirmDialog } from "../components/common/confirm-dialog.tsx";
 import { PageContainer } from "../components/layout/page-container.tsx";
-import { DEVICE_QUERY_PARTS } from "../devices/device-query-key.ts";
+import { buildDevdCompatBaseUrl, createDevdLease } from "../devd/client.ts";
+import {
+  DEVICE_QUERY_PARTS,
+  makeDeviceQueryKey,
+} from "../devices/device-query-key.ts";
+import type { StoredDevice } from "../devices/device-store.ts";
 import {
   getDevicePdQueryOptions,
   getDeviceWifiQueryOptions,
+  upsertRealDevice,
   useDeviceIdentityByBaseUrl,
 } from "../devices/hooks.ts";
+import {
+  getManagementTransportLabel,
+  isWifiTransportBaseUrl,
+  isWifiWriteTransportVerified,
+} from "../devices/management-transport.ts";
+import { syncDevicesQueryCache } from "../devices/query-cache.ts";
+import { useDeviceStore } from "../devices/store-context.tsx";
 import { useDeviceContext } from "../layouts/device-layout.tsx";
 import { requireDeviceBaseUrl } from "../lib/device-base-url.ts";
 import { downloadJsonFile } from "../lib/download.ts";
 import {
   formatHttpApiErrorSummary,
   getNetworkErrorHint,
+  getUsbSerialErrorHint,
   isLinkUnavailableError,
+  isUsbSerialUnavailableError,
 } from "../lib/http-error.ts";
 import { parseBackupImportText } from "./device-settings/import-backup.ts";
 
@@ -48,6 +66,36 @@ const BACKUP_SECTION_LABELS: Record<BackupSectionKey, string> = {
   "settings.wifi": "WiFi",
   "settings.pd": "USB-PD",
 };
+
+function formatWifiFailureReason(error: string | null | undefined): string {
+  if (!error) {
+    return "device reported WiFi error";
+  }
+  return error.replace(/_/g, " ");
+}
+
+function formatWifiWriteErrorMessage(error: Error): string {
+  if (!isHttpApiError(error)) {
+    return `WiFi 更新失败：${error.message}`;
+  }
+
+  if (
+    error.code === "UNAVAILABLE" &&
+    /EEPROM write failed/i.test(error.message)
+  ) {
+    return "WiFi 更新失败：设备存储写入失败。请重试；如果反复出现，需要检查固件的 EEPROM/I2C 写入。";
+  }
+
+  if (
+    error.code === "serial_response_timeout" ||
+    error.code === "serial_response_mismatch"
+  ) {
+    return "WiFi 更新状态未确认：USB 管理通道没有收到匹配响应。页面会读回设备状态；如果设置未变化，请重新连接 USB 后重试。";
+  }
+
+  const summary = `${error.code ?? "HTTP"} — ${error.message}`;
+  return `WiFi 更新失败：${summary}`;
+}
 
 function toggleSection(
   current: BackupSectionKey[],
@@ -59,17 +107,139 @@ function toggleSection(
   return [...current, section];
 }
 
+type WifiWriteAction = "save" | "clear" | "restore";
+type WifiSwitchDialogAction = WifiWriteAction | "switch";
+
+function wifiWriteActionLabel(action: WifiSwitchDialogAction | null): string {
+  if (action === "clear") {
+    return "Clear User WiFi";
+  }
+  if (action === "restore") {
+    return "Restore WiFi Backup";
+  }
+  if (action === "switch") {
+    return "WiFi Settings";
+  }
+  return "Save WiFi";
+}
+
+type WifiConnectionOption = {
+  id: "usb-devd" | "web-serial" | "usb-unavailable";
+  label: string;
+  detail: string;
+  disabled: boolean;
+};
+
+type WifiWriteTarget = {
+  baseUrl: string;
+  identityVerified: boolean;
+};
+
+const WIFI_STATUS_REFETCH_INTERVAL_MS = 2_000;
+const WIFI_WRITE_REFRESH_DELAY_MS = 1_000;
+const WIFI_WRITE_REFRESH_ATTEMPTS = 8;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
+
+function shouldRefreshWifiStatusAfterWrite(wifi: WifiStatus): boolean {
+  return (
+    !isCompleteWifiStatus(wifi) ||
+    wifi.state === "configured" ||
+    wifi.state === "connecting"
+  );
+}
+
+function hydrateWifiStatusAfterSet(
+  wifi: WifiStatus,
+  expectedSsid: string,
+): WifiStatus {
+  if (!expectedSsid || wifi.state === "error" || wifi.last_error) {
+    return wifi;
+  }
+
+  return {
+    ...wifi,
+    ssid: wifi.ssid ?? expectedSsid,
+    source: wifi.source ?? "user",
+  };
+}
+
+function getWifiClearApplyError(wifi: WifiStatus): string | null {
+  if (wifi.source !== "user") {
+    return null;
+  }
+
+  return "WiFi clear did not take effect: device still reports user WiFi.";
+}
+
+function isCompleteWifiStatus(wifi: WifiStatus): boolean {
+  return (
+    (wifi.source === "factory" ||
+      wifi.source === "user" ||
+      wifi.source === "none") &&
+    (typeof wifi.ssid === "string" || wifi.ssid === null)
+  );
+}
+
+function withConnectionMark(
+  marks: StoredDevice["connectionMarks"],
+  mark: NonNullable<StoredDevice["connectionMarks"]>[number],
+): StoredDevice["connectionMarks"] {
+  return marks?.includes(mark) ? marks : [...(marks ?? []), mark];
+}
+
+function getWifiConnectionOptions(
+  device: StoredDevice,
+): WifiConnectionOption[] {
+  const options: WifiConnectionOption[] = [];
+
+  if (device.devd?.baseUrl && device.devd.deviceId) {
+    options.push({
+      id: "usb-devd",
+      label: "USB / local devd",
+      detail: `${device.devd.deviceId} via ${device.devd.baseUrl}`,
+      disabled: false,
+    });
+  } else if (device.connectionMarks?.includes("usb")) {
+    options.push({
+      id: "usb-unavailable",
+      label: "USB",
+      detail: "USB was seen before, but no local devd lease is stored.",
+      disabled: true,
+    });
+  }
+
+  if (device.webSerial) {
+    options.push({
+      id: "web-serial",
+      label: "Web Serial",
+      detail: "Known device profile; settings writes are not routed here yet.",
+      disabled: true,
+    });
+  }
+
+  return options;
+}
+
 export function DeviceSettingsRoute() {
-  const { deviceId, baseUrl } = useDeviceContext();
+  const { deviceId, device, baseUrl } = useDeviceContext();
+  const queryClient = useQueryClient();
+  const deviceStore = useDeviceStore();
   const [confirmSoftResetOpen, setConfirmSoftResetOpen] = useState(false);
-  const [confirmWifiAction, setConfirmWifiAction] = useState<
-    "save" | "clear" | null
-  >(null);
-  const [confirmBackupRestoreOpen, setConfirmBackupRestoreOpen] =
-    useState(false);
+  const [wifiSwitchAction, setWifiSwitchAction] =
+    useState<WifiSwitchDialogAction | null>(null);
+  const [selectedWifiConnection, setSelectedWifiConnection] =
+    useState("usb-devd");
+  const [wifiSwitchError, setWifiSwitchError] = useState<string | null>(null);
+  const [wifiSwitchPending, setWifiSwitchPending] = useState(false);
   const [confirmBackupExportOpen, setConfirmBackupExportOpen] = useState(false);
   const [wifiSsid, setWifiSsid] = useState("");
   const [wifiPsk, setWifiPsk] = useState("");
+  const [wifiClearApplyError, setWifiClearApplyError] = useState<string | null>(
+    null,
+  );
   const [backupExportSelection, setBackupExportSelection] =
     useState<BackupSectionKey[]>(BACKUP_SECTION_KEYS);
   const [backupImport, setBackupImport] = useState<LoadLynxBackup | null>(null);
@@ -80,24 +250,154 @@ export function DeviceSettingsRoute() {
   const [backupRestoreSelection, setBackupRestoreSelection] = useState<
     BackupSectionKey[]
   >([]);
+  const isUsbDevdTransport = baseUrl ? isDevdCompatBaseUrl(baseUrl) : false;
   const identityQuery = useDeviceIdentityByBaseUrl(deviceId, baseUrl);
 
-  const wifiQuery = useQuery(
-    getDeviceWifiQueryOptions({
-      deviceId,
-      baseUrl,
-      enabled: Boolean(baseUrl),
-    }),
-  );
+  const wifiQueryOptions = getDeviceWifiQueryOptions({
+    deviceId,
+    baseUrl,
+    enabled: Boolean(baseUrl),
+    refetchInterval: isUsbDevdTransport
+      ? false
+      : WIFI_STATUS_REFETCH_INTERVAL_MS,
+    refetchOnWindowFocus: true,
+  });
+  const wifiQuery = useQuery(wifiQueryOptions);
+
+  const cacheWifiStatus = (targetBaseUrl: string, wifi: WifiStatus) => {
+    queryClient.setQueryData(
+      makeDeviceQueryKey(deviceId, targetBaseUrl, ...DEVICE_QUERY_PARTS.wifi),
+      wifi,
+    );
+  };
+
+  const refreshWifiStatusAfterWrite = (
+    initialWifi: WifiStatus,
+    writeTarget?: WifiWriteTarget,
+    expectedSsid = "",
+  ) => {
+    const targetBaseUrl = writeTarget?.baseUrl ?? baseUrl;
+    if (!targetBaseUrl) {
+      return;
+    }
+
+    const initial = hydrateWifiStatusAfterSet(initialWifi, expectedSsid);
+    if (isCompleteWifiStatus(initial)) {
+      cacheWifiStatus(targetBaseUrl, initial);
+    }
+    if (!shouldRefreshWifiStatusAfterWrite(initial)) {
+      return;
+    }
+
+    void (async () => {
+      let latest = initial;
+      for (
+        let attempt = 0;
+        attempt < WIFI_WRITE_REFRESH_ATTEMPTS &&
+        shouldRefreshWifiStatusAfterWrite(latest);
+        attempt += 1
+      ) {
+        await delay(WIFI_WRITE_REFRESH_DELAY_MS);
+        try {
+          latest = hydrateWifiStatusAfterSet(
+            await getWifiStatus(targetBaseUrl),
+            expectedSsid,
+          );
+          cacheWifiStatus(targetBaseUrl, latest);
+        } catch {
+          return;
+        }
+      }
+    })();
+  };
+
+  const refreshWifiStatusAfterClear = (
+    initialWifi: WifiStatus,
+    writeTarget?: WifiWriteTarget,
+  ) => {
+    const targetBaseUrl = writeTarget?.baseUrl ?? baseUrl;
+    if (!targetBaseUrl) {
+      return;
+    }
+
+    if (isCompleteWifiStatus(initialWifi)) {
+      cacheWifiStatus(targetBaseUrl, initialWifi);
+    }
+    const initialError = getWifiClearApplyError(initialWifi);
+    if (initialError) {
+      setWifiClearApplyError(initialError);
+      return;
+    }
+    if (!shouldRefreshWifiStatusAfterWrite(initialWifi)) {
+      return;
+    }
+
+    void (async () => {
+      let latest = initialWifi;
+      for (
+        let attempt = 0;
+        attempt < WIFI_WRITE_REFRESH_ATTEMPTS &&
+        shouldRefreshWifiStatusAfterWrite(latest);
+        attempt += 1
+      ) {
+        await delay(WIFI_WRITE_REFRESH_DELAY_MS);
+        try {
+          latest = await getWifiStatus(targetBaseUrl);
+          cacheWifiStatus(targetBaseUrl, latest);
+        } catch {
+          return;
+        }
+
+        const latestError = getWifiClearApplyError(latest);
+        if (latestError) {
+          setWifiClearApplyError(latestError);
+          return;
+        }
+      }
+    })();
+  };
+
+  const recoverWifiClearAfterError = async (
+    writeTarget?: WifiWriteTarget,
+  ): Promise<boolean> => {
+    const targetBaseUrl = writeTarget?.baseUrl ?? baseUrl;
+    if (!targetBaseUrl) {
+      return false;
+    }
+
+    let lastApplyError: string | null = null;
+    for (let attempt = 0; attempt < WIFI_WRITE_REFRESH_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        await delay(WIFI_WRITE_REFRESH_DELAY_MS);
+      }
+
+      try {
+        const latest = await getWifiStatus(targetBaseUrl);
+        cacheWifiStatus(targetBaseUrl, latest);
+        lastApplyError = getWifiClearApplyError(latest);
+        if (!lastApplyError) {
+          return true;
+        }
+      } catch {}
+    }
+
+    if (lastApplyError) {
+      setWifiClearApplyError(lastApplyError);
+    }
+    return false;
+  };
 
   const topError = (() => {
-    const err = identityQuery.error;
-    if (!err || !isHttpApiError(err)) return null;
+    const err = [identityQuery.error, wifiQuery.error].find(isHttpApiError);
+    if (!err) return null;
 
     const summary = formatHttpApiErrorSummary(err);
 
     if (err.status === 0 && err.code === "NETWORK_ERROR") {
       return { summary, hint: getNetworkErrorHint(baseUrl) } as const;
+    }
+    if (isUsbSerialUnavailableError(err)) {
+      return { summary, hint: getUsbSerialErrorHint(baseUrl) } as const;
     }
     return { summary, hint: null } as const;
   })();
@@ -110,27 +410,59 @@ export function DeviceSettingsRoute() {
     },
   });
 
-  const wifiMutation = useMutation({
-    mutationFn: async () => {
-      const requiredBaseUrl = requireDeviceBaseUrl(baseUrl);
+  const wifiMutation = useMutation<
+    WifiStatus,
+    Error,
+    WifiWriteTarget | undefined
+  >({
+    mutationFn: async (writeTarget) => {
+      setWifiClearApplyError(null);
+      const requiredBaseUrl = requireDeviceBaseUrl(
+        writeTarget?.baseUrl ?? baseUrl,
+      );
       const payload: WifiSetRequest = makeWifiSetRequest(
         wifiSsid.trim(),
         wifiPsk,
       );
-      return postWifiConfig(requiredBaseUrl, payload);
+      return postWifiConfig(requiredBaseUrl, payload, {
+        identityVerified:
+          writeTarget?.identityVerified ?? identityQuery.isSuccess,
+      });
     },
-    onSuccess: () => {
+    onSuccess: (wifi, writeTarget) => {
+      refreshWifiStatusAfterWrite(wifi, writeTarget, wifiSsid.trim());
       setWifiPsk("");
-      void wifiQuery.refetch();
     },
   });
 
-  const wifiClearMutation = useMutation({
-    mutationFn: async () => {
-      return deleteWifiConfig(requireDeviceBaseUrl(baseUrl));
+  const wifiClearMutation = useMutation<
+    WifiStatus,
+    Error,
+    WifiWriteTarget | undefined
+  >({
+    mutationFn: async (writeTarget) => {
+      setWifiClearApplyError(null);
+      return deleteWifiConfig(
+        requireDeviceBaseUrl(writeTarget?.baseUrl ?? baseUrl),
+        {
+          identityVerified:
+            writeTarget?.identityVerified ?? identityQuery.isSuccess,
+        },
+      );
     },
-    onSuccess: () => {
-      void wifiQuery.refetch();
+    onSuccess: (wifi, writeTarget) => {
+      refreshWifiStatusAfterClear(wifi, writeTarget);
+      setWifiSsid("");
+      setWifiPsk("");
+    },
+    onError: (_error, writeTarget) => {
+      void (async () => {
+        if (await recoverWifiClearAfterError(writeTarget)) {
+          wifiClearMutation.reset();
+          setWifiSsid("");
+          setWifiPsk("");
+        }
+      })();
     },
   });
 
@@ -180,9 +512,15 @@ export function DeviceSettingsRoute() {
     },
   });
 
-  const backupRestoreMutation = useMutation<BackupRestoreResult, Error, void>({
-    mutationFn: async () => {
-      const requiredBaseUrl = requireDeviceBaseUrl(baseUrl);
+  const backupRestoreMutation = useMutation<
+    BackupRestoreResult,
+    Error,
+    WifiWriteTarget | undefined
+  >({
+    mutationFn: async (writeTarget) => {
+      const requiredBaseUrl = requireDeviceBaseUrl(
+        writeTarget?.baseUrl ?? baseUrl,
+      );
       if (!backupImport) {
         throw new Error("No backup file selected.");
       }
@@ -190,6 +528,10 @@ export function DeviceSettingsRoute() {
         requiredBaseUrl,
         backupImport,
         backupRestoreSelection,
+        {
+          identityVerified:
+            writeTarget?.identityVerified ?? identityQuery.isSuccess,
+        },
       );
     },
   });
@@ -212,21 +554,180 @@ export function DeviceSettingsRoute() {
 
   const identity = identityQuery.data;
   const wifi = wifiQuery.data;
-  const wifiLanConfirmationRequired = baseUrl
-    ? !isMockBaseUrl(baseUrl) && !isDevdCompatBaseUrl(baseUrl)
-    : false;
+  const hasUserWifiOverride = wifi?.source === "user";
+
+  useEffect(() => {
+    if (wifi?.state !== "connected" || !wifi.ip) {
+      return;
+    }
+
+    const identityDeviceId =
+      identity?.device_id?.trim() || device.identityDeviceId;
+    if (!identityDeviceId) {
+      return;
+    }
+
+    const current = deviceStore.getDevices();
+    const next = upsertRealDevice(current, {
+      name: device.name,
+      baseUrl: device.baseUrl,
+      identityDeviceId,
+      connectionMarks: device.connectionMarks,
+      lan: device.lan,
+      devd: device.devd,
+      webSerial: device.webSerial,
+      identity,
+      wifi,
+    });
+    if (JSON.stringify(current) === JSON.stringify(next)) {
+      return;
+    }
+
+    deviceStore.setDevices(next);
+    syncDevicesQueryCache(queryClient, deviceStore.getDevices());
+  }, [device, deviceStore, identity, queryClient, wifi]);
+
+  const wifiFailureReason =
+    wifi?.last_error || wifi?.state === "error"
+      ? formatWifiFailureReason(wifi?.last_error)
+      : null;
+  const wifiWriteErrorMessage = (() => {
+    if (wifiClearApplyError) {
+      return wifiClearApplyError;
+    }
+
+    const clearError =
+      wifiClearMutation.error && wifi && !getWifiClearApplyError(wifi)
+        ? null
+        : wifiClearMutation.error;
+    const error = clearError ?? wifiMutation.error;
+    if (!error) {
+      return null;
+    }
+
+    return formatWifiWriteErrorMessage(error);
+  })();
+  const wifiConnectionSwitchRequired = isWifiTransportBaseUrl(baseUrl);
+  const wifiWriteTransportVerified = isWifiWriteTransportVerified(
+    baseUrl,
+    identityQuery.isSuccess,
+  );
+  const wifiWriteReadinessMessage = wifiWriteTransportVerified
+    ? null
+    : "需要先切换到已验证的 USB/devd 管理连接，才可修改 WiFi。";
+  const wifiWriteLocked = Boolean(wifiWriteReadinessMessage);
+  const wifiConnectionOptions = getWifiConnectionOptions(device);
+  const availableWifiConnectionOptions = wifiConnectionOptions.filter(
+    (option) => !option.disabled,
+  );
+  const hasKnownWifiConnectionOptions = wifiConnectionOptions.length > 0;
+  const selectedWifiConnectionOption = wifiConnectionOptions.find(
+    (option) => option.id === selectedWifiConnection,
+  );
   const supportedImportSections = getSupportedBackupSections(backupImport);
   const backupWarnings = getBackupUnknownWarnings(backupImport);
   const backupSafetyBlocked =
     backupRestoreMutation.error &&
     isHttpApiError(backupRestoreMutation.error) &&
     backupRestoreMutation.error.code === "SAFETY_BLOCKED";
-  const backupWifiLanConfirmationRequired =
-    wifiLanConfirmationRequired &&
+  const backupWifiWriteConnectionRequired =
+    !wifiWriteTransportVerified &&
     backupRestoreSelection.includes("settings.wifi");
   const backupWifiExportLanConfirmationRequired =
-    wifiLanConfirmationRequired &&
+    wifiConnectionSwitchRequired &&
     effectiveBackupExportSelection.includes("settings.wifi");
+
+  const openWifiSwitchDialog = (action: WifiSwitchDialogAction) => {
+    setWifiSwitchError(null);
+    setSelectedWifiConnection(
+      wifiConnectionOptions.find((option) => !option.disabled)?.id ??
+        wifiConnectionOptions[0]?.id ??
+        "usb-devd",
+    );
+    setWifiSwitchAction(action);
+  };
+
+  const requestWifiWrite = (action: WifiWriteAction) => {
+    if (!wifiWriteTransportVerified) {
+      openWifiSwitchDialog(action);
+      return;
+    }
+
+    if (action === "clear") {
+      wifiClearMutation.mutate(undefined);
+    } else if (action === "restore") {
+      backupRestoreMutation.mutate(undefined);
+    } else {
+      wifiMutation.mutate(undefined);
+    }
+  };
+
+  const switchWifiConnection = async (
+    option: WifiConnectionOption | undefined = selectedWifiConnectionOption,
+  ): Promise<WifiWriteTarget> => {
+    if (option?.id !== "usb-devd") {
+      throw new Error("Select an available management connection.");
+    }
+    const devd = device.devd;
+    if (!devd?.baseUrl || !devd.deviceId) {
+      throw new Error("This device has no stored USB/devd connection.");
+    }
+
+    const lease = await createDevdLease(devd.deviceId, devd.baseUrl);
+    const nextDevd = {
+      ...devd,
+      leaseId: lease.lease_id,
+    };
+    const nextBaseUrl = buildDevdCompatBaseUrl(nextDevd);
+    const current = deviceStore.getDevices();
+    const next = current.map((entry) =>
+      entry.id === deviceId
+        ? {
+            ...entry,
+            baseUrl: nextBaseUrl,
+            devd: nextDevd,
+            connectionMarks: withConnectionMark(entry.connectionMarks, "usb"),
+          }
+        : entry,
+    );
+    deviceStore.setDevices(next);
+    syncDevicesQueryCache(queryClient, next);
+    return { baseUrl: nextBaseUrl, identityVerified: true };
+  };
+
+  const continueWifiWriteVia = (option: WifiConnectionOption | undefined) => {
+    if (!option || option.disabled || wifiSwitchPending) {
+      return;
+    }
+    const action = wifiSwitchAction;
+    setSelectedWifiConnection(option.id);
+    setWifiSwitchPending(true);
+    setWifiSwitchError(null);
+    switchWifiConnection(option)
+      .then((writeTarget) => {
+        setWifiSwitchAction(null);
+        if (!action || action === "switch") {
+          return;
+        }
+        if (action === "clear") {
+          wifiClearMutation.mutate(writeTarget);
+        } else if (action === "restore") {
+          backupRestoreMutation.mutate(writeTarget);
+        } else {
+          wifiMutation.mutate(writeTarget);
+        }
+      })
+      .catch((error) => {
+        setWifiSwitchError(
+          error instanceof Error
+            ? error.message
+            : "Failed to switch connection.",
+        );
+      })
+      .finally(() => {
+        setWifiSwitchPending(false);
+      });
+  };
 
   const handleSoftReset = () => {
     if (!baseUrl) {
@@ -236,27 +737,23 @@ export function DeviceSettingsRoute() {
   };
 
   const handleWifiSave = () => {
-    if (wifiLanConfirmationRequired) {
-      setConfirmWifiAction("save");
-      return;
-    }
-    wifiMutation.mutate();
+    requestWifiWrite("save");
   };
 
   const handleWifiClear = () => {
-    if (wifiLanConfirmationRequired) {
-      setConfirmWifiAction("clear");
-      return;
-    }
-    wifiClearMutation.mutate();
+    requestWifiWrite("clear");
+  };
+
+  const handleWifiSwitchConnection = () => {
+    openWifiSwitchDialog("switch");
   };
 
   const handleBackupRestore = () => {
-    if (backupWifiLanConfirmationRequired) {
-      setConfirmBackupRestoreOpen(true);
+    if (backupWifiWriteConnectionRequired) {
+      requestWifiWrite("restore");
       return;
     }
-    backupRestoreMutation.mutate();
+    backupRestoreMutation.mutate(undefined);
   };
 
   const handleBackupExport = () => {
@@ -303,32 +800,118 @@ export function DeviceSettingsRoute() {
           softResetMutation.mutate();
         }}
       />
-      <ConfirmDialog
-        open={confirmWifiAction !== null}
-        title={confirmWifiAction === "clear" ? "Clear User WiFi" : "Save WiFi"}
-        body="This LAN request writes WiFi settings over the network."
-        details={[
-          "Use the local USB/devd path when available.",
-          "The PSK will not be shown in diagnostics or traces.",
-        ]}
-        confirmLabel={
-          confirmWifiAction === "clear" ? "Clear User WiFi" : "Save WiFi"
-        }
-        destructive={confirmWifiAction === "clear"}
-        confirmDisabled={
-          wifiMutation.isPending || wifiClearMutation.isPending || !baseUrl
-        }
-        onCancel={() => setConfirmWifiAction(null)}
-        onConfirm={() => {
-          const action = confirmWifiAction;
-          setConfirmWifiAction(null);
-          if (action === "clear") {
-            wifiClearMutation.mutate();
-          } else if (action === "save") {
-            wifiMutation.mutate();
-          }
-        }}
-      />
+      {wifiSwitchAction ? (
+        <div className="ll-modal" role="dialog" aria-modal="true">
+          <div className="ll-modal-box">
+            <h3 className="font-bold text-lg">
+              {hasKnownWifiConnectionOptions ? "Switch" : "Bind"} Connection for{" "}
+              {wifiWriteActionLabel(wifiSwitchAction)}
+            </h3>
+            {hasKnownWifiConnectionOptions ? (
+              <p className="py-3 text-sm">
+                WiFi writes run only after an independent management connection
+                is verified. Continue through USB/devd; the write will not be
+                sent if the switch fails.
+              </p>
+            ) : (
+              <p className="py-3 text-sm">
+                This device is only known through the current WiFi/HTTP path.
+                Bind USB/devd before changing WiFi.
+              </p>
+            )}
+            {hasKnownWifiConnectionOptions ? (
+              <div className="grid gap-2">
+                {wifiConnectionOptions.map((option) => (
+                  <label
+                    key={option.id}
+                    className={`flex items-start gap-3 rounded border border-base-200 p-3 text-sm ${
+                      option.disabled
+                        ? "cursor-not-allowed opacity-60"
+                        : "cursor-pointer hover:bg-base-200/50"
+                    }`}
+                  >
+                    <input
+                      type="radio"
+                      name="wifi-connection"
+                      className="ll-radio ll-radio-sm mt-0.5"
+                      value={option.id}
+                      checked={selectedWifiConnection === option.id}
+                      disabled={wifiSwitchPending || option.disabled}
+                      onChange={() => setSelectedWifiConnection(option.id)}
+                    />
+                    <span className="min-w-0">
+                      <span className="block font-bold">{option.label}</span>
+                      <span className="block break-all text-xs text-base-content/60">
+                        {option.detail}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+            ) : null}
+            {wifiSwitchError ? (
+              <div className="ll-alert ll-alert-error mt-3 text-xs">
+                <span>{wifiSwitchError}</span>
+              </div>
+            ) : null}
+            <div className="ll-modal-action">
+              {availableWifiConnectionOptions.length > 0 ? (
+                <button
+                  type="button"
+                  className="ll-button ll-button-primary min-w-32"
+                  disabled={
+                    wifiSwitchPending ||
+                    !selectedWifiConnectionOption ||
+                    selectedWifiConnectionOption.disabled
+                  }
+                  onClick={() =>
+                    continueWifiWriteVia(selectedWifiConnectionOption)
+                  }
+                >
+                  {wifiSwitchPending ? (
+                    <span className="ll-loading ll-loading-spinner ll-loading-xs"></span>
+                  ) : (
+                    <Cable size={16} strokeWidth={2.4} aria-hidden="true" />
+                  )}
+                  Continue
+                </button>
+              ) : (
+                <Link
+                  to="/devices"
+                  className="ll-button ll-button-primary min-w-40"
+                >
+                  <Cable size={16} strokeWidth={2.4} aria-hidden="true" />
+                  Bind connection
+                </Link>
+              )}
+              <button
+                type="button"
+                className="ll-button min-w-24"
+                disabled={wifiSwitchPending}
+                onClick={() => {
+                  setWifiSwitchAction(null);
+                  setWifiSwitchError(null);
+                }}
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+          <button
+            type="button"
+            className="ll-modal-backdrop"
+            aria-label="Close"
+            disabled={wifiSwitchPending}
+            onClick={() => {
+              if (wifiSwitchPending) {
+                return;
+              }
+              setWifiSwitchAction(null);
+              setWifiSwitchError(null);
+            }}
+          />
+        </div>
+      ) : null}
       <ConfirmDialog
         open={confirmBackupExportOpen}
         title="Export WiFi Backup"
@@ -344,24 +927,6 @@ export function DeviceSettingsRoute() {
         onConfirm={() => {
           setConfirmBackupExportOpen(false);
           backupExportMutation.mutate();
-        }}
-      />
-      <ConfirmDialog
-        open={confirmBackupRestoreOpen}
-        title="Restore WiFi Backup"
-        body="This restore will write WiFi credentials over the LAN connection."
-        details={[
-          "Use the local USB/devd path when available.",
-          "The backup file contains plaintext PSK.",
-          "Output will be disabled before any restore writes.",
-        ]}
-        confirmLabel="Restore Selected"
-        destructive
-        confirmDisabled={backupRestoreMutation.isPending || !baseUrl}
-        onCancel={() => setConfirmBackupRestoreOpen(false)}
-        onConfirm={() => {
-          setConfirmBackupRestoreOpen(false);
-          backupRestoreMutation.mutate();
         }}
       />
       <header>
@@ -666,6 +1231,12 @@ export function DeviceSettingsRoute() {
                         {identity?.network.mac ?? "..."}
                       </td>
                     </tr>
+                    <tr>
+                      <td className="text-base-content/60">Management path</td>
+                      <td data-testid="management-transport">
+                        {getManagementTransportLabel(baseUrl)}
+                      </td>
+                    </tr>
                   </tbody>
                 </table>
               </div>
@@ -681,57 +1252,122 @@ export function DeviceSettingsRoute() {
               <div className="grid gap-3">
                 <div className="grid grid-cols-2 gap-3 text-xs">
                   <span className="text-base-content/60">SSID</span>
-                  <span className="truncate">{wifi?.ssid ?? "..."}</span>
+                  <span className="truncate" data-testid="wifi-status-ssid">
+                    {wifi?.ssid ?? "..."}
+                  </span>
                   <span className="text-base-content/60">Source</span>
-                  <span>{wifi?.source ?? "..."}</span>
+                  <span data-testid="wifi-status-source">
+                    {wifi?.source ?? "..."}
+                  </span>
                   <span className="text-base-content/60">State</span>
-                  <span>{wifi?.state ?? "..."}</span>
+                  <span data-testid="wifi-status-state">
+                    {wifi?.state ?? "..."}
+                  </span>
                   <span className="text-base-content/60">IP</span>
-                  <span>{wifi?.ip ?? "..."}</span>
+                  <span data-testid="wifi-status-ip">{wifi?.ip ?? "..."}</span>
+                  <span className="text-base-content/60">Last error</span>
+                  <span
+                    className={
+                      wifiFailureReason ? "text-error font-bold" : undefined
+                    }
+                  >
+                    {wifiFailureReason ?? wifi?.last_error ?? "none"}
+                  </span>
                 </div>
-                <input
-                  className="ll-input ll-input-sm w-full"
-                  placeholder="SSID"
-                  value={wifiSsid}
-                  onChange={(event) => setWifiSsid(event.target.value)}
-                />
-                <input
-                  className="ll-input ll-input-sm w-full"
-                  placeholder="PSK"
-                  type="password"
-                  value={wifiPsk}
-                  onChange={(event) => setWifiPsk(event.target.value)}
-                />
-                {wifiMutation.error && isHttpApiError(wifiMutation.error) ? (
+                {wifiFailureReason ? (
                   <div className="ll-alert ll-alert-error shadow-sm text-xs">
-                    <span>
-                      WiFi update failed: {wifiMutation.error.code ?? "HTTP"} —{" "}
-                      {wifiMutation.error.message}
-                    </span>
+                    <span>WiFi connection failed: {wifiFailureReason}</span>
                   </div>
                 ) : null}
-                <div className="flex flex-wrap gap-2">
-                  <button
-                    type="button"
-                    className="ll-button ll-button-neutral ll-button-sm"
-                    disabled={
-                      !wifiSsid.trim() ||
-                      !wifiPsk ||
-                      wifiMutation.isPending ||
-                      !baseUrl
-                    }
-                    onClick={handleWifiSave}
+                <div
+                  className={`relative rounded-lg ${
+                    wifiWriteLocked ? "overflow-hidden" : "overflow-visible"
+                  }`}
+                >
+                  <div
+                    aria-hidden={wifiWriteLocked ? true : undefined}
+                    className={`grid gap-3 transition duration-200 ${
+                      wifiWriteLocked
+                        ? "pointer-events-none select-none blur-[2px] opacity-45"
+                        : ""
+                    }`}
                   >
-                    Save WiFi
-                  </button>
-                  <button
-                    type="button"
-                    className="ll-button ll-button-outline ll-button-sm"
-                    disabled={wifiClearMutation.isPending || !baseUrl}
-                    onClick={handleWifiClear}
-                  >
-                    Clear User WiFi
-                  </button>
+                    <input
+                      className="ll-input ll-input-sm w-full"
+                      placeholder="SSID"
+                      value={wifiSsid}
+                      disabled={wifiWriteLocked}
+                      onChange={(event) => setWifiSsid(event.target.value)}
+                    />
+                    <input
+                      className="ll-input ll-input-sm w-full"
+                      placeholder="PSK"
+                      type="password"
+                      value={wifiPsk}
+                      disabled={wifiWriteLocked}
+                      onChange={(event) => setWifiPsk(event.target.value)}
+                    />
+                    {wifiWriteErrorMessage ? (
+                      <div className="ll-alert ll-alert-error shadow-sm text-xs">
+                        <span>{wifiWriteErrorMessage}</span>
+                      </div>
+                    ) : null}
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        className="ll-button ll-button-neutral ll-button-sm"
+                        disabled={
+                          wifiWriteLocked ||
+                          !wifiSsid.trim() ||
+                          !wifiPsk ||
+                          wifiMutation.isPending ||
+                          !baseUrl
+                        }
+                        onClick={handleWifiSave}
+                      >
+                        Save WiFi
+                      </button>
+                      <button
+                        type="button"
+                        className="ll-button ll-button-outline ll-button-sm"
+                        title={
+                          hasUserWifiOverride
+                            ? undefined
+                            : "No user WiFi override is saved."
+                        }
+                        disabled={
+                          wifiWriteLocked ||
+                          !hasUserWifiOverride ||
+                          wifiClearMutation.isPending ||
+                          !baseUrl
+                        }
+                        onClick={handleWifiClear}
+                      >
+                        Clear User WiFi
+                      </button>
+                    </div>
+                  </div>
+                  {wifiWriteReadinessMessage ? (
+                    <div className="absolute inset-0 z-10 flex items-center justify-center rounded-lg border border-warning/50 bg-base-100/45 px-4 py-6 text-center backdrop-blur-md">
+                      <div className="flex max-w-md flex-col items-center gap-3">
+                        <p className="text-sm font-semibold leading-relaxed text-base-content">
+                          {wifiWriteReadinessMessage}
+                        </p>
+                        <button
+                          type="button"
+                          className="ll-button ll-button-primary ll-button-sm min-w-44"
+                          onClick={handleWifiSwitchConnection}
+                        >
+                          <Cable
+                            size={16}
+                            strokeWidth={2.4}
+                            aria-hidden="true"
+                          />
+                          切换连接方式
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
               </div>
             </div>

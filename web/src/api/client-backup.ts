@@ -5,7 +5,12 @@ import {
   postCalibrationCommit,
   postCalibrationReset,
 } from "./client-calibration.ts";
-import { HttpApiError, httpJsonQueued, isMockBaseUrl } from "./client-core.ts";
+import {
+  HttpApiError,
+  httpJsonQueued,
+  isDevdCompatBaseUrl,
+  isMockBaseUrl,
+} from "./client-core.ts";
 import {
   getControl,
   getPd,
@@ -56,9 +61,102 @@ export function makeManualSoftResetRequest(): SoftResetRequest {
   return { reason: "manual" };
 }
 
+export interface WifiWriteGuard {
+  identityVerified?: boolean;
+}
+
+const WIFI_SET_RECOVERY_ATTEMPTS = 8;
+const WIFI_SET_RECOVERY_DELAY_MS = 1_000;
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => globalThis.setTimeout(resolve, ms));
+}
+
+function isRecoverableWifiSetError(error: unknown): error is HttpApiError {
+  return (
+    error instanceof HttpApiError &&
+    (error.code === "serial_response_timeout" ||
+      error.code === "serial_response_mismatch")
+  );
+}
+
+function wifiSetMatchesPayload(
+  wifi: WifiStatus,
+  payload: WifiSetRequest,
+): boolean {
+  return (
+    wifi.source === "user" &&
+    wifi.ssid === payload.ssid &&
+    wifi.state !== "error"
+  );
+}
+
+async function recoverWifiSetAfterError(
+  baseUrl: string,
+  payload: WifiSetRequest,
+): Promise<WifiStatus | null> {
+  for (let attempt = 0; attempt < WIFI_SET_RECOVERY_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await delay(WIFI_SET_RECOVERY_DELAY_MS);
+    }
+
+    try {
+      const wifi = await getWifiStatus(baseUrl);
+      if (wifiSetMatchesPayload(wifi, payload)) {
+        return wifi;
+      }
+    } catch {
+      // Preserve the original write error when readback cannot confirm success.
+    }
+  }
+  return null;
+}
+
+export function assertWifiWriteAllowed(
+  baseUrl: string,
+  guard: WifiWriteGuard = {},
+): void {
+  if (isMockBaseUrl(baseUrl)) {
+    return;
+  }
+
+  if (isDevdCompatBaseUrl(baseUrl)) {
+    if (guard.identityVerified === true) {
+      return;
+    }
+    throw new HttpApiError({
+      status: 0,
+      code: "WIFI_WRITE_REQUIRES_VERIFIED_LOCAL_CONNECTION",
+      message:
+        "WiFi settings require a verified USB/devd lease and device identity before writing.",
+      retryable: false,
+    });
+  }
+
+  throw new HttpApiError({
+    status: 0,
+    code: "WIFI_WRITE_REQUIRES_LOCAL_CONNECTION",
+    message:
+      "WiFi settings can only be changed from a non-WiFi connection. Switch to USB/devd before changing WiFi.",
+    retryable: false,
+  });
+}
+
 export async function getWifiStatus(baseUrl: string): Promise<WifiStatus> {
   if (isMockBaseUrl(baseUrl)) {
-    return structuredClone(getOrCreateMockDevice(baseUrl).wifi);
+    const state = getOrCreateMockDevice(baseUrl);
+    if (state.wifiConnectPollsRemaining > 0) {
+      state.wifiConnectPollsRemaining -= 1;
+      if (state.wifiConnectPollsRemaining === 0) {
+        state.wifi = {
+          ...state.wifi,
+          state: "connected",
+          ip: "192.0.2.11",
+          last_error: null,
+        };
+      }
+    }
+    return structuredClone(state.wifi);
   }
   return httpJsonQueued<WifiStatus>(baseUrl, "/api/v1/wifi");
 }
@@ -80,36 +178,103 @@ export async function getWifiCredentials(
 export async function postWifiConfig(
   baseUrl: string,
   payload: WifiSetRequest,
+  guard?: WifiWriteGuard,
+): Promise<WifiStatus> {
+  try {
+    if (isMockBaseUrl(baseUrl)) {
+      const state = getOrCreateMockDevice(baseUrl);
+      const normalizedBaseUrl = baseUrl.toLowerCase();
+      if (normalizedBaseUrl.includes("wifi-set-eeprom-error")) {
+        throw new HttpApiError({
+          status: 503,
+          code: "UNAVAILABLE",
+          message: "EEPROM write failed",
+          retryable: true,
+        });
+      }
+
+      state.wifi = {
+        ssid: payload.ssid,
+        source: "user",
+        state: payload.wait ? "connected" : "configured",
+        ip: payload.wait ? "192.0.2.11" : null,
+        last_error: null,
+      };
+      state.wifiConnectPollsRemaining = payload.wait ? 0 : 2;
+      state.wifiPsk = payload.psk;
+
+      if (normalizedBaseUrl.includes("wifi-set-timeout-success")) {
+        throw new HttpApiError({
+          status: 504,
+          code: "serial_response_timeout",
+          message:
+            "USB request devd-set-wifi-config-test did not receive a matching response",
+          retryable: true,
+        });
+      }
+
+      return structuredClone(state.wifi);
+    }
+    assertWifiWriteAllowed(baseUrl, guard);
+    const response = await httpJsonQueued<WifiStatusResponse>(
+      baseUrl,
+      "/api/v1/wifi",
+      {
+        method: "POST",
+        body: JSON.stringify(payload),
+        headers: {
+          "Content-Type": "application/json",
+        },
+      },
+    );
+    return unwrapWifiStatusResponse(response);
+  } catch (error) {
+    if (isRecoverableWifiSetError(error)) {
+      const recovered = await recoverWifiSetAfterError(baseUrl, payload);
+      if (recovered) {
+        return recovered;
+      }
+    }
+    throw error;
+  }
+}
+
+export async function deleteWifiConfig(
+  baseUrl: string,
+  guard?: WifiWriteGuard,
 ): Promise<WifiStatus> {
   if (isMockBaseUrl(baseUrl)) {
     const state = getOrCreateMockDevice(baseUrl);
-    state.wifi = {
-      ssid: payload.ssid,
-      source: "user",
-      state: payload.wait ? "connected" : "configured",
-      ip: payload.wait ? "192.0.2.11" : null,
-      last_error: null,
-    };
-    state.wifiPsk = payload.psk;
-    return structuredClone(state.wifi);
-  }
-  const response = await httpJsonQueued<WifiStatusResponse>(
-    baseUrl,
-    "/api/v1/wifi",
-    {
-      method: "POST",
-      body: JSON.stringify(payload),
-      headers: {
-        "Content-Type": "application/json",
-      },
-    },
-  );
-  return unwrapWifiStatusResponse(response);
-}
-
-export async function deleteWifiConfig(baseUrl: string): Promise<WifiStatus> {
-  if (isMockBaseUrl(baseUrl)) {
-    const state = getOrCreateMockDevice(baseUrl);
+    const normalizedBaseUrl = baseUrl.toLowerCase();
+    if (normalizedBaseUrl.includes("wifi-clear-error")) {
+      throw new HttpApiError({
+        status: 503,
+        code: "MOCK_WIFI_CLEAR_FAILED",
+        message: "Mock WiFi clear failed.",
+        retryable: true,
+      });
+    }
+    if (normalizedBaseUrl.includes("wifi-clear-noop")) {
+      return structuredClone(state.wifi);
+    }
+    if (normalizedBaseUrl.includes("wifi-clear-timeout-success")) {
+      state.wifi = {
+        ssid: "",
+        source: "none",
+        state: "idle",
+        ip: null,
+        last_error: null,
+      };
+      state.wifiConnectPollsRemaining = 0;
+      state.wifiPsk = "";
+      throw new HttpApiError({
+        status: 504,
+        code: "serial_response_timeout",
+        message:
+          "USB request devd-clear-wifi-config-test did not receive a matching response",
+        retryable: true,
+      });
+    }
     state.wifi = {
       ssid: "LoadLynx Lab",
       source: "factory",
@@ -117,9 +282,11 @@ export async function deleteWifiConfig(baseUrl: string): Promise<WifiStatus> {
       ip: null,
       last_error: null,
     };
+    state.wifiConnectPollsRemaining = 2;
     state.wifiPsk = "factory-mock-psk";
     return structuredClone(state.wifi);
   }
+  assertWifiWriteAllowed(baseUrl, guard);
   const response = await httpJsonQueued<WifiStatusResponse>(
     baseUrl,
     "/api/v1/wifi",
@@ -235,6 +402,7 @@ export async function restoreDeviceBackup(
   baseUrl: string,
   backup: LoadLynxBackup,
   selected: BackupSectionKey[],
+  guard?: WifiWriteGuard,
 ): Promise<BackupRestoreResult> {
   validateBackupEnvelope(backup);
   const warnings = getBackupUnknownWarnings(backup);
@@ -308,7 +476,7 @@ export async function restoreDeviceBackup(
   const wifiSection = settingsSection?.wifi;
   if (selected.includes("settings.wifi") && wifiSection) {
     await run("settings.wifi", async () => {
-      await restoreWifiBackup(baseUrl, wifiSection);
+      await restoreWifiBackup(baseUrl, wifiSection, guard);
     });
   }
 
@@ -325,6 +493,7 @@ async function restoreWifiBackup(
   wifi: NonNullable<
     NonNullable<LoadLynxBackup["sections"]["settings"]>["wifi"]
   >,
+  guard?: WifiWriteGuard,
 ): Promise<void> {
   try {
     const readback = await getWifiCredentials(baseUrl);
@@ -341,10 +510,10 @@ async function restoreWifiBackup(
 
   try {
     if (wifi.source === "factory") {
-      await deleteWifiConfig(baseUrl);
+      await deleteWifiConfig(baseUrl, guard);
     } else {
       const payload = makeWifiSetRequest(wifi.ssid, wifi.psk);
-      await postWifiConfig(baseUrl, payload);
+      await postWifiConfig(baseUrl, payload, guard);
     }
   } catch (error) {
     try {

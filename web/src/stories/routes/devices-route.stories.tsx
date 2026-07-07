@@ -42,7 +42,11 @@ export const UltraWideDesktop: Story = {
   },
   play: async ({ canvas, canvasElement }) => {
     await canvas.findByRole("heading", { name: "总览" });
-    await canvas.findByText("Demo Device #1");
+    await waitFor(() => {
+      if (canvas.getAllByText("Demo Device #1").length < 1) {
+        throw new Error("Expected at least one demo device card");
+      }
+    });
 
     const pageContainer = canvasElement.querySelector(
       "[data-ll-page-container='workspace']",

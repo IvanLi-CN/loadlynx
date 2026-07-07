@@ -66,7 +66,7 @@ const ANALOG_PROBE_CHIP: &str = "STM32G431CB";
 const ANALOG_PROBE_PROTOCOL: &str = "swd";
 const ANALOG_PROBE_SPEED_KHZ: u32 = 4_000;
 pub const WEB_LEASE_HEARTBEAT_INTERVAL_MS: u64 = 2_000;
-pub const WEB_LEASE_TTL_MS: u64 = 8_000;
+pub const WEB_LEASE_TTL_MS: u64 = 60_000;
 const EVENT_LIMIT: usize = 1_000;
 const LOG_LIMIT: usize = 500;
 const TRACE_LIMIT: usize = 2_000;
@@ -75,9 +75,10 @@ const SERIAL_PROBE_BAUD: u32 = 115_200;
 // a fixed half-second wait on every warmup/read slice.
 const SERIAL_PROBE_TIMEOUT_MS: u64 = 25;
 const SERIAL_PROTOCOL_TIMEOUT_MS: u64 = 5_000;
+const SERIAL_WIFI_WRITE_PROTOCOL_TIMEOUT_MS: u64 = 160;
+const SERIAL_WIFI_STATUS_PROTOCOL_TIMEOUT_MS: u64 = 90;
+const SERIAL_IMMEDIATE_PROTOCOL_TIMEOUT_MS: u64 = 500;
 const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
-const SERIAL_STATUS_POLL_INTERVAL_MS: u64 = 200;
-const SERIAL_STATUS_REQUEST_TIMEOUT_MS: u64 = 750;
 const SERIAL_STATUS_CACHE_MAX_AGE_MS: i64 = 1_500;
 const SERIAL_PROBE_MAX_BYTES: usize = 32768;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
@@ -1493,7 +1494,7 @@ async fn flash_device(
     enforce_flash_gate(&state, &id, &target, &artifact, &input)?;
     {
         let guard = state.inner.lock().expect("state lock");
-        if target_requires_usb_lease(&target) {
+        if operation_requires_usb_lease(&target) {
             ensure_flash_lease_for_target(&guard, Some(&id), input.lease_id.as_deref(), &target)?;
         }
         let device = guard
@@ -1685,7 +1686,7 @@ async fn reset_device(
     }
     {
         let guard = state.inner.lock().expect("state lock");
-        if target_requires_usb_lease(&target) {
+        if reset_requires_usb_lease(&target) {
             ensure_lease_for_target(&guard, Some(&id), input.lease_id.as_deref())?;
         }
         let device = guard
@@ -1936,7 +1937,10 @@ fn allows_legacy_preflash_identity_fallback(input: &LeaseRequest, error: &HttpEr
             .is_some_and(|id| id == "digital-esp32s3" || is_stable_identity_device_id(id))
         && matches!(
             error.0.code.as_str(),
-            "serial_response_timeout" | "serial_response_missing" | "serial_response_invalid"
+            "serial_operation_timeout"
+                | "serial_response_timeout"
+                | "serial_response_missing"
+                | "serial_response_invalid"
         )
 }
 
@@ -2116,8 +2120,7 @@ fn stop_serial_owner(state: &AppState, port_path: &str) {
         .owners
         .remove(&port_key);
     if let Some(owner) = owner {
-        drop(owner.tx);
-        let _ = owner.join.join();
+        shutdown_serial_owner(owner);
     }
 }
 
@@ -2147,10 +2150,14 @@ fn mark_serial_exclusive(state: &AppState, port_path: &str, reason: &str) -> Res
         .insert(port_key, reason.to_string());
     drop(registry);
     if let Some(owner) = owner {
-        drop(owner.tx);
-        let _ = owner.join.join();
+        shutdown_serial_owner(owner);
     }
     Ok(())
+}
+
+fn shutdown_serial_owner(owner: SerialOwnerHandle) {
+    drop(owner.tx);
+    let _ = owner.join.join();
 }
 
 fn clear_serial_exclusive(state: &AppState, port_path: &str) {
@@ -2540,42 +2547,145 @@ async fn compat_wifi_credentials_get(
     Ok(Json(data))
 }
 
+async fn recover_wifi_status_after_write_gap(
+    state: &AppState,
+    query: &CompatQuery,
+) -> Result<Value, HttpError> {
+    let (_, data) = compat_usb_json_request_with_retry(
+        state,
+        query,
+        "get_wifi_status",
+        None,
+        "USB WiFi write recovery status completed",
+        "USB WiFi write recovery status",
+        2,
+    )
+    .await?;
+    Ok(data)
+}
+
+fn wifi_status_confirms_set(wifi: &Value, ssid: &str) -> bool {
+    wifi.get("source").and_then(Value::as_str) == Some("user")
+        && wifi.get("ssid").and_then(Value::as_str) == Some(ssid)
+        && wifi.get("state").and_then(Value::as_str) != Some("error")
+}
+
+fn wifi_status_confirms_clear(wifi: &Value) -> bool {
+    wifi.get("source")
+        .and_then(Value::as_str)
+        .is_some_and(|source| source != "user")
+}
+
 async fn compat_wifi_post(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
     Json(input): Json<WifiSetRequest>,
 ) -> Result<Json<Value>, HttpError> {
+    let _wait_requested = input.wait;
+    let ssid = input.ssid.clone();
     let extra = json!({
         "ssid": input.ssid,
         "psk": input.psk,
-        "wait": input.wait,
+        "wait": false,
     });
-    let (request_id, data) = compat_usb_json_request(
-        &state,
-        &query,
-        "set_wifi_config",
-        Some(extra),
-        "USB WiFi set completed",
-        "USB WiFi set",
-    )
-    .await?;
-    Ok(Json(json!({"request_id": request_id, "wifi": data})))
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let response = compat_usb_json_request(
+            &state,
+            &query,
+            "set_wifi_config",
+            Some(extra.clone()),
+            if attempt == 0 {
+                "USB WiFi set completed"
+            } else {
+                "USB WiFi set retry completed"
+            },
+            "USB WiFi set",
+        )
+        .await;
+        match response {
+            Ok((request_id, data)) => {
+                return Ok(Json(json!({"request_id": request_id, "wifi": data})));
+            }
+            Err(error) if is_retryable_serial_gap_or_shape_error(&error) => {
+                match recover_wifi_status_after_write_gap(&state, &query).await {
+                    Ok(data) if wifi_status_confirms_set(&data, &ssid) => {
+                        return Ok(Json(json!({
+                            "request_id": if attempt == 0 {
+                                "recovered-after-set-wifi-gap"
+                            } else {
+                                "recovered-after-set-wifi-retry-gap"
+                            },
+                            "wifi": data
+                        })));
+                    }
+                    Ok(_) | Err(_) => {
+                        last_error = Some(error);
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_timeout",
+            "USB WiFi set did not receive a matching response",
+        )
+    }))
 }
 
 async fn compat_wifi_delete(
     State(state): State<AppState>,
     Query(query): Query<CompatQuery>,
 ) -> Result<Json<Value>, HttpError> {
-    let (request_id, data) = compat_usb_json_request(
-        &state,
-        &query,
-        "clear_wifi_config",
-        None,
-        "USB WiFi clear completed",
-        "USB WiFi clear",
-    )
-    .await?;
-    Ok(Json(json!({"request_id": request_id, "wifi": data})))
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let response = compat_usb_json_request(
+            &state,
+            &query,
+            "clear_wifi_config",
+            None,
+            if attempt == 0 {
+                "USB WiFi clear completed"
+            } else {
+                "USB WiFi clear retry completed"
+            },
+            "USB WiFi clear",
+        )
+        .await;
+        match response {
+            Ok((request_id, data)) => {
+                return Ok(Json(json!({"request_id": request_id, "wifi": data})));
+            }
+            Err(error) if is_retryable_serial_gap_or_shape_error(&error) => {
+                match recover_wifi_status_after_write_gap(&state, &query).await {
+                    Ok(data) if wifi_status_confirms_clear(&data) => {
+                        return Ok(Json(json!({
+                            "request_id": if attempt == 0 {
+                                "recovered-after-clear-wifi-gap"
+                            } else {
+                                "recovered-after-clear-wifi-retry-gap"
+                            },
+                            "wifi": data
+                        })));
+                    }
+                    Ok(_) | Err(_) => {
+                        last_error = Some(error);
+                    }
+                }
+            }
+            Err(error) => return Err(error),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    Err(last_error.unwrap_or_else(|| {
+        HttpError::retryable(
+            "serial_response_timeout",
+            "USB WiFi clear did not receive a matching response",
+        )
+    }))
 }
 
 async fn compat_control_get(
@@ -3559,8 +3669,17 @@ fn ensure_real_operation_uses_cached_target(
     Ok(())
 }
 
-fn target_requires_usb_lease(target: &TargetKind) -> bool {
+fn operation_requires_usb_lease(target: &TargetKind) -> bool {
     matches!(target, TargetKind::DigitalEsp32s3)
+}
+
+fn reset_requires_usb_lease(target: &TargetKind) -> bool {
+    match target {
+        TargetKind::DigitalEsp32s3
+        | TargetKind::AnalogStm32g431
+        | TargetKind::LanHttp
+        | TargetKind::Mock => false,
+    }
 }
 
 #[derive(Debug)]
@@ -4355,9 +4474,40 @@ fn serial_request_expects_wifi_wait(op: &str, extra: Option<&Value>) -> bool {
             == Some(true)
 }
 
+fn serial_request_is_wifi_write(op: &str) -> bool {
+    matches!(op, "set_wifi_config" | "clear_wifi_config")
+}
+
+fn serial_request_is_wifi_status(op: &str) -> bool {
+    matches!(op, "get_wifi_status")
+}
+
+fn serial_request_is_immediate_response(op: &str) -> bool {
+    matches!(
+        op,
+        "get_wifi_status"
+            | "get_wifi_credentials"
+            | "get_status"
+            | "get_identity"
+            | "get_pd"
+            | "set_output_enabled"
+            | "get_control"
+            | "set_control"
+            | "apply_preset"
+            | "set_pd_policy"
+            | "soft_reset"
+    )
+}
+
 fn serial_protocol_timeout_ms(op: &str, extra: Option<&Value>) -> u64 {
     if serial_request_expects_wifi_wait(op, extra) {
         SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS
+    } else if serial_request_is_wifi_write(op) {
+        SERIAL_WIFI_WRITE_PROTOCOL_TIMEOUT_MS
+    } else if serial_request_is_wifi_status(op) {
+        SERIAL_WIFI_STATUS_PROTOCOL_TIMEOUT_MS
+    } else if serial_request_is_immediate_response(op) {
+        SERIAL_IMMEDIATE_PROTOCOL_TIMEOUT_MS
     } else {
         SERIAL_PROTOCOL_TIMEOUT_MS
     }
@@ -4484,6 +4634,15 @@ fn mock_serial_probe(
     op: &str,
     extra: Option<Value>,
 ) -> SerialProtocolProbe {
+    let request_frame = || {
+        let mut frame = json!({"type": "request", "request_id": request_id, "op": op});
+        if let Some(extra) = extra.as_ref().and_then(Value::as_object)
+            && let Some(frame) = frame.as_object_mut()
+        {
+            frame.extend(extra.clone());
+        }
+        frame
+    };
     #[cfg(test)]
     if let Some(mut queued) = state
         .mock_serial_responses
@@ -4496,13 +4655,13 @@ fn mock_serial_probe(
             .iter_mut()
             .find(|frame| frame.direction == "tx")
         {
-            frame.frame = json!({"type": "request", "request_id": request_id, "op": op});
+            frame.frame = request_frame();
         } else {
             queued.frames.insert(
                 0,
                 SerialProtocolFrame {
                     direction: "tx",
-                    frame: json!({"type": "request", "request_id": request_id, "op": op}),
+                    frame: request_frame(),
                 },
             );
         }
@@ -4530,19 +4689,26 @@ fn mock_serial_probe(
         "get_pd" | "set_pd_policy" => json!({
             "attached": false,
             "contract": null,
-            "saved": extra.unwrap_or_else(|| json!({}))
+            "saved": extra.clone().unwrap_or_else(|| json!({}))
         }),
         "set_output_enabled" => {
-            json!({"enable": extra.and_then(|v| v.get("enable").cloned()).unwrap_or(json!(false))})
+            json!({"enable": extra.as_ref().and_then(|v| v.get("enable").cloned()).unwrap_or(json!(false))})
         }
         "get_wifi_credentials" => json!({
             "ssid": "LoadLynx-Test",
             "psk": "mock-loadlynx-psk",
             "source": "user"
         }),
-        "get_wifi_status" | "set_wifi_config" | "clear_wifi_config" => json!({
+        "clear_wifi_config" => json!({
+            "ssid": "",
+            "source": "none",
+            "state": "idle",
+            "ip": null,
+            "last_error": null
+        }),
+        "get_wifi_status" | "set_wifi_config" => json!({
             "ssid": extra.as_ref().and_then(|v| v.get("ssid")).and_then(Value::as_str).unwrap_or("LoadLynx-Test"),
-            "source": if op == "clear_wifi_config" { "factory" } else { "user" },
+            "source": "user",
             "state": "connected",
             "ip": "192.0.2.10",
             "last_error": null
@@ -4556,7 +4722,7 @@ fn mock_serial_probe(
         "get_presets" => json!({
             "presets": (1_u8..=5).map(mock_preset).collect::<Vec<_>>()
         }),
-        "set_preset" => extra.unwrap_or_else(|| mock_preset(1)),
+        "set_preset" => extra.clone().unwrap_or_else(|| mock_preset(1)),
         "get_calibration_profile" => json!({
             "active": {"source": "factory-default", "fmt_version": 3, "hw_rev": 1},
             "current_ch1_points": [],
@@ -4582,7 +4748,7 @@ fn mock_serial_probe(
         frames: vec![
             SerialProtocolFrame {
                 direction: "tx",
-                frame: json!({"type": "request", "request_id": request_id, "op": op}),
+                frame: request_frame(),
             },
             SerialProtocolFrame {
                 direction: "rx",
@@ -5006,46 +5172,6 @@ fn serial_jsonl_request_on_port(
     })
 }
 
-fn serial_status_poll_on_port(
-    port: &mut dyn serialport::SerialPort,
-    request_id: &str,
-) -> io::Result<SerialProtocolProbe> {
-    let mut frames = Vec::new();
-    let mut line_buf = Vec::new();
-    let mut non_protocol_bytes = 0usize;
-    let mut non_protocol_text = String::new();
-
-    let drain_deadline = Instant::now() + Duration::from_millis(10);
-    let _ = read_serial_jsonl_until(
-        &mut *port,
-        drain_deadline,
-        &mut line_buf,
-        &mut frames,
-        &mut non_protocol_bytes,
-        &mut non_protocol_text,
-        None,
-    )?;
-    line_buf.clear();
-
-    write_serial_request(&mut *port, &mut frames, request_id, "get_status", None)?;
-    let deadline = Instant::now() + Duration::from_millis(SERIAL_STATUS_REQUEST_TIMEOUT_MS);
-    let _ = read_serial_jsonl_until(
-        &mut *port,
-        deadline,
-        &mut line_buf,
-        &mut frames,
-        &mut non_protocol_bytes,
-        &mut non_protocol_text,
-        Some(request_id),
-    )?;
-
-    Ok(SerialProtocolProbe {
-        frames,
-        non_protocol_bytes,
-        non_protocol_text,
-    })
-}
-
 fn serial_worker_loop(
     state: AppState,
     port_path: String,
@@ -5055,7 +5181,6 @@ fn serial_worker_loop(
     let port_key = canonical_port_key(&port_path);
     let mut port = None;
     let mut last_idle_open_attempt = None;
-    let mut last_status_poll_attempt = None;
     let mut idle_line_buf = Vec::new();
     let mut idle_frames = Vec::new();
     let mut idle_non_protocol_text = String::new();
@@ -5125,7 +5250,6 @@ fn serial_worker_loop(
                         })
                     }
                 };
-                last_status_poll_attempt = None;
                 let _ = command.reply.send(result);
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
@@ -5174,38 +5298,8 @@ fn serial_worker_loop(
                     );
                 }
                 if !has_active_lease_for_port(&state, &port_path) {
-                    continue;
+                    port = None;
                 }
-                if last_status_poll_attempt.is_some_and(|attempt: Instant| {
-                    attempt.elapsed() < Duration::from_millis(SERIAL_STATUS_POLL_INTERVAL_MS)
-                }) {
-                    continue;
-                }
-                let Some(device_id) = device_id_for_port(&state, &port_path) else {
-                    continue;
-                };
-                let request_id = next_request_id("status-cache");
-                match serial_status_poll_on_port(open_port.as_mut(), &request_id) {
-                    Ok(probe) => {
-                        let response = serial_response_for_request(&probe, &request_id)
-                            .or_else(|| infer_serial_response_from_fragments(&probe, &request_id))
-                            .or_else(|| infer_serial_response_from_text(&probe, &request_id));
-                        if let Ok(data) = status_data_from_serial_response(response)
-                            && let Ok(output) = finalize_status_output(&device_id, data)
-                        {
-                            update_usb_status_cache(
-                                &state,
-                                &device_id,
-                                output,
-                                "serial_owner_status_poll",
-                            );
-                        }
-                    }
-                    Err(_) => {
-                        port = None;
-                    }
-                }
-                last_status_poll_attempt = Some(Instant::now());
             }
             Err(std_mpsc::RecvTimeoutError::Disconnected) => break,
         }
@@ -6539,6 +6633,116 @@ mod tests {
     }
 
     #[test]
+    fn wifi_status_inference_recovers_interleaved_response_from_text() {
+        let request_id = "devd-set-wifi-config-1782982349975356000";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({
+                    "type": "request",
+                    "request_id": request_id,
+                    "op": "set_wifi_config",
+                    "ssid": "BenchNet",
+                    "psk": "<redacted>",
+                    "wait": false
+                }),
+            }],
+            non_protocol_bytes: 2528,
+            non_protocol_text: String::from(
+                "noise {\"type\":\"response\",\"request_id\":\"devd-set-wifi-config-1782982349e\":\"connecting\",\"ip\":null,\"last_error\":null}}\n",
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB WiFi set").unwrap();
+        assert_eq!(data["state"], "connecting");
+        assert_eq!(data["ip"], Value::Null);
+        assert_eq!(data["last_error"], Value::Null);
+        assert_eq!(data["recovered_from_text"], true);
+    }
+
+    #[test]
+    fn wifi_status_inference_recovers_state_appended_to_request_id() {
+        let request_id = "devd-set-wifi-config-1783229000591058000";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({
+                    "type": "request",
+                    "request_id": request_id,
+                    "op": "set_wifi_config",
+                    "ssid": "BenchNet",
+                    "psk": "<redacted>",
+                    "wait": false
+                }),
+            }],
+            non_protocol_bytes: 2805,
+            non_protocol_text: String::from(
+                "noise {\"type\":\"response\",\"request_id\":\"devd-set-wifi-config-1783229000591058000connecting\",\"ip\":null,\"last_error\":null}}\n",
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB WiFi set").unwrap();
+        assert_eq!(data["state"], "connecting");
+        assert_eq!(data["ip"], Value::Null);
+        assert_eq!(data["last_error"], Value::Null);
+        assert_eq!(data["recovered_from_text"], true);
+    }
+
+    #[test]
+    fn wifi_clear_inference_recovers_state_after_truncated_request_id() {
+        let request_id = "devd-clear-wifi-config-1783437098606824000";
+        let probe = SerialProtocolProbe {
+            frames: vec![SerialProtocolFrame {
+                direction: "tx",
+                frame: json!({
+                    "type": "request",
+                    "request_id": request_id,
+                    "op": "clear_wifi_config"
+                }),
+            }],
+            non_protocol_bytes: 2701,
+            non_protocol_text: String::from(
+                "noise {\"type\":\"response\",\"request_id\":\"devd-clear-wifi-config-17834370:\"idle\",\"ip\":null,\"last_error\":null}}\n",
+            ),
+        };
+
+        let response = infer_serial_response_from_text(&probe, request_id).unwrap();
+        let data = serial_response_data(response, "USB WiFi clear").unwrap();
+        assert_eq!(data["ssid"], "");
+        assert_eq!(data["source"], "none");
+        assert_eq!(data["state"], "idle");
+        assert_eq!(data["ip"], Value::Null);
+        assert_eq!(data["last_error"], Value::Null);
+        assert_eq!(data["recovered_from_text"], true);
+    }
+
+    #[test]
+    fn serial_protocol_timeout_uses_short_budget_for_immediate_requests() {
+        assert_eq!(
+            serial_protocol_timeout_ms("set_wifi_config", Some(&json!({"wait": false}))),
+            SERIAL_WIFI_WRITE_PROTOCOL_TIMEOUT_MS
+        );
+        assert_eq!(
+            serial_protocol_timeout_ms("clear_wifi_config", None),
+            SERIAL_WIFI_WRITE_PROTOCOL_TIMEOUT_MS
+        );
+        assert_eq!(
+            serial_protocol_timeout_ms("get_wifi_status", None),
+            SERIAL_WIFI_STATUS_PROTOCOL_TIMEOUT_MS
+        );
+        assert_eq!(
+            serial_protocol_timeout_ms("get_status", None),
+            SERIAL_IMMEDIATE_PROTOCOL_TIMEOUT_MS
+        );
+        assert_eq!(
+            serial_protocol_timeout_ms("set_wifi_config", Some(&json!({"wait": true}))),
+            SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS
+        );
+    }
+
+    #[test]
     fn identity_response_inference_recovers_embedded_firmware_payload() {
         let request_id = "devd-get-identity-123456";
         let probe = SerialProtocolProbe {
@@ -7454,6 +7658,220 @@ mod tests {
         assert_eq!(first_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["from_monitor_cache"], true);
+    }
+
+    #[tokio::test]
+    async fn compat_wifi_post_acks_storage_write_without_waiting_for_connection() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "type": "response",
+                        "request_id": "placeholder",
+                        "ok": true,
+                        "data": {
+                            "ssid": "BenchNet",
+                            "source": "user",
+                            "state": "connecting",
+                            "ip": null,
+                            "last_error": null
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(response) = compat_wifi_post(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: false,
+            }),
+            Json(WifiSetRequest {
+                ssid: "BenchNet".to_string(),
+                psk: "secret".to_string(),
+                wait: true,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["wifi"]["state"], "connecting");
+        let guard = state.inner.lock().expect("state lock");
+        let tx_frames = guard
+            .devices
+            .get("mock-loadlynx-devd")
+            .unwrap()
+            .trace
+            .iter()
+            .skip(trace_len_before)
+            .filter(|trace| trace.direction == "tx")
+            .map(|trace| trace.payload.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(tx_frames.len(), 1);
+        assert_eq!(tx_frames[0]["op"], "set_wifi_config");
+        assert_eq!(tx_frames[0]["wait"], false);
+        assert_eq!(tx_frames[0]["psk"], "<redacted>");
+    }
+
+    #[tokio::test]
+    async fn compat_wifi_post_recovers_applied_config_after_response_gap() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: Vec::new(),
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "type": "response",
+                        "request_id": "placeholder",
+                        "ok": true,
+                        "data": {
+                            "ssid": "BenchNet",
+                            "source": "user",
+                            "state": "connecting",
+                            "ip": null,
+                            "last_error": null
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(response) = compat_wifi_post(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: false,
+            }),
+            Json(WifiSetRequest {
+                ssid: "BenchNet".to_string(),
+                psk: "secret".to_string(),
+                wait: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["request_id"], "recovered-after-set-wifi-gap");
+        assert_eq!(response["wifi"]["ssid"], "BenchNet");
+        assert_eq!(response["wifi"]["source"], "user");
+    }
+
+    #[tokio::test]
+    async fn compat_wifi_delete_recovers_applied_clear_after_response_gap() {
+        let state = AppState::new(PathBuf::from("."));
+        let Json(lease) = create_lease(
+            State(state.clone()),
+            Json(LeaseRequest {
+                device_id: "mock-loadlynx-devd".to_string(),
+                expected_identity_device_id: None,
+                bind_probe: None,
+                allow_legacy_preflash_identity_fallback: None,
+            }),
+        )
+        .await
+        .unwrap();
+        let lease_id = lease["lease_id"].as_str().unwrap().to_string();
+        {
+            let mut queued = state
+                .mock_serial_responses
+                .lock()
+                .expect("mock serial responses lock");
+            queued.clear();
+            queued.push_back(SerialProtocolProbe {
+                frames: Vec::new(),
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+            queued.push_back(SerialProtocolProbe {
+                frames: vec![SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "type": "response",
+                        "request_id": "placeholder",
+                        "ok": true,
+                        "data": {
+                            "ssid": "",
+                            "source": "none",
+                            "state": "idle",
+                            "ip": null,
+                            "last_error": null
+                        }
+                    }),
+                }],
+                non_protocol_bytes: 0,
+                non_protocol_text: String::new(),
+            });
+        }
+
+        let Json(response) = compat_wifi_delete(
+            State(state.clone()),
+            Query(CompatQuery {
+                device_id: Some("mock-loadlynx-devd".to_string()),
+                lease_id: Some(lease_id),
+                fresh: false,
+                cache: false,
+            }),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(response["request_id"], "recovered-after-clear-wifi-gap");
+        assert_eq!(response["wifi"]["source"], "none");
+        assert_eq!(response["wifi"]["state"], "idle");
     }
 
     #[tokio::test]
@@ -8373,8 +8791,14 @@ mod tests {
 
     #[test]
     fn analog_probe_operations_do_not_require_usb_lease() {
-        assert!(target_requires_usb_lease(&TargetKind::DigitalEsp32s3));
-        assert!(!target_requires_usb_lease(&TargetKind::AnalogStm32g431));
+        assert!(operation_requires_usb_lease(&TargetKind::DigitalEsp32s3));
+        assert!(!operation_requires_usb_lease(&TargetKind::AnalogStm32g431));
+    }
+
+    #[test]
+    fn digital_reset_uses_cached_selector_without_web_usb_lease() {
+        assert!(!reset_requires_usb_lease(&TargetKind::DigitalEsp32s3));
+        assert!(!reset_requires_usb_lease(&TargetKind::AnalogStm32g431));
     }
 
     #[tokio::test]

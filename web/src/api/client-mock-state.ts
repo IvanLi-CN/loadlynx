@@ -25,6 +25,7 @@ export interface MockDeviceState {
   wifi: WifiStatus;
   wifiPsk: string;
   simulation: MockSimulationState;
+  wifiConnectPollsRemaining: number;
 }
 
 export interface MockCalibrationState {
@@ -612,6 +613,26 @@ export function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
     last_error: null,
   };
 
+  const normalizedBaseUrl = baseUrl.toLowerCase();
+  if (
+    normalizedBaseUrl.includes("wifi-connect-failed") ||
+    normalizedBaseUrl.includes("wifi-clear-noop") ||
+    normalizedBaseUrl.includes("wifi-clear-error") ||
+    normalizedBaseUrl.includes("wifi-clear-timeout-success")
+  ) {
+    wifi.ssid = "BenchNet";
+    wifi.source = "user";
+    wifi.state = "connected";
+    wifi.ip = "192.168.31.216";
+    wifi.last_error = null;
+  }
+
+  if (normalizedBaseUrl.includes("wifi-connect-failed")) {
+    wifi.state = "error";
+    wifi.ip = null;
+    wifi.last_error = "connect_failed";
+  }
+
   const state: MockDeviceState = {
     identity,
     status,
@@ -629,6 +650,7 @@ export function getOrCreateMockDevice(baseUrl: string): MockDeviceState {
       profile: simulationProfile,
       lastWallClockMs: Date.now(),
     },
+    wifiConnectPollsRemaining: 0,
   };
 
   if (baseUrl.toLowerCase().includes("calibration-output-applied")) {

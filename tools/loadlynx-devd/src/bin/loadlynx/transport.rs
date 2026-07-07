@@ -446,16 +446,42 @@ pub(crate) async fn post_usb_operation_with_optional_lease(
         );
     }
 
+    let request_payload = payload.clone();
     let result: Result<Value, Box<dyn std::error::Error + Send + Sync>> = async {
         request_devd_value(
             &resolved.devd,
             reqwest::Method::POST,
             &operation_path,
-            Some(payload),
+            Some(request_payload),
         )
         .await
     }
     .await;
+    let result = match result {
+        Err(error) if dry_run && saved_usb_device_needs_relookup(&*error) => {
+            let scan = request_devd_value(
+                &resolved.devd,
+                reqwest::Method::POST,
+                "/api/v1/devices/scan",
+                None,
+            )
+            .await?;
+            let device = resolve_scanned_usb_device_for_saved_hardware(resolved, &scan)?;
+            let retry_path = path.replacen(
+                &format!("/devices/{}", resolved.device),
+                &format!("/devices/{device}"),
+                1,
+            );
+            request_devd_value(
+                &resolved.devd,
+                reqwest::Method::POST,
+                &retry_path,
+                Some(payload),
+            )
+            .await
+        }
+        other => other,
+    };
 
     if let Some((lease, _)) = lease.as_ref() {
         let _ = release_cli_lease(client, &resolved.devd, &lease.lease_id).await;

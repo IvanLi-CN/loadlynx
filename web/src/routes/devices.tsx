@@ -1,10 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { HttpApiError } from "../api/client.ts";
-import { ENABLE_MOCK_DEVTOOLS, isHttpApiError } from "../api/client.ts";
-import type { ControlView, FastStatusView } from "../api/types.ts";
+import {
+  ENABLE_MOCK_DEVTOOLS,
+  getIdentity,
+  getWifiStatus,
+  isHttpApiError,
+} from "../api/client.ts";
+import type { ControlView, FastStatusView, Identity } from "../api/types.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import {
   buildDevdCompatBaseUrl,
@@ -18,12 +23,14 @@ import {
   getDeviceControlQueryOptions,
   getDeviceStatusQueryOptions,
   type ScanProgress,
+  upsertRealDevice,
   useAddDeviceMutation,
   useAddRealDeviceMutation,
   useDeviceIdentity,
   useDevicesQuery,
   useSubnetScanMutation,
 } from "../devices/hooks.ts";
+import { syncDevicesQueryCache } from "../devices/query-cache.ts";
 import {
   beginManagedScan,
   cancelManagedScan,
@@ -90,6 +97,28 @@ export function getOverviewTopRightDetail({
   }
 
   return fallbackDetail;
+}
+
+function isLikelyLanBaseUrl(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    const hostname = url.hostname.toLowerCase();
+    return (
+      hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1"
+    );
+  } catch {
+    return false;
+  }
+}
+
+async function readIdentityForBinding(
+  baseUrl: string,
+): Promise<Identity | undefined> {
+  try {
+    return await getIdentity(baseUrl);
+  } catch {
+    return undefined;
+  }
 }
 
 export function DevicesRoute() {
@@ -343,15 +372,26 @@ export function DevicesRoute() {
                     }
 
                     setAddDeviceError(null);
-                    addRealDeviceMutation.mutate(
-                      { name, baseUrl },
-                      {
-                        onSuccess: () => {
-                          setNewDeviceName("");
-                          setNewDeviceBaseUrl("");
+                    void (async () => {
+                      const identity = await readIdentityForBinding(baseUrl);
+                      addRealDeviceMutation.mutate(
+                        {
+                          name,
+                          baseUrl,
+                          identityDeviceId: identity?.device_id,
+                          connectionMarks: isLikelyLanBaseUrl(baseUrl)
+                            ? ["lan"]
+                            : undefined,
+                          identity,
                         },
-                      },
-                    );
+                        {
+                          onSuccess: () => {
+                            setNewDeviceName("");
+                            setNewDeviceBaseUrl("");
+                          },
+                        },
+                      );
+                    })();
                   }}
                   className="flex flex-col gap-4"
                 >
@@ -518,23 +558,42 @@ export function DevicesRoute() {
                           if (!candidate) return;
                           createDevdLease.mutate(candidate.id, {
                             onSuccess: (lease) => {
-                              const connectionMarks: StoredDevice["connectionMarks"] =
-                                ["usb"];
-                              if (candidate.lan_endpoint) {
-                                connectionMarks.push("lan");
-                              }
                               const devd = {
                                 baseUrl: DEFAULT_DEVD_BASE_URL,
                                 deviceId: candidate.id,
                                 leaseId: lease.lease_id,
                               };
                               const baseUrl = buildDevdCompatBaseUrl(devd);
-                              addRealDeviceMutation.mutate({
-                                name: candidate.display_name,
-                                baseUrl,
-                                connectionMarks,
-                                devd,
-                              });
+                              void (async () => {
+                                const [identityResult, wifiResult] =
+                                  await Promise.allSettled([
+                                    getIdentity(baseUrl),
+                                    getWifiStatus(baseUrl),
+                                  ]);
+                                const identity =
+                                  identityResult.status === "fulfilled"
+                                    ? identityResult.value
+                                    : candidate.identity;
+                                const wifi =
+                                  wifiResult.status === "fulfilled"
+                                    ? wifiResult.value
+                                    : undefined;
+                                addRealDeviceMutation.mutate({
+                                  name: candidate.display_name,
+                                  baseUrl,
+                                  identityDeviceId:
+                                    lease.identity_device_id ??
+                                    identity?.device_id ??
+                                    undefined,
+                                  connectionMarks: ["usb"],
+                                  lan: candidate.lan_endpoint
+                                    ? { baseUrl: candidate.lan_endpoint }
+                                    : undefined,
+                                  devd,
+                                  identity,
+                                  wifi,
+                                });
+                              })();
                             },
                             onError: (error) => {
                               setDevdError(
@@ -723,6 +782,10 @@ export function DevicesRoute() {
                                             d.identity.device_id ||
                                             `Device ${d.ip}`,
                                           baseUrl: `http://${d.ip}`,
+                                          identityDeviceId:
+                                            d.identity.device_id,
+                                          connectionMarks: ["lan"],
+                                          identity: d.identity,
                                         });
                                       }}
                                       disabled={isAddingReal}
@@ -762,6 +825,8 @@ function OverviewDeviceCard(props: {
 }) {
   const { t } = useTranslation();
   const { device, isCurrentDevice, selectionMode, selectionIntent } = props;
+  const store = useDeviceStore();
+  const queryClient = useQueryClient();
   const identityQuery = useDeviceIdentity(device);
   const statusQuery = useQuery<FastStatusView, HttpApiError>({
     ...getDeviceStatusQueryOptions({
@@ -786,6 +851,32 @@ function OverviewDeviceCard(props: {
   const status = statusQuery.data;
   const control = controlQuery.data;
   const connectionLabels = getConnectionLabels(device);
+
+  useEffect(() => {
+    const identityDeviceId = identity?.device_id?.trim();
+    if (!identityDeviceId) {
+      return;
+    }
+
+    const current = store.getDevices();
+    const next = upsertRealDevice(current, {
+      name: device.name,
+      baseUrl: device.baseUrl,
+      identityDeviceId,
+      connectionMarks: device.connectionMarks,
+      lan: device.lan,
+      devd: device.devd,
+      webSerial: device.webSerial,
+      identity,
+    });
+    if (JSON.stringify(current) === JSON.stringify(next)) {
+      return;
+    }
+
+    store.setDevices(next);
+    syncDevicesQueryCache(queryClient, store.getDevices());
+  }, [device, identity, queryClient, store]);
+
   let statusTone = "ok" as "ok" | "warn" | "danger";
   let statusLabel = t("overview.online");
   let statusDetail = identity?.network.ip ?? t("overview.noLiveIdentity");

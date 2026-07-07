@@ -29,9 +29,16 @@ test.describe("Simulation device empty state", () => {
       .getByRole("button", { name: /Add sample device/i })
       .click();
 
-    await expect(page.getByText(/Demo Device #1/i)).toBeVisible();
-    await expect(page.getByText(/mock-001/i)).toBeVisible();
-    await page.getByRole("link", { name: /Open Dashboard|打开仪表盘/ }).click();
+    const demoDeviceCard = page
+      .getByRole("article")
+      .filter({ hasText: "mock-001" });
+    await expect(
+      demoDeviceCard.getByRole("heading", { name: /Demo Device #1/i }),
+    ).toBeVisible();
+    await expect(demoDeviceCard.getByText(/mock-001/i)).toBeVisible();
+    await demoDeviceCard
+      .getByRole("link", { name: /Open Dashboard|打开仪表盘/ })
+      .click();
 
     await expect(page).toHaveURL(/\/cc/);
     await expect(page.getByText("Mode, output and setpoints")).toBeVisible();

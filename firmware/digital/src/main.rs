@@ -13,10 +13,14 @@ use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, AtomicU32, Ordering};
 use core::{convert::Infallible, ptr, slice};
 use defmt::*;
 use embassy_executor::Spawner;
+#[cfg(feature = "net_http")]
+use embassy_futures::select::{Either, select};
 use embassy_futures::yield_now;
 #[cfg(feature = "net_http")]
 use embassy_sync::channel::Channel;
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, mutex::Mutex};
+#[cfg(feature = "net_http")]
+use embassy_time::{Duration, Timer};
 use embedded_graphics::pixelcolor::Rgb565;
 use embedded_hal::digital::OutputPin;
 use embedded_hal::spi::ErrorType as SpiErrorType;
@@ -1923,6 +1927,76 @@ fn write_usb_soft_reset_response(out: &mut UsbJsonLine, request_id: Option<&str>
 }
 
 #[cfg(feature = "net_http")]
+async fn read_usb_wifi_blob_bounded(
+    eeprom: &'static EepromMutex,
+) -> Result<[u8; eeprom::EEPROM_WIFI_LEN], eeprom::EepromError> {
+    const USB_WIFI_EEPROM_TIMEOUT: Duration = Duration::from_millis(250);
+    let read = async {
+        let mut guard = eeprom.lock().await;
+        guard.read_wifi_blob().await
+    };
+    match select(read, Timer::after(USB_WIFI_EEPROM_TIMEOUT)).await {
+        Either::First(result) => result,
+        Either::Second(_) => return Err(eeprom::EepromError::Timeout),
+    }
+}
+
+#[cfg(feature = "net_http")]
+async fn write_usb_wifi_blob_bounded(
+    eeprom: &'static EepromMutex,
+    blob: &[u8; eeprom::EEPROM_WIFI_LEN],
+) -> Result<(), eeprom::EepromError> {
+    const USB_WIFI_EEPROM_TIMEOUT: Duration = Duration::from_millis(500);
+    let write = async {
+        let mut guard = eeprom.lock().await;
+        let mut last_error = eeprom::EepromError::I2c;
+        for attempt in 0..3 {
+            match guard.write_wifi_blob(blob).await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = error;
+                    if attempt < 2 {
+                        Timer::after(Duration::from_millis(12)).await;
+                    }
+                }
+            }
+        }
+        Err(last_error)
+    };
+    match select(write, Timer::after(USB_WIFI_EEPROM_TIMEOUT)).await {
+        Either::First(result) => result,
+        Either::Second(_) => Err(eeprom::EepromError::Timeout),
+    }
+}
+
+#[cfg(feature = "net_http")]
+async fn clear_usb_wifi_blob_bounded(
+    eeprom: &'static EepromMutex,
+) -> Result<(), eeprom::EepromError> {
+    const USB_WIFI_EEPROM_TIMEOUT: Duration = Duration::from_millis(500);
+    let clear = async {
+        let mut guard = eeprom.lock().await;
+        let mut last_error = eeprom::EepromError::I2c;
+        for attempt in 0..3 {
+            match guard.clear_wifi_blob().await {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    last_error = error;
+                    if attempt < 2 {
+                        Timer::after(Duration::from_millis(12)).await;
+                    }
+                }
+            }
+        }
+        Err(last_error)
+    };
+    match select(clear, Timer::after(USB_WIFI_EEPROM_TIMEOUT)).await {
+        Either::First(result) => result,
+        Either::Second(_) => Err(eeprom::EepromError::Timeout),
+    }
+}
+
+#[cfg(feature = "net_http")]
 async fn write_usb_wifi_response(
     out: &mut UsbJsonLine,
     request_id: Option<&str>,
@@ -1940,10 +2014,7 @@ async fn write_usb_wifi_response(
     }
     match op {
         "get_wifi_credentials" => {
-            let blob = {
-                let mut guard = eeprom.lock().await;
-                guard.read_wifi_blob().await
-            };
+            let blob = read_usb_wifi_blob_bounded(eeprom).await;
             let Ok(blob) = blob else {
                 out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNAVAILABLE\",\"message\":\"EEPROM read failed\"}}").ok();
                 return;
@@ -1966,22 +2037,28 @@ async fn write_usb_wifi_response(
             out.push_str("\"}}").ok();
         }
         "get_wifi_status" => {
-            let user_ssid = {
-                let mut guard = eeprom.lock().await;
-                guard.read_wifi_blob().await.ok().and_then(|blob| {
+            let user_ssid = read_usb_wifi_blob_bounded(eeprom)
+                .await
+                .ok()
+                .and_then(|blob| {
                     eeprom::decode_wifi_blob(&blob).map(|parts| String::from(parts.ssid))
-                })
-            };
-            let status = { *wifi_state.lock().await };
-            out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
-            write_json_string_escaped(out, user_ssid.as_deref().or(WIFI_SSID).unwrap_or(""));
-            out.push_str("\",\"source\":\"").ok();
-            out.push_str(match (user_ssid.is_some(), WIFI_SSID.is_some()) {
+                });
+            let mut status = { *wifi_state.lock().await };
+            let source = match (user_ssid.is_some(), WIFI_SSID.is_some()) {
                 (true, _) => "user",
                 (false, true) => "factory",
                 (false, false) => "none",
-            })
-            .ok();
+            };
+            if source == "none" {
+                status.state = net::WifiConnectionState::Idle;
+                status.ipv4 = None;
+                status.gateway = None;
+                status.last_error = None;
+            }
+            out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
+            write_json_string_escaped(out, user_ssid.as_deref().or(WIFI_SSID).unwrap_or(""));
+            out.push_str("\",\"source\":\"").ok();
+            out.push_str(source).ok();
             write_usb_wifi_status_tail(out, status);
         }
         "set_wifi_config" => {
@@ -2009,7 +2086,7 @@ async fn write_usb_wifi_response(
                     return;
                 }
             };
-            if eeprom.lock().await.write_wifi_blob(&blob).await.is_err() {
+            if write_usb_wifi_blob_bounded(eeprom, &blob).await.is_err() {
                 out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNAVAILABLE\",\"message\":\"EEPROM write failed\"}}").ok();
                 return;
             }
@@ -2024,11 +2101,11 @@ async fn write_usb_wifi_response(
             write_usb_wifi_status_tail(out, status);
         }
         "clear_wifi_config" => {
-            if eeprom.lock().await.clear_wifi_blob().await.is_err() {
+            if clear_usb_wifi_blob_bounded(eeprom).await.is_err() {
                 out.push_str(",\"ok\":false,\"error\":{\"code\":\"UNAVAILABLE\",\"message\":\"EEPROM clear failed\"}}").ok();
                 return;
             }
-            mark_wifi_reconfigure_pending(wifi_state).await;
+            mark_wifi_clear_pending(wifi_state).await;
             let status = { *wifi_state.lock().await };
             out.push_str(",\"ok\":true,\"data\":{\"ssid\":\"").ok();
             write_json_string_escaped(out, WIFI_SSID.unwrap_or(""));
@@ -2091,6 +2168,7 @@ fn wifi_error_name(error: net::WifiErrorKind) -> &'static str {
     match error {
         net::WifiErrorKind::BadStaticConfig => "bad_static_config",
         net::WifiErrorKind::ConnectFailed => "connect_failed",
+        net::WifiErrorKind::ConnectTimeout => "connect_timeout",
         net::WifiErrorKind::DhcpTimeout => "dhcp_timeout",
         net::WifiErrorKind::LinkLost => "link_lost",
     }
@@ -2103,6 +2181,21 @@ async fn mark_wifi_reconfigure_pending(wifi_state: &'static net::WifiStateMutex)
     status.ipv4 = None;
     status.gateway = None;
     status.last_error = None;
+    status.reconfigure_requested = true;
+}
+
+#[cfg(feature = "net_http")]
+async fn mark_wifi_clear_pending(wifi_state: &'static net::WifiStateMutex) {
+    let mut status = wifi_state.lock().await;
+    status.state = if WIFI_SSID.is_some() {
+        net::WifiConnectionState::Connecting
+    } else {
+        net::WifiConnectionState::Idle
+    };
+    status.ipv4 = None;
+    status.gateway = None;
+    status.last_error = None;
+    status.reconfigure_requested = true;
 }
 
 #[cfg(feature = "net_http")]
@@ -7933,9 +8026,11 @@ async fn main(spawner: Spawner) {
 
     #[cfg(feature = "net_http")]
     {
-        // Reserve reclaimed bootloader RAM as heap for Wi‑Fi + HTTP stack
-        // allocations, avoiding additional pressure on the main DRAM region.
+        // Reserve reclaimed bootloader RAM and PSRAM as heap for Wi-Fi + HTTP
+        // stack allocations. Browser-driven HTTP polling and Wi-Fi reconnects
+        // can exceed the reclaimed internal heap alone.
         esp_alloc::heap_allocator!(#[esp_hal::ram(reclaimed)] size: 64 * 1024);
+        esp_alloc::psram_allocator!(peripherals.PSRAM, hal::psram);
     }
 
     // Initialize the preemptive scheduler used by esp-radio + embassy-net

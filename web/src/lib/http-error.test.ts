@@ -4,9 +4,11 @@ import { HttpApiError } from "../api/client.ts";
 import {
   formatHttpApiErrorSummary,
   getNetworkErrorHint,
+  getUsbSerialErrorHint,
   isAnalogNotReadyError,
   isLinkUnavailableError,
   isUnsupportedOperationError,
+  isUsbSerialUnavailableError,
 } from "./http-error.ts";
 
 function makeError(
@@ -36,6 +38,12 @@ test("helpers classify unsupported and transient device errors", () => {
     ),
   ).toBe(true);
   expect(isLinkUnavailableError(makeError({ code: "LINK_DOWN" }))).toBe(true);
+  expect(isUsbSerialUnavailableError(makeError({ code: "device_busy" }))).toBe(
+    true,
+  );
+  expect(
+    isUsbSerialUnavailableError(makeError({ code: "web_session_expired" })),
+  ).toBe(true);
   expect(isAnalogNotReadyError(makeError({ code: "ANALOG_NOT_READY" }))).toBe(
     true,
   );
@@ -47,4 +55,10 @@ test("getNetworkErrorHint includes baseUrl when provided", () => {
     "baseUrl=http://device.local",
   );
   expect(getNetworkErrorHint()).not.toContain("baseUrl=");
+});
+
+test("getUsbSerialErrorHint explains the affected baseUrl", () => {
+  expect(getUsbSerialErrorHint("http://127.0.0.1:19390")).toContain(
+    "baseUrl=http://127.0.0.1:19390",
+  );
 });

@@ -55,6 +55,23 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - SHOULD: devd 可以托管生产 Web 静态文件，并为 Vite dev server 提供 `/api` proxy 目标。
 - SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/digital monitor 操作。Analog RTT/defmt monitor 尚未实现时，CLI/devd 必须返回结构化错误，不得悄悄监视 digital USB session。
 - MUST: Web Serial 是 GitHub Pages 与 release Web bundle 的正式浏览器路径；支持身份/状态/控制/PD/输出/预设/校准/WiFi/诊断和 ESP32-S3 flash，并在不支持 Serial API 的浏览器引导到 released CLI/devd。
+- MUST: Runtime WiFi writes (`set_wifi_config`, `clear_wifi_config`, backup restore of `settings.wifi`) MUST NOT treat LAN HTTP, mDNS, saved HTTP transports, subnet scan hits, or "verified LAN" reachability as an alternate management path. Those transports can be the current WiFi path and can disappear as a direct result of the write. WiFi writes that are initiated while the device is reached through LAN HTTP MUST switch to an independent path such as USB/devd, or fail before sending credentials.
+- MUST: Runtime WiFi writes MUST be gated by a verified independent management path before the write request is sent. A URL that merely looks like USB/devd is not sufficient; the UI/CLI must first create or refresh the USB/devd lease and read identity for the same device. If switching, leasing, identity verification, or queue ownership fails, the WiFi write MUST NOT be sent. This applies equally to Save WiFi, Clear User WiFi, and backup restore of `settings.wifi`.
+- MUST: WiFi write request acknowledgement MUST be based on the device confirming the EEPROM write/clear command, not on LAN association completing. The Web/devd write request must return the storage-acknowledged response promptly after the firmware reply; target latency is within 500 ms in the normal USB/devd path. `clear_wifi_config` must clear the user credential source, remove the current IP from the reported status while the radio is being reconfigured, and force the firmware WiFi task to disconnect or stop when no fallback credentials exist. After the acknowledgement, Web/CLI must poll device-reported WiFi status until the intended state is confirmed or a terminal error is reported. If the write request times out but a follow-up WiFi status read reports the intended post-write state, Web/CLI must treat the write as applied and must not show a stale serial timeout as a failure. If a post-clear status still reports `source=user`, or a post-set status does not report the requested user SSID, the Web/CLI must show a write failure instead of silently leaving stale state visible.
+- MUST: Successful USB/devd and Web Serial connections must trigger LAN binding discovery for the same `identity.device_id`. The Web/CLI should attempt, in order, explicit devd `lan_endpoint` / DNS-SD endpoint, identity mDNS hostname, WiFi status IP, and identity network IP; once a valid HTTP base URL is derived, it must be saved as the same device's LAN/WiFi transport instead of creating another device row.
+- MUST: Successful LAN/WiFi discovery must perform the same identity-keyed merge in reverse. If the discovered device identity matches an existing USB/devd or Web Serial record, update that existing record with the LAN transport and keep all known transports on one saved device.
+- MUST: Switching the active management path is an asynchronous connection operation, not a local UI selection. The UI must show a loading state for the target transport, probe or lease the requested path, read identity, and confirm it is the same `identity.device_id` before updating the active `baseUrl` or closing the device sheet. If the probe, lease, network request, or identity match fails, the sheet remains open, the active path remains unchanged, and the error is visible.
+- MUST: Saved LAN/WiFi transports are candidates only. A saved LAN base URL must not be treated as currently connected after WiFi credentials are cleared, after the device reports no WiFi IP, or after a switch probe fails. Stale LAN candidates may remain visible for retry, but they must not display cached device data as live state or become the active path without a fresh identity check.
+
+### WiFi write business flow
+
+1. Detect whether the currently selected management path is independent from WiFi.
+2. If the current path is LAN HTTP/mDNS/saved HTTP/verified LAN, block direct write and ask the user to bind or switch to USB/devd.
+3. If the current path is USB/devd but identity is pending, stale, errored, or the lease is not verified, treat it as not connected for WiFi writes and require a fresh switch/lease verification.
+4. Only after USB/devd lease creation or refresh succeeds and identity is confirmed for the same device may the app send `set_wifi_config`, `clear_wifi_config`, or a restore `settings.wifi` write.
+5. If any previous step fails, show the failure and keep the existing WiFi configuration unchanged.
+6. After sending `set_wifi_config` or `clear_wifi_config`, the write request returns once the device acknowledges the EEPROM write/clear; it must not block on WiFi association/disconnection. Then poll WiFi status until the intended state is confirmed or a terminal error is reported. This polling also applies when the request returns `serial_response_timeout` or `serial_response_mismatch`, because the firmware may have applied the side effect while the response frame was lost. A set is confirmed only when status reports the requested SSID with `source=user` and no terminal WiFi error. A clear is confirmed only when status reports `source!=user`. Any contradictory post-write status is a failed write and must be visible to the user.
+7. After a WiFi status read reports `state=connected` with an IP address, update the saved device record with the derived LAN/WiFi transport for the same identity. This read-side transport binding is allowed even though WiFi writes remain blocked on LAN.
 
 ## 功能与行为规格
 
@@ -68,6 +85,13 @@ LoadLynx devd 的顶层设备记录应允许把同一实体的多个连接面合
 - `lan_endpoint`: `.local` hostname 或 IP base URL。
 - `connection_marks`: `lan`, `usb`, `digital_flash`, `analog_flash`, `uart_link`。
 - `lease`: devd/Web/CLI 内部授权凭证；同一 device 可有多个有效 lease，但同一物理 USB port 在同一时刻只能归属一个已确认 device。
+
+Saved-device merge behavior:
+
+- `identity.device_id` is the primary merge key across LAN HTTP, USB/devd and Web Serial.
+- A USB/devd lease that successfully reads identity must also try to read network/WiFi status and attach a LAN transport when the device reports a usable mDNS hostname or IP address.
+- Web Serial identity capture must not persist OS serial port paths, but it may persist the captured identity profile and any derived LAN/WiFi transport for the same identity.
+- LAN transport selection should prefer mDNS `.local` hostnames over raw IP when both are reported, because DHCP IPs can change; explicit endpoints with a port preserve that port.
 
 ### devd IPC and HTTP bridge
 
@@ -210,7 +234,7 @@ CLI commands should map 1:1 to devd/LAN operations:
 
 Temporary devd candidate IDs are discovery outputs, not operation targets. A USB candidate may only enter user operations through `loadlynx device add`; the bind flow must read identity over a short bind-probe lease and reject firmware that does not expose a stable `identity.device_id` such as `loadlynx-<short-id>`. `loadlynx device add --usb-port <path>` is the non-interactive USB bind form for automation and HIL: devd still scans candidates, matches the explicit port path, and then runs the same identity-confirming bind-probe flow. Bind-probe leases are restricted to identity binding and must not authorize normal control, diagnostics, reset or flash operations. Saved device records use that stable ID as the registry key, may hold both USB and HTTP transport locators, remember `last_transport`, and expose a global default plus nearest-ancestor `.loadlynx` local selection for selector-free automation. Saved USB operations on a fresh auto-started devd may trigger scan before lease creation, then must confirm the current firmware identity still matches the saved device ID; a missing lease identity is a failed confirmation, not a permissive legacy fallback.
 
-LAN WiFi writes require the explicit `--allow-insecure-lan-wifi` CLI flag. USB/devd WiFi writes do not require that LAN safety override because they are local physical access operations.
+WiFi writes require an independent management path. USB/devd WiFi writes use a local physical-access lease and are allowed. LAN HTTP WiFi writes are not allowed by confirmation alone: a saved HTTP transport, a successful LAN identity check, or a "verified LAN" mark does not prove that the connection is independent of the WiFi configuration being changed. If a selected device resolves only to LAN HTTP for `wifi set`, `wifi clear`, or backup restore of `settings.wifi`, CLI must fail before sending credentials and tell the user to bind/use USB/devd for the same device.
 
 CLI must print target evidence before hardware-changing operations: device id, transport, port/probe, artifact id, SHA-256 and dry-run/real mode.
 
@@ -222,6 +246,7 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Firmware page: artifact source, target board selector, match/mismatch warning, dry-run, flash progress, reconnect state.
 - Web Serial firmware path: browser file inputs for release catalog and firmware file, SHA-256 verification, `yes` confirmation, identity confirmation, non-project acknowledgement, esptool-js flash, and post-flash identity/profile capture without saving OS port paths.
 - USB session page/panel: lease state, heartbeat/reconnect, bounded logs, raw trace with sensitive redaction.
+- Settings/WiFi: when the active device path is LAN HTTP and the user requests a WiFi write, the UI may present a switch/bind dialog, but selectable entries must be independent control paths only. USB/devd is selectable when a valid binding is available. Current LAN HTTP, saved HTTP transports, mDNS/manual IP entries, subnet scan hits, and "verified LAN" entries must not be selectable for continuing the WiFi write.
 
 ## 验收标准
 
@@ -239,6 +264,10 @@ CLI must print target evidence before hardware-changing operations: device id, t
 - Given CLI sets a USB target to 12V PD and enables a 2A CC load, When `status` is read through devd, Then the response shows the PD contract, CC target, output enabled state and measured current without direct CLI serial access.
 - Given CLI disables output, When `status` is read through devd, Then output enabled and analog enable are false and measured current is near zero.
 - Given a USB CDC `set_wifi_config` request contains PSK, When session traces or diagnostics are fetched, Then PSK is redacted.
+- Given Web is connected to a device through LAN HTTP, When the user requests Save WiFi or Clear WiFi, Then the switch dialog must not list the current LAN HTTP URL or any "verified LAN" HTTP entry as a usable management connection.
+- Given CLI resolves a saved device to LAN HTTP only, When `wifi set`, `wifi clear`, or backup restore of `settings.wifi` is requested, Then CLI fails before sending credentials and asks for a USB/devd binding.
+- Given a USB/devd `set_wifi_config` request returns `serial_response_timeout` after the firmware has applied the requested SSID, When Web or CLI reads WiFi status and sees that requested SSID as `source=user`, Then the operation is reported as applied instead of showing the stale serial timeout.
+- Given a USB/devd `set_wifi_config` request returns `UNAVAILABLE` / `EEPROM write failed`, When Web shows the result, Then it tells the user the device storage write failed and does not imply the WiFi SSID or PSK is invalid.
 - Given Storybook exists, Web UI changes for Connect/Firmware/USB session must have stable stories and visual evidence before merge.
 
 ## Visual Evidence
@@ -290,6 +319,18 @@ CLI must print target evidence before hardware-changing operations: device id, t
   evidence_note: verifies the Settings route renders WiFi status, accepts user WiFi input through the API layer, and renders a diagnostics export without exposing PSK.
 
 ![Settings WiFi diagnostics evidence](./assets/settings-wifi-diagnostics.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Settings/WiFiSetEepromErrorFriendlyMessage`
+  state: WiFi set EEPROM write failure
+  capture_scope: browser-viewport
+  requested_viewport: `none`
+  viewport_strategy: browser-viewport
+  target_program: mock-only
+  sensitive_exclusion: mock PSK only
+  evidence_note: verifies the Settings route shows a user-actionable device storage failure instead of exposing `UNAVAILABLE` / `EEPROM write failed` as raw implementation text.
+
+![WiFi EEPROM error friendly message evidence](./assets/wifi-set-eeprom-error-friendly.jpg)
 
 ## 非功能性验收 / 质量门槛
 

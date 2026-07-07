@@ -3,7 +3,7 @@ title: Local device control plane for Web, CLI and firmware operations
 module: devices
 problem_type: local_hardware_control
 component: devd
-tags: [devd, usb-http-bridge, firmware-flash, mdns, cli, hardware-safety]
+tags: [devd, usb-http-bridge, firmware-flash, mdns, cli, hardware-safety, api-performance]
 status: active
 related_specs: [e3rv6]
 ---
@@ -71,6 +71,11 @@ Use a local-first control plane:
 - Flash/reset tools that need the OS serial port directly must temporarily close or pause the daemon serial owner and return explicit busy/in-progress errors to concurrent same-port commands.
 - Do not fake unsupported compatibility endpoints. If firmware does not expose an operation on the current build, return a clear unsupported-operation error rather than advertising the operation or synthesizing success in the daemon.
 - Long-running firmware-side waits need matching daemon-side serial timeouts for that operation only. Keep ordinary request timeouts short, then widen timeout windows for explicit wait semantics such as WiFi connection waits.
+- Classify host API latency by operation semantics, not by transport. Immediate operations such as status reads, control writes, WiFi credential writes and WiFi clears should have a short, explicit response budget; do not let a generic serial or background-probe timeout define their user-facing latency.
+- Treat `wait=true` and similar flags as opt-in long waits. The default write path should acknowledge that the setting was accepted or applied quickly, then let status polling report eventual network attachment separately.
+- Background health probes must not compete with active leases for the same USB CDC request window. If a client owns an active lease, serialize only that client's foreground command stream or pause background polling until the port is idle.
+- Recovery and retry paths must remain bounded by the endpoint's latency contract. A recovered response can be returned only when a fresh operation-scoped status read proves the requested state; retrying until success and then reporting a slow success hides the actual failure mode.
+- For hardware-backed Web flows, verify latency with real repeated HIL loops, not one manual click. A useful acceptance test records status code, operation-specific state, request ID and max latency for consecutive write/clear cycles.
 - Treat mDNS/DNS-SD as convenience discovery. Always keep manual IP/hostname entry and bounded scan fallback.
 - For dual-MCU devices, represent board targets explicitly instead of flattening them into one generic "serial device".
 - If older firmware exposes only a generic USB identity, block binding and control until firmware provides a stable device ID. Do not synthesize a persistent ID from OS port paths or daemon candidate IDs.

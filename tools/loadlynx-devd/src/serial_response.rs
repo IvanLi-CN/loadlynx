@@ -110,8 +110,10 @@ pub(crate) fn infer_serial_response_from_text(
     {
         return Some(response);
     }
-    if serial_request_id_matches_op(request_id, "devd-get-wifi-status")
-        && let Some(response) = infer_wifi_status_response_from_text(text, request_id)
+    if (serial_request_id_matches_op(request_id, "devd-get-wifi-status")
+        || serial_request_id_matches_op(request_id, "devd-set-wifi-config")
+        || serial_request_id_matches_op(request_id, "devd-clear-wifi-config"))
+        && let Some(response) = infer_wifi_status_response_from_text(probe, request_id)
     {
         return Some(response);
     }
@@ -185,12 +187,66 @@ fn infer_calibration_profile_response_from_text(text: &str, request_id: &str) ->
     }))
 }
 
-fn infer_wifi_status_response_from_text(text: &str, request_id: &str) -> Option<Value> {
-    let state = json_string_after_any(text, &["\"state\":\"", "tate\":\""])?;
+fn infer_wifi_status_response_from_text(
+    probe: &SerialProtocolProbe,
+    request_id: &str,
+) -> Option<Value> {
+    let text = &probe.non_protocol_text;
+    if !text.contains("\"type\":\"response\"") || !text.contains("\"request_id\":\"") {
+        return None;
+    }
+    let op_prefix = if serial_request_id_matches_op(request_id, "devd-get-wifi-status") {
+        "devd-get-wifi-status"
+    } else if serial_request_id_matches_op(request_id, "devd-set-wifi-config") {
+        "devd-set-wifi-config"
+    } else if serial_request_id_matches_op(request_id, "devd-clear-wifi-config") {
+        "devd-clear-wifi-config"
+    } else {
+        return None;
+    };
+    if !text.contains(op_prefix) {
+        return None;
+    }
+    let search_text = text.find(op_prefix).map(|idx| &text[idx..]).unwrap_or(text);
+    let expected_op = expected_op_for_request_id(request_id)?;
+    let tx_frame = probe.frames.iter().find(|event| {
+        event.direction == "tx"
+            && event
+                .frame
+                .get("request_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == request_id)
+            && event
+                .frame
+                .get("op")
+                .and_then(Value::as_str)
+                .is_some_and(|op| op == expected_op)
+    });
+    let tx_frame = tx_frame?;
+    let state = wifi_state_from_text(search_text)?;
     let ip = json_string_after_any(text, &["\"ip\":\""]);
-    let ssid = json_string_after_any(text, &["\"ssid\":\""]);
-    let source = json_string_after_any(text, &["\"source\":\""]);
+    let ssid = json_string_after_any(text, &["\"ssid\":\""]).or_else(|| match expected_op {
+        "set_wifi_config" => tx_frame
+            .frame
+            .get("ssid")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        "clear_wifi_config" => Some(String::new()),
+        _ => None,
+    });
+    let source = json_string_after_any(text, &["\"source\":\""]).or_else(|| match expected_op {
+        "set_wifi_config" => Some("user".to_string()),
+        "clear_wifi_config" => Some("none".to_string()),
+        _ => None,
+    });
     let last_error = json_string_after_any(text, &["\"last_error\":\""]);
+    let last_error = if last_error.is_some() {
+        json!(last_error)
+    } else if text.contains("\"last_error\":null") {
+        Value::Null
+    } else {
+        json!(null)
+    };
     let data = json!({
         "ssid": ssid,
         "source": source,
@@ -206,6 +262,63 @@ fn infer_wifi_status_response_from_text(text: &str, request_id: &str) -> Option<
         "data": data,
         "recovered_from_text": true
     }))
+}
+
+fn wifi_state_from_text(text: &str) -> Option<String> {
+    for marker in ["\"state\":\"", "tate\":\"", "e\":\""] {
+        if let Some(state) = json_string_after(text, marker)
+            && is_wifi_state_name(&state)
+        {
+            return Some(state);
+        }
+    }
+    wifi_state_appended_to_request_id(text).or_else(|| wifi_state_after_colon_quote(text))
+}
+
+fn wifi_state_appended_to_request_id(text: &str) -> Option<String> {
+    let marker = "\"request_id\":\"";
+    let tail = if let Some(start) = text.find(marker) {
+        &text[start + marker.len()..]
+    } else {
+        text
+    };
+    let end = tail.find('"')?;
+    let request_text = &tail[..end];
+    for state in ["connected", "connecting", "idle", "error"] {
+        if request_text.ends_with(state) {
+            return Some(state.to_string());
+        }
+    }
+    None
+}
+
+fn wifi_state_after_colon_quote(text: &str) -> Option<String> {
+    let mut best: Option<(usize, &str)> = None;
+    for state in ["connected", "connecting", "idle", "error"] {
+        let marker = format!(":\"{state}\"");
+        if let Some(index) = text.find(&marker)
+            && best.is_none_or(|(best_index, _)| index < best_index)
+        {
+            best = Some((index, state));
+        }
+    }
+    best.map(|(_, state)| state.to_string())
+}
+
+fn is_wifi_state_name(value: &str) -> bool {
+    matches!(value, "idle" | "connecting" | "connected" | "error")
+}
+
+fn expected_op_for_request_id(request_id: &str) -> Option<&'static str> {
+    if serial_request_id_matches_op(request_id, "devd-get-wifi-status") {
+        Some("get_wifi_status")
+    } else if serial_request_id_matches_op(request_id, "devd-set-wifi-config") {
+        Some("set_wifi_config")
+    } else if serial_request_id_matches_op(request_id, "devd-clear-wifi-config") {
+        Some("clear_wifi_config")
+    } else {
+        None
+    }
 }
 
 fn json_string_after_any(text: &str, markers: &[&str]) -> Option<String> {

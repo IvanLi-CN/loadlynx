@@ -18,14 +18,6 @@ fn main() {
         println!("cargo:rerun-if-changed={}", path.display());
     }
 
-    // Re-run when Wi-Fi config changes.
-    if let Some(repo_root) = repo_root_from_manifest() {
-        let env_path = repo_root.join(".env");
-        if env_path.exists() {
-            println!("cargo:rerun-if-changed={}", env_path.display());
-        }
-    }
-
     let pkg_name = std::env::var("CARGO_PKG_NAME").unwrap_or_else(|_| "unknown".to_string());
     let pkg_ver = std::env::var("LOADLYNX_RELEASE_VERSION")
         .or_else(|_| std::env::var("LOADLYNX_PROJECT_VERSION"))
@@ -64,36 +56,12 @@ fn main() {
         let _ = std::fs::write(path, &version_string);
     }
 
-    // Load Wi-Fi configuration from .env or environment and inject it as compile-time env vars.
-    let mut cfg = std::collections::HashMap::new();
-    if let Some(repo_root) = repo_root_from_manifest() {
-        let env_path = repo_root.join(".env");
-        if env_path.exists() {
-            cfg.extend(load_env_file(&env_path));
-        }
-    }
-
-    if let Some(wifi_ssid) = get_wifi_cfg("DIGITAL_WIFI_SSID", &cfg) {
-        println!("cargo:rustc-env=LOADLYNX_WIFI_SSID={}", wifi_ssid);
-    }
-    if let Some(wifi_psk) = get_wifi_cfg("DIGITAL_WIFI_PSK", &cfg) {
-        println!("cargo:rustc-env=LOADLYNX_WIFI_PSK={}", wifi_psk);
-    }
-
-    if let Some(hostname) = get_wifi_cfg("DIGITAL_WIFI_HOSTNAME", &cfg) {
-        println!("cargo:rustc-env=LOADLYNX_WIFI_HOSTNAME={}", hostname);
-    }
-    if let Some(static_ip) = get_wifi_cfg("DIGITAL_WIFI_STATIC_IP", &cfg) {
-        println!("cargo:rustc-env=LOADLYNX_WIFI_STATIC_IP={}", static_ip);
-    }
-    if let Some(netmask) = get_wifi_cfg("DIGITAL_WIFI_NETMASK", &cfg) {
-        println!("cargo:rustc-env=LOADLYNX_WIFI_NETMASK={}", netmask);
-    }
-    if let Some(gateway) = get_wifi_cfg("DIGITAL_WIFI_GATEWAY", &cfg) {
-        println!("cargo:rustc-env=LOADLYNX_WIFI_GATEWAY={}", gateway);
-    }
-    if let Some(dns) = get_wifi_cfg("DIGITAL_WIFI_DNS", &cfg) {
-        println!("cargo:rustc-env=LOADLYNX_WIFI_DNS={}", dns);
+    // Development firmware must not carry default Wi-Fi credentials. Runtime
+    // Wi-Fi is written through USB/devd or Web Serial and persisted in EEPROM.
+    // Factory Wi-Fi is an explicit, controlled build mode only.
+    println!("cargo:rerun-if-env-changed=LOADLYNX_ENABLE_FACTORY_WIFI");
+    if env::var("LOADLYNX_ENABLE_FACTORY_WIFI").as_deref() == Ok("1") {
+        inject_factory_wifi_from_environment();
     }
 }
 
@@ -275,35 +243,7 @@ fn source_digest() -> Option<u64> {
     }
 }
 
-fn load_env_file(path: &std::path::Path) -> std::collections::HashMap<String, String> {
-    let mut map = std::collections::HashMap::new();
-
-    let contents = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(_) => return map,
-    };
-
-    for line in contents.lines() {
-        let line = line.trim();
-
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-
-        if let Some((key, value)) = line.split_once('=') {
-            let key = key.trim();
-            let value = value.trim();
-
-            if !key.is_empty() && !value.is_empty() {
-                map.insert(key.to_string(), value.to_string());
-            }
-        }
-    }
-
-    map
-}
-
-fn get_wifi_cfg(key: &str, file_cfg: &std::collections::HashMap<String, String>) -> Option<String> {
+fn get_non_empty_env(key: &str) -> Option<String> {
     if let Ok(v) = env::var(key) {
         let v = v.trim();
         if !v.is_empty() {
@@ -311,12 +251,44 @@ fn get_wifi_cfg(key: &str, file_cfg: &std::collections::HashMap<String, String>)
         }
     }
 
-    if let Some(v) = file_cfg.get(key) {
-        let v = v.trim();
-        if !v.is_empty() {
-            return Some(v.to_string());
-        }
+    None
+}
+
+fn inject_factory_wifi_from_environment() {
+    for key in [
+        "LOADLYNX_FACTORY_WIFI_SSID",
+        "LOADLYNX_FACTORY_WIFI_PSK",
+        "LOADLYNX_FACTORY_WIFI_HOSTNAME",
+        "LOADLYNX_FACTORY_WIFI_STATIC_IP",
+        "LOADLYNX_FACTORY_WIFI_NETMASK",
+        "LOADLYNX_FACTORY_WIFI_GATEWAY",
+        "LOADLYNX_FACTORY_WIFI_DNS",
+    ] {
+        println!("cargo:rerun-if-env-changed={key}");
     }
 
-    None
+    let Some(wifi_ssid) = get_non_empty_env("LOADLYNX_FACTORY_WIFI_SSID") else {
+        panic!("LOADLYNX_ENABLE_FACTORY_WIFI=1 requires LOADLYNX_FACTORY_WIFI_SSID");
+    };
+    let Some(wifi_psk) = get_non_empty_env("LOADLYNX_FACTORY_WIFI_PSK") else {
+        panic!("LOADLYNX_ENABLE_FACTORY_WIFI=1 requires LOADLYNX_FACTORY_WIFI_PSK");
+    };
+
+    println!("cargo:rustc-env=LOADLYNX_WIFI_SSID={wifi_ssid}");
+    println!("cargo:rustc-env=LOADLYNX_WIFI_PSK={wifi_psk}");
+    if let Some(hostname) = get_non_empty_env("LOADLYNX_FACTORY_WIFI_HOSTNAME") {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_HOSTNAME={hostname}");
+    }
+    if let Some(static_ip) = get_non_empty_env("LOADLYNX_FACTORY_WIFI_STATIC_IP") {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_STATIC_IP={static_ip}");
+    }
+    if let Some(netmask) = get_non_empty_env("LOADLYNX_FACTORY_WIFI_NETMASK") {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_NETMASK={netmask}");
+    }
+    if let Some(gateway) = get_non_empty_env("LOADLYNX_FACTORY_WIFI_GATEWAY") {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_GATEWAY={gateway}");
+    }
+    if let Some(dns) = get_non_empty_env("LOADLYNX_FACTORY_WIFI_DNS") {
+        println!("cargo:rustc-env=LOADLYNX_WIFI_DNS={dns}");
+    }
 }
