@@ -1,16 +1,25 @@
 import { LoaderCircle } from "lucide-react";
+import { useTranslation } from "react-i18next";
 
 export type RoutePendingViewProps = {
   title?: string;
+  titleKey?: string;
   description?: string;
+  descriptionKey?: string;
   compact?: boolean;
 };
 
 export function RoutePendingView({
-  title = "正在打开页面",
-  description = "正在加载目标视图",
+  title,
+  titleKey = "routePending.defaultTitle",
+  description,
+  descriptionKey = "routePending.defaultDescription",
   compact = false,
 }: RoutePendingViewProps) {
+  const { t } = useTranslation();
+  const resolvedTitle = title ?? t(titleKey);
+  const resolvedDescription = description ?? t(descriptionKey);
+
   return (
     <section
       role="status"
@@ -34,9 +43,11 @@ export function RoutePendingView({
             />
           </span>
           <div className="min-w-0">
-            <h1 className="text-lg font-bold text-base-content">{title}</h1>
+            <h1 className="text-lg font-bold text-base-content">
+              {resolvedTitle}
+            </h1>
             <p className="mt-1 font-mono text-sm text-base-content/70">
-              {description}
+              {resolvedDescription}
             </p>
           </div>
         </div>

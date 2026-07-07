@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { Cable } from "lucide-react";
 import { useEffect, useState } from "react";
+import { useTranslation } from "react-i18next";
 import {
   BACKUP_SECTION_KEYS,
   deleteWifiConfig,
@@ -67,34 +68,42 @@ const BACKUP_SECTION_LABELS: Record<BackupSectionKey, string> = {
   "settings.pd": "USB-PD",
 };
 
-function formatWifiFailureReason(error: string | null | undefined): string {
+type SettingsTranslator = ReturnType<typeof useTranslation>["t"];
+
+function formatWifiFailureReason(
+  t: SettingsTranslator,
+  error: string | null | undefined,
+): string {
   if (!error) {
-    return "device reported WiFi error";
+    return t("settings.wifiFailureFallback");
   }
   return error.replace(/_/g, " ");
 }
 
-function formatWifiWriteErrorMessage(error: Error): string {
+function formatWifiWriteErrorMessage(
+  t: SettingsTranslator,
+  error: Error,
+): string {
   if (!isHttpApiError(error)) {
-    return `WiFi 更新失败：${error.message}`;
+    return t("settings.wifiUpdateFailed", { message: error.message });
   }
 
   if (
     error.code === "UNAVAILABLE" &&
     /EEPROM write failed/i.test(error.message)
   ) {
-    return "WiFi 更新失败：设备存储写入失败。请重试；如果反复出现，需要检查固件的 EEPROM/I2C 写入。";
+    return t("settings.wifiStorageFailed");
   }
 
   if (
     error.code === "serial_response_timeout" ||
     error.code === "serial_response_mismatch"
   ) {
-    return "WiFi 更新状态未确认：USB 管理通道没有收到匹配响应。页面会读回设备状态；如果设置未变化，请重新连接 USB 后重试。";
+    return t("settings.wifiStatusUnconfirmed");
   }
 
   const summary = `${error.code ?? "HTTP"} — ${error.message}`;
-  return `WiFi 更新失败：${summary}`;
+  return t("settings.wifiUpdateFailed", { message: summary });
 }
 
 function toggleSection(
@@ -110,17 +119,20 @@ function toggleSection(
 type WifiWriteAction = "save" | "clear" | "restore";
 type WifiSwitchDialogAction = WifiWriteAction | "switch";
 
-function wifiWriteActionLabel(action: WifiSwitchDialogAction | null): string {
+function wifiWriteActionLabel(
+  t: SettingsTranslator,
+  action: WifiSwitchDialogAction | null,
+): string {
   if (action === "clear") {
-    return "Clear User WiFi";
+    return t("settings.clearUserWifi");
   }
   if (action === "restore") {
-    return "Restore WiFi Backup";
+    return t("settings.restoreWifiBackup");
   }
   if (action === "switch") {
-    return "WiFi Settings";
+    return t("settings.wifiSettings");
   }
-  return "Save WiFi";
+  return t("settings.saveWifi");
 }
 
 type WifiConnectionOption = {
@@ -224,6 +236,7 @@ function getWifiConnectionOptions(
 }
 
 export function DeviceSettingsRoute() {
+  const { t } = useTranslation();
   const { deviceId, device, baseUrl } = useDeviceContext();
   const queryClient = useQueryClient();
   const deviceStore = useDeviceStore();
@@ -589,7 +602,7 @@ export function DeviceSettingsRoute() {
 
   const wifiFailureReason =
     wifi?.last_error || wifi?.state === "error"
-      ? formatWifiFailureReason(wifi?.last_error)
+      ? formatWifiFailureReason(t, wifi?.last_error)
       : null;
   const wifiWriteErrorMessage = (() => {
     if (wifiClearApplyError) {
@@ -605,7 +618,7 @@ export function DeviceSettingsRoute() {
       return null;
     }
 
-    return formatWifiWriteErrorMessage(error);
+    return formatWifiWriteErrorMessage(t, error);
   })();
   const wifiConnectionSwitchRequired = isWifiTransportBaseUrl(baseUrl);
   const wifiWriteTransportVerified = isWifiWriteTransportVerified(
@@ -614,7 +627,7 @@ export function DeviceSettingsRoute() {
   );
   const wifiWriteReadinessMessage = wifiWriteTransportVerified
     ? null
-    : "需要先切换到已验证的 USB/devd 管理连接，才可修改 WiFi。";
+    : t("settings.wifiWriteRequiresUsb");
   const wifiWriteLocked = Boolean(wifiWriteReadinessMessage);
   const wifiConnectionOptions = getWifiConnectionOptions(device);
   const availableWifiConnectionOptions = wifiConnectionOptions.filter(
@@ -788,8 +801,8 @@ export function DeviceSettingsRoute() {
       <ConfirmDialog
         open={confirmSoftResetOpen}
         title="Soft Reset"
-        body="确定要进行 Soft Reset 吗？当前输出会被重置。"
-        details={["Writes device: Yes.", "May interrupt ongoing output."]}
+        body={t("settings.softResetBody")}
+        details={[t("settings.writesDevice"), t("settings.interruptOutput")]}
         confirmLabel="Soft Reset"
         destructive
         confirmDisabled={softResetMutation.isPending}
@@ -805,7 +818,7 @@ export function DeviceSettingsRoute() {
           <div className="ll-modal-box">
             <h3 className="font-bold text-lg">
               {hasKnownWifiConnectionOptions ? "Switch" : "Bind"} Connection for{" "}
-              {wifiWriteActionLabel(wifiSwitchAction)}
+              {wifiWriteActionLabel(t, wifiSwitchAction)}
             </h3>
             {hasKnownWifiConnectionOptions ? (
               <p className="py-3 text-sm">
@@ -1363,7 +1376,7 @@ export function DeviceSettingsRoute() {
                             strokeWidth={2.4}
                             aria-hidden="true"
                           />
-                          切换连接方式
+                          {t("settings.switchConnection")}
                         </button>
                       </div>
                     </div>

@@ -217,7 +217,11 @@ export function DevicesRoute() {
           if (
             isManagedScanCurrent(activeScanControllerRef.current, controller)
           ) {
-            setScanError(err instanceof Error ? err.message : "Unknown error");
+            setScanError(
+              err instanceof Error
+                ? err.message
+                : t("dashboard.errors.unknown"),
+            );
           }
         },
         onSettled: () => {
@@ -238,22 +242,22 @@ export function DevicesRoute() {
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
             <h2 className="text-2xl font-bold">
-              {selectionMode ? "选择设备" : "总览"}
+              {selectionMode ? t("devices.selectionTitle") : t("devices.title")}
             </h2>
             <p className="mt-1 max-w-3xl text-sm text-base-content/70">
               {selectionMode
-                ? "选择要进入的设备。"
-                : "查看所有设备的核心状态、连接方式与入口。"}
+                ? t("devices.selectionSubtitle")
+                : t("devices.subtitle")}
             </p>
           </div>
           <div className="rounded-2xl border border-base-300/70 bg-base-200/30 px-4 py-3 text-xs text-base-content/60">
             <div className="font-mono uppercase tracking-[0.14em] text-base-content/45">
-              {selectionMode ? "Selected View" : "Devices"}
+              {selectionMode ? t("devices.selectedView") : "Devices"}
             </div>
             <div className="mt-2">
               {selectionMode
                 ? `${selectionIntent.route.toUpperCase()}${selectionIntent.panel ? " · PD Panel" : ""}`
-                : `${devices.length} device${devices.length === 1 ? "" : "s"}`}
+                : t("devices.deviceCount", { count: devices.length })}
             </div>
           </div>
         </div>
@@ -263,27 +267,29 @@ export function DevicesRoute() {
         <div className="flex items-end justify-between gap-4">
           <div>
             <div className="text-xs font-mono uppercase tracking-[0.14em] text-base-content/45">
-              Device List
+              {t("devices.deviceListLabel")}
             </div>
-            <h3 className="mt-1 text-lg font-bold">当前已知设备</h3>
+            <h3 className="mt-1 text-lg font-bold">
+              {t("devices.knownDevices")}
+            </h3>
           </div>
         </div>
 
         {devicesQuery.isLoading ? (
           <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
             <div className="ll-panel-body p-8 text-center text-base-content/60">
-              Loading devices...
+              {t("devices.loading")}
             </div>
           </div>
         ) : devices.length === 0 ? (
           <div className="ll-panel bg-base-100 shadow-sm border border-base-200">
             <div className="ll-panel-body p-8 text-center space-y-4">
               <p className="text-base-content/80 text-lg">
-                No devices yet. Add a LoadLynx device to get started.
+                {t("devices.empty")}
               </p>
               <div className="border-t border-base-300/70 pt-4">
                 <p className="text-sm text-base-content/70">
-                  You can also add a sample device to preview the interface.
+                  {t("devices.sampleHint")}
                 </p>
                 <button
                   type="button"
@@ -293,7 +299,9 @@ export function DevicesRoute() {
                   }}
                   disabled={isMutating}
                 >
-                  {isMutating ? "Adding sample..." : "Add sample device"}
+                  {isMutating
+                    ? t("devices.addingSample")
+                    : t("devices.addSample")}
                 </button>
               </div>
             </div>
@@ -317,9 +325,11 @@ export function DevicesRoute() {
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div>
             <div className="text-xs font-mono uppercase tracking-[0.14em] text-base-content/45">
-              Device Tools
+              {t("devices.toolsLabel")}
             </div>
-            <h3 className="mt-1 text-lg font-bold">注册、桥接与发现</h3>
+            <h3 className="mt-1 text-lg font-bold">
+              {t("devices.toolsTitle")}
+            </h3>
           </div>
           {ENABLE_MOCK_DEVTOOLS ? (
             <div className="flex items-center gap-3">
@@ -331,7 +341,9 @@ export function DevicesRoute() {
                 disabled={isMutating}
                 className="ll-button ll-button-secondary ll-button-sm"
               >
-                {isMutating ? "Adding device..." : "Add sample device"}
+                {isMutating
+                  ? t("devices.addingDevice")
+                  : t("devices.addSample")}
               </button>
             </div>
           ) : null}
@@ -346,9 +358,7 @@ export function DevicesRoute() {
                     event.preventDefault();
 
                     if (isDemoMode) {
-                      setAddDeviceError(
-                        "Sample devices are enabled on this page. Disable demo mode to add a network device.",
-                      );
+                      setAddDeviceError(t("devices.demoAddBlocked"));
                       return;
                     }
 
@@ -356,7 +366,7 @@ export function DevicesRoute() {
                     const baseUrl = newDeviceBaseUrl.trim();
 
                     if (!name || !baseUrl) {
-                      setAddDeviceError("Name and base URL are required.");
+                      setAddDeviceError(t("devices.nameRequired"));
                       return;
                     }
 
@@ -365,9 +375,7 @@ export function DevicesRoute() {
                       !lowerBaseUrl.startsWith("http://") &&
                       !lowerBaseUrl.startsWith("https://")
                     ) {
-                      setAddDeviceError(
-                        "Base URL must start with http:// or https://.",
-                      );
+                      setAddDeviceError(t("devices.baseUrlProtocolRequired"));
                       return;
                     }
 
@@ -397,24 +405,25 @@ export function DevicesRoute() {
                 >
                   <div>
                     <h4 className="ll-panel-title text-base">
-                      Register device
+                      {t("devices.registerTitle")}
                     </h4>
                     <p className="mt-1 text-xs text-base-content/60">
-                      Add a network device by hostname or base URL.
+                      {t("devices.registerHint")}
                     </p>
                   </div>
 
                   {isDemoMode ? (
                     <output className="ll-alert ll-alert-info text-sm">
-                      Sample devices are active right now. Switch demo mode off
-                      to add a network device here.
+                      {t("devices.demoActive")}
                     </output>
                   ) : null}
 
                   <div className="flex flex-wrap gap-4 items-end">
                     <label className="ll-form-control flex-1 min-w-[200px]">
                       <div className="ll-label-row pb-1">
-                        <span className="ll-label-text">Device name</span>
+                        <span className="ll-label-text">
+                          {t("devices.nameLabel")}
+                        </span>
                       </div>
                       <input
                         id="device-name"
@@ -431,7 +440,9 @@ export function DevicesRoute() {
                     </label>
                     <label className="ll-form-control flex-[2] min-w-[250px]">
                       <div className="ll-label-row pb-1">
-                        <span className="ll-label-text">Base URL</span>
+                        <span className="ll-label-text">
+                          {t("devices.baseUrlLabel")}
+                        </span>
                       </div>
                       <input
                         id="device-base-url"
@@ -451,7 +462,9 @@ export function DevicesRoute() {
                       disabled={isAddingReal || isDemoMode}
                       className="ll-button ll-button-primary"
                     >
-                      {isAddingReal ? "Adding..." : "Add device"}
+                      {isAddingReal
+                        ? t("devices.adding")
+                        : t("devices.addDevice")}
                     </button>
                   </div>
 
@@ -464,7 +477,7 @@ export function DevicesRoute() {
                     </div>
                   ) : (
                     <div className="text-xs text-base-content/60">
-                      Enter the hostname or IP. Example:{" "}
+                      {t("devices.hostnameHint")}{" "}
                       <code className="code">http://loadlynx-d68638.local</code>
                     </div>
                   )}
@@ -476,9 +489,11 @@ export function DevicesRoute() {
               <div className="ll-panel-body p-4 gap-4">
                 <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
                   <div>
-                    <h4 className="ll-panel-title text-base">Local devd</h4>
+                    <h4 className="ll-panel-title text-base">
+                      {t("devices.localDevd")}
+                    </h4>
                     <p className="text-xs text-base-content/60">
-                      Available devices from{" "}
+                      {t("devices.localDevdHint")}{" "}
                       <code className="code">{DEFAULT_DEVD_BASE_URL}</code>.
                     </p>
                   </div>
@@ -498,13 +513,13 @@ export function DevicesRoute() {
                           setDevdError(
                             error instanceof Error
                               ? error.message
-                              : "devd scan failed",
+                              : t("devices.devdScanFailed"),
                           );
                         },
                       });
                     }}
                   >
-                    Refresh
+                    {t("devices.refresh")}
                   </button>
                 </div>
 
@@ -523,7 +538,7 @@ export function DevicesRoute() {
                       <label className="ll-form-control">
                         <div className="ll-label-row pb-1">
                           <span className="ll-label-text">
-                            Available device
+                            {t("devices.availableDevice")}
                           </span>
                         </div>
                         <select
@@ -599,13 +614,13 @@ export function DevicesRoute() {
                               setDevdError(
                                 error instanceof Error
                                   ? error.message
-                                  : "failed to create devd lease",
+                                  : t("devices.createLeaseFailed"),
                               );
                             },
                           });
                         }}
                       >
-                        Add from devd
+                        {t("devices.addFromDevd")}
                       </button>
                     </div>
 
@@ -613,11 +628,11 @@ export function DevicesRoute() {
                       <table className="ll-table ll-table-xs">
                         <thead>
                           <tr>
-                            <th>Candidate</th>
-                            <th>Digital</th>
-                            <th>Analog</th>
-                            <th>LAN</th>
-                            <th>State</th>
+                            <th>{t("devices.candidate")}</th>
+                            <th>{t("devices.digital")}</th>
+                            <th>{t("devices.analog")}</th>
+                            <th>{t("devices.lan")}</th>
+                            <th>{t("devices.state")}</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -649,7 +664,7 @@ export function DevicesRoute() {
                   </>
                 ) : (
                   <div className="text-xs text-base-content/60">
-                    No devd devices found yet.
+                    {t("devices.noDevdDevices")}
                   </div>
                 )}
               </div>
@@ -661,9 +676,11 @@ export function DevicesRoute() {
               <div className="ll-panel-body p-4">
                 <div className="flex justify-between items-center">
                   <div>
-                    <h4 className="ll-panel-title text-base">LAN scan</h4>
+                    <h4 className="ll-panel-title text-base">
+                      {t("devices.lanScan")}
+                    </h4>
                     <p className="mt-1 text-xs text-base-content/60">
-                      Search the current network for LoadLynx devices.
+                      {t("devices.lanScanHint")}
                     </p>
                   </div>
                   <button
@@ -678,22 +695,24 @@ export function DevicesRoute() {
                     disabled={isDemoMode}
                     className="ll-button ll-button-sm ll-button-ghost"
                   >
-                    {isScanPanelOpen ? "Hide scan" : "Scan network..."}
+                    {isScanPanelOpen
+                      ? t("devices.hideScan")
+                      : t("devices.scanNetwork")}
                   </button>
                 </div>
 
                 {isScanPanelOpen ? (
                   <div className="mt-4 space-y-4">
                     <div className="ll-alert ll-alert-warning text-xs">
-                      <span>
-                        This scans the selected subnet with short HTTP probes.
-                      </span>
+                      <span>{t("devices.scanWarning")}</span>
                     </div>
 
                     <div className="flex flex-wrap gap-4 items-end">
                       <label className="ll-form-control flex-1 min-w-[200px]">
                         <div className="ll-label-row pb-1">
-                          <span className="ll-label-text">Seed IP</span>
+                          <span className="ll-label-text">
+                            {t("devices.seedIp")}
+                          </span>
                         </div>
                         <input
                           id="lan-scan-seed-ip"
@@ -712,7 +731,9 @@ export function DevicesRoute() {
                         disabled={isDemoMode || isScanning || !seedIp}
                         className="ll-button ll-button-primary ll-button-sm"
                       >
-                        {isScanning ? "Scanning..." : "Start scan"}
+                        {isScanning
+                          ? t("devices.scanning")
+                          : t("devices.startScan")}
                       </button>
                       {isScanning ? (
                         <button
@@ -720,14 +741,14 @@ export function DevicesRoute() {
                           className="ll-button ll-button-ghost ll-button-sm"
                           onClick={stopScan}
                         >
-                          Cancel
+                          {t("devices.cancel")}
                         </button>
                       ) : null}
                     </div>
 
                     {scanError ? (
                       <div className="text-error text-sm">
-                        Scan failed: {scanError}
+                        {t("devices.scanFailed", { message: scanError })}
                       </div>
                     ) : null}
 
@@ -735,10 +756,16 @@ export function DevicesRoute() {
                       <div className="space-y-2">
                         <div className="flex justify-between text-xs text-base-content/70">
                           <span>
-                            Scanned {scanProgress.scannedCount} /{" "}
-                            {scanProgress.totalCount} hosts
+                            {t("devices.scanProgress", {
+                              scannedCount: scanProgress.scannedCount,
+                              totalCount: scanProgress.totalCount,
+                            })}
                           </span>
-                          <span>Found {scanProgress.foundCount} devices</span>
+                          <span>
+                            {t("devices.scanFound", {
+                              foundCount: scanProgress.foundCount,
+                            })}
+                          </span>
                         </div>
                         <progress
                           className="progress progress-primary w-full"
@@ -751,16 +778,18 @@ export function DevicesRoute() {
                     {scanResults.length > 0 ? (
                       <div>
                         <h5 className="font-bold text-sm mb-2">
-                          Discovered devices ({scanResults.length})
+                          {t("devices.discoveredDevices", {
+                            count: scanResults.length,
+                          })}
                         </h5>
                         <div className="overflow-x-auto">
                           <table className="ll-table ll-table-xs">
                             <thead>
                               <tr>
-                                <th>Hostname</th>
-                                <th>IP</th>
-                                <th>Device ID</th>
-                                <th>Action</th>
+                                <th>{t("devices.hostname")}</th>
+                                <th>{t("devices.ip")}</th>
+                                <th>{t("devices.deviceId")}</th>
+                                <th>{t("devices.action")}</th>
                               </tr>
                             </thead>
                             <tbody>
@@ -790,7 +819,7 @@ export function DevicesRoute() {
                                       }}
                                       disabled={isAddingReal}
                                     >
-                                      Add
+                                      {t("devices.add")}
                                     </button>
                                   </td>
                                 </tr>

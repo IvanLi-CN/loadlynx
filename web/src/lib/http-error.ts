@@ -36,16 +36,16 @@ export function isAnalogNotReadyError(error: HttpApiError): boolean {
 
 export function getNetworkErrorHint(baseUrl?: string): string {
   return (
-    "无法连接设备" +
-    (baseUrl ? `（baseUrl=${baseUrl}）` : "") +
-    "，请检查网络与 IP 设置。"
+    "Cannot reach device" +
+    (baseUrl ? ` (baseUrl=${baseUrl})` : "") +
+    ". Check network and IP settings."
   );
 }
 
 export function getUsbSerialErrorHint(baseUrl?: string): string {
   return (
-    "USB/devd 管理通道不可用：lease 可能已过期、串口正忙，或设备没有返回匹配响应" +
-    (baseUrl ? `（baseUrl=${baseUrl}）` : "") +
-    "。请等待当前请求收口，必要时重新绑定 USB 连接。"
+    "USB/devd management path is unavailable: the lease may have expired, the serial port may be busy, or the device did not return a matching response" +
+    (baseUrl ? ` (baseUrl=${baseUrl})` : "") +
+    ". Wait for the current request to finish and re-bind USB if needed."
   );
 }

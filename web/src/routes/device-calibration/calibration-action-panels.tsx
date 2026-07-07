@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 export function CalibrationDraftActionsPanel(input: {
   disableApplyPreview: boolean;
@@ -12,6 +13,7 @@ export function CalibrationDraftActionsPanel(input: {
   onImportDraftFile: (file: File | null) => Promise<void>;
   onResetDraft: () => void;
 }) {
+  const { t } = useTranslation();
   const {
     disableApplyPreview,
     disableExport,
@@ -29,9 +31,11 @@ export function CalibrationDraftActionsPanel(input: {
     <div className="ll-panel bg-base-200/40 border border-base-200">
       <div className="ll-panel-body py-4 gap-3">
         <div className="flex items-start justify-between gap-3">
-          <h4 className="font-bold text-sm">仅本地（不读写设备）</h4>
+          <h4 className="font-bold text-sm">
+            {t("calibration.localOnlyTitle")}
+          </h4>
           <div className="ll-badge ll-badge-neutral whitespace-nowrap shrink-0">
-            不读写设备
+            {t("calibration.localOnlyBadge")}
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -90,6 +94,7 @@ export function CalibrationHardwareIoPanel(input: {
   disableReadDeviceToDraft: boolean;
   onReadDeviceToDraft: () => void;
 }) {
+  const { t } = useTranslation();
   const {
     actionButtons,
     children,
@@ -101,13 +106,13 @@ export function CalibrationHardwareIoPanel(input: {
     <div className="ll-panel bg-base-200/40 border border-base-200">
       <div className="ll-panel-body py-4 gap-3">
         <div className="flex items-start justify-between gap-3">
-          <h4 className="font-bold text-sm">硬件 I/O</h4>
+          <h4 className="font-bold text-sm">{t("calibration.hardwareIo")}</h4>
           <div className="flex items-center gap-2">
             <div className="ll-badge ll-badge-info whitespace-nowrap">
-              读设备
+              {t("calibration.readDevice")}
             </div>
             <div className="ll-badge ll-badge-warning whitespace-nowrap">
-              写设备
+              {t("calibration.writeDevice")}
             </div>
           </div>
         </div>

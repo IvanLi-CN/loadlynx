@@ -75,7 +75,7 @@ export function DeviceStatusRoute() {
     }
 
     if (isUnsupportedOperationError(firstHttpError)) {
-      const hint = "固件版本不支持该 API，请升级固件后重试。";
+      const hint = t("status.unsupportedApiHint");
       return { summary, hint } as const;
     }
 

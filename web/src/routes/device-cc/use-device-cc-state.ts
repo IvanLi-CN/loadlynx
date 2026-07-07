@@ -951,13 +951,13 @@ export function useDeviceCcState(
   const explainHttpError = (error: HttpApiError): string | null => {
     switch (error.code) {
       case "LINK_DOWN":
-        return "UART 链路掉线：请检查 analog↔digital 连接与供电。";
+        return t("dashboard.errors.linkDownExplain");
       case "ANALOG_NOT_READY":
-        return "Analog 未就绪：常见原因是校准缺失或仍在初始化。";
+        return t("dashboard.errors.analogNotReadyExplain");
       case "ANALOG_FAULTED":
-        return "Analog 处于故障态：请先排查过流/过温/硬件异常。";
+        return t("dashboard.errors.analogFaultedExplain");
       case "LIMIT_VIOLATION":
-        return "输入超出限值：例如 CP 模式需要 target_p_mw <= max_p_mw。";
+        return t("dashboard.errors.limitViolationExplain");
       default:
         return null;
     }
