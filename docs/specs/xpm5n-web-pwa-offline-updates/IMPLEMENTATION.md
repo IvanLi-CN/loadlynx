@@ -6,8 +6,10 @@
 - Moved `web` build version generation before Vite build so `public/version.json` is present before precache generation.
 - Added root-level PWA update prompt runtime and a separate Storybook-safe view component.
 - Added active `/version.json` probing in the PWA prompt runtime so stale GitHub Pages tabs can discover a newer deployed build and offer an operator-confirmed refresh even before the browser surfaces a Workbox `needRefresh` event.
+- Added a stable `/pwa-shell-guard.js` bootstrap that compares the cached shell version against `/version.json`, clears stale service workers/caches on mismatch, and reloads into the latest shell before any dead hashed app entry can execute.
 - Added Storybook states for update-ready, offline-ready, registration-error, and hidden prompt states.
 - Added production preview smoke coverage for offline app-shell reload and network-only API behavior.
+- Added production preview smoke coverage for a synthetic stale HTML shell so refresh-path regressions are caught before deploy.
 - Split `workbox-window` into `pwa-vendor` so app and Storybook JS bundle budgets remain within the existing `250 kB` cap.
 
 ## Verification

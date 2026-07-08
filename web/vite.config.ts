@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, type UserConfig } from "vite";
@@ -14,7 +16,41 @@ function isStorybookBuild(): boolean {
   );
 }
 
+function hydrateLocalBuildVersion() {
+  if (process.env.VITE_APP_VERSION?.trim()) {
+    return;
+  }
+
+  try {
+    const payload = JSON.parse(
+      readFileSync(join(__dirname, "public", "version.json"), "utf8"),
+    ) as { version?: string | null };
+    const version = payload.version?.trim();
+    if (version) {
+      process.env.VITE_APP_VERSION = version;
+    }
+  } catch {
+    // Local builds can still proceed without a hydrated build version.
+  }
+}
+
+function rewritePwaShellGuardEntry(html: string): string {
+  const entryTagMatch = html.match(
+    /<script[^>]*type="module"[^>]*src="([^"]+)"[^>]*><\/script>/,
+  );
+
+  if (!entryTagMatch) {
+    return html;
+  }
+
+  return html
+    .replace(entryTagMatch[0], "")
+    .replace("__LOADLYNX_APP_ENTRY__", entryTagMatch[1]);
+}
+
 export function createViteConfig(): UserConfig {
+  hydrateLocalBuildVersion();
+
   const webDevPort = resolvePort("webDev").port;
   const webPreviewPort = resolvePort("webPreview").port;
   const enablePwa = !isStorybookBuild();
@@ -22,6 +58,12 @@ export function createViteConfig(): UserConfig {
   return {
     base: "/",
     plugins: [
+      {
+        name: "loadlynx-pwa-shell-guard-entry",
+        transformIndexHtml(html) {
+          return rewritePwaShellGuardEntry(html);
+        },
+      },
       react(),
       tailwindcss(),
       enablePwa

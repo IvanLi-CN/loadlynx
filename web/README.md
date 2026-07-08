@@ -128,12 +128,14 @@ PWA behavior:
 - Offline reload can reopen the console shell even when the frontend server is unreachable.
 - Device HTTP APIs, devd endpoints, firmware artifacts and Web Serial sessions are not runtime-cached.
 - `/version.json` is generated before build for the current server artifact but is not precached by the service worker.
+- A stable `/pwa-shell-guard.js` preflight compares the cached shell version against `/version.json`; when an old cached shell would boot dead hashed assets, it clears stale service workers/caches and reloads into the latest shell before the main app bundle starts.
 - App updates use prompt mode: a new service worker can cache the next build in the background, and the UI refreshes only after the user clicks `升级` / `Upgrade`.
 - Storybook uses a no-op PWA registration mock. Storybook is not itself built as a PWA target.
 
 Validation:
 
 - `bun run test:preview-smoke` includes an offline reload scenario and verifies API and `/version.json` fetches are not returned from cache while offline.
+- `bun run test:preview-smoke` also injects a synthetic stale HTML shell and verifies it self-recovers to the latest built app before requesting dead hashed assets.
 - `bun run test:storybook:ci` covers the update-ready, offline-ready, registration-error and hidden prompt states.
 
 ## Ports
