@@ -27,6 +27,7 @@ The existing version display is build-time injected and visible in the console. 
 - `version.json` must be generated before Vite build copies and precaches public assets.
 - The service worker must use prompt-style updates, not auto-refresh.
 - Precache and runtime caching must not include LoadLynx device APIs, devd endpoints, firmware artifacts, Web Serial flows, or `/version.json`.
+- The running app must actively probe `/version.json` with `cache: "no-store"` so a GitHub Pages or release-web deployment that publishes a newer build can surface an upgrade prompt even when the current tab is still controlled by an older service worker generation.
 - The PWA update UI must use the existing LoadLynx console visual language and remain accessible through `role="status"` or `role="alert"`.
 - Storybook must expose stable states for update-ready, offline-ready, registration-error, and hidden states without registering a real service worker.
 - Production preview smoke must prove app-shell reload works while offline and that API fetches are not served from cache.
@@ -38,6 +39,7 @@ The existing version display is build-time injected and visible in the console. 
 - After first online load and service worker control, a browser offline reload still shows the `LoadLynx Web Console` app shell.
 - With the browser offline, `fetch("/api/v1/status", { cache: "no-store" })` and `fetch("/version.json", { cache: "no-store" })` fail instead of returning cached app-shell, stale API data, or stale version metadata.
 - When `needRefresh` is true, the UI shows a new-version prompt and calls `updateServiceWorker(true)` only after the user clicks the upgrade action.
+- When `/version.json` reports a newer build version than the running app, the UI shows the same non-blocking upgrade prompt even before Workbox emits `needRefresh`, and the refresh path still remains operator-confirmed.
 - Storybook CI passes the PWA prompt stories and existing route stories.
 
 ## Visual Evidence
