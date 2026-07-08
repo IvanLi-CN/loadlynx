@@ -8,6 +8,7 @@
 - Added active `/version.json` probing in the PWA prompt runtime so stale GitHub Pages tabs can discover a newer deployed build and offer an operator-confirmed refresh even before the browser surfaces a Workbox `needRefresh` event.
 - Added a stable `/pwa-shell-guard.js` bootstrap that compares the cached shell version against `/version.json`, clears stale service workers/caches on mismatch, and reloads into the latest shell before any dead hashed app entry can execute.
 - Added a legacy recovery shim at `/assets/index-SkMVprsZ.js` so pre-guard stale dashboard shells already stuck on that asset path can clear old PWA state and reload into the current shell.
+- Enabled `skipWaiting` and `clientsClaim` on the migration release's generated service worker so broken tabs controlled by the pre-guard worker can reach the legacy recovery shim on refresh.
 - Added Storybook states for update-ready, offline-ready, registration-error, and hidden prompt states.
 - Added production preview smoke coverage for offline app-shell reload and network-only API behavior.
 - Added production preview smoke coverage for a synthetic stale HTML shell so refresh-path regressions are caught before deploy.

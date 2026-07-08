@@ -93,8 +93,10 @@ export function createViteConfig(): UserConfig {
               ],
             },
             workbox: {
+              clientsClaim: true,
               cleanupOutdatedCaches: true,
               navigateFallback: "/index.html",
+              skipWaiting: true,
               globPatterns: [
                 "**/*.{js,css,html,ico,png,svg,webmanifest,woff2}",
               ],

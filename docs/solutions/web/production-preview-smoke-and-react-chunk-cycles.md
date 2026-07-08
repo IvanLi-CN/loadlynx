@@ -40,6 +40,7 @@ Manual chunk boundaries split libraries that expect a single initialization path
 - For PWA apps, include a production preview smoke that waits for service worker control, switches the browser offline, reloads, and verifies the app shell still mounts while API fetches remain network-only.
 - For PWA apps, add a stale-shell bootstrap guard ahead of the hashed entry bundle so an old cached HTML shell can compare its embedded version against `/version.json` and self-recover before it requests dead assets from a newer deploy.
 - When a broken client is already pinned to a specific old entry asset name, ship a migration shim at that legacy asset path for at least one release so the stale client can clear old PWA state and reload into the current shell.
+- If the stale client is still controlled by the old service worker, make the migration release's worker claim clients and skip waiting so the compatibility asset becomes reachable during refresh.
 
 ## Guardrails / Reuse Notes
 
