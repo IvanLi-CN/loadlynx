@@ -1,5 +1,5 @@
 ---
-title: Production preview smoke and React chunk-cycle guardrails
+title: Production preview smoke and runtime-coupled chunk-cycle guardrails
 module: web
 problem_type: production_runtime_crash
 component: vite-build
@@ -9,11 +9,11 @@ related_specs: [n5nwv, m8k2v, rjkcw, xpm5n]
 symptoms:
   - GitHub Pages served HTML/JS/CSS successfully but the page stayed blank.
   - dev server worked while built preview crashed on first paint.
-root_cause: manual chunk boundaries created a vendor-to-react runtime initialization cycle
+root_cause: manual chunk boundaries split runtime-coupled libraries into production-only initialization cycles
 resolution_type: guardrail
 ---
 
-# Production preview smoke and React chunk-cycle guardrails
+# Production preview smoke and runtime-coupled chunk-cycle guardrails
 
 ## Context
 
@@ -27,21 +27,23 @@ Vite manual chunking can reduce app bundle size, but production runtime behavior
 
 ## Root cause
 
-React runtime code and helper modules that expected a single initialization path were split into a standalone `react-vendor` chunk, while other emitted vendor chunks still imported pieces back from that runtime. The emitted graph formed a `vendor` ↔ `react-vendor` cycle, so one side observed partially initialized bindings and crashed before React could mount.
+Manual chunk boundaries split libraries that expect a single initialization path into separate production chunks. Historical failures used `vendor` ↔ `react-vendor`; the same class reappeared when `recharts` internals were split across `recharts-*` and `state-vendor`. In both cases the emitted graph formed a cycle or half-initialized read, so one side observed undefined bindings and crashed before the app or dashboard route could mount.
 
 ## Resolution
 
-- Keep React runtime on the normal vendor initialization path instead of forcing a standalone `react-vendor` chunk.
-- If bundle budgets need more headroom, split only pure non-React dependencies into extra chunks.
+- Keep runtime-coupled libraries on a single initialization path instead of forcing them across multiple vendor chunks.
+- React should stay on the normal vendor initialization path, and `recharts` should not be split across internal runtime/state chunk boundaries unless the emitted graph is proven acyclic.
+- If bundle budgets need more headroom, split only pure non-core dependencies into extra chunks or adjust the explicit budget gate by the smallest defensible amount.
 - Add a dedicated production preview smoke that runs against built `dist` through `vite preview`, not the dev server.
 - Make the smoke fail on both uncaught `pageerror` and browser `console error`, so white-screen regressions are caught before deploy.
+- Extend the smoke beyond the Overview homepage to at least one real dashboard route so route-level chart crashes cannot hide behind a healthy app shell.
 - For PWA apps, include a production preview smoke that waits for service worker control, switches the browser offline, reloads, and verifies the app shell still mounts while API fetches remain network-only.
 
 ## Guardrails / Reuse Notes
 
 - Treat `bun run build && bun run preview` as the canonical reproduction path for any “works in dev, blank in prod” report.
 - Do not classify a fully fetched white screen as “performance” until production preview proves the app actually mounted.
-- Manual chunk boundaries around `react` / `react-dom` are high risk unless the emitted graph is inspected for cycles.
+- Manual chunk boundaries around `react` / `react-dom` or chart runtimes like `recharts` are high risk unless the emitted graph is inspected for cycles.
 - PWA client helpers such as `workbox-window` can be split into a dedicated vendor chunk to preserve bundle budgets, but React should stay on the normal vendor path.
 - CI should run production preview smoke before publishing static artifacts; bundle budgets alone do not prove runtime health.
 

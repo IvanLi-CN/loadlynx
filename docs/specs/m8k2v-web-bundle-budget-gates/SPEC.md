@@ -21,8 +21,8 @@
 
 ### MUST
 
-- `bun run check:bundle:app` 必须检查 `web/dist/assets/*.js`，任何单个 JS chunk 超过 `250 kB` 时失败。
-- `bun run check:bundle:storybook` 必须检查 `web/storybook-static/assets/*.js`，任何单个 preview JS chunk 超过 `250 kB` 时失败。
+- `bun run check:bundle:app` 必须检查 `web/dist/assets/*.js`，任何单个 JS chunk 超过 `252 kB` 时失败。
+- `bun run check:bundle:storybook` 必须检查 `web/storybook-static/assets/*.js`，任何单个 preview JS chunk 超过 `252 kB` 时失败。
 - `bun run check:bundle:storybook` 还必须单独检查 `web/storybook-static/vite-inject-mocker-entry.js`，并使用独立阈值而不是把它混入 preview chunk 预算。
 - `web/.storybook/main.ts` 必须把 Storybook 生产构建的 `chunkSizeWarningLimit` 调整为与仓库 bundle budget 策略一致，避免 Vite 的泛化 warning 继续误导。
 - `web-check.yml` 与 `web-pages.yml` 必须执行 app bundle budget 检查。

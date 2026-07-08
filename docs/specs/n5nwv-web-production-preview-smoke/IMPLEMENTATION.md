@@ -6,6 +6,7 @@
 - 新增 `bun run test:preview-smoke`、`web/playwright.preview.config.ts` 与 `web/tests/e2e/preview-smoke.spec.ts`，专门针对已构建 `dist` 运行生产预览冒烟。
 - 将 preview smoke 接入 `.github/workflows/web-check.yml` 与 `.github/workflows/web-pages.yml`，并同步 workflow hygiene 契约。
 - 更新 `web/README.md`，把新的 preview smoke 脚本和用途写入人类入口文档。
+- 2026-07-08: `recharts` 相关 dashboard route 在 production bundle 下再次出现 route-level crash。修复方式是保持整个 `recharts` 运行时留在单一 `recharts-vendor` chunk，并把 preview smoke 扩展到 `/$deviceId/cc`，覆盖真实仪表盘首屏而不是只看 Overview 首页。
 
 ## Verification
 

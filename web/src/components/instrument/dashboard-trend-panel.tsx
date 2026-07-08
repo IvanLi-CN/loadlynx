@@ -1,16 +1,15 @@
 import { memo, useMemo, useState } from "react";
-import type { TooltipContentProps, TooltipValueType } from "recharts";
-import {
-  Area,
-  CartesianGrid,
-  ComposedChart,
-  Line,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from "recharts";
+import { Area } from "recharts/es6/cartesian/Area";
+import { CartesianGrid } from "recharts/es6/cartesian/CartesianGrid";
+import { Line } from "recharts/es6/cartesian/Line";
+import { ReferenceLine } from "recharts/es6/cartesian/ReferenceLine";
+import { XAxis } from "recharts/es6/cartesian/XAxis";
+import { YAxis } from "recharts/es6/cartesian/YAxis";
+import { ComposedChart } from "recharts/es6/chart/ComposedChart";
+import { ResponsiveContainer } from "recharts/es6/component/ResponsiveContainer";
+import { Tooltip } from "recharts/es6/component/Tooltip";
+import type { ValueType as TooltipValueType } from "recharts/types/component/DefaultTooltipContent";
+import type { TooltipContentProps } from "recharts/types/component/Tooltip";
 import { FixedNumber } from "./fixed-number.tsx";
 
 type MetricKey = "voltage" | "current" | "power" | "resistance";

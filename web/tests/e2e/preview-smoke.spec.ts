@@ -1,8 +1,6 @@
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
-test("production preview mounts without runtime crashes @preview-smoke", async ({
-  page,
-}) => {
+function captureRuntimeErrors(page: Page) {
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
 
@@ -15,6 +13,14 @@ test("production preview mounts without runtime crashes @preview-smoke", async (
     pageErrors.push(error.message);
   });
 
+  return { consoleErrors, pageErrors };
+}
+
+test("production preview mounts without runtime crashes @preview-smoke", async ({
+  page,
+}) => {
+  const { consoleErrors, pageErrors } = captureRuntimeErrors(page);
+
   await page.goto("/");
 
   await expect(
@@ -25,4 +31,41 @@ test("production preview mounts without runtime crashes @preview-smoke", async (
   ).toBeVisible();
   await expect(pageErrors).toEqual([]);
   await expect(consoleErrors).toEqual([]);
+});
+
+test("production preview opens the dashboard route without runtime crashes @preview-smoke", async ({
+  page,
+}) => {
+  const { consoleErrors, pageErrors } = captureRuntimeErrors(page);
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("loadlynx.locale", "en");
+    window.localStorage.setItem("loadlynx.demoMode", "true");
+    window.localStorage.setItem(
+      "loadlynx.demo.devices",
+      JSON.stringify([
+        {
+          id: "mock-001",
+          name: "Demo Device #1",
+          baseUrl: "mock://demo-1",
+        },
+      ]),
+    );
+  });
+
+  await page.goto("/devices?demo=true");
+  const demoDeviceCard = page
+    .getByRole("article")
+    .filter({ hasText: "mock-001" });
+  await demoDeviceCard
+    .getByRole("link", { name: /Open Dashboard|打开仪表盘/i })
+    .click();
+
+  await expect(page).toHaveURL(/\/mock-001\/cc$/);
+  await expect(pageErrors).toEqual([]);
+  await expect(consoleErrors).toEqual([]);
+  await expect(
+    page.locator('[aria-label="Primary dashboard monitor"]'),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /USB-PD/i })).toBeVisible();
 });
