@@ -55,6 +55,17 @@ function toFastStatusView(payload: FastStatusResponse): FastStatusView {
   };
 }
 
+const devdStatusMemory = new Map<string, FastStatusView>();
+
+function getDevdStatusMemoryKey(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  const deviceId = url.searchParams.get("device_id");
+  if (!deviceId) {
+    return baseUrl;
+  }
+  return `${url.origin}${url.pathname}?device_id=${deviceId}`;
+}
+
 function makeApplyPresetRequest(preset_id: number): ApplyPresetRequest {
   return { preset_id };
 }
@@ -81,7 +92,7 @@ export async function getIdentity(baseUrl: string): Promise<Identity> {
       );
       return normalizeDevdIdentity(baseUrl, {
         device_id: new URL(baseUrl).searchParams.get("device_id") ?? undefined,
-        uptime_ms: status.status.uptime_ms,
+        uptime_ms: status.uptime_ms ?? status.status.uptime_ms,
       });
     }
   }
@@ -97,7 +108,10 @@ export async function getStatus(baseUrl: string): Promise<FastStatusView> {
       baseUrl,
       "/api/v1/status",
     );
-    return normalizeDevdStatus(payload);
+    const memoryKey = getDevdStatusMemoryKey(baseUrl);
+    const view = normalizeDevdStatus(payload, devdStatusMemory.get(memoryKey));
+    devdStatusMemory.set(memoryKey, view);
+    return view;
   }
 
   const payload = await httpJsonQueued<FastStatusResponse>(

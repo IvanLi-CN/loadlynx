@@ -64,6 +64,12 @@ import {
   STREAM_UI_INTERVAL_MS,
 } from "./status-stream-gate.ts";
 import {
+  DEVD_FAST_STATUS_TARGET_PERIOD_MS,
+  getFastStatusRefetchIntervalMs,
+  getManualStatusPollDelayMs,
+  usesManualDevdStatusPolling,
+} from "./status-fallback-interval.ts";
+import {
   buildTrendSeries,
   ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
   shouldAppendTrendSample,
@@ -82,7 +88,6 @@ type UpdateControlMutation = ReturnType<
 >;
 export type DashboardMetricKey = "voltage" | "current" | "power" | "resistance";
 
-const FAST_STATUS_REFETCH_MS = 400;
 const PD_REFETCH_MS = 1500;
 const RETRY_DELAY_MS = 500;
 const jitterRetryDelay = () => 200 + Math.random() * 300;
@@ -684,6 +689,8 @@ export function useDeviceCcState(
     },
   });
 
+  const devdManualStatusPolling = usesManualDevdStatusPolling(baseUrl);
+
   const statusQuery = useQuery<FastStatusView, HttpApiError>({
     ...getDeviceStatusQueryOptions({
       deviceId,
@@ -692,11 +699,64 @@ export function useDeviceCcState(
         Boolean(baseUrl) &&
         identityQuery.isSuccess &&
         !writesInFlight &&
-        streamStatus === null,
-      refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
+        streamStatus === null &&
+        !devdManualStatusPolling,
+      refetchInterval: isPageVisible
+        ? getFastStatusRefetchIntervalMs(baseUrl)
+        : false,
     }),
     retryDelay: jitterRetryDelay,
   });
+
+  const devdManualStatusPollingEnabled =
+    isPageVisible &&
+    identityQuery.isSuccess &&
+    !writesInFlight &&
+    streamStatus === null &&
+    devdManualStatusPolling;
+
+  useEffect(() => {
+    if (!devdManualStatusPollingEnabled) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let pollTimer: number | null = null;
+
+    const scheduleNextPoll = (delayMs: number) => {
+      pollTimer = window.setTimeout(() => {
+        void runPoll();
+      }, delayMs);
+    };
+
+    const runPoll = async () => {
+      const cycleStartedAtMs = window.performance.now();
+
+      try {
+        await statusQuery.refetch();
+      } finally {
+        if (cancelled) {
+          return;
+        }
+        scheduleNextPoll(
+          getManualStatusPollDelayMs(
+            DEVD_FAST_STATUS_TARGET_PERIOD_MS,
+            cycleStartedAtMs,
+            window.performance.now(),
+          ),
+        );
+      }
+    };
+
+    void runPoll();
+
+    return () => {
+      cancelled = true;
+      if (pollTimer != null) {
+        window.clearTimeout(pollTimer);
+      }
+    };
+  }, [devdManualStatusPollingEnabled, statusQuery.refetch]);
 
   useEffect(() => {
     if (!baseUrl || !identityQuery.isSuccess || !isPageVisible) {

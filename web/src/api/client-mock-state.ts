@@ -71,6 +71,10 @@ export interface DevdControlCompatPayload {
 
 export interface DevdStatusPayload {
   status: Partial<FastStatusJson>;
+  uptime_ms?: number;
+  sink_core_temp_mc?: number;
+  sink_exhaust_temp_mc?: number;
+  mcu_temp_mc?: number;
   link_up?: boolean;
   hello_seen?: boolean;
   analog_state?: FastStatusView["analog_state"];
@@ -181,7 +185,7 @@ function createInitialStatus(
   baseUrl: string | undefined,
   profile: MockSimulationProfile,
 ): FastStatusView {
-  const raw: FastStatusJson = {
+  const raw = {
     uptime_ms: 123_456,
     mode: 1,
     state_flags: 0,
@@ -541,7 +545,9 @@ export function normalizeDevdIdentity(
 
 export function normalizeDevdStatus(
   payload: DevdStatusPayload,
+  previous?: FastStatusView,
 ): FastStatusView {
+  const previousRaw = previous?.raw;
   const fallbackMode =
     payload.control?.mode === "cc"
       ? 1
@@ -549,39 +555,58 @@ export function normalizeDevdStatus(
         ? 2
         : payload.control?.mode === "cp"
           ? 3
-          : 1;
+          : (previousRaw?.mode ?? 1);
   const raw: FastStatusJson = {
-    uptime_ms: payload.status.uptime_ms ?? 0,
-    mode: payload.status.mode ?? fallbackMode,
-    state_flags: payload.status.state_flags ?? 0,
-    enable: payload.status.enable ?? payload.control?.output_enabled ?? false,
+    uptime_ms:
+      payload.uptime_ms ?? payload.status.uptime_ms ?? previousRaw?.uptime_ms ?? 0,
+    mode: payload.status.mode ?? previousRaw?.mode ?? fallbackMode,
+    state_flags: payload.status.state_flags ?? previousRaw?.state_flags ?? 0,
+    enable:
+      payload.status.enable ??
+      payload.control?.output_enabled ??
+      previousRaw?.enable ??
+      false,
     target_value:
       payload.status.target_value ??
+      previousRaw?.target_value ??
       (fallbackMode === 3 ? (payload.control?.target_p_mw ?? 0) : 0),
-    i_local_ma: payload.status.i_local_ma ?? 0,
-    i_remote_ma: payload.status.i_remote_ma ?? 0,
-    v_local_mv: payload.status.v_local_mv ?? 0,
-    v_remote_mv: payload.status.v_remote_mv ?? 0,
-    calc_p_mw: payload.status.calc_p_mw ?? 0,
-    dac_headroom_mv: payload.status.dac_headroom_mv ?? 0,
-    loop_error: payload.status.loop_error ?? 0,
-    sink_core_temp_mc: payload.status.sink_core_temp_mc ?? 0,
-    sink_exhaust_temp_mc: payload.status.sink_exhaust_temp_mc ?? 0,
-    mcu_temp_mc: payload.status.mcu_temp_mc ?? 0,
-    fault_flags: payload.status.fault_flags ?? 0,
-    cal_kind: payload.status.cal_kind,
-    raw_v_nr_100uv: payload.status.raw_v_nr_100uv,
-    raw_v_rmt_100uv: payload.status.raw_v_rmt_100uv,
-    raw_cur_100uv: payload.status.raw_cur_100uv,
-    raw_dac_code: payload.status.raw_dac_code,
-  };
+    i_local_ma: payload.status.i_local_ma ?? previousRaw?.i_local_ma ?? 0,
+    i_remote_ma: payload.status.i_remote_ma ?? previousRaw?.i_remote_ma ?? 0,
+    v_local_mv: payload.status.v_local_mv ?? previousRaw?.v_local_mv ?? 0,
+    v_remote_mv: payload.status.v_remote_mv ?? previousRaw?.v_remote_mv ?? 0,
+    calc_p_mw: payload.status.calc_p_mw ?? previousRaw?.calc_p_mw ?? 0,
+    dac_headroom_mv:
+      payload.status.dac_headroom_mv ?? previousRaw?.dac_headroom_mv ?? 0,
+    loop_error: payload.status.loop_error ?? previousRaw?.loop_error ?? 0,
+    sink_core_temp_mc:
+      payload.sink_core_temp_mc ??
+      payload.status.sink_core_temp_mc ??
+      previousRaw?.sink_core_temp_mc,
+    sink_exhaust_temp_mc:
+      payload.sink_exhaust_temp_mc ??
+      payload.status.sink_exhaust_temp_mc ??
+      previousRaw?.sink_exhaust_temp_mc,
+    mcu_temp_mc:
+      payload.mcu_temp_mc ??
+      payload.status.mcu_temp_mc ??
+      previousRaw?.mcu_temp_mc,
+    fault_flags: payload.status.fault_flags ?? previousRaw?.fault_flags ?? 0,
+    cal_kind: payload.status.cal_kind ?? previousRaw?.cal_kind,
+    raw_v_nr_100uv: payload.status.raw_v_nr_100uv ?? previousRaw?.raw_v_nr_100uv,
+    raw_v_rmt_100uv:
+      payload.status.raw_v_rmt_100uv ?? previousRaw?.raw_v_rmt_100uv,
+    raw_cur_100uv: payload.status.raw_cur_100uv ?? previousRaw?.raw_cur_100uv,
+    raw_dac_code: payload.status.raw_dac_code ?? previousRaw?.raw_dac_code,
+  } as FastStatusJson;
   return {
     raw,
-    link_up: payload.link_up ?? true,
-    hello_seen: payload.hello_seen ?? true,
-    analog_state: payload.analog_state ?? "ready",
-    fault_flags_decoded: payload.fault_flags_decoded ?? [],
-    state_flags_decoded: payload.state_flags_decoded ?? [],
+    link_up: payload.link_up ?? previous?.link_up ?? true,
+    hello_seen: payload.hello_seen ?? previous?.hello_seen ?? true,
+    analog_state: payload.analog_state ?? previous?.analog_state ?? "ready",
+    fault_flags_decoded:
+      payload.fault_flags_decoded ?? previous?.fault_flags_decoded ?? [],
+    state_flags_decoded:
+      payload.state_flags_decoded ?? previous?.state_flags_decoded ?? [],
   };
 }
 
