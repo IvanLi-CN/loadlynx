@@ -111,7 +111,7 @@ Core scripts:
 
 ## Bundle budgets
 
-- App build budget: every emitted `dist/assets/*.js` chunk must stay at or below `250 kB`.
+- App build budget: every emitted `dist/assets/*.js` chunk must stay at or below `252 kB`.
 - Production preview smoke: after `bun run build`, `bun run test:preview-smoke` must prove the built `dist` bundle mounts without uncaught `pageerror` or `console error`.
 - Storybook preview budget: every emitted `storybook-static/assets/*.js` chunk must stay at or below `250 kB`.
 - Storybook framework runtime budget: `storybook-static/vite-inject-mocker-entry.js` is tracked separately with a `1200 kB` cap because it is injected by Storybook's Vitest mocker runtime rather than by LoadLynx application code.

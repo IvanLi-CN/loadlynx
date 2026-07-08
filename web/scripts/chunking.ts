@@ -4,16 +4,7 @@ function packageChunkName(id: string): string | null {
   }
 
   if (id.includes("/node_modules/recharts/")) {
-    if (
-      id.includes("/node_modules/recharts/es6/chart/") ||
-      id.includes("/node_modules/recharts/es6/cartesian/") ||
-      id.includes("/node_modules/recharts/es6/component/") ||
-      id.includes("/node_modules/recharts/es6/container/") ||
-      id.includes("/node_modules/recharts/es6/context/")
-    ) {
-      return "recharts-core-vendor";
-    }
-    return "recharts-runtime-vendor";
+    return "recharts-vendor";
   }
 
   if (

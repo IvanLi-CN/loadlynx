@@ -4,7 +4,7 @@
 
 - `https://loadlynx.ivanli.cc/` 在 GitHub Pages 上返回了完整 HTML、CSS 与 JS，但首屏实际白屏，没有把 React 应用挂载出来。
 - 同一问题可在当前源码的 `bun run build` + `bun run preview` 本地复现，而 `bun run dev` 正常，说明故障属于 production bundle runtime，而不是开发态逻辑或网络慢。
-- 根因来自手工 `manualChunks` 后形成的 `vendor` ↔ `react-vendor` 循环初始化：`react-vendor` 初始化时触发 `Cannot set properties of undefined (setting 'Activity')`，导致应用启动前崩溃。
+- 这类故障的共同根因是手工 `manualChunks` 把运行时强耦合的图表依赖链拆散，形成 production-only 的循环初始化或半初始化读取；历史上表现为 `vendor` ↔ `react-vendor`，当前也覆盖 `recharts` ↔ `reselect/state-vendor` 一类回归。
 
 ## Goals
 
@@ -37,9 +37,9 @@
 
 ### MUST
 
-- `manualChunks` 不得再把 `react` / `react-dom` 拆到独立 `react-vendor` chunk。
-- 若未来需要继续拆包，只允许拆出纯非 React 依赖；不得重新引入会让 React runtime 与其初始化 helper 形成循环初始化的独立 chunk。
-- `bun run build` 后，`bun run preview` 下的首页必须可见，且不再出现 `Cannot set properties of undefined (setting 'Activity')`。
+- `manualChunks` 不得再把会形成运行时初始化环的耦合依赖链拆到不同 chunk；已知高风险对象至少包括 `react/react-dom` 与 `recharts` 内部状态图。
+- 若未来需要继续拆包，只允许拆出纯非核心运行时依赖；不得重新引入会让图表运行时、状态 selector 或 React runtime 在初始化期读取到半初始化绑定的独立 chunk。
+- `bun run build` 后，`bun run preview` 下的首页与 `/$deviceId/cc` 仪表盘路由都必须可见，且不再出现白屏或 route-level error boundary。
 - 仓库必须提供独立的 production preview smoke，直接针对已构建 `dist` 运行，而不是复用 dev-server E2E。
 - preview smoke 必须断言首页标题可见，且无 uncaught `pageerror` / `console error`。
 - `web-check.yml` 必须在 `bun run build` 与 app bundle budget 之后运行 preview smoke。
@@ -50,6 +50,10 @@
 - Given 执行 `cd web && bun run build`
   When 执行 `cd web && bun run test:preview-smoke`
   Then 生产 bundle 首页正常挂载，标题可见，且浏览器未捕获任何 uncaught `pageerror` / `console error`。
+
+- Given 执行 `cd web && bun run build`
+  When 执行 `cd web && bun run test:preview-smoke`
+  Then 生产 bundle 的 `/$deviceId/cc` 仪表盘路由也必须正常挂载，`Primary dashboard monitor` 与 `USB-PD` 控件可见，且不出现 route-level error boundary。
 
 - Given `web-check.yml` 在 CI 中执行
   When build 或 app bundle budget 通过后运行 preview smoke

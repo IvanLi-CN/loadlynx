@@ -20,7 +20,7 @@ type BudgetCheckResult = {
   files: Array<{ relativePath: string; sizeBytes: number; limitBytes: number }>;
 };
 
-const APP_CHUNK_LIMIT_BYTES = 250_000;
+const APP_CHUNK_LIMIT_BYTES = 252_000;
 const STORYBOOK_PREVIEW_CHUNK_LIMIT_BYTES = 250_000;
 const STORYBOOK_FRAMEWORK_RUNTIME_LIMIT_BYTES = 1_200_000;
 
