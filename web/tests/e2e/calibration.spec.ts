@@ -12,6 +12,18 @@ async function openCalibrationSection(
     .click();
 }
 
+async function addSampleDeviceFromDevicesPage(
+  page: Parameters<typeof test>[1] extends (args: infer T) => unknown
+    ? T["page"]
+    : never,
+) {
+  await page
+    .locator("section")
+    .filter({ hasText: /当前已知设备|Known devices/ })
+    .getByRole("button", { name: /添加示例设备|Add sample device/i })
+    .click();
+}
+
 async function openSystemPage(
   page: Parameters<typeof test>[1] extends (args: infer T) => unknown
     ? T["page"]
@@ -57,11 +69,7 @@ test.describe("Calibration UI", () => {
     page,
   }) => {
     await page.goto("/devices");
-    await page
-      .locator("section")
-      .filter({ hasText: "当前已知设备" })
-      .getByRole("button", { name: "Add sample device" })
-      .click();
+    await addSampleDeviceFromDevicesPage(page);
 
     await page.goto("/mock-001/calibration?section=current_ch2");
     await expect(page).toHaveURL(
@@ -90,11 +98,7 @@ test.describe("Calibration UI", () => {
     page,
   }) => {
     await page.goto("/devices");
-    await page
-      .locator("section")
-      .filter({ hasText: "当前已知设备" })
-      .getByRole("button", { name: "Add sample device" })
-      .click();
+    await addSampleDeviceFromDevicesPage(page);
 
     await page.goto("/mock-001/calibration");
     await expect(page).toHaveURL(/section=voltage/);
@@ -118,11 +122,7 @@ test.describe("Calibration UI", () => {
   test("full flow with simulation device", async ({ page }) => {
     await page.goto("/devices");
 
-    await page
-      .locator("section")
-      .filter({ hasText: "当前已知设备" })
-      .getByRole("button", { name: "Add sample device" })
-      .click();
+    await addSampleDeviceFromDevicesPage(page);
 
     // First simulation device always becomes mock-001.
     const deviceId = "mock-001";
@@ -280,11 +280,7 @@ test.describe("Calibration UI", () => {
     page,
   }) => {
     await page.goto("/devices");
-    await page
-      .locator("section")
-      .filter({ hasText: "当前已知设备" })
-      .getByRole("button", { name: "Add sample device" })
-      .click();
+    await addSampleDeviceFromDevicesPage(page);
 
     const deviceId = "mock-001";
     const baseUrl = "mock://demo-1";
@@ -349,11 +345,7 @@ test.describe("Calibration UI", () => {
 
   test("leaving calibration tears down calibration mode", async ({ page }) => {
     await page.goto("/devices");
-    await page
-      .locator("section")
-      .filter({ hasText: "当前已知设备" })
-      .getByRole("button", { name: "Add sample device" })
-      .click();
+    await addSampleDeviceFromDevicesPage(page);
 
     const deviceId = "mock-001";
     const baseUrl = "mock://demo-1";

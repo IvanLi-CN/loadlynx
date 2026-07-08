@@ -2,11 +2,11 @@ import { expect, test } from "@playwright/test";
 
 test.describe("Simulation device empty state", () => {
   test.beforeEach(async ({ page }) => {
-    await page.addInitScript(() => {
+    await page.goto("/");
+    await page.evaluate(() => {
+      window.localStorage.clear();
       window.localStorage.setItem("loadlynx.locale", "en");
     });
-    await page.goto("/");
-    await page.evaluate(() => window.localStorage.clear());
     await page.reload();
     await expect(
       page.getByRole("heading", { name: /Overview|总览/i }).first(),
@@ -25,8 +25,8 @@ test.describe("Simulation device empty state", () => {
 
     await page
       .locator("section")
-      .filter({ hasText: "当前已知设备" })
-      .getByRole("button", { name: /Add sample device/i })
+      .filter({ hasText: /Known devices|当前已知设备/ })
+      .getByRole("button", { name: /Add sample device|添加示例设备/i })
       .click();
 
     const demoDeviceCard = page
