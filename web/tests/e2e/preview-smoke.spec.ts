@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 
 function captureRuntimeErrors(page: Page) {
   const consoleErrors: string[] = [];
@@ -67,7 +67,5 @@ test("production preview opens the dashboard route without runtime crashes @prev
   await expect(
     page.locator('[aria-label="Primary dashboard monitor"]'),
   ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: /USB-PD/i }),
-  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /USB-PD/i })).toBeVisible();
 });
