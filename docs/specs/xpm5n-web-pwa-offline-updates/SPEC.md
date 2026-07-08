@@ -45,16 +45,16 @@ The existing version display is build-time injected and visible in the console. 
 ## Visual Evidence
 
 - source_type: storybook_canvas
-  story_id_or_title: `PWA/UpdatePrompt/UpdateReady`
-  state: update-ready
-  capture_scope: element
-  requested_viewport: `900x520`
-  viewport_strategy: devtools-emulate
+  story_id_or_title: `Routes/Settings/PwaVersionRefreshReady`
+  state: full settings page with non-blocking update-ready prompt
+  capture_scope: page-level canvas
+  requested_viewport: `1600x1200`
+  viewport_strategy: storybook_canvas
   target_program: mock-only
-  sensitive_exclusion: no real device data; Storybook mock console surface only
-  evidence_note: verifies the cached-update prompt is visible, non-blocking, and consistent with the LoadLynx instrument console UI.
+  sensitive_exclusion: no real device data; Storybook mock settings page only
+  evidence_note: verifies the stale-build recovery prompt appears in the real Settings page shell instead of an isolated component surface.
 
-![PWA update-ready prompt](./assets/pwa-update-ready.png)
+![PWA version refresh page](./assets/pwa-version-refresh-ready.png)
 
 ## Related Specs
 

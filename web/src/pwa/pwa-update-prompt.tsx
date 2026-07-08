@@ -1,6 +1,7 @@
 import { useRegisterSW } from "virtual:pwa-register/react";
 import { useEffect, useState } from "react";
 import { PwaUpdatePromptView } from "./pwa-update-prompt-view.tsx";
+import { waitForServiceWorkerWaiting } from "./service-worker-upgrade.ts";
 import { type AppVersionPayload, hasRemoteAppUpdate } from "./version-check.ts";
 
 const VERSION_POLL_INTERVAL_MS = 60_000;
@@ -25,6 +26,8 @@ function PwaUpdatePromptRuntime() {
   const [registrationError, setRegistrationError] = useState<string | null>(
     null,
   );
+  const [registeredServiceWorker, setRegisteredServiceWorker] =
+    useState<ServiceWorkerRegistration | null>(null);
   const [versionUpdateReady, setVersionUpdateReady] = useState(false);
   const currentVersion = import.meta.env.VITE_APP_VERSION?.trim() || null;
   const {
@@ -38,6 +41,9 @@ function PwaUpdatePromptRuntime() {
         error instanceof Error ? error.message : String(error),
       );
       console.error("[pwa] service worker registration failed", error);
+    },
+    onRegisteredSW(_swUrl, registration) {
+      setRegisteredServiceWorker(registration ?? null);
     },
   });
 
@@ -107,32 +113,43 @@ function PwaUpdatePromptRuntime() {
   return (
     <PwaUpdatePromptView
       state={
-        needRefresh || versionUpdateReady
-          ? "update-ready"
-          : offlineReady
-            ? "offline-ready"
-            : registrationError
-              ? "registration-error"
+        registrationError
+          ? "registration-error"
+          : needRefresh || versionUpdateReady
+            ? "update-ready"
+            : offlineReady
+              ? "offline-ready"
               : "hidden"
       }
       errorMessage={registrationError}
       onClose={close}
       onUpdate={() => {
         void (async () => {
+          if (needRefresh) {
+            await updateServiceWorker(true);
+            return;
+          }
+
           if ("serviceWorker" in navigator) {
             const registrations =
               await navigator.serviceWorker.getRegistrations();
             await Promise.all(
               registrations.map((registration) => registration.update()),
             );
-          }
 
-          if (needRefresh) {
+            const activeRegistration =
+              registeredServiceWorker ?? registrations[0] ?? null;
+            if (activeRegistration) {
+              const waitingReady =
+                await waitForServiceWorkerWaiting(activeRegistration);
+              if (waitingReady) {
+                await updateServiceWorker(true);
+                return;
+              }
+            }
+          } else {
             await updateServiceWorker(true);
-            return;
           }
-
-          window.location.reload();
         })();
       }}
     />

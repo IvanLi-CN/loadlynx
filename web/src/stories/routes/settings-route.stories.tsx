@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react";
 import { waitFor, within } from "storybook/test";
+import { PwaUpdatePromptView } from "../../pwa/pwa-update-prompt-view.tsx";
 import { RouteStoryHarness } from "../router/route-story-harness.tsx";
 
 function SettingsRouteStory() {
@@ -131,6 +132,19 @@ function UnverifiedDevdSettingsRouteStory() {
         },
       ]}
     />
+  );
+}
+
+function PwaVersionRefreshSettingsRouteStory() {
+  return (
+    <>
+      <RouteStoryHarness initialPath="/mock-001/settings" />
+      <PwaUpdatePromptView
+        state="update-ready"
+        onClose={() => {}}
+        onUpdate={() => {}}
+      />
+    </>
   );
 }
 
@@ -419,6 +433,24 @@ export const WiFiWriteBlocksVerifiedLanWithoutUsb: Story = {
 
 export const WiFiWriteLockedOverlay: Story = {
   render: () => <UnverifiedDevdSettingsRouteStory />,
+};
+
+export const PwaVersionRefreshReady: Story = {
+  render: () => <PwaVersionRefreshSettingsRouteStory />,
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+
+    await waitFor(
+      () => {
+        canvas.getByText("LoadLynx Web Console");
+        canvas.getByRole("heading", { name: "WiFi" });
+        canvas.getByRole("status");
+        canvas.getByText("新版本已缓存");
+        canvas.getByRole("button", { name: "升级" });
+      },
+      { timeout: 5000 },
+    );
+  },
 };
 
 export const WiFiWriteBlockedUntilUsbVerified: Story = {
