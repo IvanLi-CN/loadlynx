@@ -1,4 +1,20 @@
+import type { Route } from "@playwright/test";
 import { expect, test } from "@playwright/test";
+
+const corsJsonHeaders = {
+  "access-control-allow-headers": "content-type",
+  "access-control-allow-methods": "GET,POST,DELETE,OPTIONS",
+  "access-control-allow-origin": "*",
+  "content-type": "application/json",
+};
+
+async function fulfillJson(route: Route, body: unknown) {
+  await route.fulfill({
+    status: 200,
+    headers: corsJsonHeaders,
+    body: JSON.stringify(body),
+  });
+}
 
 test.describe("Device Pages", () => {
   test.beforeEach(async ({ page }) => {
@@ -18,13 +34,16 @@ test.describe("Device Pages", () => {
     });
     await page.goto("/");
     await expect(page.locator("text=LoadLynx Web Console")).toBeVisible();
-    await expect(page.getByText(/Demo Device #1/i)).toBeVisible();
+    const demoDeviceCard = page
+      .getByRole("article")
+      .filter({ hasText: "mock-001" });
+    await expect(
+      demoDeviceCard.getByRole("heading", { name: /Demo Device #1/i }),
+    ).toBeVisible();
 
-    const openDashboardBtn = page
-      .getByRole("link", {
-        name: /Open Dashboard|打开仪表盘/,
-      })
-      .first();
+    const openDashboardBtn = demoDeviceCard.getByRole("link", {
+      name: /Open Dashboard|打开仪表盘/,
+    });
 
     await expect(openDashboardBtn).toBeVisible();
     await openDashboardBtn.click();
@@ -154,5 +173,304 @@ test.describe("Device Pages", () => {
 
     await page.getByRole("button", { name: "Restore Selected" }).click();
     await expect(page.getByText("WiFi OK")).toBeVisible();
+  });
+
+  test("should refresh WiFi status after an async WiFi save", async ({
+    page,
+  }) => {
+    await page.getByRole("button", { name: "System" }).click();
+    await page.getByRole("link", { name: "Settings" }).click();
+
+    await expect(page.url()).toContain("/settings");
+    await expect(page.getByRole("heading", { name: "WiFi" })).toBeVisible();
+
+    await page.getByPlaceholder("SSID").fill("BenchNet");
+    await page.getByPlaceholder("PSK").fill("not-shown");
+    await page.getByRole("button", { name: "Save WiFi" }).click();
+
+    await expect(page.getByTestId("wifi-status-state")).toHaveText(
+      "configured",
+    );
+    await expect(page.getByTestId("wifi-status-state")).toHaveText(
+      "connected",
+      { timeout: 5000 },
+    );
+    await expect(page.getByTestId("wifi-status-ip")).toHaveText("192.0.2.11");
+  });
+
+  test("should refresh WiFi status from the USB/devd write target", async ({
+    page,
+  }) => {
+    const directBaseUrl = "http://192.0.2.55";
+    const devdBaseUrl = "http://127.0.0.1:39881";
+    let devdWifiGetCount = 0;
+
+    const identity = {
+      device_id: "loadlynx-test",
+      digital_fw_version: "digital test",
+      analog_fw_version: "analog test",
+      protocol_version: 1,
+      uptime_ms: 123000,
+      capabilities: {
+        cc_supported: true,
+        cv_supported: true,
+        cp_supported: true,
+        presets_supported: true,
+        preset_count: 5,
+        api_version: "2.0.0-test",
+        devd: true,
+        dns_sd: true,
+        mdns: true,
+        usb_cdc_bridge: true,
+      },
+      network: {
+        hostname: "loadlynx-test.local",
+        ip: "192.0.2.55",
+        mac: "00:00:00:00:00:55",
+      },
+    };
+
+    await page.route(`${directBaseUrl}/**`, async (route) => {
+      const request = route.request();
+      if (request.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsJsonHeaders });
+        return;
+      }
+
+      const path = new URL(request.url()).pathname;
+      if (path === "/api/v1/identity") {
+        await fulfillJson(route, identity);
+        return;
+      }
+      if (path === "/api/v1/wifi") {
+        await fulfillJson(route, {
+          ssid: "OldNet",
+          source: "user",
+          state: "connecting",
+          ip: null,
+          last_error: null,
+        });
+        return;
+      }
+      if (path === "/api/v1/pd") {
+        await fulfillJson(route, {
+          fixed: { enabled: false, voltage_mv: 5000, current_ma: 3000 },
+          pps: { enabled: false, voltage_mv: 5000, current_ma: 3000 },
+        });
+        return;
+      }
+
+      await route.fulfill({ status: 404, headers: corsJsonHeaders });
+    });
+
+    await page.route(`${devdBaseUrl}/**`, async (route) => {
+      const request = route.request();
+      if (request.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsJsonHeaders });
+        return;
+      }
+
+      const path = new URL(request.url()).pathname;
+      if (path === "/api/v1/serial/lease") {
+        await fulfillJson(route, {
+          device_id: "digital-test",
+          identity_device_id: "loadlynx-test",
+          lease_id: "lease-test",
+          heartbeat_interval_ms: 2000,
+          lease_ttl_ms: 8000,
+        });
+        return;
+      }
+      if (path === "/api/v1/identity") {
+        await fulfillJson(route, identity);
+        return;
+      }
+      if (path === "/api/v1/wifi" && request.method() === "POST") {
+        await fulfillJson(route, {
+          ssid: "BenchNet",
+          source: "user",
+          state: "connecting",
+          ip: null,
+          last_error: null,
+        });
+        return;
+      }
+      if (path === "/api/v1/wifi") {
+        devdWifiGetCount += 1;
+        await fulfillJson(route, {
+          ssid: "BenchNet",
+          source: "user",
+          state: devdWifiGetCount >= 2 ? "connected" : "connecting",
+          ip: devdWifiGetCount >= 2 ? "192.0.2.11" : null,
+          last_error: null,
+        });
+        return;
+      }
+      if (path === "/api/v1/pd") {
+        await fulfillJson(route, {
+          fixed: { enabled: false, voltage_mv: 5000, current_ma: 3000 },
+          pps: { enabled: false, voltage_mv: 5000, current_ma: 3000 },
+        });
+        return;
+      }
+
+      await route.fulfill({ status: 404, headers: corsJsonHeaders });
+    });
+
+    await page.addInitScript(
+      ({ directUrl, devdUrl }) => {
+        window.localStorage.setItem("loadlynx.demoMode", "false");
+        window.localStorage.setItem(
+          "loadlynx.devices",
+          JSON.stringify([
+            {
+              id: "direct-http",
+              name: "WiFi Device",
+              baseUrl: directUrl,
+              connectionMarks: ["usb"],
+              devd: {
+                baseUrl: devdUrl,
+                deviceId: "digital-test",
+              },
+            },
+          ]),
+        );
+      },
+      { directUrl: directBaseUrl, devdUrl: devdBaseUrl },
+    );
+
+    await page.goto("/direct-http/settings");
+    await expect(page.getByRole("heading", { name: "WiFi" })).toBeVisible();
+    await expect(page.getByTestId("wifi-status-state")).toHaveText(
+      "connecting",
+    );
+
+    await page
+      .getByRole("button", { name: /Switch connection|切换连接方式/ })
+      .click();
+    const switchDialog = page.getByRole("dialog");
+    await expect(switchDialog).toBeVisible();
+    await expect(switchDialog).toContainText("USB/devd");
+    await switchDialog.getByRole("button", { name: "Continue" }).click();
+    await expect(page.getByPlaceholder("SSID")).toBeEnabled();
+
+    await page.getByPlaceholder("SSID").fill("BenchNet");
+    await page.getByPlaceholder("PSK").fill("not-shown");
+    await page.getByRole("button", { name: "Save WiFi" }).click();
+
+    await expect(page.getByTestId("wifi-status-state")).toHaveText(
+      "connected",
+      { timeout: 5000 },
+    );
+    await expect(page.getByTestId("wifi-status-ip")).toHaveText("192.0.2.11");
+  });
+
+  test("should block WiFi writes over verified LAN without USB/devd", async ({
+    page,
+  }) => {
+    const directBaseUrl = "http://192.0.2.56";
+    let directWifiPostCount = 0;
+
+    const identity = {
+      device_id: "loadlynx-lan-only",
+      digital_fw_version: "digital test",
+      analog_fw_version: "analog test",
+      protocol_version: 1,
+      uptime_ms: 123000,
+      capabilities: {
+        cc_supported: true,
+        cv_supported: true,
+        cp_supported: true,
+        presets_supported: true,
+        preset_count: 5,
+        api_version: "2.0.0-test",
+        devd: false,
+        dns_sd: true,
+        mdns: true,
+        usb_cdc_bridge: false,
+      },
+      network: {
+        hostname: "loadlynx-lan-only.local",
+        ip: "192.0.2.56",
+        mac: "00:00:00:00:00:56",
+      },
+    };
+
+    await page.route(`${directBaseUrl}/**`, async (route) => {
+      const request = route.request();
+      if (request.method() === "OPTIONS") {
+        await route.fulfill({ status: 204, headers: corsJsonHeaders });
+        return;
+      }
+
+      const path = new URL(request.url()).pathname;
+      if (path === "/api/v1/identity") {
+        await fulfillJson(route, identity);
+        return;
+      }
+      if (path === "/api/v1/wifi" && request.method() === "POST") {
+        directWifiPostCount += 1;
+        await fulfillJson(route, {
+          ssid: "BenchNet",
+          source: "user",
+          state: "connecting",
+          ip: null,
+          last_error: null,
+        });
+        return;
+      }
+      if (path === "/api/v1/wifi") {
+        await fulfillJson(route, {
+          ssid: "OldNet",
+          source: "user",
+          state: "connected",
+          ip: "192.0.2.56",
+          last_error: null,
+        });
+        return;
+      }
+      if (path === "/api/v1/pd") {
+        await fulfillJson(route, {
+          fixed: { enabled: false, voltage_mv: 5000, current_ma: 3000 },
+          pps: { enabled: false, voltage_mv: 5000, current_ma: 3000 },
+        });
+        return;
+      }
+
+      await route.fulfill({ status: 404, headers: corsJsonHeaders });
+    });
+
+    await page.addInitScript((directUrl) => {
+      window.localStorage.setItem("loadlynx.demoMode", "false");
+      window.localStorage.setItem(
+        "loadlynx.devices",
+        JSON.stringify([
+          {
+            id: "lan-only",
+            name: "Verified LAN Device",
+            baseUrl: directUrl,
+            connectionMarks: ["lan"],
+          },
+        ]),
+      );
+    }, directBaseUrl);
+
+    await page.goto("/lan-only/settings");
+    await expect(page.getByRole("heading", { name: "WiFi" })).toBeVisible();
+
+    await page
+      .getByRole("button", { name: /Switch connection|切换连接方式/ })
+      .click();
+
+    const dialog = page.getByRole("dialog");
+    await expect(dialog).toBeVisible();
+    await expect(dialog).toContainText("Bind Connection for WiFi Settings");
+    await expect(
+      dialog.getByRole("link", { name: "Bind connection" }),
+    ).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Continue" })).toHaveCount(
+      0,
+    );
+    expect(directWifiPostCount).toBe(0);
   });
 });

@@ -63,8 +63,8 @@
 - `just deps-root` / `just deps-web` / `just deps-web-browsers`：显式声明本地检查依赖准备步骤
 - analog / embedded 本地检查还依赖 `third_party/embassy` 子模块；缺失时先执行 `git submodule update --init --recursive`
 - digital / ESP32 本地入口还依赖 `cargo +esp` 与 `$HOME/export-esp.sh`；缺失时 `just fmt*`、`just d-clippy`、`just d-build`、`just check-embedded` 会先给出显式 setup hint
-- `just d-build` 还要求 digital Wi-Fi 编译配置存在：默认读取仓库根 `.env` 的 `DIGITAL_WIFI_SSID` / `DIGITAL_WIFI_PSK`，也接受同名临时环境变量；缺失时先 fail-fast 提示 `.env.example`
-- `just d-clippy` 会注入 dummy Wi-Fi 编译配置，所以不依赖仓库根 `.env`；它只验证 digital firmware 在默认 feature 集下的 lint gate
+- `just d-build` 不读取仓库根 `.env` 的 Wi-Fi 凭据；开发固件默认不带 Wi-Fi 配置。factory/release Wi-Fi 只能通过命令级 `LOADLYNX_ENABLE_FACTORY_WIFI=1` 与 `LOADLYNX_FACTORY_WIFI_*` 显式启用。
+- `just d-clippy` 不注入 Wi-Fi 编译配置；它只验证 digital firmware 在默认 feature 集下的 lint gate。
 - `just check`：日常快速自检
 - `just check-full`：尽量贴近 CI，但不触发 release / deploy / hardware side effects
 

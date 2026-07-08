@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Link,
   Outlet,
@@ -6,10 +6,22 @@ import {
   useParams,
   useRouterState,
 } from "@tanstack/react-router";
-import { Check, ChevronRight, MonitorCog } from "lucide-react";
+import {
+  Cable,
+  Check,
+  ChevronRight,
+  LoaderCircle,
+  MonitorCog,
+  SquareTerminal,
+  Wifi,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
-import type { HttpApiError } from "../api/client.ts";
+import {
+  getIdentity,
+  type HttpApiError,
+  isDevdCompatBaseUrl,
+} from "../api/client.ts";
 import type { FastStatusView } from "../api/types.ts";
 import { AppIcon } from "../components/icons/app-icon.tsx";
 import {
@@ -19,12 +31,19 @@ import {
 } from "../components/icons/nav-icons.ts";
 import { AppVersionLink } from "../components/layout/app-version-link.tsx";
 import { LanguageSwitcher } from "../components/layout/language-switcher.tsx";
+import { buildDevdCompatBaseUrl, createDevdLease } from "../devd/client.ts";
 import { useDevdLeaseHeartbeats } from "../devd/hooks.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
 import {
+  getDeviceQueryRetry,
   getDeviceStatusQueryOptions,
   useDevicesQuery,
 } from "../devices/hooks.ts";
+import {
+  getManagementTransport,
+  getManagementTransportLabel,
+} from "../devices/management-transport.ts";
+import { syncDevicesQueryCache } from "../devices/query-cache.ts";
 import { useDeviceStore } from "../devices/store-context.tsx";
 import {
   getConnectionLabels,
@@ -118,6 +137,51 @@ function getDevicePresenceState(
   };
 }
 
+function getStoredLanBaseUrl(device: StoredDevice): string | undefined {
+  const lanBaseUrl = device.lan?.baseUrl.trim();
+  if (lanBaseUrl) {
+    return lanBaseUrl;
+  }
+  return getManagementTransport(device.baseUrl) === "lan-http"
+    ? device.baseUrl
+    : undefined;
+}
+
+function appendConnectionMark(
+  marks: StoredDevice["connectionMarks"],
+  mark: NonNullable<StoredDevice["connectionMarks"]>[number],
+): StoredDevice["connectionMarks"] {
+  if (marks?.includes(mark)) {
+    return marks;
+  }
+  return [...(marks ?? []), mark];
+}
+
+function getStoredHardwareIdentity(device: StoredDevice): string | undefined {
+  const identityDeviceId = device.identityDeviceId?.trim();
+  if (identityDeviceId) {
+    return identityDeviceId;
+  }
+
+  const webSerialIdentityDeviceId = device.webSerial?.identityDeviceId?.trim();
+  return webSerialIdentityDeviceId || undefined;
+}
+
+function assertSameDeviceIdentity(
+  expectedDevice: StoredDevice,
+  actualDeviceId: string | undefined,
+) {
+  const expectedDeviceId = getStoredHardwareIdentity(expectedDevice);
+  const actual = actualDeviceId?.trim();
+  if (!expectedDeviceId || !actual || expectedDeviceId === actual) {
+    return;
+  }
+
+  throw new Error(
+    `Target connection is ${actual}, expected ${expectedDeviceId}.`,
+  );
+}
+
 function DeviceSheet(props: {
   open: boolean;
   onClose: () => void;
@@ -126,8 +190,138 @@ function DeviceSheet(props: {
 }) {
   const { t } = useTranslation();
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const deviceStore = useDeviceStore();
   const devicesQuery = useDevicesQuery();
   const devices = devicesQuery.data ?? [];
+  const [switchingTransport, setSwitchingTransport] = useState<string | null>(
+    null,
+  );
+  const [transportError, setTransportError] = useState<{
+    title: string;
+    message: string;
+  } | null>(null);
+  const intent = getDeviceRouteIntentFromHref(props.currentHref);
+
+  const updateDeviceTransport = (
+    targetDeviceId: string,
+    updater: (device: StoredDevice) => StoredDevice,
+  ) => {
+    const next = deviceStore
+      .getDevices()
+      .map((device) =>
+        device.id === targetDeviceId ? updater(device) : device,
+      );
+    deviceStore.setDevices(next);
+    syncDevicesQueryCache(queryClient, deviceStore.getDevices());
+  };
+
+  const switchToLan = async (device: StoredDevice) => {
+    const lanBaseUrl = getStoredLanBaseUrl(device);
+    if (!lanBaseUrl) {
+      return;
+    }
+    const switchingKey = `${device.id}:lan`;
+    setSwitchingTransport(switchingKey);
+    setTransportError(null);
+    try {
+      const identity = await getIdentity(lanBaseUrl);
+      assertSameDeviceIdentity(device, identity.device_id);
+      updateDeviceTransport(device.id, (current) => ({
+        ...current,
+        baseUrl: lanBaseUrl,
+        identityDeviceId: identity.device_id || current.identityDeviceId,
+        lan: { baseUrl: lanBaseUrl },
+        connectionMarks: appendConnectionMark(current.connectionMarks, "lan"),
+      }));
+      props.onClose();
+    } catch {
+      setTransportError({
+        title: t("shell.lanSwitchFailedTitle"),
+        message: t("shell.lanSwitchFailedMessage"),
+      });
+    } finally {
+      setSwitchingTransport(null);
+    }
+  };
+
+  const switchToUsbDevd = async (device: StoredDevice) => {
+    const devd = device.devd;
+    if (!devd) {
+      return;
+    }
+    const switchingKey = `${device.id}:usb-devd`;
+    setSwitchingTransport(switchingKey);
+    setTransportError(null);
+    try {
+      const lease = await createDevdLease(devd.deviceId, devd.baseUrl);
+      const nextDevd = { ...devd, leaseId: lease.lease_id };
+      const nextBaseUrl = buildDevdCompatBaseUrl(nextDevd);
+      const identity = await getIdentity(nextBaseUrl);
+      assertSameDeviceIdentity(device, identity.device_id);
+      const lanBaseUrl = getStoredLanBaseUrl(device);
+      updateDeviceTransport(device.id, (current) => ({
+        ...current,
+        baseUrl: nextBaseUrl,
+        identityDeviceId: identity.device_id || current.identityDeviceId,
+        lan: current.lan ?? (lanBaseUrl ? { baseUrl: lanBaseUrl } : undefined),
+        devd: nextDevd,
+        connectionMarks: appendConnectionMark(current.connectionMarks, "usb"),
+      }));
+      props.onClose();
+    } catch {
+      setTransportError({
+        title: t("shell.usbSwitchFailedTitle"),
+        message: t("shell.usbSwitchFailedMessage"),
+      });
+    } finally {
+      setSwitchingTransport(null);
+    }
+  };
+
+  const navigateToDevice = (deviceId: string) => {
+    props.onClose();
+    if (intent.route === "status") {
+      navigate({
+        to: "/$deviceId/status",
+        params: { deviceId },
+      });
+      return;
+    }
+    if (intent.route === "settings") {
+      navigate({
+        to: "/$deviceId/settings",
+        params: { deviceId },
+      });
+      return;
+    }
+    if (intent.route === "calibration") {
+      navigate({
+        to: "/$deviceId/calibration",
+        params: { deviceId },
+      });
+      return;
+    }
+    if (intent.route === "firmware") {
+      navigate({
+        to: "/$deviceId/firmware",
+        params: { deviceId },
+      });
+      return;
+    }
+    if (intent.route === "about") {
+      navigate({
+        to: "/$deviceId/about",
+        params: { deviceId },
+      });
+      return;
+    }
+    navigate({
+      to: "/$deviceId/cc",
+      params: { deviceId },
+      search: intent.panel ? { panel: "pd" } : {},
+    });
+  };
 
   useEffect(() => {
     if (!props.open) return undefined;
@@ -151,8 +345,6 @@ function DeviceSheet(props: {
   if (!props.open) {
     return null;
   }
-
-  const intent = getDeviceRouteIntentFromHref(props.currentHref);
 
   return (
     <div className="fixed inset-0 z-50">
@@ -199,94 +391,168 @@ function DeviceSheet(props: {
             {devices.map((device) => {
               const active = device.id === props.currentDeviceId;
               const connectionLabels = getConnectionLabels(device);
+              const currentTransport = getManagementTransport(device.baseUrl);
+              const lanBaseUrl = getStoredLanBaseUrl(device);
+              const hasUsbDevd = Boolean(device.devd);
+              const isSwitchingLan = switchingTransport === `${device.id}:lan`;
+              const isSwitchingUsbDevd =
+                switchingTransport === `${device.id}:usb-devd`;
 
               return (
-                <button
+                <div
                   key={device.id}
-                  type="button"
                   className={[
-                    "group w-full rounded-[20px] border px-4 py-4 text-left transition",
+                    "rounded-[20px] border px-4 py-4 transition",
                     active
                       ? "border-cyan-300/55 bg-cyan-400/10 shadow-[0_0_28px_oklch(0.82_0.17_210/.12)]"
                       : "border-base-300/70 bg-base-200/30 hover:border-cyan-300/40 hover:bg-base-200/45",
                   ].join(" ")}
-                  onClick={() => {
-                    props.onClose();
-                    if (intent.route === "status") {
-                      navigate({
-                        to: "/$deviceId/status",
-                        params: { deviceId: device.id },
-                      });
-                      return;
-                    }
-                    if (intent.route === "settings") {
-                      navigate({
-                        to: "/$deviceId/settings",
-                        params: { deviceId: device.id },
-                      });
-                      return;
-                    }
-                    if (intent.route === "calibration") {
-                      navigate({
-                        to: "/$deviceId/calibration",
-                        params: { deviceId: device.id },
-                      });
-                      return;
-                    }
-                    if (intent.route === "firmware") {
-                      navigate({
-                        to: "/$deviceId/firmware",
-                        params: { deviceId: device.id },
-                      });
-                      return;
-                    }
-                    if (intent.route === "about") {
-                      navigate({
-                        to: "/$deviceId/about",
-                        params: { deviceId: device.id },
-                      });
-                      return;
-                    }
-                    navigate({
-                      to: "/$deviceId/cc",
-                      params: { deviceId: device.id },
-                      search: intent.panel ? { panel: "pd" } : {},
-                    });
-                  }}
                 >
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="truncate text-sm font-semibold">
-                        {device.name}
+                  <button
+                    type="button"
+                    className="group w-full text-left"
+                    onClick={() => navigateToDevice(device.id)}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold">
+                          {device.name}
+                        </div>
+                        <div className="mt-1 font-mono text-[11px] text-base-content/55">
+                          {device.id}
+                        </div>
                       </div>
-                      <div className="mt-1 font-mono text-[11px] text-base-content/55">
-                        {device.id}
+                      <div className="flex items-center gap-2">
+                        {active ? (
+                          <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-cyan-300/45 bg-cyan-300/14 text-cyan-100">
+                            <Check size={15} />
+                          </span>
+                        ) : null}
+                        <ChevronRight
+                          size={16}
+                          className="text-base-content/45 transition group-hover:text-cyan-100"
+                          aria-hidden="true"
+                        />
                       </div>
                     </div>
-                    <div className="flex items-center gap-2">
-                      {active ? (
-                        <span className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-cyan-300/45 bg-cyan-300/14 text-cyan-100">
-                          <Check size={15} />
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      {connectionLabels.map((label) => (
+                        <span
+                          key={label}
+                          className="rounded-full border border-base-300/75 bg-base-200/35 px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.12em] text-base-content/70"
+                        >
+                          {label}
                         </span>
-                      ) : null}
-                      <ChevronRight
-                        size={16}
-                        className="text-base-content/45 transition group-hover:text-cyan-100"
-                        aria-hidden="true"
-                      />
+                      ))}
                     </div>
-                  </div>
-                  <div className="mt-3 flex flex-wrap gap-2">
-                    {connectionLabels.map((label) => (
-                      <span
-                        key={label}
-                        className="rounded-full border border-base-300/75 bg-base-200/35 px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.12em] text-base-content/70"
-                      >
-                        {label}
-                      </span>
-                    ))}
-                  </div>
-                </button>
+                  </button>
+
+                  {active ? (
+                    <div className="mt-4 border-t border-base-300/55 pt-4">
+                      <div className="flex items-center justify-between gap-3">
+                        <div className="text-[11px] font-mono uppercase tracking-[0.14em] text-base-content/50">
+                          {t("shell.managementPath")}
+                        </div>
+                        <div className="truncate font-mono text-[11px] text-base-content/55">
+                          {t("shell.currentPath", {
+                            path: getManagementTransportLabel(device.baseUrl),
+                          })}
+                        </div>
+                      </div>
+                      <fieldset className="mt-3 grid grid-cols-1 gap-2 sm:grid-cols-3">
+                        <legend className="sr-only">
+                          {t("shell.managementPath")}
+                        </legend>
+                        <button
+                          type="button"
+                          className={[
+                            "ll-button ll-button-sm min-w-0 justify-center gap-2 border px-3",
+                            currentTransport === "lan-http"
+                              ? "border-emerald-300/50 bg-emerald-400/12 text-emerald-100"
+                              : "border-base-300/70 bg-base-200/35 hover:border-emerald-300/40",
+                          ].join(" ")}
+                          disabled={!lanBaseUrl || Boolean(switchingTransport)}
+                          aria-pressed={currentTransport === "lan-http"}
+                          title={t("shell.lanWifiFull")}
+                          onClick={() => {
+                            if (currentTransport !== "lan-http") {
+                              void switchToLan(device);
+                            }
+                          }}
+                        >
+                          {isSwitchingLan ? (
+                            <LoaderCircle
+                              size={15}
+                              className="motion-safe:animate-spin"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Wifi size={15} aria-hidden="true" />
+                          )}
+                          <span className="truncate">
+                            {isSwitchingLan
+                              ? t("shell.switchingPath")
+                              : t("shell.lanWifi")}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className={[
+                            "ll-button ll-button-sm min-w-0 justify-center gap-2 border px-3",
+                            currentTransport === "usb-devd"
+                              ? "border-cyan-300/55 bg-cyan-400/14 text-cyan-100"
+                              : "border-base-300/70 bg-base-200/35 hover:border-cyan-300/40",
+                          ].join(" ")}
+                          disabled={!hasUsbDevd || Boolean(switchingTransport)}
+                          aria-pressed={currentTransport === "usb-devd"}
+                          title={t("shell.usbDevdFull")}
+                          onClick={() => {
+                            if (currentTransport !== "usb-devd") {
+                              void switchToUsbDevd(device);
+                            }
+                          }}
+                        >
+                          {isSwitchingUsbDevd ? (
+                            <LoaderCircle
+                              size={15}
+                              className="motion-safe:animate-spin"
+                              aria-hidden="true"
+                            />
+                          ) : (
+                            <Cable size={15} aria-hidden="true" />
+                          )}
+                          <span className="truncate">
+                            {isSwitchingUsbDevd
+                              ? t("shell.switchingPath")
+                              : t("shell.usbDevd")}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          className="ll-button ll-button-sm min-w-0 justify-center gap-2 border border-base-300/55 bg-base-200/20 px-3 text-base-content/40"
+                          disabled
+                          aria-disabled="true"
+                          title={t("shell.webSerialFull")}
+                        >
+                          <SquareTerminal size={15} aria-hidden="true" />
+                          <span className="truncate">
+                            {t("shell.webSerial")}
+                          </span>
+                        </button>
+                      </fieldset>
+                      {transportError ? (
+                        <div className="mt-3 rounded-lg border border-amber-400/40 bg-amber-950/24 px-3 py-2 text-xs text-amber-50">
+                          <div className="font-semibold">
+                            {transportError.title}
+                          </div>
+                          <div className="mt-1 leading-relaxed text-amber-50/78">
+                            {transportError.message}
+                          </div>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </div>
               );
             })}
           </div>
@@ -332,16 +598,21 @@ export function ConsoleLayout() {
       ? devices.find((device) => device.id === lastActiveDeviceId)
       : undefined;
   const currentDevice = routeDevice ?? rememberedDevice;
-  const currentDeviceMeta = currentDevice?.id ?? null;
+  const currentDeviceMeta = currentDevice
+    ? `${getManagementTransportLabel(currentDevice.baseUrl)} · ${currentDevice.id}`
+    : null;
+  const currentDeviceIsUsbDevd = currentDevice?.baseUrl
+    ? isDevdCompatBaseUrl(currentDevice.baseUrl)
+    : false;
 
   const currentDeviceStatusQuery = useQuery<FastStatusView, HttpApiError>({
     ...getDeviceStatusQueryOptions({
       deviceId: currentDevice?.id,
       baseUrl: currentDevice?.baseUrl,
       enabled: Boolean(currentDevice?.baseUrl),
-      refetchInterval: 3000,
+      refetchInterval: currentDeviceIsUsbDevd ? false : 3000,
       refetchOnWindowFocus: false,
-      retry: 1,
+      retry: getDeviceQueryRetry(currentDevice?.baseUrl, 1),
       retryDelay: 250,
     }),
   });

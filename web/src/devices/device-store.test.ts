@@ -54,6 +54,7 @@ test("LocalStorageDeviceStore sanitizes malformed stored device entries", () => 
         id: "llx-1",
         name: "Bench",
         baseUrl: "http://192.168.1.23",
+        identityDeviceId: "loadlynx-d68638",
         devd: {
           baseUrl: "http://127.0.0.1:30180",
           deviceId: "digital-aabbcc",
@@ -78,12 +79,109 @@ test("LocalStorageDeviceStore sanitizes malformed stored device entries", () => 
       id: "llx-1",
       name: "Bench",
       baseUrl: "http://192.168.1.23",
+      identityDeviceId: "loadlynx-d68638",
       devd: {
         baseUrl: "http://127.0.0.1:30180",
         deviceId: "digital-aabbcc",
       },
       webSerial: {
         identityDeviceId: "llx-1",
+      },
+    },
+  ]);
+});
+
+test("LocalStorageDeviceStore coalesces duplicate transports by hardware identity", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(
+    "loadlynx.devices",
+    JSON.stringify([
+      {
+        id: "device-001",
+        name: "ESP32-S3 USB CDC",
+        baseUrl:
+          "http://127.0.0.1:19390/?device_id=digital-2bdf&lease_id=lease-1",
+        identityDeviceId: "loadlynx-d68638",
+        connectionMarks: ["usb"],
+        devd: {
+          baseUrl: "http://127.0.0.1:19390",
+          deviceId: "digital-2bdf",
+          leaseId: "lease-1",
+        },
+      },
+      {
+        id: "device-002",
+        name: "LoadLynx d68638 WiFi",
+        baseUrl: "http://192.168.31.216",
+        identityDeviceId: "loadlynx-d68638",
+        connectionMarks: ["lan"],
+      },
+    ]),
+  );
+
+  const store = new LocalStorageDeviceStore(storage);
+
+  expect(store.getDevices()).toEqual([
+    {
+      id: "device-001",
+      name: "LoadLynx d68638 WiFi",
+      baseUrl: "http://192.168.31.216",
+      identityDeviceId: "loadlynx-d68638",
+      connectionMarks: ["lan", "usb"],
+      lan: {
+        baseUrl: "http://192.168.31.216",
+      },
+      devd: {
+        baseUrl: "http://127.0.0.1:19390",
+        deviceId: "digital-2bdf",
+        leaseId: "lease-1",
+      },
+    },
+  ]);
+});
+
+test("LocalStorageDeviceStore prefers LAN base URL when coalescing duplicate transports", () => {
+  const storage = new MemoryStorage();
+  storage.setItem(
+    "loadlynx.devices",
+    JSON.stringify([
+      {
+        id: "device-001",
+        name: "LoadLynx d68638 WiFi",
+        baseUrl: "http://192.168.31.216",
+        identityDeviceId: "loadlynx-d68638",
+      },
+      {
+        id: "device-002",
+        name: "ESP32-S3 USB CDC",
+        baseUrl:
+          "http://127.0.0.1:19390/?device_id=digital-2bdf&lease_id=lease-1",
+        identityDeviceId: "loadlynx-d68638",
+        devd: {
+          baseUrl: "http://127.0.0.1:19390",
+          deviceId: "digital-2bdf",
+          leaseId: "lease-1",
+        },
+      },
+    ]),
+  );
+
+  const store = new LocalStorageDeviceStore(storage);
+
+  expect(store.getDevices()).toEqual([
+    {
+      id: "device-001",
+      name: "LoadLynx d68638 WiFi",
+      baseUrl: "http://192.168.31.216",
+      identityDeviceId: "loadlynx-d68638",
+      connectionMarks: ["lan", "usb"],
+      lan: {
+        baseUrl: "http://192.168.31.216",
+      },
+      devd: {
+        baseUrl: "http://127.0.0.1:19390",
+        deviceId: "digital-2bdf",
+        leaseId: "lease-1",
       },
     },
   ]);

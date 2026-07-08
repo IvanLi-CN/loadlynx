@@ -2202,6 +2202,10 @@ mod tests {
         spawn_test_ipc_with_mode(state, TestIpcMode::ScanRequiredArtifact).await
     }
 
+    async fn spawn_operation_scan_required_test_ipc(state: TestHttpState) -> String {
+        spawn_test_ipc_with_mode(state, TestIpcMode::ScanRequiredOperation).await
+    }
+
     async fn spawn_identity_mismatch_then_scan_test_ipc(state: TestHttpState) -> String {
         spawn_test_ipc_with_mode(state, TestIpcMode::IdentityMismatchThenScan).await
     }
@@ -2212,6 +2216,7 @@ mod tests {
         DuplicateAnalogSelector,
         ScanRequiredLease,
         ScanRequiredArtifact,
+        ScanRequiredOperation,
         IdentityMismatchThenScan,
     }
 
@@ -2273,6 +2278,7 @@ mod tests {
                     TestIpcMode::Normal | TestIpcMode::DuplicateAnalogSelector => "digital-1",
                     TestIpcMode::ScanRequiredLease
                     | TestIpcMode::ScanRequiredArtifact
+                    | TestIpcMode::ScanRequiredOperation
                     | TestIpcMode::IdentityMismatchThenScan => "digital-current",
                 };
                 let devices = match mode {
@@ -2292,6 +2298,20 @@ mod tests {
                 Ok(json!({ "devices": devices }))
             }
             "devices.flash" | "devices.reset" => {
+                if matches!(mode, TestIpcMode::ScanRequiredOperation)
+                    && state.scans.load(Ordering::SeqCst) == 0
+                {
+                    return IpcResponse {
+                        ok: false,
+                        result: None,
+                        error: Some(loadlynx_devd::ApiError {
+                            code: "device_not_found".to_string(),
+                            message: "device is not known".to_string(),
+                            retryable: false,
+                            details: None,
+                        }),
+                    };
+                }
                 state
                     .operation_payloads
                     .lock()
@@ -3132,6 +3152,46 @@ mod tests {
             .lock()
             .expect("operation payloads lock");
         assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("dry_run").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(payloads[0].get("lease_id").is_none());
+    }
+
+    #[tokio::test]
+    async fn dry_run_usb_firmware_operation_scans_saved_port_after_stale_device_id() {
+        let state = TestHttpState::default();
+        let devd = spawn_operation_scan_required_test_ipc(state.clone()).await;
+        let resolved = ResolvedUsbHardware {
+            hardware_id: "loadlynx-a1b2c3".to_string(),
+            device: "digital-stale".to_string(),
+            devd,
+            port_path: Some("mock://esp32s3".to_string()),
+            expected_identity_device_id: Some("loadlynx-a1b2c3".to_string()),
+        };
+
+        post_usb_operation_with_optional_lease(
+            &Client::new(),
+            &resolved,
+            "/api/v1/devices/digital-stale/reset",
+            json!({"target": TargetKind::DigitalEsp32s3, "dry_run": true}),
+            true,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(state.scans.load(Ordering::SeqCst), 1);
+        assert_eq!(state.lease_creates.load(Ordering::SeqCst), 0);
+        let payloads = state
+            .operation_payloads
+            .lock()
+            .expect("operation payloads lock");
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(
+            payloads[0].get("device_id").and_then(Value::as_str),
+            Some("digital-current")
+        );
         assert_eq!(
             payloads[0].get("dry_run").and_then(Value::as_bool),
             Some(true)

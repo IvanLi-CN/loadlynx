@@ -16,7 +16,7 @@
 
 - 新建 `web/` 前端子项目（与 `paste-preset` 工程规范保持一致）。
 - ESP32‑S3 固件：
-  - Wi‑Fi 配网与网络状态管理（通过 `.env`/环境变量驱动的 STA 模式）。
+  - Wi‑Fi 配网与网络状态管理（开发固件默认通过运行时 USB/devd 或 Web Serial 写入，不从 `.env` 编译默认凭据）。
   - 设备识别信息（ID、固件版本、网络信息、bridge metadata）。
   - 状态、统一控制、CC 兼容视图、USB‑PD、Wi‑Fi、诊断、标定与固件维护相关 API。
 - Web 控制台：
@@ -177,29 +177,20 @@
 
 ### 5.1 Wi‑Fi 配置来源
 
-- 配置源优先级：
-  1. 仓库根目录 `.env` 文件（推荐命名）；
-  2. 构建环境变量（`DIGITAL_WIFI_*`）。
-- 建议配置键：
-  - `DIGITAL_WIFI_SSID`：接入 AP 的 SSID。
-  - `DIGITAL_WIFI_PSK`：密码（WPA2/WPA3 等）。
-  - `DIGITAL_WIFI_HOSTNAME`：设备在局域网中的主机名（可选）。
-  - `DIGITAL_WIFI_STATIC_IP`、`DIGITAL_WIFI_NETMASK`、`DIGITAL_WIFI_GATEWAY`、`DIGITAL_WIFI_DNS`：静态 IP 配置（可选，首版仍以 DHCP 为主，静态配置为备用方案）。
-- `.env` 文件不纳入版本控制，防止泄露敏感信息。
+- 开发固件默认不包含 Wi-Fi 凭据。运行时配置通过 USB/devd 或 Web Serial 写入 EEPROM，并由固件 Wi-Fi task 重新加载。
+- `clear_wifi_config` 清除用户 EEPROM 凭据；如果没有显式 factory fallback，Wi-Fi 状态必须变为 `source=none` 并停止/断开 STA。
+- 仓库根 `.env` 不得存放 Wi-Fi 凭据，也不得定义 `DIGITAL_WIFI_*`。本地测试凭据只应在 Web 表单、CLI 参数或一次性命令环境中作为运行时输入使用。
+- factory Wi-Fi 是显式构建模式：只有设置 `LOADLYNX_ENABLE_FACTORY_WIFI=1` 时，构建脚本才允许从当前构建环境读取 `LOADLYNX_FACTORY_WIFI_SSID` / `LOADLYNX_FACTORY_WIFI_PSK`，并注入 `LOADLYNX_WIFI_*` 编译期环境。该模式用于受控 factory/release 场景，不是开发测试默认值，也不能通过 repo-root `.env` 配置。
+- 可选 factory 键：`LOADLYNX_FACTORY_WIFI_HOSTNAME`、`LOADLYNX_FACTORY_WIFI_STATIC_IP`、`LOADLYNX_FACTORY_WIFI_NETMASK`、`LOADLYNX_FACTORY_WIFI_GATEWAY`、`LOADLYNX_FACTORY_WIFI_DNS`。
 
 ### 5.2 build.rs 职责扩展
 
-在现有版本号注入逻辑基础上，`firmware/digital/build.rs` 需要增加：
+在现有版本号注入逻辑基础上，`firmware/digital/build.rs` 的 Wi-Fi 规则是：
 
-- 监视配置文件变更：
-  - `cargo:rerun-if-changed=<repo_root>/.env`。
-- 解析 `.env` 与环境变量：
-  - 使用简单键值解析（`KEY=VALUE`），忽略注释与无效行；
-  - 字段缺失时尝试从 `std::env::var` 读取。
-- 将配置注入编译期环境：
-  - 通过 `println!("cargo:rustc-env=LOADLYNX_WIFI_SSID=...")` 等形式导出；
-  - 必须存在的字段（SSID/PSK）缺失时，构建失败并输出明确错误信息；
-  - 避免把完整配置写入日志或版本文件，仅通过 `env!` 在代码中访问。
+- 默认构建只注入版本、target、profile 和 source digest；不得监视或解析 repo-root `.env`。
+- 监视 `LOADLYNX_ENABLE_FACTORY_WIFI`，并且仅当它等于 `1` 时进入 factory Wi-Fi 注入路径。
+- factory Wi-Fi 注入路径只读取当前构建环境中的 `LOADLYNX_FACTORY_WIFI_*`，不读取 `.env` 文件；`LOADLYNX_FACTORY_WIFI_SSID` / `LOADLYNX_FACTORY_WIFI_PSK` 缺失或为空时必须构建失败。
+- 避免把完整配置写入日志或版本文件，仅通过 `option_env!` 在代码中访问。
 
 ### 5.3 运行时联网流程（高层设计）
 

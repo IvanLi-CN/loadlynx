@@ -8,6 +8,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import {
   postCalibrationApply,
   postCalibrationCommit,
@@ -103,6 +104,7 @@ export function CurrentCalibrationPanel({
   onRefetchProfile,
   isOffline,
 }: CurrentCalibrationPanelProps) {
+  const { t } = useTranslation();
   const calibrationStore = useCalibrationStore();
   const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
   const [confirmKind, setConfirmKind] = useState<
@@ -490,7 +492,7 @@ export function CurrentCalibrationPanel({
           <div className="ll-panel-body gap-4">
             <div className="flex items-start justify-between gap-3">
               <h3 className="ll-panel-title flex flex-col items-start leading-tight">
-                <span>本地草稿</span>
+                <span>{t("calibration.localDraft")}</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Web
                 </span>
@@ -584,7 +586,7 @@ export function CurrentCalibrationPanel({
 
             <div className="flex items-center justify-between gap-3 flex-wrap">
               <div className="text-sm font-bold whitespace-nowrap shrink-0">
-                电流单位
+                {t("calibration.currentUnit")}
               </div>
               <div className="ll-join">
                 <button
@@ -608,13 +610,16 @@ export function CurrentCalibrationPanel({
 
             <details className="ll-disclosure bg-base-200/40 border border-base-200">
               <summary className="ll-disclosure-title text-sm font-bold">
-                高级选项
+                {t("calibration.advancedOptions")}
               </summary>
               <div className="ll-disclosure-content">
                 <label className="ll-form-control w-full max-w-lg">
                   <div className="ll-label-row">
                     <span className="ll-label-text">
-                      基础电流扣除 ({channelDisplay}) ({inputUnit})
+                      {t("calibration.baselineCurrentDeduction", {
+                        channel: channelDisplay,
+                        unit: inputUnit,
+                      })}
                     </span>
                   </div>
                   <div className="ll-join w-full">

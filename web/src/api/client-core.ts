@@ -52,6 +52,9 @@ export function supportsBackupWifiCredentials(baseUrl: string): boolean {
   return Boolean(baseUrl);
 }
 
+const DEVICE_HTTP_TIMEOUT_MS = 15_000;
+const DEVICE_QUEUE_WAIT_TIMEOUT_MS = 15_000;
+
 export function isStorybookRuntime(): boolean {
   return globalThis.__LOADLYNX_STORYBOOK__ === true;
 }
@@ -121,12 +124,51 @@ function mapHttpError(status: number, data: unknown): HttpApiError {
 
 const deviceQueues = new Map<string, Promise<unknown>>();
 
+function makeDeviceTimeoutError(code: string, message: string): HttpApiError {
+  return new HttpApiError({
+    status: 0,
+    code,
+    message,
+    retryable: true,
+    details: null,
+  });
+}
+
+async function waitForDeviceQueueTurn(
+  baseUrl: string,
+  tail: Promise<unknown>,
+): Promise<void> {
+  let timeout: ReturnType<typeof globalThis.setTimeout> | undefined;
+  try {
+    await Promise.race([
+      tail.catch(() => undefined),
+      new Promise<never>((_, reject) => {
+        timeout = globalThis.setTimeout(() => {
+          reject(
+            makeDeviceTimeoutError(
+              "QUEUE_WAIT_TIMEOUT",
+              `Request queue for ${baseUrl} did not advance within ${DEVICE_QUEUE_WAIT_TIMEOUT_MS}ms`,
+            ),
+          );
+        }, DEVICE_QUEUE_WAIT_TIMEOUT_MS);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) {
+      globalThis.clearTimeout(timeout);
+    }
+  }
+}
+
 function enqueueForDevice<T>(
   baseUrl: string,
   op: () => Promise<T>,
 ): Promise<T> {
-  const tail = deviceQueues.get(baseUrl) ?? Promise.resolve();
-  const next = tail.catch(() => undefined).then(() => op());
+  const tail = deviceQueues.get(baseUrl);
+  const next =
+    tail === undefined
+      ? Promise.resolve().then(() => op())
+      : waitForDeviceQueueTurn(baseUrl, tail).then(() => op());
 
   deviceQueues.set(
     baseUrl,
@@ -163,13 +205,24 @@ async function httpJson<T>(
   }
 
   let response: Response;
+  const controller = new AbortController();
+  const timeout = globalThis.setTimeout(() => {
+    controller.abort();
+  }, DEVICE_HTTP_TIMEOUT_MS);
   try {
     response = await fetch(url.toString(), {
-      method,
       ...init,
+      method,
       headers,
+      signal: init?.signal ?? controller.signal,
     });
   } catch (error) {
+    if (!init?.signal && controller.signal.aborted) {
+      throw makeDeviceTimeoutError(
+        "REQUEST_TIMEOUT",
+        `Request to ${path} timed out after ${DEVICE_HTTP_TIMEOUT_MS}ms`,
+      );
+    }
     const message =
       error instanceof Error ? error.message : "Network request failed";
     throw new HttpApiError({
@@ -179,6 +232,8 @@ async function httpJson<T>(
       retryable: true,
       details: null,
     });
+  } finally {
+    globalThis.clearTimeout(timeout);
   }
 
   const text = await response.text();

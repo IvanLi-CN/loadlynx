@@ -109,7 +109,7 @@ These rules exist to prevent an Agent from silently switching the owner's connec
 - Chip/targets are configured via crate `.cargo/config.toml`; adjust only if board/chip changes.
 - Do not commit secrets or machine‑specific paths; prefer flags/env (e.g., `--port /dev/tty.*`).
 - Probe‑RS chip may vary by package; verify `STM32G431CB` before flashing.
-- Digital firmware Wi‑Fi credentials MUST come from the repo-root `.env` file (copy from `.env.example`); do not override `DIGITAL_WIFI_*` ad-hoc (e.g., `DIGITAL_WIFI_SSID=dummy`) unless the owner explicitly approves it.
+- Development digital firmware MUST NOT carry default Wi-Fi credentials. Runtime Wi-Fi credentials must be written through USB/devd or Web Serial and persisted in EEPROM. The repo-root `.env` must not contain Wi-Fi credentials or `DIGITAL_WIFI_*` keys. Factory Wi-Fi is allowed only for an explicitly approved factory/release build with `LOADLYNX_ENABLE_FACTORY_WIFI=1` and command-scoped `LOADLYNX_FACTORY_WIFI_*` environment values.
 
 ## Documentation & Datasheet Localization
 

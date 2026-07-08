@@ -7,6 +7,7 @@ import {
   useMemo,
   useState,
 } from "react";
+import { useTranslation } from "react-i18next";
 import {
   postCalibrationApply,
   postCalibrationCommit,
@@ -96,6 +97,7 @@ export function VoltageCalibrationPanel({
   onRefetchProfile,
   isOffline,
 }: VoltageCalibrationPanelProps) {
+  const { t } = useTranslation();
   const calibrationStore = useCalibrationStore();
   const [viewTab, setViewTab] = useState<"draft" | "device">("draft");
   const [inputV, setInputV] = useState("12.000000");
@@ -372,7 +374,7 @@ export function VoltageCalibrationPanel({
           <div className="ll-panel-body gap-4">
             <div className="flex items-start justify-between gap-3">
               <h3 className="ll-panel-title flex flex-col items-start leading-tight">
-                <span>本地草稿</span>
+                <span>{t("calibration.localDraft")}</span>
                 <span className="text-sm font-normal text-base-content/60">
                   Web
                 </span>

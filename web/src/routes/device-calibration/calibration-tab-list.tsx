@@ -1,9 +1,11 @@
+import { useTranslation } from "react-i18next";
 import type { CalibrationTab } from "./shared.ts";
 
 export function CalibrationTabList(input: {
   activeTab: CalibrationTab;
   onSelectTab: (tab: CalibrationTab) => void;
 }) {
+  const { t } = useTranslation();
   const { activeTab, onSelectTab } = input;
 
   return (
@@ -16,7 +18,7 @@ export function CalibrationTabList(input: {
         tabIndex={activeTab === "voltage" ? 0 : -1}
         onClick={() => onSelectTab("voltage")}
       >
-        电压
+        {t("calibration.voltage")}
       </button>
       <button
         type="button"
@@ -26,7 +28,7 @@ export function CalibrationTabList(input: {
         tabIndex={activeTab === "current_ch1" ? 0 : -1}
         onClick={() => onSelectTab("current_ch1")}
       >
-        电流通道1
+        {t("calibration.currentCh1")}
       </button>
       <button
         type="button"
@@ -36,7 +38,7 @@ export function CalibrationTabList(input: {
         tabIndex={activeTab === "current_ch2" ? 0 : -1}
         onClick={() => onSelectTab("current_ch2")}
       >
-        电流通道2
+        {t("calibration.currentCh2")}
       </button>
     </div>
   );

@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import type { CalibrationProfile } from "../../api/types.ts";
 import type { ValidationIssue } from "../../calibration/validation.ts";
 import {
@@ -25,6 +26,7 @@ export function CalibrationOverviewPanel(input: {
   profileUpdatedAt: number;
   statusMatchesActiveTab: boolean;
 }) {
+  const { t } = useTranslation();
   const {
     deviceProfile,
     deviceCalKind,
@@ -175,12 +177,11 @@ export function CalibrationOverviewPanel(input: {
         {!isOffline && !statusMatchesActiveTab ? (
           <output className="ll-alert ll-alert-info text-sm py-2">
             <span>
-              正在同步校准模式：等待设备切换到{" "}
               <span className="font-mono">
-                {formatDeviceCalKind(expectedCalKind)}
+                {t("calibration.syncingMode", {
+                  kind: formatDeviceCalKind(expectedCalKind),
+                })}
               </span>
-              。在同步完成前，RAW / DAC
-              会保持占位，避免把旧模式的数据误显示到当前页签。
             </span>
           </output>
         ) : null}

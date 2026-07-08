@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useTranslation } from "react-i18next";
 
 export function CalibrationDeviceViewPanel(input: {
   children: ReactNode;
@@ -8,6 +9,7 @@ export function CalibrationDeviceViewPanel(input: {
   readPending: boolean;
   resetDisabled: boolean;
 }) {
+  const { t } = useTranslation();
   const {
     children,
     deviceProfileSource,
@@ -22,17 +24,17 @@ export function CalibrationDeviceViewPanel(input: {
       <div className="ll-panel-body gap-4">
         <div className="flex items-start justify-between gap-3">
           <h3 className="ll-panel-title flex flex-col items-start leading-tight">
-            <span>设备数据</span>
+            <span>{t("calibration.deviceData")}</span>
             <span className="text-sm font-normal text-base-content/60">
               Hardware
             </span>
           </h3>
           <div className="flex items-center gap-2">
             <div className="ll-badge ll-badge-info whitespace-nowrap">
-              读设备
+              {t("calibration.readDevice")}
             </div>
             <div className="ll-badge ll-badge-warning whitespace-nowrap">
-              写设备
+              {t("calibration.writeDevice")}
             </div>
           </div>
         </div>

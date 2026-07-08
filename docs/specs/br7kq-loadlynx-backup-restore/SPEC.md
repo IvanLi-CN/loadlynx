@@ -65,7 +65,7 @@ LoadLynx 已经通过 CLI、devd USB bridge、LAN HTTP API 和 Web Settings 暴�
 ## CLI 行为
 
 - `loadlynx backup export --file <path|-> [--include ...]`
-- `loadlynx backup import --file <path|-> [--include ...] [--dry-run] [--allow-insecure-lan-wifi]`
+- `loadlynx backup import --file <path|-> [--include ...] [--dry-run]`
 
 Include values:
 
@@ -86,7 +86,9 @@ Include values:
 
 If step 3 or 4 fails, import MUST return a safety-blocked error and MUST NOT write any section.
 
-When `settings.wifi` is restored through a LAN HTTP selector, CLI MUST require `--allow-insecure-lan-wifi`. USB/devd restore does not require that LAN safety override.
+When `settings.wifi` is selected for a non-dry-run restore, the write MUST use an independent management path that will not be disrupted by the WiFi change. USB/devd is the accepted independent path. A LAN HTTP URL, mDNS hostname, saved HTTP transport, or "verified" LAN reachability is not an independent path for WiFi writes, because it may be the exact WiFi path being replaced. CLI MUST refuse `settings.wifi` restore over LAN HTTP instead of offering a confirmation or override flag.
+
+The independent path MUST be verified before the restore sends the WiFi write. A stored USB/devd URL, expired lease ID, prior USB connection mark, or pending Settings page readback is not sufficient. Web/CLI must create or refresh the USB/devd lease and confirm device identity first; if that verification fails, restore MUST stop before `settings.wifi` and leave the current WiFi configuration unchanged.
 
 ## Web 行为
 
@@ -101,7 +103,7 @@ Device Settings route MUST include a Backup & Restore card:
   - Restorable supported sections default selected.
   - Restore Selected first disables output and confirms disabled state.
   - If selected export includes `settings.wifi` over LAN HTTP, show an explicit WiFi credential read confirmation before downloading the backup.
-  - If selected restore includes `settings.wifi` over LAN HTTP, show an explicit WiFi credential write confirmation before starting restore.
+  - If selected restore includes `settings.wifi` while the current device path is LAN HTTP or an unverified USB/devd path, block the restore until the same device is verified through USB/devd. The UI must not offer the current LAN HTTP path, a saved HTTP transport, a "verified LAN" entry, or a stale USB/devd lease as a completed management connection for this write.
   - If safety disable fails, show a safety-blocked error and do not restore any section.
   - Partial restore failures should show per-section results without hiding earlier successes.
 
@@ -121,6 +123,9 @@ Device Settings route MUST include a Backup & Restore card:
 - Given Web import reads a backup containing unknown future sections, Then preview warns and still allows known supported sections.
 - Given Web Restore Selected cannot confirm output disabled, Then it shows safety-blocked and performs no writes.
 - Given WiFi credentials are exported, Then backup contains `ssid`, plaintext `psk`, and `source`, while ordinary status and diagnostics still do not include `psk`.
+- Given Web restore includes `settings.wifi` and the device is currently reached through LAN HTTP, When no USB/devd path is bound for the same device, Then restore is blocked and no LAN HTTP override option is shown.
+- Given Web restore includes `settings.wifi` and the selected device has only a stale or unverified USB/devd lease, When identity verification has not succeeded, Then restore is blocked before any WiFi write is sent and the UI requires USB/devd verification.
+- Given CLI import includes `settings.wifi` and resolves the device through LAN HTTP, When import is non-dry-run, Then CLI refuses before writing WiFi and instructs the user to bind/use USB/devd.
 - Given calibration import has an empty curve, Then that curve is reset instead of committed with an empty points list.
 - Given presets import has `active_preset_id`, Then preset slots are restored but active preset is not applied automatically.
 

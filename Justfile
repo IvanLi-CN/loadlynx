@@ -138,8 +138,6 @@ check-embedded:
   just _require-esp-toolchain
   just _require-esp-export
   (cd firmware/analog && cargo build --locked --release --target thumbv7em-none-eabihf)
-  DIGITAL_WIFI_SSID="${DIGITAL_WIFI_SSID:-codex_dummy}" \
-  DIGITAL_WIFI_PSK="${DIGITAL_WIFI_PSK:-codex_dummy}" \
   just d-build
 
 # Embedded lint/static checks aligned with Code Check.
@@ -229,12 +227,10 @@ d-clippy:
   set -eu; \
   . "$HOME/export-esp.sh"; \
   FEATURES="${FEATURES:-}"; \
-  DIGITAL_WIFI_SSID="${DIGITAL_WIFI_SSID:-codex_dummy}"; \
-  DIGITAL_WIFI_PSK="${DIGITAL_WIFI_PSK:-codex_dummy}"; \
   if [ -n "$FEATURES" ]; then \
-  (cd firmware/digital && DIGITAL_WIFI_SSID="$DIGITAL_WIFI_SSID" DIGITAL_WIFI_PSK="$DIGITAL_WIFI_PSK" cargo +esp clippy --locked --bins --features "$FEATURES" -- -D warnings); \
+  (cd firmware/digital && cargo +esp clippy --locked --bins --features "$FEATURES" -- -D warnings); \
   else \
-  (cd firmware/digital && DIGITAL_WIFI_SSID="$DIGITAL_WIFI_SSID" DIGITAL_WIFI_PSK="$DIGITAL_WIFI_PSK" cargo +esp clippy --locked --bins -- -D warnings); \
+  (cd firmware/digital && cargo +esp clippy --locked --bins -- -D warnings); \
   fi
 
 d-build:

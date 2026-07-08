@@ -1,8 +1,11 @@
+import { useTranslation } from "react-i18next";
+
 export function CalibrationViewTabs(input: {
   activeView: "draft" | "device";
   className?: string;
   onSelectView: (view: "draft" | "device") => void;
 }) {
+  const { t } = useTranslation();
   const { activeView, className, onSelectView } = input;
 
   return (
@@ -15,7 +18,7 @@ export function CalibrationViewTabs(input: {
         tabIndex={activeView === "draft" ? 0 : -1}
         onClick={() => onSelectView("draft")}
       >
-        本地草稿
+        {t("calibration.localDraft")}
       </button>
       <button
         type="button"
@@ -25,7 +28,7 @@ export function CalibrationViewTabs(input: {
         tabIndex={activeView === "device" ? 0 : -1}
         onClick={() => onSelectView("device")}
       >
-        设备数据
+        {t("calibration.deviceData")}
       </button>
     </div>
   );

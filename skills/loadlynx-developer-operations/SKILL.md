@@ -127,7 +127,7 @@ just loadlynx flash digital --device <saved-id> --artifact <artifact-id>
 ## WiFi And Calibration
 
 - Developer WiFi work may involve source configuration, firmware protocol changes, devd API changes, CLI support, release packaging, and secret redaction.
-- Build-time digital WiFi credentials must come from repo-defined `.env` / `DIGITAL_WIFI_*` sources; do not override them ad hoc unless the owner explicitly approves it.
+- Development digital firmware must not read repo-root `.env` WiFi credentials or `DIGITAL_WIFI_*` keys. Runtime WiFi credentials are written through USB/devd or Web Serial. Factory/release WiFi is allowed only for explicitly scoped `LOADLYNX_ENABLE_FACTORY_WIFI=1` builds with command-scoped `LOADLYNX_FACTORY_WIFI_*` values.
 - Runtime user WiFi configuration must not be documented as available until the released CLI and firmware actually implement it.
 - Treat calibration writes as maintenance operations. Read `docs/dev-notes/user-calibration.md` before changing calibration behavior or data.
 - Keep calibration mode ownership single-writer, leave calibration mode `off` after maintenance, and collect before/after evidence when writing or committing calibration data.

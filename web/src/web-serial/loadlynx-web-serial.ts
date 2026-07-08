@@ -1,4 +1,4 @@
-import type { FirmwareIdentity } from "../api/types.ts";
+import type { FirmwareIdentity, NetworkInfo } from "../api/types.ts";
 
 export const WEB_SERIAL_FLASH_CONFIRMATION_TEXT = "yes";
 
@@ -6,6 +6,8 @@ export interface WebSerialIdentityProfile {
   deviceId: string;
   displayName?: string;
   product?: string;
+  hostname?: string;
+  network?: NetworkInfo;
   firmware?: FirmwareIdentity;
   capturedAt: string;
 }
@@ -268,12 +270,34 @@ async function tryCaptureIdentity(
           : undefined,
       product:
         typeof identity.product === "string" ? identity.product : undefined,
+      hostname:
+        typeof identity.hostname === "string" ? identity.hostname : undefined,
+      network: parseNetworkInfo(identity.network),
       firmware: parseFirmwareIdentity(identity.firmware),
       capturedAt: new Date().toISOString(),
     };
   } catch {
     return undefined;
   }
+}
+
+function parseNetworkInfo(value: unknown): NetworkInfo | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.ip !== "string" ||
+    typeof candidate.mac !== "string" ||
+    typeof candidate.hostname !== "string"
+  ) {
+    return undefined;
+  }
+  return {
+    ip: candidate.ip,
+    mac: candidate.mac,
+    hostname: candidate.hostname,
+  };
 }
 
 export function parseFirmwareIdentity(

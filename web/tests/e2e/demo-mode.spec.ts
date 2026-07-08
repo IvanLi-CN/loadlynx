@@ -51,8 +51,13 @@ test.describe("Demo mode", () => {
     await expect(
       page.evaluate(() => window.localStorage.getItem("loadlynx.demoMode")),
     ).resolves.toBe("true");
-    await expect(page.getByText("Demo Device #1")).toBeVisible();
-    await expect(page.getByText("mock-001")).toBeVisible();
+    const demoDeviceCard = page
+      .getByRole("article")
+      .filter({ hasText: "mock-001" });
+    await expect(
+      demoDeviceCard.getByRole("heading", { name: "Demo Device #1" }),
+    ).toBeVisible();
+    await expect(demoDeviceCard.getByText("mock-001")).toBeVisible();
     await expect(page.getByText("Real Device In Demo")).toHaveCount(0);
     await expect(
       page.getByRole("button", { name: "Add device" }),
@@ -65,7 +70,7 @@ test.describe("Demo mode", () => {
     await page.waitForTimeout(250);
     await expect.poll(() => realProbeCount).toBe(0);
 
-    await page.getByRole("link", { name: "Open Dashboard" }).first().click();
+    await demoDeviceCard.getByRole("link", { name: "Open Dashboard" }).click();
     await expect(page).toHaveURL(/\/mock-001\/cc$/);
     await expect(page.getByText("Mode, output and setpoints")).toBeVisible();
     await expect(

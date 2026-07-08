@@ -4,7 +4,11 @@ export interface StoredDevice {
   id: string;
   name: string;
   baseUrl: string;
+  identityDeviceId?: string;
   connectionMarks?: Array<"lan" | "usb" | "digital_flash" | "analog_flash">;
+  lan?: {
+    baseUrl: string;
+  };
   devd?: {
     baseUrl: string;
     deviceId: string;
@@ -46,8 +50,14 @@ function cloneStoredDevice(device: StoredDevice): StoredDevice {
     id: device.id,
     name: device.name,
     baseUrl: device.baseUrl,
+    identityDeviceId: device.identityDeviceId,
     connectionMarks: device.connectionMarks
       ? [...device.connectionMarks]
+      : undefined,
+    lan: device.lan
+      ? {
+          baseUrl: device.lan.baseUrl,
+        }
       : undefined,
     devd: device.devd
       ? {
@@ -66,6 +76,165 @@ function cloneStoredDevice(device: StoredDevice): StoredDevice {
   };
 }
 
+function normalizeIdentityDeviceId(device: StoredDevice): string | undefined {
+  const identityDeviceId =
+    typeof device.identityDeviceId === "string"
+      ? device.identityDeviceId.trim()
+      : "";
+  if (identityDeviceId) {
+    return identityDeviceId;
+  }
+
+  const webSerialIdentityDeviceId =
+    typeof device.webSerial?.identityDeviceId === "string"
+      ? device.webSerial.identityDeviceId.trim()
+      : "";
+  return webSerialIdentityDeviceId || undefined;
+}
+
+const CONNECTION_MARK_ORDER: NonNullable<StoredDevice["connectionMarks"]> = [
+  "lan",
+  "usb",
+  "digital_flash",
+  "analog_flash",
+];
+
+function mergeConnectionMarks(
+  first: StoredDevice["connectionMarks"],
+  second: StoredDevice["connectionMarks"],
+): StoredDevice["connectionMarks"] {
+  const marks = new Set([...(first ?? []), ...(second ?? [])]);
+  const ordered = CONNECTION_MARK_ORDER.filter((mark) => marks.has(mark));
+  return ordered.length > 0 ? ordered : undefined;
+}
+
+function isLanBaseUrl(baseUrl: string): boolean {
+  try {
+    const url = new URL(baseUrl);
+    const hostname = url.hostname.toLowerCase();
+    return (
+      hostname !== "localhost" && hostname !== "127.0.0.1" && hostname !== "::1"
+    );
+  } catch {
+    return false;
+  }
+}
+
+function normalizeLanEndpoint(device: StoredDevice): StoredDevice["lan"] {
+  const storedLanBaseUrl =
+    typeof device.lan?.baseUrl === "string" ? device.lan.baseUrl.trim() : "";
+  if (storedLanBaseUrl && isLanBaseUrl(storedLanBaseUrl)) {
+    return { baseUrl: storedLanBaseUrl };
+  }
+
+  const baseUrl = device.baseUrl.trim();
+  if (baseUrl && isLanBaseUrl(baseUrl)) {
+    return { baseUrl };
+  }
+
+  return undefined;
+}
+
+function isUsbDevdBaseUrl(device: StoredDevice): boolean {
+  if (device.devd) {
+    return true;
+  }
+
+  try {
+    const url = new URL(device.baseUrl);
+    const hostname = url.hostname.toLowerCase();
+    return (
+      (hostname === "localhost" ||
+        hostname === "127.0.0.1" ||
+        hostname === "::1") &&
+      url.searchParams.has("lease_id")
+    );
+  } catch {
+    return false;
+  }
+}
+
+function inferConnectionMarks(
+  device: StoredDevice,
+): StoredDevice["connectionMarks"] {
+  const marks = new Set(device.connectionMarks ?? []);
+  if (isLanBaseUrl(device.baseUrl)) {
+    marks.add("lan");
+  }
+  if (isUsbDevdBaseUrl(device)) {
+    marks.add("usb");
+  }
+  return mergeConnectionMarks([...marks], undefined);
+}
+
+function preferredPrimaryDevice(
+  existing: StoredDevice,
+  incoming: StoredDevice,
+): StoredDevice {
+  const existingIsLan = isLanBaseUrl(existing.baseUrl);
+  const incomingIsLan = isLanBaseUrl(incoming.baseUrl);
+  if (incomingIsLan && !existingIsLan) {
+    return incoming;
+  }
+  if (existingIsLan && !incomingIsLan) {
+    return existing;
+  }
+  return incoming;
+}
+
+function mergeStoredDevice(existing: StoredDevice, incoming: StoredDevice) {
+  const primary = preferredPrimaryDevice(existing, incoming);
+  const lan = normalizeLanEndpoint(incoming) ?? normalizeLanEndpoint(existing);
+
+  return {
+    ...existing,
+    name: primary.name || existing.name || incoming.name,
+    baseUrl: primary.baseUrl || existing.baseUrl || incoming.baseUrl,
+    identityDeviceId:
+      normalizeIdentityDeviceId(incoming) ??
+      normalizeIdentityDeviceId(existing),
+    connectionMarks: mergeConnectionMarks(
+      inferConnectionMarks(existing),
+      inferConnectionMarks(incoming),
+    ),
+    lan,
+    devd: incoming.devd ?? existing.devd,
+    webSerial: incoming.webSerial ?? existing.webSerial,
+  } satisfies StoredDevice;
+}
+
+export function coalesceStoredDevicesByIdentity(
+  devices: StoredDevice[],
+): StoredDevice[] {
+  const next: StoredDevice[] = [];
+  const identityIndex = new Map<string, number>();
+
+  for (const device of devices) {
+    const identityDeviceId = normalizeIdentityDeviceId(device);
+    if (!identityDeviceId) {
+      next.push(cloneStoredDevice(device));
+      continue;
+    }
+
+    const existingIndex = identityIndex.get(identityDeviceId);
+    if (existingIndex === undefined) {
+      identityIndex.set(identityDeviceId, next.length);
+      next.push({
+        ...cloneStoredDevice(device),
+        identityDeviceId,
+      });
+      continue;
+    }
+
+    next[existingIndex] = mergeStoredDevice(next[existingIndex], {
+      ...cloneStoredDevice(device),
+      identityDeviceId,
+    });
+  }
+
+  return next;
+}
+
 function isDemoDevice(device: StoredDevice): boolean {
   return device.baseUrl.trim().toLowerCase().startsWith("mock://");
 }
@@ -78,6 +247,7 @@ function sanitizeDevices(input: unknown): StoredDevice[] {
   const devices: StoredDevice[] = [];
   for (const item of input) {
     const stored = item as StoredDevice;
+    const lan = stored.lan;
     const devd = stored.devd;
     const webSerial = stored.webSerial;
     if (
@@ -91,9 +261,19 @@ function sanitizeDevices(input: unknown): StoredDevice[] {
         id: stored.id,
         name: stored.name,
         baseUrl: stored.baseUrl,
+        identityDeviceId:
+          typeof stored.identityDeviceId === "string"
+            ? stored.identityDeviceId
+            : undefined,
         connectionMarks: Array.isArray(stored.connectionMarks)
           ? stored.connectionMarks
           : undefined,
+        lan:
+          lan && typeof lan.baseUrl === "string"
+            ? {
+                baseUrl: lan.baseUrl,
+              }
+            : undefined,
         devd:
           devd &&
           typeof devd.baseUrl === "string" &&
@@ -123,7 +303,7 @@ function sanitizeDevices(input: unknown): StoredDevice[] {
     }
   }
 
-  return devices;
+  return coalesceStoredDevicesByIdentity(devices);
 }
 
 export class LocalStorageDeviceStore implements DeviceStore {
@@ -156,7 +336,10 @@ export class LocalStorageDeviceStore implements DeviceStore {
 
   setDevices(devices: StoredDevice[]): void {
     try {
-      this.#storage.setItem(this.#key, JSON.stringify(devices));
+      this.#storage.setItem(
+        this.#key,
+        JSON.stringify(coalesceStoredDevicesByIdentity(devices)),
+      );
     } catch {
       // Best-effort only; UI can still function from in-memory state.
     }
@@ -189,7 +372,7 @@ export class MemoryDeviceStore implements DeviceStore {
   #lastActiveDeviceId: string | null = null;
 
   constructor(initialDevices: StoredDevice[] = []) {
-    this.#devices = initialDevices.map(cloneStoredDevice);
+    this.#devices = coalesceStoredDevicesByIdentity(initialDevices);
   }
 
   getDevices(): StoredDevice[] {
@@ -197,7 +380,7 @@ export class MemoryDeviceStore implements DeviceStore {
   }
 
   setDevices(devices: StoredDevice[]): void {
-    this.#devices = devices.map(cloneStoredDevice);
+    this.#devices = coalesceStoredDevicesByIdentity(devices);
   }
 
   getLastActiveDeviceId(): string | null {

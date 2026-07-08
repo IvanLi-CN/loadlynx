@@ -153,8 +153,8 @@ just check-full          # 更接近 CI 的全量检查
 
 - analog / embedded 相关检查依赖 `third_party/embassy` 子模块；若 worktree 里只有空目录，先执行 `git submodule update --init --recursive`。
 - digital / ESP32 相关入口（`just fmt*` 中的 digital 格式检查、`just d-clippy`、`just d-build`、`just check-embedded`）依赖 `cargo +esp` 与 `$HOME/export-esp.sh`；缺失时命令会直接提示先完成 `espup` 安装，而不是把错误留给底层构建链。
-- `just d-build` 还要求 digital Wi-Fi 编译配置可用：优先从仓库根 `.env` 读取 `DIGITAL_WIFI_SSID` / `DIGITAL_WIFI_PSK`，也可在命令前临时注入同名环境变量；缺失时会先给出 `.env.example` 提示再退出。
-- `just d-clippy` 使用临时 dummy Wi-Fi 编译配置，因此不要求仓库根 `.env` 存在；它的目标是把 digital lint gate 对齐到 CI，而不是验证真实网络配置。
+- `just d-build` 默认不会把 Wi-Fi 凭据编译进 digital 固件。开发固件的 Wi-Fi 凭据必须通过 USB/devd 或 Web Serial 在运行时写入 EEPROM；仓库根 `.env` 不应包含 Wi-Fi 凭据。
+- 只有显式设置 `LOADLYNX_ENABLE_FACTORY_WIFI=1` 时，`firmware/digital/build.rs` 才会从当前构建环境读取 `LOADLYNX_FACTORY_WIFI_SSID` / `LOADLYNX_FACTORY_WIFI_PSK` 注入 factory Wi-Fi；该模式用于受控 factory/release 场景，不能作为开发测试默认值，也不能通过 repo-root `.env` 配置。
 - `just check-root` / `just check-web*` 在缺少依赖时会直接报出对应的 `deps-*` 提示，而不是把错误延迟到下层工具。
 - `just fmt` 现在会在任一 crate / Web 格式化失败时直接报错，不再吞掉失败。
 

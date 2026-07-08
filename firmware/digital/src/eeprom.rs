@@ -20,6 +20,8 @@ pub const EEPROM_WIFI_LEN: usize = 192;
 pub const WIFI_BLOB_MAGIC: &[u8; 8] = b"LLWIFI1\0";
 pub const WIFI_MAX_SSID_LEN: usize = 32;
 pub const WIFI_MAX_PSK_LEN: usize = 64;
+const WIFI_HEADER_LEN: usize = 10;
+const WIFI_STORED_LEN: usize = WIFI_HEADER_LEN + WIFI_MAX_SSID_LEN + WIFI_MAX_PSK_LEN;
 
 pub struct WifiBlobParts<'a> {
     pub ssid: &'a str,
@@ -160,9 +162,7 @@ impl SharedM24c64 {
         while offset < data.len() {
             let page_off = cur_addr % EEPROM_PAGE_SIZE_BYTES;
             let page_rem = EEPROM_PAGE_SIZE_BYTES - page_off;
-            // Be conservative: write at most 16 bytes per cycle even if the
-            // device supports 32-byte page writes.
-            let chunk_len = (data.len() - offset).min(page_rem).min(16);
+            let chunk_len = (data.len() - offset).min(page_rem);
 
             let chunk = &data[offset..offset + chunk_len];
             let dev = self.dev;
@@ -241,7 +241,17 @@ impl SharedM24c64 {
         &mut self,
         blob: &[u8; EEPROM_WIFI_LEN],
     ) -> Result<(), EepromError> {
-        self.write(EEPROM_WIFI_BASE_ADDR, blob).await
+        // Invalidate first and commit the magic last. A reset during the write
+        // leaves the blob unreadable instead of exposing a partially updated
+        // credential as valid.
+        self.write(EEPROM_WIFI_BASE_ADDR, &[0xFF; WIFI_BLOB_MAGIC.len()])
+            .await?;
+        self.write(
+            EEPROM_WIFI_BASE_ADDR + WIFI_BLOB_MAGIC.len() as u16,
+            &blob[WIFI_BLOB_MAGIC.len()..WIFI_STORED_LEN],
+        )
+        .await?;
+        self.write(EEPROM_WIFI_BASE_ADDR, WIFI_BLOB_MAGIC).await
     }
 
     pub async fn read_wifi_blob(&mut self) -> Result<[u8; EEPROM_WIFI_LEN], EepromError> {
@@ -251,8 +261,8 @@ impl SharedM24c64 {
     }
 
     pub async fn clear_wifi_blob(&mut self) -> Result<(), EepromError> {
-        let buf = [0xFFu8; EEPROM_WIFI_LEN];
-        self.write_wifi_blob(&buf).await
+        self.write(EEPROM_WIFI_BASE_ADDR, &[0xFF; WIFI_HEADER_LEN])
+            .await
     }
 
     async fn wait_ready(&mut self, probe_addr: u16) -> Result<(), EepromError> {

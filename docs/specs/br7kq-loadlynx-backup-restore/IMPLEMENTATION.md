@@ -20,7 +20,7 @@
 ## Implementation Summary
 
 - `loadlynx backup export/import` supports selectable sections, `--file -`, dry-run import, unknown-section warnings and fail-closed output-disable safety before restore writes.
-- CLI backup import keeps the existing LAN WiFi write guard: restoring `settings.wifi` over LAN requires `--allow-insecure-lan-wifi`.
+- Current SPEC supersedes the original LAN WiFi write guard: restoring `settings.wifi` over LAN HTTP must now fail before writing and require USB/devd for the same device.
 - WiFi restore preserves backup source: factory-source backups clear the user override; user-source backups write the backed-up credentials with `wait=false`.
 - Digital firmware exposes WiFi credential reads over USB JSONL and LAN HTTP for explicit backup export; ordinary status and diagnostics continue to redact PSK.
 - devd proxies `/api/v1/wifi/credentials` to USB and keeps ordinary diagnostics/traces on the existing redaction path.
@@ -41,7 +41,7 @@
   - devd direct flash and reset paths used the approved cached digital port.
   - LAN `/api/v1/identity` matched the flashed firmware digest.
   - `loadlynx backup export --url http://192.168.31.216 --file tmp/hil-backup-restore/lan-full.json --json` exported all sections with file mode `600` and plaintext WiFi PSK present.
-  - `loadlynx backup import --url http://192.168.31.216 --file tmp/hil-backup-restore/full.json --allow-insecure-lan-wifi --json` restored presets, calibration, `settings.pd` and `settings.wifi` with `safety.output_disabled=true`.
+  - Historical note: the original HIL run restored `settings.wifi` over LAN HTTP with an explicit override. That path is no longer the active contract; current implementations must require USB/devd for `settings.wifi` restore.
   - Post-restore control readback confirmed `output_enabled=false`; PD saved readback matched fixed PDO 3 at 12000 mV and 2000 mA; WiFi credential readback reported factory source with PSK present.
 
 ## Visual Evidence

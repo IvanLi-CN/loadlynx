@@ -156,11 +156,12 @@ loadlynx preset apply --device <id> <preset_id>
 
 ```bash
 loadlynx wifi show --device <id>
-loadlynx wifi set --device <id> --ssid <ssid> --psk <psk> [--wait] [--allow-insecure-lan-wifi]
-loadlynx wifi clear --device <id> [--allow-insecure-lan-wifi]
+loadlynx wifi set --device <id> --ssid <ssid> --psk <psk> [--wait]
+loadlynx wifi clear --device <id>
 ```
 
 - Never echo PSKs or secrets in chat, logs, screenshots, traces, or shell history.
+- Wi-Fi writes must use an independent management path such as USB/devd. Do not use LAN HTTP, mDNS, a saved HTTP transport, "verified LAN", or an unsafe override to continue `wifi set` or `wifi clear`; bind/use USB/devd for the same device first.
 - Firmware:
 
 ```bash

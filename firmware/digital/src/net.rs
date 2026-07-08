@@ -9,6 +9,7 @@ use core::{
 use alloc::{format, string::String};
 use defmt::*;
 use embassy_executor::Spawner;
+use embassy_futures::select::{Either, select};
 use embassy_net::{
     Config as NetConfig, DhcpConfig, Ipv4Address, Ipv4Cidr, Stack, StackResources, StaticConfigV4,
     tcp::TcpSocket,
@@ -18,7 +19,7 @@ use embassy_time::{Duration, Timer};
 use esp_hal::{peripherals::WIFI, rng::Rng};
 use esp_radio::{
     Controller as RadioController, init as radio_init,
-    wifi::{self, ClientConfig, ModeConfig, WifiController, WifiDevice},
+    wifi::{self, AuthMethod, ClientConfig, ModeConfig, ScanMethod, WifiController, WifiDevice},
 };
 use heapless::{String as HString, Vec};
 use static_cell::StaticCell;
@@ -59,6 +60,7 @@ pub enum WifiConnectionState {
 pub enum WifiErrorKind {
     BadStaticConfig,
     ConnectFailed,
+    ConnectTimeout,
     DhcpTimeout,
     LinkLost,
 }
@@ -71,6 +73,7 @@ pub struct WifiState {
     pub is_static: bool,
     pub last_error: Option<WifiErrorKind>,
     pub mac: Option<[u8; 6]>,
+    pub reconfigure_requested: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,6 +98,7 @@ impl WifiState {
             is_static: false,
             last_error: None,
             mac: None,
+            reconfigure_requested: false,
         }
     }
 }
@@ -354,6 +358,15 @@ async fn wifi_task(
         };
         let Some(ssid) = credentials.ssid.clone() else {
             info!("Wi-Fi credentials unavailable (source=none); waiting for EEPROM/user config");
+            if matches!(controller.is_started(), Ok(true)) {
+                let _ = controller.disconnect_async().await;
+                if let Err(err) = controller.stop_async().await {
+                    warn!(
+                        "Wi-Fi stop_async after credentials cleared error: {:?}",
+                        err
+                    );
+                }
+            }
             {
                 let mut guard = state.lock().await;
                 guard.state = WifiConnectionState::Idle;
@@ -366,6 +379,12 @@ async fn wifi_task(
         };
         let Some(psk) = credentials.psk.clone() else {
             warn!("Wi-Fi credentials missing PSK for source={}", source);
+            if matches!(controller.is_started(), Ok(true)) {
+                let _ = controller.disconnect_async().await;
+                if let Err(err) = controller.stop_async().await {
+                    warn!("Wi-Fi stop_async after missing PSK error: {:?}", err);
+                }
+            }
             {
                 let mut guard = state.lock().await;
                 guard.state = WifiConnectionState::Idle;
@@ -382,12 +401,16 @@ async fn wifi_task(
             guard.ipv4 = None;
             guard.gateway = None;
             guard.last_error = None;
+            guard.reconfigure_requested = false;
         }
 
         let client_config = ModeConfig::Client(
             ClientConfig::default()
                 .with_ssid(ssid.clone())
-                .with_password(psk.clone()),
+                .with_password(psk.clone())
+                .with_auth_method(AuthMethod::WpaWpa2Personal)
+                .with_scan_method(ScanMethod::AllChannels)
+                .with_failure_retry_cnt(3),
         );
 
         if matches!(controller.is_started(), Ok(true)) {
@@ -425,8 +448,14 @@ async fn wifi_task(
             ssid.as_str(),
             source
         );
-        match controller.connect_async().await {
-            Ok(()) => {
+        const WIFI_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+        let connect_result = select(
+            controller.connect_async(),
+            Timer::after(WIFI_CONNECT_TIMEOUT),
+        )
+        .await;
+        match connect_result {
+            Either::First(Ok(())) => {
                 info!("Wi-Fi connect_async returned Ok; waiting for IPv4 config");
 
                 let mut retries: u8 = 0;
@@ -480,7 +509,9 @@ async fn wifi_task(
                     }
 
                     let next = read_wifi_credentials(eeprom).await;
-                    if next.source != credentials.source
+                    let reconfigure_requested = { state.lock().await.reconfigure_requested };
+                    if reconfigure_requested
+                        || next.source != credentials.source
                         || next.ssid != Some(ssid.clone())
                         || next.psk != Some(psk.clone())
                     {
@@ -490,7 +521,7 @@ async fn wifi_task(
                     }
                 }
             }
-            Err(err) => {
+            Either::First(Err(err)) => {
                 warn!("Wi-Fi connect_async error: {:?}", err);
                 {
                     let mut guard = state.lock().await;
@@ -498,6 +529,21 @@ async fn wifi_task(
                     guard.last_error = Some(WifiErrorKind::ConnectFailed);
                 }
                 Timer::after(Duration::from_secs(10)).await;
+            }
+            Either::Second(_) => {
+                warn!("Wi-Fi connect_async timed out; stopping STA before retry");
+                {
+                    let mut guard = state.lock().await;
+                    guard.state = WifiConnectionState::Error;
+                    guard.ipv4 = None;
+                    guard.gateway = None;
+                    guard.last_error = Some(WifiErrorKind::ConnectTimeout);
+                }
+                let _ = controller.disconnect_async().await;
+                if let Err(err) = controller.stop_async().await {
+                    warn!("Wi-Fi stop_async after connect timeout error: {:?}", err);
+                }
+                Timer::after(Duration::from_secs(5)).await;
             }
         }
 
@@ -1273,6 +1319,7 @@ fn wifi_error_name(error: WifiErrorKind) -> &'static str {
     match error {
         WifiErrorKind::BadStaticConfig => "bad_static_config",
         WifiErrorKind::ConnectFailed => "connect_failed",
+        WifiErrorKind::ConnectTimeout => "connect_timeout",
         WifiErrorKind::DhcpTimeout => "dhcp_timeout",
         WifiErrorKind::LinkLost => "link_lost",
     }
@@ -1329,7 +1376,13 @@ pub(crate) async fn render_wifi_status_json(
     wifi_state: &'static WifiStateMutex,
 ) -> Result<(), &'static str> {
     let (ssid, source) = read_wifi_status_identity(eeprom).await;
-    let wifi = { *wifi_state.lock().await };
+    let mut wifi = { *wifi_state.lock().await };
+    if source == "none" {
+        wifi.state = WifiConnectionState::Idle;
+        wifi.ipv4 = None;
+        wifi.gateway = None;
+        wifi.last_error = None;
+    }
     buf.clear();
     buf.push_str("{\"ssid\":\"");
     write_json_string_escaped(buf, &ssid);
@@ -1367,6 +1420,20 @@ async fn mark_wifi_reconfigure_pending(wifi_state: &'static WifiStateMutex) {
     status.ipv4 = None;
     status.gateway = None;
     status.last_error = None;
+    status.reconfigure_requested = true;
+}
+
+async fn mark_wifi_clear_pending(wifi_state: &'static WifiStateMutex) {
+    let mut status = wifi_state.lock().await;
+    status.state = if WIFI_SSID.is_some() {
+        WifiConnectionState::Connecting
+    } else {
+        WifiConnectionState::Idle
+    };
+    status.ipv4 = None;
+    status.gateway = None;
+    status.last_error = None;
+    status.reconfigure_requested = true;
 }
 
 async fn wait_for_wifi_connected(wifi_state: &'static WifiStateMutex) {
@@ -1421,7 +1488,7 @@ pub(crate) async fn handle_wifi_clear_http(
         write_error_body(body_out, "UNAVAILABLE", "EEPROM clear failed", true, None);
         return Err("503 Service Unavailable");
     }
-    mark_wifi_reconfigure_pending(wifi_state).await;
+    mark_wifi_clear_pending(wifi_state).await;
     render_wifi_status_json(body_out, eeprom, wifi_state).await
 }
 
