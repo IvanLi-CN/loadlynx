@@ -66,10 +66,10 @@ import {
 import {
   buildTrendSeries,
   ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
-  THERMAL_TREND_SAMPLE_INTERVAL_MS,
   shouldAppendTrendSample,
   snapshotTrendSeriesDomains,
   stabilizeTrendSeriesDomains,
+  THERMAL_TREND_SAMPLE_INTERVAL_MS,
   TREND_WINDOW_SECONDS,
   type TrendDomainMemoryMap,
   type TrendSample,
