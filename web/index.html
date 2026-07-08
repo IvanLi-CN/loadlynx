@@ -16,6 +16,11 @@
   </head>
   <body class="bg-base-100 text-base-content antialiased">
     <div id="root"></div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script
+      src="/pwa-shell-guard.js"
+      data-shell-version="%VITE_APP_VERSION%"
+      data-app-entry="__LOADLYNX_APP_ENTRY__"
+    ></script>
+    <script type="module" data-loadlynx-entry src="/src/main.tsx"></script>
   </body>
 </html>
