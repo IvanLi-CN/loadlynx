@@ -332,6 +332,34 @@ CLI must print target evidence before hardware-changing operations: device id, t
 
 ![WiFi EEPROM error friendly message evidence](./assets/wifi-set-eeprom-error-friendly.jpg)
 
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Devices/DevdDiscovery`
+  state: zh-CN Devices route with devd discovery controls
+  capture_scope: browser-viewport
+  requested_viewport: `1440x1280`
+  viewport_strategy: playwright-headless
+  target_program: mock-only
+  sensitive_exclusion: N/A
+  submission_gate: approved
+  PR: include
+  evidence_note: verifies the Devices route renders localized device overview, registration, LAN scan, and local devd discovery controls without sticky full-page screenshot artifacts.
+
+![Devices zh-CN i18n viewport evidence](./assets/devices-i18n-zh-viewport.png)
+
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Settings/WiFiWriteLockedOverlay`
+  state: en Settings WiFi write lock
+  capture_scope: browser-viewport
+  requested_viewport: `1440x900`
+  viewport_strategy: playwright-headless
+  target_program: mock-only
+  sensitive_exclusion: mock-only device state; no real PSK
+  submission_gate: approved
+  PR: include
+  evidence_note: verifies the Settings route renders the WiFi write lock overlay and connection switch action in English.
+
+![Settings WiFi write lock English viewport evidence](./assets/settings-wifi-locked-en-viewport.png)
+
 ## 非功能性验收 / 质量门槛
 
 - Rust daemon unit tests cover candidate filtering, stable IDs, lease expiry, artifact matching, target mismatch, PSK redaction, error envelopes.
