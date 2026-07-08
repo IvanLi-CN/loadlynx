@@ -1937,7 +1937,7 @@ async fn read_usb_wifi_blob_bounded(
     };
     match select(read, Timer::after(USB_WIFI_EEPROM_TIMEOUT)).await {
         Either::First(result) => result,
-        Either::Second(_) => return Err(eeprom::EepromError::Timeout),
+        Either::Second(_) => Err(eeprom::EepromError::Timeout),
     }
 }
 
