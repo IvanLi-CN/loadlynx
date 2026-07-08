@@ -1,4 +1,4 @@
-export const STREAM_UI_INTERVAL_MS = 500;
+export const STREAM_UI_INTERVAL_MS = 200;
 
 export function getStatusRenderDelay(
   lastCommitAtMs: number | null,

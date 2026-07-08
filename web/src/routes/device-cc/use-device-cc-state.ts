@@ -65,6 +65,8 @@ import {
 } from "./status-stream-gate.ts";
 import {
   buildTrendSeries,
+  ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
+  THERMAL_TREND_SAMPLE_INTERVAL_MS,
   shouldAppendTrendSample,
   snapshotTrendSeriesDomains,
   stabilizeTrendSeriesDomains,
@@ -94,6 +96,17 @@ const EMPTY_PRESET: PresetDraft = {
   max_i_ma_total: 0,
   max_p_mw: 0,
 };
+
+function appendTrendSampleWindow(
+  prev: TrendSample[],
+  nextSample: TrendSample,
+  shouldResetWindow: boolean,
+): TrendSample[] {
+  const base = shouldResetWindow ? [] : prev;
+  const next = base.length >= TREND_MAX_POINTS ? base.slice(1) : base.slice();
+  next.push(nextSample);
+  return trimTrendSamplesToWindow(next, TREND_WINDOW_SECONDS);
+}
 
 function computeTrendBounds(points: number[]): {
   min: number;
@@ -866,47 +879,89 @@ export function useDeviceCcState(
           ? "Ω"
           : "A";
 
-  const lastTrendUptimeMsRef = useRef<number | null>(null);
-  const [trendSamples, setTrendSamples] = useState<TrendSample[]>([]);
+  const lastElectricalTrendUptimeMsRef = useRef<number | null>(null);
+  const lastThermalTrendUptimeMsRef = useRef<number | null>(null);
+  const [electricalTrendSamples, setElectricalTrendSamples] = useState<
+    TrendSample[]
+  >([]);
+  const [thermalTrendSamples, setThermalTrendSamples] = useState<TrendSample[]>(
+    [],
+  );
   const trendDomainMemoryRef = useRef<TrendDomainMemoryMap>({});
 
   useEffect(() => {
     const uptimeMs = status?.raw.uptime_ms ?? null;
-    const previousUptimeMs = lastTrendUptimeMsRef.current;
+    const previousUptimeMs = lastElectricalTrendUptimeMsRef.current;
     if (
       uptimeMs == null ||
-      !shouldAppendTrendSample(previousUptimeMs, uptimeMs)
+      !shouldAppendTrendSample(
+        previousUptimeMs,
+        uptimeMs,
+        ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
+      )
     ) {
       return;
     }
-    lastTrendUptimeMsRef.current = uptimeMs;
+    lastElectricalTrendUptimeMsRef.current = uptimeMs;
 
-    setTrendSamples((prev) => {
+    setElectricalTrendSamples((prev) => {
       const shouldResetWindow =
         previousUptimeMs != null &&
         uptimeMs != null &&
         uptimeMs < previousUptimeMs;
-      const base = shouldResetWindow ? [] : prev;
-      const next =
-        base.length >= TREND_MAX_POINTS ? base.slice(1) : base.slice();
-      next.push({
-        time: uptimeMs / 1_000,
-        voltage: localVoltageV,
-        current: totalCurrentA,
-        power: totalPowerW,
-        resistance: resistanceOhms,
-        thermal: tempCoreC,
-      });
-      return trimTrendSamplesToWindow(next, TREND_WINDOW_SECONDS);
+      return appendTrendSampleWindow(
+        prev,
+        {
+          time: uptimeMs / 1_000,
+          voltage: localVoltageV,
+          current: totalCurrentA,
+          power: totalPowerW,
+          resistance: resistanceOhms,
+        },
+        shouldResetWindow,
+      );
     });
   }, [
     localVoltageV,
     resistanceOhms,
     status?.raw.uptime_ms,
-    tempCoreC,
     totalCurrentA,
     totalPowerW,
   ]);
+
+  useEffect(() => {
+    const uptimeMs = status?.raw.uptime_ms ?? null;
+    const previousUptimeMs = lastThermalTrendUptimeMsRef.current;
+    if (
+      uptimeMs == null ||
+      !shouldAppendTrendSample(
+        previousUptimeMs,
+        uptimeMs,
+        THERMAL_TREND_SAMPLE_INTERVAL_MS,
+      )
+    ) {
+      return;
+    }
+    lastThermalTrendUptimeMsRef.current = uptimeMs;
+
+    setThermalTrendSamples((prev) => {
+      const shouldResetWindow =
+        previousUptimeMs != null &&
+        uptimeMs != null &&
+        uptimeMs < previousUptimeMs;
+      return appendTrendSampleWindow(
+        prev,
+        {
+          time: uptimeMs / 1_000,
+          voltage: null,
+          current: null,
+          power: null,
+          thermal: tempCoreC,
+        },
+        shouldResetWindow,
+      );
+    });
+  }, [status?.raw.uptime_ms, tempCoreC]);
 
   const handleSavePreset = () => {
     savePresetDraft(selectedPresetId, {
@@ -1064,7 +1119,7 @@ export function useDeviceCcState(
     },
   ];
 
-  const thermalTrendPoints = trendSamples
+  const thermalTrendPoints = thermalTrendSamples
     .map((sample) => sample.thermal)
     .filter(
       (value): value is number => value != null && Number.isFinite(value),
@@ -1077,7 +1132,7 @@ export function useDeviceCcState(
     () =>
       stabilizeTrendSeriesDomains(
         buildTrendSeries({
-          samples: trendSamples,
+          samples: electricalTrendSamples,
           mode: controlMode,
           targetVoltageV: draftPresetTargetVMv / 1_000,
           minVoltageV: draftPresetMinVMv / 1_000,
@@ -1096,7 +1151,7 @@ export function useDeviceCcState(
       draftPresetTargetIMa,
       draftPresetTargetPMw,
       draftPresetTargetVMv,
-      trendSamples,
+      electricalTrendSamples,
     ],
   );
 
