@@ -14,7 +14,7 @@ describe("status-fallback-interval", () => {
   });
 
   it("uses the tighter devd fallback cadence for USB compat URLs", () => {
-    expect(DEVD_FAST_STATUS_TARGET_PERIOD_MS).toBe(333);
+    expect(DEVD_FAST_STATUS_TARGET_PERIOD_MS).toBe(200);
     expect(
       usesManualDevdStatusPolling(
         "http://127.0.0.1:30180/?device_id=loadlynx-abc123&lease_id=lease-1",
@@ -32,7 +32,7 @@ describe("status-fallback-interval", () => {
   });
 
   it("compensates the next devd poll delay by the elapsed request time", () => {
-    expect(getManualStatusPollDelayMs(333, 1_000, 1_100)).toBe(233);
-    expect(getManualStatusPollDelayMs(333, 1_000, 1_400)).toBe(0);
+    expect(getManualStatusPollDelayMs(200, 1_000, 1_100)).toBe(100);
+    expect(getManualStatusPollDelayMs(200, 1_000, 1_250)).toBe(0);
   });
 });

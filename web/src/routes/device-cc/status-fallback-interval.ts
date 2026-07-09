@@ -1,7 +1,7 @@
 import { isDevdCompatBaseUrl } from "../../api/client.ts";
 
 export const HTTP_FAST_STATUS_REFETCH_MS = 400;
-export const DEVD_FAST_STATUS_TARGET_PERIOD_MS = 333;
+export const DEVD_FAST_STATUS_TARGET_PERIOD_MS = 200;
 
 export function getFastStatusRefetchIntervalMs(
   baseUrl: string | undefined,

@@ -701,6 +701,7 @@ export function useDeviceCcState(
         !writesInFlight &&
         streamStatus === null &&
         !devdManualStatusPolling,
+      readCache: devdManualStatusPolling,
       refetchInterval: isPageVisible
         ? getFastStatusRefetchIntervalMs(baseUrl)
         : false,

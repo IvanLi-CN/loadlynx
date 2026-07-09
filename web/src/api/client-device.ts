@@ -99,14 +99,18 @@ export async function getIdentity(baseUrl: string): Promise<Identity> {
   return httpJsonQueued<Identity>(baseUrl, "/api/v1/identity");
 }
 
-export async function getStatus(baseUrl: string): Promise<FastStatusView> {
+export async function getStatus(
+  baseUrl: string,
+  options?: { cache?: boolean },
+): Promise<FastStatusView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetStatus(baseUrl);
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
+    const path = options?.cache ? "/api/v1/status?cache=true" : "/api/v1/status";
     const payload = await httpJsonQueued<DevdStatusPayload>(
       baseUrl,
-      "/api/v1/status",
+      path,
     );
     const memoryKey = getDevdStatusMemoryKey(baseUrl);
     const view = normalizeDevdStatus(payload, devdStatusMemory.get(memoryKey));

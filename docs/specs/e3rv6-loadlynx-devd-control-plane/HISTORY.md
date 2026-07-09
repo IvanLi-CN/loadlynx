@@ -30,6 +30,24 @@ Final preset-list HIL showed a repeatable USB Serial/JTAG failure mode where the
 
 Saved-device USB realtime reads exposed a narrower regression later: `loadlynx status --device ... --json` and `loadlynx control get --device ... --json` could still hit the full host-side operation timeout even when device discovery and LAN status were healthy. The accepted fix kept the owner-facing CLI unchanged and tightened both ends of the compat read path: devd now treats serial response gaps for those reads as bounded retries with operation-scoped recovery, and firmware keeps `get_status` / `get_control` on compact USB response shapes instead of depending on the broader HTTP body renderer.
 
+## `/cc` USB owner-facing 5 Hz path
+
+The `/cc` Web work surface later needed faster owner-facing status updates on USB/devd without increasing hardware-side publish cadence or multiplying USB `get_status` load by page count. The accepted model was not “page polls USB faster”; it was “one serial owner refreshes one cache faster”.
+
+The visible symptom that “USB still looks like ~3 Hz” turned out to be two different effects mixed together. First, the old devd fallback target was still `~333 ms`, so the Web layer could not exceed about 3 Hz on USB. Second, after moving the producer to `200 ms`, same-cadence measurement from the consumer side could still alias into repeated samples and make the page look slower than the producer really was.
+
+The resulting implementation keeps the LAN SSE contract and firmware publish behavior unchanged, raises only the devd serial-owner background `get_status` cadence to about `200 ms` while a lease is active, and lets `/cc` consume `GET /api/v1/status?cache=true` on the devd compat path. The serial worker now waits against the next due refresh instead of relying on a coarse fixed loop, and active leases stop recording pure non-protocol monitor noise into trace/log state.
+
+Real USB/devd verification on `/dev/cu.usbmodem212101` showed unique cache updates at `183-225 ms` with a `205.2 ms` mean, and a same-page `200 ms` consumer read then advanced on every observed sample. This is close enough to the 5 Hz owner-facing target while still keeping one bounded USB status producer per physical port.
+
+## `/cc` LAN owner-facing 5 Hz path
+
+Once the USB/devd path was aligned near 5 Hz, real LAN/WiFi direct verification still showed the browser-side SSE stream arriving closer to `~224 ms` on average. The firmware constant was already `200 ms`, so the problem was not the configured target rate.
+
+The accepted diagnosis was that the LAN SSE loop measured its period incorrectly: one cycle rendered JSON, wrote the event, flushed the socket, and only then slept a full `200 ms`. In practice that made the real wire period equal to `send_work + 200 ms`, which is exactly the kind of consistent `20-70 ms` drift observed on hardware.
+
+The fix kept the same owner-facing contract and did not raise the configured rate. Instead, the firmware now measures elapsed work inside each SSE cycle and sleeps only the remaining budget up to the `200 ms` target. Real HIL on `loadlynx-d68638.local` / `192.168.31.216` then measured `191-216 ms` event spacing with a `201.3 ms` mean, bringing WiFi direct back to about 5 Hz without changing USB/devd behavior or hardware publish semantics.
+
 ## IPC-first host tools and Web Serial release path
 
 The host tools boundary changed to make released CLI/devd safer for ordinary users. `loadlynx-devd serve` is now an IPC daemon used by the CLI, while `loadlynx-devd bridge-http` is the loopback-only browser/debug bridge. This is a minor breaking change because ordinary CLI workflows no longer expose the legacy daemon-URL flag; the CLI uses `--ipc` and can auto-start a sibling devd process.

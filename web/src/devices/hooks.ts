@@ -160,6 +160,7 @@ export function getDeviceStatusQueryOptions(input: {
   baseUrl: string | undefined;
   enabled: boolean;
   parts?: DeviceQueryParts;
+  readCache?: boolean;
   refetchInterval: number | false;
   refetchOnWindowFocus?: boolean;
   retry?: DeviceQueryRetry;
@@ -170,6 +171,7 @@ export function getDeviceStatusQueryOptions(input: {
     baseUrl,
     enabled,
     parts = DEVICE_QUERY_PARTS.status,
+    readCache = false,
     refetchInterval,
     refetchOnWindowFocus,
     retry = getDeviceQueryRetry(baseUrl),
@@ -181,7 +183,7 @@ export function getDeviceStatusQueryOptions(input: {
       if (!baseUrl) {
         throw new Error("Device base URL is not available");
       }
-      return getStatus(baseUrl);
+      return getStatus(baseUrl, { cache: readCache });
     },
     enabled,
     refetchInterval,

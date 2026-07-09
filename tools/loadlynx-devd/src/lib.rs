@@ -80,6 +80,9 @@ const SERIAL_WIFI_STATUS_PROTOCOL_TIMEOUT_MS: u64 = 90;
 const SERIAL_IMMEDIATE_PROTOCOL_TIMEOUT_MS: u64 = 500;
 const SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS: u64 = 35_000;
 const SERIAL_STATUS_CACHE_MAX_AGE_MS: i64 = 1_500;
+const SERIAL_BACKGROUND_STATUS_REFRESH_MS: u64 = 200;
+const SERIAL_WORKER_TICK_MS: u64 = 20;
+const SERIAL_IDLE_MONITOR_SLICE_MS: u64 = 10;
 const SERIAL_PROBE_MAX_BYTES: usize = 32768;
 const SERIAL_COMMAND_QUEUE_LIMIT: usize = 16;
 const SERIAL_OPERATION_WAIT_MS: u64 = 10_000;
@@ -2326,6 +2329,74 @@ async fn request_compat_status_data(
             "USB status did not return a protocol response",
         )
     }))
+}
+
+fn update_cached_status_from_probe(
+    state: &AppState,
+    device_id: &str,
+    request_id: &str,
+    probe: &SerialProtocolProbe,
+    source: &str,
+) -> Result<(), HttpError> {
+    let response = serial_response_for_request(probe, request_id)
+        .or_else(|| infer_serial_response_from_fragments(probe, request_id))
+        .or_else(|| infer_serial_response_from_text(probe, request_id));
+    let data = status_data_from_serial_response(response)?;
+    let output = {
+        let mut guard = state.inner.lock().expect("state lock");
+        let Some(device) = guard.devices.get_mut(device_id) else {
+            return Ok(());
+        };
+        let _ = maybe_update_device_status_cache(device, &data);
+        let _ = maybe_update_device_control_cache(device, &data);
+        finalize_status_output(device_id, merge_cached_control_if_missing(device, data))
+    }?;
+    update_usb_status_cache(state, device_id, output, source);
+    Ok(())
+}
+
+fn schedule_next_background_status_refresh(
+    cycle_started_at: Instant,
+    target_period_ms: u64,
+) -> Instant {
+    let elapsed_ms = cycle_started_at
+        .elapsed()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64;
+    Instant::now() + Duration::from_millis(target_period_ms.saturating_sub(elapsed_ms))
+}
+
+fn serial_worker_wait_duration(
+    now: Instant,
+    next_background_status_refresh_at: Option<Instant>,
+    active_lease: bool,
+) -> Duration {
+    let default_wait = Duration::from_millis(SERIAL_WORKER_TICK_MS);
+    if !active_lease {
+        return default_wait;
+    }
+
+    match next_background_status_refresh_at {
+        Some(due) => default_wait.min(due.saturating_duration_since(now)),
+        None => default_wait,
+    }
+}
+
+fn serial_idle_monitor_deadline(
+    now: Instant,
+    next_background_status_refresh_at: Option<Instant>,
+    active_lease: bool,
+) -> Instant {
+    let default_deadline = now + Duration::from_millis(SERIAL_IDLE_MONITOR_SLICE_MS);
+    if !active_lease {
+        return default_deadline;
+    }
+
+    match next_background_status_refresh_at {
+        Some(due) if due <= now => now,
+        Some(due) if due < default_deadline => due,
+        _ => default_deadline,
+    }
 }
 
 async fn compat_status(
@@ -5181,11 +5252,19 @@ fn serial_worker_loop(
     let port_key = canonical_port_key(&port_path);
     let mut port = None;
     let mut last_idle_open_attempt = None;
+    let mut next_background_status_refresh_at = None;
+    let mut last_background_status_error_log = None;
     let mut idle_line_buf = Vec::new();
     let mut idle_frames = Vec::new();
     let mut idle_non_protocol_text = String::new();
     loop {
-        match rx.recv_timeout(Duration::from_millis(50)) {
+        let wait_started_at = Instant::now();
+        let wait_timeout = serial_worker_wait_duration(
+            wait_started_at,
+            next_background_status_refresh_at,
+            has_active_lease_for_port(&state, &port_path),
+        );
+        match rx.recv_timeout(wait_timeout) {
             Ok(command) => {
                 let request = command.request.clone();
                 if port.is_none() {
@@ -5201,6 +5280,7 @@ fn serial_worker_loop(
                         }
                     }
                 }
+                let request_started_at = Instant::now();
                 let result = match serial_jsonl_request_on_port(
                     port.as_mut().expect("serial port opened").as_mut(),
                     &request.request_id,
@@ -5250,6 +5330,13 @@ fn serial_worker_loop(
                         })
                     }
                 };
+                if result.is_ok() && request.op == "get_status" {
+                    next_background_status_refresh_at =
+                        Some(schedule_next_background_status_refresh(
+                            request_started_at,
+                            SERIAL_BACKGROUND_STATUS_REFRESH_MS,
+                        ));
+                }
                 let _ = command.reply.send(result);
             }
             Err(std_mpsc::RecvTimeoutError::Timeout) => {
@@ -5267,10 +5354,91 @@ fn serial_worker_loop(
                 let Some(open_port) = port.as_mut() else {
                     continue;
                 };
+                let active_lease = has_active_lease_for_port(&state, &port_path);
+                let refresh_due = next_background_status_refresh_at
+                    .is_none_or(|due: Instant| Instant::now() >= due);
+                if refresh_due
+                    && active_lease
+                    && let Some(device_id) = device_id_for_port(&state, &port_path)
+                {
+                    let refresh_started_at = Instant::now();
+                    let request_id = next_request_id("get_status");
+                    match serial_jsonl_request_on_port(
+                        open_port.as_mut(),
+                        &request_id,
+                        "get_status",
+                        None,
+                    ) {
+                        Ok(probe) => {
+                            next_background_status_refresh_at =
+                                Some(schedule_next_background_status_refresh(
+                                    refresh_started_at,
+                                    SERIAL_BACKGROUND_STATUS_REFRESH_MS,
+                                ));
+                            if update_cached_status_from_probe(
+                                &state,
+                                &device_id,
+                                &request_id,
+                                &probe,
+                                "serial_owner_background",
+                            )
+                            .is_ok()
+                            {
+                                last_background_status_error_log = None;
+                            } else if last_background_status_error_log.is_none_or(
+                                |last: Instant| last.elapsed() >= Duration::from_secs(5),
+                            ) {
+                                let mut guard = state.inner.lock().expect("state lock");
+                                if let Some(device) = guard.devices.get_mut(&device_id) {
+                                    push_log(
+                                        device,
+                                        "warn",
+                                        "serial",
+                                        "USB background status refresh returned an invalid status payload",
+                                    );
+                                }
+                                last_background_status_error_log = Some(Instant::now());
+                            }
+                        }
+                        Err(error) => {
+                            port = None;
+                            next_background_status_refresh_at =
+                                Some(schedule_next_background_status_refresh(
+                                    refresh_started_at,
+                                    SERIAL_BACKGROUND_STATUS_REFRESH_MS,
+                                ));
+                            if last_background_status_error_log.is_none_or(|last: Instant| {
+                                last.elapsed() >= Duration::from_secs(5)
+                            }) {
+                                let mut guard = state.inner.lock().expect("state lock");
+                                if let Some(device) = guard.devices.get_mut(&device_id) {
+                                    push_log(
+                                        device,
+                                        "warn",
+                                        "serial",
+                                        &format!(
+                                            "USB background status refresh failed on {port_path}: {error}"
+                                        ),
+                                    );
+                                }
+                                last_background_status_error_log = Some(Instant::now());
+                            }
+                            continue;
+                        }
+                    }
+                }
                 idle_frames.clear();
                 let mut idle_non_protocol_bytes = 0usize;
                 idle_non_protocol_text.clear();
-                let deadline = Instant::now() + Duration::from_millis(25);
+                let now = Instant::now();
+                let deadline = serial_idle_monitor_deadline(
+                    now,
+                    next_background_status_refresh_at,
+                    active_lease,
+                );
+                if deadline <= now {
+                    continue;
+                }
                 if read_serial_jsonl_until(
                     open_port.as_mut(),
                     deadline,
@@ -5283,6 +5451,9 @@ fn serial_worker_loop(
                 .is_ok()
                     && (!idle_frames.is_empty() || idle_non_protocol_bytes != 0)
                 {
+                    if active_lease && idle_frames.is_empty() {
+                        continue;
+                    }
                     record_serial_protocol_probe(
                         &state,
                         device_id_for_port(&state, &port_path)
@@ -5329,22 +5500,86 @@ pub fn default_analog_probe_path(repo_root: &std::path::Path) -> PathBuf {
     repo_root.join(DEFAULT_ANALOG_PROBE_FILE)
 }
 
+fn parse_gitdir_redirect(contents: &str) -> Option<PathBuf> {
+    let line = contents.lines().next()?.trim();
+    let redirected = line.strip_prefix("gitdir:")?.trim();
+    if redirected.is_empty() {
+        return None;
+    }
+    Some(PathBuf::from(redirected))
+}
+
+fn resolve_common_git_dir(git_dir: &std::path::Path) -> Option<PathBuf> {
+    let commondir = fs::read_to_string(git_dir.join("commondir")).ok()?;
+    let redirected = commondir.lines().next()?.trim();
+    if redirected.is_empty() {
+        return None;
+    }
+    Some(if PathBuf::from(redirected).is_absolute() {
+        PathBuf::from(redirected)
+    } else {
+        git_dir.join(redirected)
+    })
+}
+
+fn push_unique_repo_root(roots: &mut Vec<PathBuf>, root: PathBuf) {
+    let normalized = fs::canonicalize(&root).unwrap_or(root);
+    if roots.iter().any(|existing| {
+        fs::canonicalize(existing).unwrap_or_else(|_| existing.clone()) == normalized
+    }) {
+        return;
+    }
+    roots.push(normalized);
+}
+
+fn repo_local_config_roots(repo_root: &std::path::Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    push_unique_repo_root(&mut roots, repo_root.to_path_buf());
+
+    let git_path = repo_root.join(".git");
+    let Some(redirected_git_dir) = fs::read_to_string(&git_path)
+        .ok()
+        .and_then(|contents| parse_gitdir_redirect(&contents))
+    else {
+        return roots;
+    };
+
+    let git_dir = if redirected_git_dir.is_absolute() {
+        redirected_git_dir
+    } else {
+        repo_root.join(redirected_git_dir)
+    };
+    let Some(common_git_dir) = resolve_common_git_dir(&git_dir) else {
+        return roots;
+    };
+    let common_git_dir = fs::canonicalize(&common_git_dir).unwrap_or(common_git_dir);
+    let Some(shared_repo_root) = common_git_dir.parent() else {
+        return roots;
+    };
+    push_unique_repo_root(&mut roots, shared_repo_root.to_path_buf());
+
+    roots
+}
+
+fn read_repo_local_selector(repo_root: &std::path::Path, filename: &str) -> Option<String> {
+    repo_local_config_roots(repo_root)
+        .into_iter()
+        .find_map(|root| {
+            fs::read_to_string(root.join(filename))
+                .ok()?
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty() && !line.starts_with('#') && !line.contains('='))
+                .map(ToOwned::to_owned)
+        })
+}
+
 pub fn read_default_digital_usb_port(repo_root: &std::path::Path) -> Option<String> {
-    fs::read_to_string(default_digital_usb_port_path(repo_root))
-        .ok()?
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.contains('='))
-        .map(ToOwned::to_owned)
+    read_repo_local_selector(repo_root, DEFAULT_DIGITAL_USB_PORT_FILE)
 }
 
 pub fn read_default_analog_probe_selector(repo_root: &std::path::Path) -> Option<String> {
-    fs::read_to_string(default_analog_probe_path(repo_root))
-        .ok()?
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty() && !line.starts_with('#') && !line.contains('='))
-        .map(ToOwned::to_owned)
+    read_repo_local_selector(repo_root, DEFAULT_ANALOG_PROBE_FILE)
 }
 
 pub fn write_default_digital_usb_port(
@@ -6166,6 +6401,67 @@ mod tests {
     }
 
     #[test]
+    fn default_digital_usb_port_reads_shared_repo_record_from_worktree() {
+        let repo = tempfile::tempdir().unwrap();
+        let shared_repo_root = repo.path().join("repo");
+        let common_git_dir = shared_repo_root.join(".git");
+        let worktree_root = repo.path().join("worktree");
+        let worktree_git_dir = common_git_dir.join("worktrees").join("w1");
+        fs::create_dir_all(&common_git_dir).unwrap();
+        fs::create_dir_all(&worktree_git_dir).unwrap();
+        fs::create_dir_all(&worktree_root).unwrap();
+        fs::write(
+            shared_repo_root.join(DEFAULT_DIGITAL_USB_PORT_FILE),
+            "/dev/cu.usbmodem212101\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree_root.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )
+        .unwrap();
+        fs::write(worktree_git_dir.join("commondir"), "../..\n").unwrap();
+
+        assert_eq!(
+            read_default_digital_usb_port(&worktree_root).as_deref(),
+            Some("/dev/cu.usbmodem212101")
+        );
+    }
+
+    #[test]
+    fn default_digital_usb_port_prefers_worktree_record_over_shared_repo_root() {
+        let repo = tempfile::tempdir().unwrap();
+        let shared_repo_root = repo.path().join("repo");
+        let common_git_dir = shared_repo_root.join(".git");
+        let worktree_root = repo.path().join("worktree");
+        let worktree_git_dir = common_git_dir.join("worktrees").join("w1");
+        fs::create_dir_all(&common_git_dir).unwrap();
+        fs::create_dir_all(&worktree_git_dir).unwrap();
+        fs::create_dir_all(&worktree_root).unwrap();
+        fs::write(
+            shared_repo_root.join(DEFAULT_DIGITAL_USB_PORT_FILE),
+            "/dev/cu.shared\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree_root.join(DEFAULT_DIGITAL_USB_PORT_FILE),
+            "/dev/cu.worktree\n",
+        )
+        .unwrap();
+        fs::write(
+            worktree_root.join(".git"),
+            format!("gitdir: {}\n", worktree_git_dir.display()),
+        )
+        .unwrap();
+        fs::write(worktree_git_dir.join("commondir"), "../..\n").unwrap();
+
+        assert_eq!(
+            read_default_digital_usb_port(&worktree_root).as_deref(),
+            Some("/dev/cu.worktree")
+        );
+    }
+
+    #[test]
     fn default_analog_probe_selector_reads_plain_selector_record() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(
@@ -6739,6 +7035,49 @@ mod tests {
         assert_eq!(
             serial_protocol_timeout_ms("set_wifi_config", Some(&json!({"wait": true}))),
             SERIAL_WIFI_WAIT_PROTOCOL_TIMEOUT_MS
+        );
+    }
+
+    #[test]
+    fn serial_worker_wait_duration_tracks_near_background_due_time() {
+        let now = Instant::now();
+        let near_due = now + Duration::from_millis(7);
+        assert_eq!(
+            serial_worker_wait_duration(now, Some(near_due), false),
+            Duration::from_millis(SERIAL_WORKER_TICK_MS)
+        );
+        assert_eq!(
+            serial_worker_wait_duration(now, Some(near_due), true),
+            Duration::from_millis(7)
+        );
+        assert_eq!(
+            serial_worker_wait_duration(now, Some(now + Duration::from_millis(50)), true,),
+            Duration::from_millis(SERIAL_WORKER_TICK_MS)
+        );
+        assert_eq!(
+            serial_worker_wait_duration(now, Some(now), true),
+            Duration::ZERO
+        );
+    }
+
+    #[test]
+    fn serial_idle_monitor_deadline_yields_to_imminent_background_refresh() {
+        let now = Instant::now();
+        let default_deadline = serial_idle_monitor_deadline(now, None, true).duration_since(now);
+        assert_eq!(
+            default_deadline,
+            Duration::from_millis(SERIAL_IDLE_MONITOR_SLICE_MS)
+        );
+
+        let imminent_due = now + Duration::from_millis(4);
+        assert_eq!(
+            serial_idle_monitor_deadline(now, Some(imminent_due), true),
+            imminent_due
+        );
+        assert_eq!(serial_idle_monitor_deadline(now, Some(now), true), now);
+        assert_eq!(
+            serial_idle_monitor_deadline(now, Some(imminent_due), false).duration_since(now),
+            Duration::from_millis(SERIAL_IDLE_MONITOR_SLICE_MS)
         );
     }
 
@@ -7658,6 +7997,86 @@ mod tests {
         assert_eq!(first_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["device_id"], "mock-loadlynx-devd");
         assert_eq!(second_status["from_monitor_cache"], true);
+    }
+
+    #[tokio::test]
+    async fn background_status_probe_updates_caches_without_trace_noise() {
+        let state = AppState::new(PathBuf::from("."));
+        let trace_len_before = {
+            let guard = state.inner.lock().expect("state lock");
+            guard.devices.get("mock-loadlynx-devd").unwrap().trace.len()
+        };
+        let request_id = "devd-get-status-123456";
+        let probe = SerialProtocolProbe {
+            frames: vec![
+                SerialProtocolFrame {
+                    direction: "tx",
+                    frame: json!({
+                        "type": "request",
+                        "request_id": request_id,
+                        "op": "get_status"
+                    }),
+                },
+                SerialProtocolFrame {
+                    direction: "rx",
+                    frame: json!({
+                        "type": "response",
+                        "request_id": request_id,
+                        "ok": true,
+                        "data": {
+                            "analog_state": "ready",
+                            "control": {
+                                "active_preset_id": 1,
+                                "mode": "cc",
+                                "output_enabled": false,
+                                "target_i_ma": 0,
+                                "target_v_mv": 12000,
+                                "target_p_mw": 0,
+                                "min_v_mv": 0
+                            },
+                            "hello_seen": true,
+                            "link_up": true,
+                            "status": {
+                                "state_flags": 2,
+                                "fault_flags": 0,
+                                "enable": false,
+                                "i_local_ma": 0,
+                                "i_remote_ma": 0,
+                                "v_local_mv": 61,
+                                "v_remote_mv": 24,
+                                "calc_p_mw": 0
+                            }
+                        }
+                    }),
+                },
+            ],
+            non_protocol_bytes: 0,
+            non_protocol_text: String::new(),
+        };
+
+        update_cached_status_from_probe(
+            &state,
+            "mock-loadlynx-devd",
+            request_id,
+            &probe,
+            "serial_owner_background",
+        )
+        .unwrap();
+
+        let cached = cached_usb_status_output(&state, "mock-loadlynx-devd", -1).unwrap();
+        assert_eq!(cached["status_sample_source"], "serial_owner_background");
+        assert_eq!(cached["link_up"], true);
+        assert_eq!(cached["hello_seen"], true);
+        assert_eq!(cached["analog_state"], "ready");
+
+        let guard = state.inner.lock().expect("state lock");
+        let device = guard.devices.get("mock-loadlynx-devd").unwrap();
+        assert_eq!(device.trace.len(), trace_len_before);
+        assert!(device.status_cache.is_some());
+        assert_eq!(
+            device.usb_status_source.as_deref(),
+            Some("serial_owner_background")
+        );
     }
 
     #[tokio::test]
