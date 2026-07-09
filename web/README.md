@@ -129,6 +129,8 @@ PWA behavior:
 - Device HTTP APIs, devd endpoints, firmware artifacts and Web Serial sessions are not runtime-cached.
 - `/version.json` is generated before build for the current server artifact but is not precached by the service worker.
 - A stable `/pwa-shell-guard.js` preflight compares the cached shell version against `/version.json`; when an old cached shell would boot dead hashed assets, it clears stale service workers/caches and reloads into the latest shell before the main app bundle starts.
+- A legacy recovery shim is also shipped at `/assets/index-SkMVprsZ.js` so already-broken pre-guard dashboard shells can clear old PWA state and bounce into the current app shell.
+- During the legacy stale-shell migration release, the generated service worker claims clients and skips waiting so refreshing a broken tab can hand subresource requests to the migration shim without waiting for an in-app prompt.
 - App updates use prompt mode: a new service worker can cache the next build in the background, and the UI refreshes only after the user clicks `升级` / `Upgrade`.
 - Storybook uses a no-op PWA registration mock. Storybook is not itself built as a PWA target.
 
@@ -136,6 +138,7 @@ Validation:
 
 - `bun run test:preview-smoke` includes an offline reload scenario and verifies API and `/version.json` fetches are not returned from cache while offline.
 - `bun run test:preview-smoke` also injects a synthetic stale HTML shell and verifies it self-recovers to the latest built app before requesting dead hashed assets.
+- `bun run test:preview-smoke` also injects a pre-guard legacy dashboard shell that still points at `/assets/index-SkMVprsZ.js` and verifies the legacy shim clears stale PWA state before reloading into the current dashboard.
 - `bun run test:storybook:ci` covers the update-ready, offline-ready, registration-error and hidden prompt states.
 
 ## Ports

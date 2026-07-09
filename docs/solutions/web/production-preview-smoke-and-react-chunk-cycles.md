@@ -39,6 +39,8 @@ Manual chunk boundaries split libraries that expect a single initialization path
 - Extend the smoke beyond the Overview homepage to at least one real dashboard route so route-level chart crashes cannot hide behind a healthy app shell.
 - For PWA apps, include a production preview smoke that waits for service worker control, switches the browser offline, reloads, and verifies the app shell still mounts while API fetches remain network-only.
 - For PWA apps, add a stale-shell bootstrap guard ahead of the hashed entry bundle so an old cached HTML shell can compare its embedded version against `/version.json` and self-recover before it requests dead assets from a newer deploy.
+- When a broken client is already pinned to a specific old entry asset name, ship a migration shim at that legacy asset path for at least one release so the stale client can clear old PWA state and reload into the current shell.
+- If the stale client is still controlled by the old service worker, make the migration release's worker claim clients and skip waiting so the compatibility asset becomes reachable during refresh.
 
 ## Guardrails / Reuse Notes
 
@@ -47,6 +49,7 @@ Manual chunk boundaries split libraries that expect a single initialization path
 - Manual chunk boundaries around `react` / `react-dom` or chart runtimes like `recharts` are high risk unless the emitted graph is inspected for cycles.
 - PWA client helpers such as `workbox-window` can be split into a dedicated vendor chunk to preserve bundle budgets, but React should stay on the normal vendor path.
 - If hashed entry assets change across deploys, do not rely on an old cached HTML shell to “eventually” self-heal; give the shell its own stable bootstrap path that can clear stale service-worker/cache state before loading app code.
+- If the bad deploy is already live and some clients are pinned to an old entry asset path, the stable bootstrap alone is not enough; add a temporary compatibility asset at the legacy path and cover it with preview smoke.
 - CI should run production preview smoke before publishing static artifacts; bundle budgets alone do not prove runtime health.
 
 ## References
@@ -56,5 +59,6 @@ Manual chunk boundaries split libraries that expect a single initialization path
 - `web/tests/e2e/preview-smoke.spec.ts`
 - `web/tests/e2e/pwa-preview.spec.ts`
 - `web/public/pwa-shell-guard.js`
+- `web/public/assets/index-SkMVprsZ.js`
 - `docs/specs/n5nwv-web-production-preview-smoke/SPEC.md`
 - `docs/specs/xpm5n-web-pwa-offline-updates/SPEC.md`

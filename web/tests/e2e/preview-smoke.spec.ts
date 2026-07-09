@@ -125,3 +125,52 @@ test("production preview recovers from a stale HTML shell before loading dead as
   await expect(pageErrors).toEqual([]);
   await expect(consoleErrors).toEqual([]);
 });
+
+test("production preview recovers a legacy stale entry shell already pinned to an old asset name @preview-smoke", async ({
+  page,
+}) => {
+  const { consoleErrors, pageErrors } = captureRuntimeErrors(page);
+  const currentShell = readFileSync(
+    join(process.cwd(), "dist", "index.html"),
+    "utf8",
+  );
+  const legacyShell = currentShell.replace(
+    /<script[^>]*src="\/pwa-shell-guard\.js"[\s\S]*?<\/script>/,
+    '<script type="module" src="/assets/index-SkMVprsZ.js"></script>',
+  );
+  let requestCount = 0;
+
+  await page.addInitScript(() => {
+    window.localStorage.setItem("loadlynx.locale", "en");
+    window.localStorage.setItem("loadlynx.demoMode", "true");
+    window.localStorage.setItem(
+      "loadlynx.demo.devices",
+      JSON.stringify([
+        {
+          id: "mock-001",
+          name: "Demo Device #1",
+          baseUrl: "mock://demo-1",
+        },
+      ]),
+    );
+  });
+
+  await page.route(/\/mock-001\/cc\?demo=true(?:&.*)?$/, async (route) => {
+    requestCount += 1;
+    await route.fulfill({
+      status: 200,
+      contentType: "text/html; charset=utf-8",
+      body: requestCount === 1 ? legacyShell : currentShell,
+    });
+  });
+
+  await page.goto("/mock-001/cc?demo=true&legacy-shell-test=1");
+
+  await expect(page).toHaveURL(/__ll_legacy_entry_recover=/);
+  await expect(
+    page.locator('[aria-label="Primary dashboard monitor"]'),
+  ).toBeVisible();
+  await expect(page.getByRole("button", { name: /USB-PD/i })).toBeVisible();
+  await expect(pageErrors).toEqual([]);
+  await expect(consoleErrors).toEqual([]);
+});

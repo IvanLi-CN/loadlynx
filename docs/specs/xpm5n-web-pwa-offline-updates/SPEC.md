@@ -29,6 +29,8 @@ The existing version display is build-time injected and visible in the console. 
 - Precache and runtime caching must not include LoadLynx device APIs, devd endpoints, firmware artifacts, Web Serial flows, or `/version.json`.
 - The running app must actively probe `/version.json` with `cache: "no-store"` so a GitHub Pages or release-web deployment that publishes a newer build can surface an upgrade prompt even when the current tab is still controlled by an older service worker generation.
 - A cached HTML shell that embeds an older build version must compare itself against `/version.json` before booting the main bundle; if the server has a newer build, the page must avoid loading dead hashed assets, clear stale service-worker/cache state, and reload into the newer shell.
+- A legacy pre-guard dashboard shell that still requests `/assets/index-SkMVprsZ.js` must also recover by clearing stale PWA state and reloading into the current shell, so already-broken clients are not stranded after the migration release.
+- The legacy migration release may let the new service worker claim clients and skip waiting so refreshing an already-broken tab can route old subresource requests through the recovery shim; the visible app-shell refresh remains operator-driven outside this migration path.
 - The PWA update UI must use the existing LoadLynx console visual language and remain accessible through `role="status"` or `role="alert"`.
 - Storybook must expose stable states for update-ready, offline-ready, registration-error, and hidden states without registering a real service worker.
 - Production preview smoke must prove app-shell reload works while offline and that API fetches are not served from cache.
@@ -42,6 +44,8 @@ The existing version display is build-time injected and visible in the console. 
 - When `needRefresh` is true, the UI shows a new-version prompt and calls `updateServiceWorker(true)` only after the user clicks the upgrade action.
 - When `/version.json` reports a newer build version than the running app, the UI shows the same non-blocking upgrade prompt even before Workbox emits `needRefresh`, and the refresh path still remains operator-confirmed.
 - Given a synthetic stale HTML shell that still points at dead hashed assets, when it opens against a newer `/version.json`, then it reloads into the latest shell before requesting the stale entry asset.
+- Given a synthetic pre-guard dashboard shell that still points at `/assets/index-SkMVprsZ.js`, when it opens against the migration release, then it clears stale PWA state and reloads into the current dashboard shell.
+- Given a browser already controlled by a pre-guard service worker, when it refreshes against the migration release, then the migration worker can take control without waiting for an in-app prompt so the legacy recovery shim becomes reachable.
 - Storybook CI passes the PWA prompt stories and existing route stories.
 
 ## Visual Evidence
