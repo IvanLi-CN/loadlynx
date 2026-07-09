@@ -3,6 +3,9 @@
 - 用户文档（User）
   - 电脑安装与更新：`user/install-and-update.md`
 
+- 产品渲染（Product Renders）
+  - `product-renders.md`
+
 - 板级总览（Boards）
   - `boards/analog-board.md`
   - `boards/control-board.md`
