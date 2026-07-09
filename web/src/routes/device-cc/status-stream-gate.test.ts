@@ -6,6 +6,10 @@ import {
 } from "./status-stream-gate.ts";
 
 describe("status-stream-gate", () => {
+  it("aligns the stream render cadence with the LAN SSE target", () => {
+    expect(STREAM_UI_INTERVAL_MS).toBe(200);
+  });
+
   it("commits immediately when no prior render exists", () => {
     expect(shouldCommitStatusImmediately(null, 100)).toBe(true);
     expect(getStatusRenderDelay(null, 100)).toBe(0);

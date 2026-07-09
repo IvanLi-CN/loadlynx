@@ -443,7 +443,8 @@ data: {"status":{"uptime_ms":123456,"mode":1,...},"link_up":true,"hello_seen":tr
 
 - 刷新频率与资源限制：
   - 内部 UART FastStatus 仍按设计以约 20 Hz 更新缓存；
-  - SSE 端每次仅在有新状态且达到最小发送间隔时推送，建议上限 5–10 Hz；
+  - owner-facing 实时工作面默认目标为约 `200 ms / 5 Hz`；
+  - SSE 端每次仅在有新状态且达到最小发送间隔时推送；实现应按目标周期补偿 JSON 渲染、socket 写入与 flush 耗时，而不是在完成发送后再无条件额外等待整个周期；
   - 固件可限制同时存在的 SSE 连接数量（例如最多 1–2 条），超出时返回 `429 RATE_LIMITED` 或拒绝新连接。
 - 链路异常：
   - 当 UART 链路判定为断开或不健康时，可以：

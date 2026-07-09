@@ -65,7 +65,9 @@ type MetricConfig = {
 };
 
 export const TREND_WINDOW_SECONDS = 30;
-export const TREND_SAMPLE_INTERVAL_MS = 1_000;
+export const ELECTRICAL_TREND_SAMPLE_INTERVAL_MS = 500;
+export const THERMAL_TREND_SAMPLE_INTERVAL_MS = 1_000;
+export const TREND_SAMPLE_INTERVAL_MS = THERMAL_TREND_SAMPLE_INTERVAL_MS;
 
 const METRIC_CONFIG: Record<TrendMetricKey, MetricConfig> = {
   voltage: {

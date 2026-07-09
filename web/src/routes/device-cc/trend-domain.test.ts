@@ -2,10 +2,12 @@ import { describe, expect, it } from "vitest";
 import {
   buildTrendSeries,
   computeTrendDomain,
+  ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
   getTrendReferenceByMetric,
   shouldAppendTrendSample,
   snapshotTrendSeriesDomains,
   stabilizeTrendSeriesDomains,
+  THERMAL_TREND_SAMPLE_INTERVAL_MS,
   type TrendSample,
   trimTrendSamplesToWindow,
 } from "./trend-domain.ts";
@@ -29,6 +31,37 @@ describe("trend-domain", () => {
     expect(shouldAppendTrendSample(1_000, 1_300)).toBe(false);
     expect(shouldAppendTrendSample(1_000, 2_000)).toBe(true);
     expect(shouldAppendTrendSample(2_000, 1_500)).toBe(true);
+  });
+
+  it("supports split electrical and thermal sampling cadences", () => {
+    expect(
+      shouldAppendTrendSample(
+        1_000,
+        1_000 + ELECTRICAL_TREND_SAMPLE_INTERVAL_MS - 1,
+        ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
+      ),
+    ).toBe(false);
+    expect(
+      shouldAppendTrendSample(
+        1_000,
+        1_000 + ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
+        ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
+      ),
+    ).toBe(true);
+    expect(
+      shouldAppendTrendSample(
+        1_000,
+        1_000 + THERMAL_TREND_SAMPLE_INTERVAL_MS - 1,
+        THERMAL_TREND_SAMPLE_INTERVAL_MS,
+      ),
+    ).toBe(false);
+    expect(
+      shouldAppendTrendSample(
+        1_000,
+        1_000 + THERMAL_TREND_SAMPLE_INTERVAL_MS,
+        THERMAL_TREND_SAMPLE_INTERVAL_MS,
+      ),
+    ).toBe(true);
   });
 
   it("uses CC/CV/CP specific reference rules", () => {

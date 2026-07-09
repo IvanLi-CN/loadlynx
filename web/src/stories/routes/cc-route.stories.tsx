@@ -13,6 +13,9 @@ const meta = {
   globals: {
     loadlynxLocale: "en",
   },
+  parameters: {
+    viewport: { defaultViewport: "loadlynxLarge" },
+  },
 } satisfies Meta<typeof CcRouteStory>;
 
 export default meta;
@@ -68,6 +71,39 @@ export const Default: Story = {
         }
       },
       { timeout: 5_000 },
+    );
+  },
+};
+
+export const LiveTelemetry: Story = {
+  play: async ({ canvas }) => {
+    await canvas.findByText(/Mode, output and setpoints/i, undefined, {
+      timeout: 5_000,
+    });
+    await waitFor(
+      () => {
+        const controlSummary = canvas.getByText(/· Uptime:/i);
+        const current = controlSummary.textContent ?? "";
+        if (!current.includes("Setpoint:")) {
+          throw new Error("Expected controls summary to include uptime");
+        }
+      },
+      { timeout: 5_000 },
+    );
+
+    const firstSummary = (
+      canvas.getByText(/· Uptime:/i).textContent ?? ""
+    ).trim();
+    await waitFor(
+      () => {
+        const nextSummary = (
+          canvas.getByText(/· Uptime:/i).textContent ?? ""
+        ).trim();
+        if (nextSummary === firstSummary) {
+          throw new Error("Expected live telemetry summary to refresh");
+        }
+      },
+      { timeout: 1_500 },
     );
   },
 };

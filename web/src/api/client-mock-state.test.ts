@@ -92,7 +92,6 @@ test("normalizeDevdIdentity supplies default usb bridge metadata for devd payloa
 test("normalizeDevdStatus preserves decoded flags and measurement_invalid analog state", () => {
   const view = normalizeDevdStatus({
     status: {
-      uptime_ms: 42,
       mode: 2,
       state_flags: 0b11_1111,
       enable: true,
@@ -109,6 +108,7 @@ test("normalizeDevdStatus preserves decoded flags and measurement_invalid analog
       mcu_temp_mc: 36000,
       fault_flags: 0b1010,
     },
+    uptime_ms: 42,
     link_up: false,
     hello_seen: false,
     analog_state: "measurement_invalid",
@@ -136,6 +136,93 @@ test("normalizeDevdStatus preserves decoded flags and measurement_invalid analog
     "POWER_LIMITED",
     "CURRENT_LIMITED",
   ]);
+});
+
+test("normalizeDevdStatus reuses the last good sample for omitted compat fields", () => {
+  const previous = normalizeDevdStatus({
+    status: {
+      mode: 1,
+      state_flags: 0b11,
+      enable: true,
+      target_value: 1500,
+      i_local_ma: 1200,
+      i_remote_ma: 55,
+      v_local_mv: 5020,
+      v_remote_mv: 4980,
+      calc_p_mw: 6200,
+      dac_headroom_mv: 22,
+      loop_error: 4,
+      fault_flags: 0,
+    },
+    uptime_ms: 1_000,
+    sink_core_temp_mc: 41_000,
+    sink_exhaust_temp_mc: 39_000,
+    mcu_temp_mc: 36_000,
+    link_up: true,
+    hello_seen: true,
+    analog_state: "ready",
+    fault_flags_decoded: [],
+    state_flags_decoded: ["REMOTE_ACTIVE", "LINK_GOOD"],
+  });
+
+  const view = normalizeDevdStatus(
+    {
+      status: {
+        i_local_ma: 0,
+        i_remote_ma: 0,
+        v_local_mv: 49,
+        v_remote_mv: 12,
+        calc_p_mw: 0,
+        enable: false,
+        fault_flags: 0,
+        state_flags: 2,
+      },
+      uptime_ms: 2_000,
+      link_up: true,
+      hello_seen: true,
+      analog_state: "ready",
+      fault_flags_decoded: [],
+      state_flags_decoded: ["LINK_GOOD"],
+    },
+    previous,
+  );
+
+  expect(view.raw.uptime_ms).toBe(2_000);
+  expect(view.raw.sink_core_temp_mc).toBe(41_000);
+  expect(view.raw.sink_exhaust_temp_mc).toBe(39_000);
+  expect(view.raw.mcu_temp_mc).toBe(36_000);
+  expect(view.raw.mode).toBe(1);
+  expect(view.raw.target_value).toBe(1_500);
+  expect(view.raw.v_local_mv).toBe(49);
+  expect(view.raw.v_remote_mv).toBe(12);
+  expect(view.raw.enable).toBe(false);
+  expect(view.state_flags_decoded).toEqual(["LINK_GOOD"]);
+});
+
+test("normalizeDevdStatus leaves missing thermal fields empty when no sample exists yet", () => {
+  const view = normalizeDevdStatus({
+    status: {
+      i_local_ma: 0,
+      i_remote_ma: 0,
+      v_local_mv: 49,
+      v_remote_mv: 12,
+      calc_p_mw: 0,
+      enable: false,
+      fault_flags: 0,
+      state_flags: 2,
+    },
+    uptime_ms: 2_000,
+    link_up: true,
+    hello_seen: true,
+    analog_state: "ready",
+    fault_flags_decoded: [],
+    state_flags_decoded: ["LINK_GOOD"],
+  });
+
+  expect(view.raw.uptime_ms).toBe(2_000);
+  expect(view.raw.sink_core_temp_mc).toBeUndefined();
+  expect(view.raw.sink_exhaust_temp_mc).toBeUndefined();
+  expect(view.raw.mcu_temp_mc).toBeUndefined();
 });
 
 test("normalizeDevdStatus derives CP mode when only control.mode is present", () => {

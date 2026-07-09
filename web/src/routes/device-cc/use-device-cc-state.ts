@@ -60,14 +60,22 @@ import {
   writePresetInputMemory,
 } from "./preset-input-memory.ts";
 import {
+  DEVD_FAST_STATUS_TARGET_PERIOD_MS,
+  getFastStatusRefetchIntervalMs,
+  getManualStatusPollDelayMs,
+  usesManualDevdStatusPolling,
+} from "./status-fallback-interval.ts";
+import {
   getStatusRenderDelay,
   STREAM_UI_INTERVAL_MS,
 } from "./status-stream-gate.ts";
 import {
   buildTrendSeries,
+  ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
   shouldAppendTrendSample,
   snapshotTrendSeriesDomains,
   stabilizeTrendSeriesDomains,
+  THERMAL_TREND_SAMPLE_INTERVAL_MS,
   TREND_WINDOW_SECONDS,
   type TrendDomainMemoryMap,
   type TrendSample,
@@ -80,7 +88,6 @@ type UpdateControlMutation = ReturnType<
 >;
 export type DashboardMetricKey = "voltage" | "current" | "power" | "resistance";
 
-const FAST_STATUS_REFETCH_MS = 400;
 const PD_REFETCH_MS = 1500;
 const RETRY_DELAY_MS = 500;
 const jitterRetryDelay = () => 200 + Math.random() * 300;
@@ -94,6 +101,17 @@ const EMPTY_PRESET: PresetDraft = {
   max_i_ma_total: 0,
   max_p_mw: 0,
 };
+
+function appendTrendSampleWindow(
+  prev: TrendSample[],
+  nextSample: TrendSample,
+  shouldResetWindow: boolean,
+): TrendSample[] {
+  const base = shouldResetWindow ? [] : prev;
+  const next = base.length >= TREND_MAX_POINTS ? base.slice(1) : base.slice();
+  next.push(nextSample);
+  return trimTrendSamplesToWindow(next, TREND_WINDOW_SECONDS);
+}
 
 function computeTrendBounds(points: number[]): {
   min: number;
@@ -671,6 +689,8 @@ export function useDeviceCcState(
     },
   });
 
+  const devdManualStatusPolling = usesManualDevdStatusPolling(baseUrl);
+
   const statusQuery = useQuery<FastStatusView, HttpApiError>({
     ...getDeviceStatusQueryOptions({
       deviceId,
@@ -679,11 +699,64 @@ export function useDeviceCcState(
         Boolean(baseUrl) &&
         identityQuery.isSuccess &&
         !writesInFlight &&
-        streamStatus === null,
-      refetchInterval: isPageVisible ? FAST_STATUS_REFETCH_MS : false,
+        streamStatus === null &&
+        !devdManualStatusPolling,
+      readCache: devdManualStatusPolling,
+      refetchInterval: isPageVisible
+        ? getFastStatusRefetchIntervalMs(baseUrl)
+        : false,
     }),
     retryDelay: jitterRetryDelay,
   });
+
+  const devdManualStatusPollingEnabled =
+    isPageVisible &&
+    identityQuery.isSuccess &&
+    !writesInFlight &&
+    streamStatus === null &&
+    devdManualStatusPolling;
+
+  useEffect(() => {
+    if (!devdManualStatusPollingEnabled) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let pollTimer: number | null = null;
+
+    const scheduleNextPoll = (delayMs: number) => {
+      pollTimer = window.setTimeout(() => {
+        void runPoll();
+      }, delayMs);
+    };
+
+    const runPoll = async () => {
+      const cycleStartedAtMs = window.performance.now();
+
+      try {
+        await statusQuery.refetch();
+      } finally {
+        if (!cancelled) {
+          scheduleNextPoll(
+            getManualStatusPollDelayMs(
+              DEVD_FAST_STATUS_TARGET_PERIOD_MS,
+              cycleStartedAtMs,
+              window.performance.now(),
+            ),
+          );
+        }
+      }
+    };
+
+    void runPoll();
+
+    return () => {
+      cancelled = true;
+      if (pollTimer != null) {
+        window.clearTimeout(pollTimer);
+      }
+    };
+  }, [devdManualStatusPollingEnabled, statusQuery.refetch]);
 
   useEffect(() => {
     if (!baseUrl || !identityQuery.isSuccess || !isPageVisible) {
@@ -866,47 +939,89 @@ export function useDeviceCcState(
           ? "Ω"
           : "A";
 
-  const lastTrendUptimeMsRef = useRef<number | null>(null);
-  const [trendSamples, setTrendSamples] = useState<TrendSample[]>([]);
+  const lastElectricalTrendUptimeMsRef = useRef<number | null>(null);
+  const lastThermalTrendUptimeMsRef = useRef<number | null>(null);
+  const [electricalTrendSamples, setElectricalTrendSamples] = useState<
+    TrendSample[]
+  >([]);
+  const [thermalTrendSamples, setThermalTrendSamples] = useState<TrendSample[]>(
+    [],
+  );
   const trendDomainMemoryRef = useRef<TrendDomainMemoryMap>({});
 
   useEffect(() => {
     const uptimeMs = status?.raw.uptime_ms ?? null;
-    const previousUptimeMs = lastTrendUptimeMsRef.current;
+    const previousUptimeMs = lastElectricalTrendUptimeMsRef.current;
     if (
       uptimeMs == null ||
-      !shouldAppendTrendSample(previousUptimeMs, uptimeMs)
+      !shouldAppendTrendSample(
+        previousUptimeMs,
+        uptimeMs,
+        ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
+      )
     ) {
       return;
     }
-    lastTrendUptimeMsRef.current = uptimeMs;
+    lastElectricalTrendUptimeMsRef.current = uptimeMs;
 
-    setTrendSamples((prev) => {
+    setElectricalTrendSamples((prev) => {
       const shouldResetWindow =
         previousUptimeMs != null &&
         uptimeMs != null &&
         uptimeMs < previousUptimeMs;
-      const base = shouldResetWindow ? [] : prev;
-      const next =
-        base.length >= TREND_MAX_POINTS ? base.slice(1) : base.slice();
-      next.push({
-        time: uptimeMs / 1_000,
-        voltage: localVoltageV,
-        current: totalCurrentA,
-        power: totalPowerW,
-        resistance: resistanceOhms,
-        thermal: tempCoreC,
-      });
-      return trimTrendSamplesToWindow(next, TREND_WINDOW_SECONDS);
+      return appendTrendSampleWindow(
+        prev,
+        {
+          time: uptimeMs / 1_000,
+          voltage: localVoltageV,
+          current: totalCurrentA,
+          power: totalPowerW,
+          resistance: resistanceOhms,
+        },
+        shouldResetWindow,
+      );
     });
   }, [
     localVoltageV,
     resistanceOhms,
     status?.raw.uptime_ms,
-    tempCoreC,
     totalCurrentA,
     totalPowerW,
   ]);
+
+  useEffect(() => {
+    const uptimeMs = status?.raw.uptime_ms ?? null;
+    const previousUptimeMs = lastThermalTrendUptimeMsRef.current;
+    if (
+      uptimeMs == null ||
+      !shouldAppendTrendSample(
+        previousUptimeMs,
+        uptimeMs,
+        THERMAL_TREND_SAMPLE_INTERVAL_MS,
+      )
+    ) {
+      return;
+    }
+    lastThermalTrendUptimeMsRef.current = uptimeMs;
+
+    setThermalTrendSamples((prev) => {
+      const shouldResetWindow =
+        previousUptimeMs != null &&
+        uptimeMs != null &&
+        uptimeMs < previousUptimeMs;
+      return appendTrendSampleWindow(
+        prev,
+        {
+          time: uptimeMs / 1_000,
+          voltage: null,
+          current: null,
+          power: null,
+          thermal: tempCoreC,
+        },
+        shouldResetWindow,
+      );
+    });
+  }, [status?.raw.uptime_ms, tempCoreC]);
 
   const handleSavePreset = () => {
     savePresetDraft(selectedPresetId, {
@@ -1064,7 +1179,7 @@ export function useDeviceCcState(
     },
   ];
 
-  const thermalTrendPoints = trendSamples
+  const thermalTrendPoints = thermalTrendSamples
     .map((sample) => sample.thermal)
     .filter(
       (value): value is number => value != null && Number.isFinite(value),
@@ -1077,7 +1192,7 @@ export function useDeviceCcState(
     () =>
       stabilizeTrendSeriesDomains(
         buildTrendSeries({
-          samples: trendSamples,
+          samples: electricalTrendSamples,
           mode: controlMode,
           targetVoltageV: draftPresetTargetVMv / 1_000,
           minVoltageV: draftPresetMinVMv / 1_000,
@@ -1096,7 +1211,7 @@ export function useDeviceCcState(
       draftPresetTargetIMa,
       draftPresetTargetPMw,
       draftPresetTargetVMv,
-      trendSamples,
+      electricalTrendSamples,
     ],
   );
 

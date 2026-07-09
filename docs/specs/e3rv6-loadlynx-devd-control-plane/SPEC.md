@@ -52,6 +52,8 @@ LoadLynx 已有 ESP32-S3 数字板的局域网 HTTP API、mDNS 设计草案、We
 - MUST: ESP32-S3 烧录与 STM32G431 烧录目标分离；同一设备记录可包含 `digital_target` 与 `analog_target`。
 - MUST: Web 页面能通过 LAN 只读 API 使用 mDNS `.local`、DNS-SD 结果或用户手工 URL 连接设备。
 - MUST: CLI 同时支持 LAN base URL 和 devd USB target，输出 JSON 与人类可读摘要。
+- MUST: `/cc` 页面在 USB/devd 管理路径上只能消费 devd 已持有的状态流或缓存，不能因为页面提频而把同一物理 USB 口的 `get_status` 请求按页面数放大。owner-facing 主读数目标是约 `200 ms / 5 Hz`，但该目标必须通过单一 serial owner 的节拍控制达成，而不是提升 MCU 侧发布频率。
+- MUST: `/cc` 在 LAN SSE 不可用时保留现有 `400 ms` HTTP fallback；数字板 LAN SSE `200 ms` 节拍和模拟板状态发布频率不因 Web 提频而改变。
 - SHOULD: devd 可以托管生产 Web 静态文件，并为 Vite dev server 提供 `/api` proxy 目标。
 - SHOULD: devd bounded session 返回 structured logs、raw USB traces、defmt decode 状态和最近 flash/reset/digital monitor 操作。Analog RTT/defmt monitor 尚未实现时，CLI/devd 必须返回结构化错误，不得悄悄监视 digital USB session。
 - MUST: Web Serial 是 GitHub Pages 与 release Web bundle 的正式浏览器路径；支持身份/状态/控制/PD/输出/预设/校准/WiFi/诊断和 ESP32-S3 flash，并在不支持 Serial API 的浏览器引导到 released CLI/devd。
@@ -174,6 +176,8 @@ ESP32-S3 USB CDC uses LF-delimited JSON frames. The bridge protocol should align
 - Firmware `get_status` and `get_control` USB responses should stay compact and operation-specific. They must fit the JSONL frame budget without relying on the full LAN/HTTP response body shape, while still carrying the owner-facing fields required by `status` and `control get`.
 
 The daemon owns each USB CDC port through a per-port serial owner while any lease for that port is active. HTTP commands enqueue JSONL requests through that owner, devd generates a unique `request_id` per operation, and only matching responses may satisfy the request. Mismatched responses are trace evidence, not success. The owner continuously reads unsolicited monitor frames and publishes them through bounded session/event state. Serial open or I/O failures must be retryable per command; a transient failure must not poison the owner until the lease is released.
+
+For `/cc` owner-facing live status, devd may maintain one lease-scoped background `get_status` refresh at about `200 ms` while the port owner is active and then serve compatibility reads from that cache. This cache-backed path is specific to owner-facing fast status consumption and must not change the firmware-side USB/LAN publish contracts or multiply USB polling by tab count.
 
 Status and output-control response recovery may compensate for ESP32-S3 USB Serial/JTAG log noise only inside the same queued command window. A recovered success must be derived from frames after the matching transmit frame and must have the operation-specific payload shape; unrelated response IDs or stale monitor frames are not valid command responses. Saved-device USB compat read path retries are bounded and must leave trace/session evidence for each failed or recovered request window instead of silently waiting for the full operation timeout.
 

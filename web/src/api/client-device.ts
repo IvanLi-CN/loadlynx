@@ -55,6 +55,17 @@ function toFastStatusView(payload: FastStatusResponse): FastStatusView {
   };
 }
 
+const devdStatusMemory = new Map<string, FastStatusView>();
+
+function getDevdStatusMemoryKey(baseUrl: string): string {
+  const url = new URL(baseUrl);
+  const deviceId = url.searchParams.get("device_id");
+  if (!deviceId) {
+    return baseUrl;
+  }
+  return `${url.origin}${url.pathname}?device_id=${deviceId}`;
+}
+
 function makeApplyPresetRequest(preset_id: number): ApplyPresetRequest {
   return { preset_id };
 }
@@ -81,23 +92,29 @@ export async function getIdentity(baseUrl: string): Promise<Identity> {
       );
       return normalizeDevdIdentity(baseUrl, {
         device_id: new URL(baseUrl).searchParams.get("device_id") ?? undefined,
-        uptime_ms: status.status.uptime_ms,
+        uptime_ms: status.uptime_ms ?? status.status.uptime_ms,
       });
     }
   }
   return httpJsonQueued<Identity>(baseUrl, "/api/v1/identity");
 }
 
-export async function getStatus(baseUrl: string): Promise<FastStatusView> {
+export async function getStatus(
+  baseUrl: string,
+  options?: { cache?: boolean },
+): Promise<FastStatusView> {
   if (isMockBaseUrl(baseUrl)) {
     return mockGetStatus(baseUrl);
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
-    const payload = await httpJsonQueued<DevdStatusPayload>(
-      baseUrl,
-      "/api/v1/status",
-    );
-    return normalizeDevdStatus(payload);
+    const path = options?.cache
+      ? "/api/v1/status?cache=true"
+      : "/api/v1/status";
+    const payload = await httpJsonQueued<DevdStatusPayload>(baseUrl, path);
+    const memoryKey = getDevdStatusMemoryKey(baseUrl);
+    const view = normalizeDevdStatus(payload, devdStatusMemory.get(memoryKey));
+    devdStatusMemory.set(memoryKey, view);
+    return view;
   }
 
   const payload = await httpJsonQueued<FastStatusResponse>(

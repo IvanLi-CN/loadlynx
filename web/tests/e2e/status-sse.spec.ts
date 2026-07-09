@@ -206,12 +206,26 @@ test("status SSE stream drives CC page without extra polling", async ({
     page.getByRole("region", { name: /Live control/i }),
   ).toBeVisible();
 
+  const initialCurrentReadback = await page.evaluate(() => {
+    const normalized = document.body.innerText.replace(/\s+/g, "");
+    const match = normalized.match(/CURRENT([0-9]+\.[0-9]{3})A/);
+    return match?.[1] ?? null;
+  });
+  expect(initialCurrentReadback).not.toBeNull();
+
   await page.waitForFunction(
     () =>
-      (window as unknown as { __statusMessages: number }).__statusMessages >= 3,
+      (window as unknown as { __statusMessages: number }).__statusMessages >= 4,
     undefined,
     { timeout: 2000 },
   );
+
+  const refreshedCurrentReadback = await page.evaluate(() => {
+    const normalized = document.body.innerText.replace(/\s+/g, "");
+    const match = normalized.match(/CURRENT([0-9]+\.[0-9]{3})A/);
+    return match?.[1] ?? null;
+  });
+  expect(refreshedCurrentReadback).not.toBe(initialCurrentReadback);
 
   // Wait for several additional stream ticks so any fallback polling would
   // have a chance to fire before we sample the fetch count.
