@@ -206,13 +206,12 @@ test("status SSE stream drives CC page without extra polling", async ({
     page.getByRole("region", { name: /Live control/i }),
   ).toBeVisible();
 
-  const initialTelemetrySummary = await page.evaluate(() => {
-    const candidates = [...document.querySelectorAll("div, span, p")]
-      .map((node) => (node.textContent ?? "").trim())
-      .filter((text) => text.includes("Setpoint:") && text.includes("Uptime:"));
-    return candidates[0] ?? null;
+  const initialCurrentReadback = await page.evaluate(() => {
+    const normalized = document.body.innerText.replace(/\s+/g, "");
+    const match = normalized.match(/CURRENT([0-9]+\.[0-9]{3})A/);
+    return match?.[1] ?? null;
   });
-  expect(initialTelemetrySummary).not.toBeNull();
+  expect(initialCurrentReadback).not.toBeNull();
 
   await page.waitForFunction(
     () =>
@@ -221,13 +220,12 @@ test("status SSE stream drives CC page without extra polling", async ({
     { timeout: 2000 },
   );
 
-  const refreshedTelemetrySummary = await page.evaluate(() => {
-    const candidates = [...document.querySelectorAll("div, span, p")]
-      .map((node) => (node.textContent ?? "").trim())
-      .filter((text) => text.includes("Setpoint:") && text.includes("Uptime:"));
-    return candidates[0] ?? null;
+  const refreshedCurrentReadback = await page.evaluate(() => {
+    const normalized = document.body.innerText.replace(/\s+/g, "");
+    const match = normalized.match(/CURRENT([0-9]+\.[0-9]{3})A/);
+    return match?.[1] ?? null;
   });
-  expect(refreshedTelemetrySummary).not.toBe(initialTelemetrySummary);
+  expect(refreshedCurrentReadback).not.toBe(initialCurrentReadback);
 
   // Wait for several additional stream ticks so any fallback polling would
   // have a chance to fire before we sample the fetch count.
