@@ -107,11 +107,10 @@ export async function getStatus(
     return mockGetStatus(baseUrl);
   }
   if (isDevdCompatBaseUrl(baseUrl)) {
-    const path = options?.cache ? "/api/v1/status?cache=true" : "/api/v1/status";
-    const payload = await httpJsonQueued<DevdStatusPayload>(
-      baseUrl,
-      path,
-    );
+    const path = options?.cache
+      ? "/api/v1/status?cache=true"
+      : "/api/v1/status";
+    const payload = await httpJsonQueued<DevdStatusPayload>(baseUrl, path);
     const memoryKey = getDevdStatusMemoryKey(baseUrl);
     const view = normalizeDevdStatus(payload, devdStatusMemory.get(memoryKey));
     devdStatusMemory.set(memoryKey, view);

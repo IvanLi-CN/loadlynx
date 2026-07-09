@@ -60,15 +60,15 @@ import {
   writePresetInputMemory,
 } from "./preset-input-memory.ts";
 import {
-  getStatusRenderDelay,
-  STREAM_UI_INTERVAL_MS,
-} from "./status-stream-gate.ts";
-import {
   DEVD_FAST_STATUS_TARGET_PERIOD_MS,
   getFastStatusRefetchIntervalMs,
   getManualStatusPollDelayMs,
   usesManualDevdStatusPolling,
 } from "./status-fallback-interval.ts";
+import {
+  getStatusRenderDelay,
+  STREAM_UI_INTERVAL_MS,
+} from "./status-stream-gate.ts";
 import {
   buildTrendSeries,
   ELECTRICAL_TREND_SAMPLE_INTERVAL_MS,
@@ -736,16 +736,15 @@ export function useDeviceCcState(
       try {
         await statusQuery.refetch();
       } finally {
-        if (cancelled) {
-          return;
+        if (!cancelled) {
+          scheduleNextPoll(
+            getManualStatusPollDelayMs(
+              DEVD_FAST_STATUS_TARGET_PERIOD_MS,
+              cycleStartedAtMs,
+              window.performance.now(),
+            ),
+          );
         }
-        scheduleNextPoll(
-          getManualStatusPollDelayMs(
-            DEVD_FAST_STATUS_TARGET_PERIOD_MS,
-            cycleStartedAtMs,
-            window.performance.now(),
-          ),
-        );
       }
     };
 

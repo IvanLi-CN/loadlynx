@@ -1,8 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   DEVD_FAST_STATUS_TARGET_PERIOD_MS,
-  getManualStatusPollDelayMs,
   getFastStatusRefetchIntervalMs,
+  getManualStatusPollDelayMs,
   HTTP_FAST_STATUS_REFETCH_MS,
   usesManualDevdStatusPolling,
 } from "./status-fallback-interval.ts";

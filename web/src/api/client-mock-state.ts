@@ -558,7 +558,10 @@ export function normalizeDevdStatus(
           : (previousRaw?.mode ?? 1);
   const raw: FastStatusJson = {
     uptime_ms:
-      payload.uptime_ms ?? payload.status.uptime_ms ?? previousRaw?.uptime_ms ?? 0,
+      payload.uptime_ms ??
+      payload.status.uptime_ms ??
+      previousRaw?.uptime_ms ??
+      0,
     mode: payload.status.mode ?? previousRaw?.mode ?? fallbackMode,
     state_flags: payload.status.state_flags ?? previousRaw?.state_flags ?? 0,
     enable:
@@ -592,7 +595,8 @@ export function normalizeDevdStatus(
       previousRaw?.mcu_temp_mc,
     fault_flags: payload.status.fault_flags ?? previousRaw?.fault_flags ?? 0,
     cal_kind: payload.status.cal_kind ?? previousRaw?.cal_kind,
-    raw_v_nr_100uv: payload.status.raw_v_nr_100uv ?? previousRaw?.raw_v_nr_100uv,
+    raw_v_nr_100uv:
+      payload.status.raw_v_nr_100uv ?? previousRaw?.raw_v_nr_100uv,
     raw_v_rmt_100uv:
       payload.status.raw_v_rmt_100uv ?? previousRaw?.raw_v_rmt_100uv,
     raw_cur_100uv: payload.status.raw_cur_100uv ?? previousRaw?.raw_cur_100uv,
