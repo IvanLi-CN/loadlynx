@@ -428,6 +428,8 @@ export async function validateReleasePagesContracts({
     ["prepare-pages-release-bundle.mjs", "must validate the exact release Web bundle before Pages upload"],
     ["needs.web.result == 'success'", "must prepare Pages only after the release Web bundle succeeds"],
     ["pages-deploy:", "must contain a Pages deployment job"],
+    ["needs.host-tools.result == 'success'", "must deploy Pages only after host tools succeed"],
+    ["needs.firmware.result == 'success'", "must deploy Pages only after firmware succeeds"],
     ["needs.pages.result == 'success'", "must deploy Pages only after bundle preparation succeeds"],
     ["- pages-deploy", "must block Create GitHub release on Pages deployment"],
     ["needs.pages-deploy.result == 'success'", "must require successful Pages deployment before release creation"],

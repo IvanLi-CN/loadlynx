@@ -629,7 +629,7 @@ jobs:
   pages-deploy:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.pages.result == 'success'
+    if: needs.host-tools.result == 'success' && needs.firmware.result == 'success' && needs.pages.result == 'success'
   pages:
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -388,8 +388,10 @@ jobs:
     name: Deploy Pages release bundle
     needs:
       - intent
+      - host-tools
+      - firmware
       - pages
-    if: needs.intent.outputs.should_release == 'true' && needs.pages.result == 'success'
+    if: needs.intent.outputs.should_release == 'true' && needs.host-tools.result == 'success' && needs.firmware.result == 'success' && needs.pages.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
