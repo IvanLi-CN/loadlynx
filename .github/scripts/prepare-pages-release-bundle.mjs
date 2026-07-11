@@ -22,6 +22,13 @@ function parseTarEntries(archive) {
     .filter(Boolean);
 }
 
+function hasUnsafeTarLink(archive) {
+  const verboseEntries = execFileSync("tar", ["-tvzf", archive], {
+    encoding: "utf8",
+  }).split(/\r?\n/);
+  return verboseEntries.some((entry) => entry.startsWith("l") || entry.startsWith("h"));
+}
+
 function isUnsafeTarEntry(entry) {
   const normalized = entry.replace(/^\.\//, "");
   return (
@@ -51,6 +58,9 @@ export function preparePagesReleaseBundle({ archive, tag, output }) {
   const entries = parseTarEntries(resolvedArchive);
   if (entries.some(isUnsafeTarEntry)) {
     fail("archive contains an unsafe path");
+  }
+  if (hasUnsafeTarLink(resolvedArchive)) {
+    fail("archive contains a symbolic or hard link");
   }
 
   mkdirSync(resolvedOutput, { recursive: true });

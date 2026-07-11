@@ -1,7 +1,14 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  linkSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -75,6 +82,22 @@ for (const [tag, version] of [
   assert.throws(
     () => preparePagesReleaseBundle({ archive, tag: "v1.2.3", output: join(root, "pages") }),
     /404\.html shell version must be 1\.2\.3/,
+  );
+}
+
+for (const linkType of ["symbolic", "hard"]) {
+  const root = mkdtempSync(join(tmpdir(), `loadlynx-pages-bundle-${linkType}-link-`));
+  const dist = writeBundle(root, "1.2.3");
+  if (linkType === "symbolic") {
+    symlinkSync("index.html", join(dist, "link"));
+  } else {
+    linkSync(join(dist, "index.html"), join(dist, "link"));
+  }
+  const archive = join(root, "loadlynx-web-v1.2.3.tar.gz");
+  execFileSync("tar", ["-czf", archive, "-C", dist, "."]);
+  assert.throws(
+    () => preparePagesReleaseBundle({ archive, tag: "v1.2.3", output: join(root, "pages") }),
+    /symbolic or hard link/,
   );
 }
 
