@@ -136,6 +136,10 @@ pub(crate) fn expand_compact_calibration_profile(data: Value) -> Result<Value, H
         .ok_or_else(|| compact_calibration_error("active source must be a string"))?;
     let fmt_version = compact_u64(&active[1], "fmt_version")?;
     let hw_rev = compact_u64(&active[2], "hw_rev")?;
+    let persistence_status = compact
+        .get("s")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
 
     Ok(json!({
         "active": {
@@ -143,6 +147,7 @@ pub(crate) fn expand_compact_calibration_profile(data: Value) -> Result<Value, H
             "fmt_version": fmt_version,
             "hw_rev": hw_rev,
         },
+        "persistence": {"status": persistence_status},
         "current_ch1_points": expand_compact_current_curve(compact, "c1")?,
         "current_ch2_points": expand_compact_current_curve(compact, "c2")?,
         "v_local_points": expand_compact_voltage_curve(compact, "vl")?,

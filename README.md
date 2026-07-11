@@ -16,7 +16,7 @@
   - 与 S3 通过 UART 帧通信（建议 CBOR/SLIP）
 - ESP32‑S3
   - 本地 UI、HTTP/Web 控制面、USB CDC/host-tools bridge
-  - EEPROM-backed calibration / presets / PD policy 持久化
+  - EEPROM-backed calibration / presets / PD policy 持久化；校准 Commit/Reset 仅在 EEPROM 写后读回验证成功时发布
   - 与 G431 的可靠 UART 控制链（SoftReset、CalWrite、SetEnable、LimitProfile、SetMode、PD request）
   - 本地风扇 PWM 控制（`FAN_TACH` 与跨 MCU `thermal_derate` 联动仍在后续阶段）
   - Wi‑Fi、mDNS、release Web / CLI / devd 控制入口

@@ -5983,6 +5983,7 @@ mod tests {
         let expanded = expand_compact_calibration_profile(json!({
             "compact": "cal_profile_v1",
             "a": ["user-calibrated", 3, 1],
+            "s": "commit-verified",
             "c1": [[0, 0, 0], [25000, 4095, 5000]],
             "c2": [[1, 2, 3]],
             "vl": [[0, 0]],
@@ -5992,6 +5993,7 @@ mod tests {
 
         assert_eq!(expanded["active"]["source"], "user-calibrated");
         assert_eq!(expanded["active"]["fmt_version"], 3);
+        assert_eq!(expanded["persistence"]["status"], "commit-verified");
         assert_eq!(expanded["current_ch1_points"][1]["raw_dac_code"], 4095);
         assert_eq!(expanded["current_ch2_points"][0]["meas_ma"], 3);
         assert_eq!(expanded["v_remote_points"][0]["meas_mv"], 120);
