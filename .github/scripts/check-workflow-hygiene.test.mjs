@@ -86,6 +86,46 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  validateWorkflowHygiene({
+    workflows: [
+      {
+        ...healthyWorkflow,
+        jobs: [
+          {
+            id: "notify",
+            name: null,
+            hasTimeoutMinutes: true,
+            isReusableWorkflow: true,
+          },
+        ],
+      },
+    ],
+  }),
+  ['workflow healthy.yml reusable job "notify": timeout-minutes is not supported'],
+);
+
+assert.deepEqual(
+  parseWorkflowMetadata(
+    `name: Reusable
+permissions: {}
+
+jobs:
+  notify:
+    uses: owner/repo/.github/workflows/notify.yml@main
+`,
+    "reusable.yml",
+  ).jobs,
+  [
+    {
+      id: "notify",
+      name: null,
+      hasTimeoutMinutes: false,
+      isReusableWorkflow: true,
+    },
+  ],
+);
+
+assert.deepEqual(
   parseWorkflowMetadata(
     `name: Node
 permissions:

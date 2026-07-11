@@ -155,6 +155,10 @@ export function parseWorkflowMetadata(source, fileName) {
     if (/^ {4}timeout-minutes:\s*\d+\s*$/.test(line)) {
       currentJob.hasTimeoutMinutes = true;
     }
+
+    if (/^ {4}uses:\s*\S/.test(line)) {
+      currentJob.isReusableWorkflow = true;
+    }
   }
 
   return workflow;
@@ -252,7 +256,11 @@ export function validateWorkflowHygiene({ workflows }) {
     }
 
     for (const job of workflow.jobs) {
-      if (!job.hasTimeoutMinutes) {
+      if (job.isReusableWorkflow && job.hasTimeoutMinutes) {
+        failures.push(
+          `workflow ${workflow.fileName} reusable job ${JSON.stringify(job.name ?? job.id)}: timeout-minutes is not supported`,
+        );
+      } else if (!job.isReusableWorkflow && !job.hasTimeoutMinutes) {
         failures.push(`workflow ${workflow.fileName} job ${JSON.stringify(job.name ?? job.id)}: missing timeout-minutes`);
       }
     }
