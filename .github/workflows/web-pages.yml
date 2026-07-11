@@ -1,14 +1,12 @@
 name: Web Deploy (GitHub Pages)
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - "web/**"
-      - ".github/workflows/web-pages.yml"
-      - ".github/scripts/**"
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Published release tag whose Web bundle should be deployed"
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -20,81 +18,42 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  build:
+  prepare:
     runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
-      - name: Checkout
+      - name: Checkout deployment tooling
         uses: actions/checkout@v4
         with:
           submodules: false
-          fetch-tags: true
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version-file: ".node-version"
-
-      - name: Setup Bun
-        uses: oven-sh/setup-bun@v2
-        with:
-          bun-version-file: ".bun-version"
-
-      - name: Compute web version
-        working-directory: web
+      - name: Download published release Web bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          VERSION_LINE="$(../.github/scripts/compute-version.sh)"
-          echo "$VERSION_LINE" >> "$GITHUB_ENV"
-          APP_EFFECTIVE_VERSION="${VERSION_LINE#APP_EFFECTIVE_VERSION=}"
-          echo "VITE_APP_VERSION=${APP_EFFECTIVE_VERSION}" >> "$GITHUB_ENV"
-          echo "VITE_APP_GIT_SHA=${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "VITE_GITHUB_REPO=${GITHUB_REPOSITORY}" >> "$GITHUB_ENV"
+          set -euo pipefail
+          tag='${{ inputs.release_tag }}'
+          mkdir -p dist/release
+          gh release download "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern "loadlynx-web-$tag.tar.gz" \
+            --dir dist/release
 
-          # Optional stable release tag (v*) if HEAD is exactly on a tag.
-          VITE_APP_GIT_TAG="$(git describe --tags --exact-match --match 'v*' 2>/dev/null || true)"
-          if [ -n "$VITE_APP_GIT_TAG" ]; then
-            echo "VITE_APP_GIT_TAG=${VITE_APP_GIT_TAG}" >> "$GITHUB_ENV"
-          fi
-
-          echo "Using $VERSION_LINE for build"
-
-      - name: Install dependencies
-        working-directory: web
+      - name: Validate and prepare release bundle
         run: |
-          if [ -f package-lock.json ]; then
-            echo "ERROR: web/package-lock.json is not supported. Use Bun and web/bun.lock only." >&2
-            exit 1
-          fi
-          bun ci
-
-      - name: Install Playwright browsers
-        working-directory: web
-        run: node scripts/run-playwright.mjs install --with-deps
-
-      - name: Build web app
-        working-directory: web
-        run: bun run build
-
-      - name: Check app bundle budgets
-        working-directory: web
-        run: bun run check:bundle:app
-
-      - name: Production preview smoke
-        working-directory: web
-        run: bun run test:preview-smoke
-
-      - name: Add SPA 404 page
-        working-directory: web
-        run: cp dist/index.html dist/404.html
+          node .github/scripts/prepare-pages-release-bundle.mjs \
+            --archive "dist/release/loadlynx-web-${{ inputs.release_tag }}.tar.gz" \
+            --tag "${{ inputs.release_tag }}" \
+            --output dist/pages
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: web/dist
+          path: dist/pages
 
   deploy:
-    needs: build
+    needs: prepare
     runs-on: ubuntu-latest
     timeout-minutes: 20
     environment:

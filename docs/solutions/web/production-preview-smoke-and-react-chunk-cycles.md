@@ -50,7 +50,7 @@ Manual chunk boundaries split libraries that expect a single initialization path
 - PWA client helpers such as `workbox-window` can be split into a dedicated vendor chunk to preserve bundle budgets, but React should stay on the normal vendor path.
 - If hashed entry assets change across deploys, do not rely on an old cached HTML shell to “eventually” self-heal; give the shell its own stable bootstrap path that can clear stale service-worker/cache state before loading app code.
 - If the bad deploy is already live and some clients are pinned to an old entry asset path, the stable bootstrap alone is not enough; add a temporary compatibility asset at the legacy path and cover it with preview smoke.
-- CI should run production preview smoke before publishing static artifacts; bundle budgets alone do not prove runtime health.
+- The release Web job must run production preview smoke before packaging the tarball used by both GitHub Release and Pages; bundle budgets alone do not prove runtime health.
 
 ## References
 

@@ -79,6 +79,9 @@ jobs:
       - name: Run workflow hygiene tests
         run: npm run test:workflow-hygiene
 
+      - name: Test Pages release bundle validation
+        run: npm run test:pages-release-bundle
+
       - name: Cache host cargo registry and targets
         uses: actions/cache@v4
         with:

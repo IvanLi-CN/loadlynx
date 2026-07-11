@@ -19,6 +19,8 @@ permissions:
   contents: write
   issues: write
   pull-requests: write
+  pages: write
+  id-token: write
 
 concurrency:
   group: release-main
@@ -317,6 +319,22 @@ jobs:
         working-directory: web
         run: bun run build
 
+      - name: Check app bundle budgets
+        working-directory: web
+        run: bun run check:bundle:app
+
+      - name: Install Playwright browsers
+        working-directory: web
+        run: node scripts/run-playwright.mjs install --with-deps
+
+      - name: Production preview smoke
+        working-directory: web
+        run: bun run test:preview-smoke
+
+      - name: Add SPA 404 page
+        working-directory: web
+        run: cp dist/index.html dist/404.html
+
       - name: Package web bundle
         run: |
           set -euo pipefail
@@ -330,6 +348,61 @@ jobs:
           path: dist/web/*
           if-no-files-found: error
 
+  pages:
+    name: Prepare Pages release bundle
+    needs:
+      - intent
+      - web
+    if: needs.intent.outputs.should_release == 'true' && needs.web.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Checkout deployment tooling
+        uses: actions/checkout@v4
+        with:
+          submodules: false
+
+      - name: Download release Web bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: loadlynx-web
+          path: dist/release
+
+      - name: Validate and prepare release bundle
+        run: |
+          node .github/scripts/prepare-pages-release-bundle.mjs \
+            --archive "dist/release/loadlynx-web-${{ needs.intent.outputs.tag }}.tar.gz" \
+            --tag "${{ needs.intent.outputs.tag }}" \
+            --output dist/pages
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/pages
+
+  pages-deploy:
+    name: Deploy Pages release bundle
+    needs:
+      - intent
+      - pages
+    if: needs.intent.outputs.should_release == 'true' && needs.pages.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
   release:
     name: Create GitHub release
     needs:
@@ -337,7 +410,8 @@ jobs:
       - host-tools
       - firmware
       - web
-    if: needs.intent.outputs.should_release == 'true'
+      - pages-deploy
+    if: needs.intent.outputs.should_release == 'true' && needs.pages-deploy.result == 'success'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

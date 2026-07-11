@@ -198,9 +198,9 @@ Examples:
 
 ## CI versioning
 
-- GitHub Actions calls `.github/scripts/compute-version.sh` to emit `APP_EFFECTIVE_VERSION` (from `APP_BASE_VERSION` or `package.json` plus git metadata).
+- GitHub Actions uses `.github/scripts/compute-version.sh` only for non-release Web checks. The release workflow injects its resolved release version directly.
 - `scripts/write-version.mjs` consumes `APP_EFFECTIVE_VERSION` during `bun run build` to write `public/version.json` before Vite copies it into `dist/version.json`.
-- Official GitHub Releases bypass the package base version and inject the release workflow's computed version/tag directly through `APP_EFFECTIVE_VERSION`, `VITE_APP_VERSION`, and `VITE_APP_GIT_TAG`.
+- Official GitHub Releases bypass the package base version and inject the release workflow's computed version/tag directly through `APP_EFFECTIVE_VERSION`, `VITE_APP_VERSION`, and `VITE_APP_GIT_TAG`. The exact validated release tarball is both attached to the release and deployed to GitHub Pages.
 
 ## UI version + GitHub source link
 
@@ -212,7 +212,7 @@ The main Console UI surfaces build metadata directly from build-time injected Vi
   - Fallback to commit (`VITE_APP_GIT_SHA`) → `https://github.com/<repo>/commit/<sha>`
 - Repo base: `VITE_GITHUB_REPO` (`Owner/Repo`, defaults to `IvanLi-CN/loadlynx` when unset)
 
-CI injects these vars in `.github/workflows/web-pages.yml` and `.github/workflows/web-check.yml`. For local builds you can set them manually (optional):
+CI injects these vars in `.github/workflows/release.yml` and `.github/workflows/web-check.yml`. `.github/workflows/web-pages.yml` only validates and deploys an existing release tarball selected by `release_tag`. For local builds you can set them manually (optional):
 
 ```bash
 VITE_APP_VERSION="$(../.github/scripts/compute-version.sh | cut -d= -f2)" \

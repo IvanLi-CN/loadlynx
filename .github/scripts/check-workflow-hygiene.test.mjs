@@ -5,11 +5,12 @@ import {
   validateCurrentTruthDocs,
   validateHttpSurfaceContracts,
   validateReleaseDecisionDocs,
+  validateReleasePagesContracts,
   validateReleasedCliDocs,
   validateWebToolingContracts,
   validateWorkflowHygiene,
 } from "./check-quality-gates-lib.mjs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -334,10 +335,7 @@ jobs:
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
-      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
-      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
       ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
-      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );
@@ -355,11 +353,8 @@ jobs:
     [
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
-      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
-      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
       "web/package-lock.json must not exist; use web/bun.lock as the only lockfile",
       ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
-      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );
@@ -395,10 +390,7 @@ jobs:
       'web/package.json: scripts["test:e2e:ui"] must be "node scripts/run-playwright.mjs test --ui"',
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
-      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
-      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
       ".github/workflows/web-check.yml: web install step must reject web/package-lock.json and run bun ci",
-      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
       ".github/workflows/release.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );
@@ -550,13 +542,89 @@ jobs:
       ".github/workflows/web-check.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
       ".github/workflows/web-check.yml: Production preview smoke step must run bun run test:preview-smoke",
-      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
-      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
-      ".github/workflows/web-pages.yml: web install step must reject web/package-lock.json and run bun ci",
     ],
   );
 } finally {
   await rm(tempDir, { recursive: true, force: true });
+}
+
+{
+  const tempDir = await mkdtemp(join(tmpdir(), "loadlynx-release-pages-contract-"));
+  try {
+    const pagesPath = join(tempDir, "web-pages.yml");
+    const releasePath = join(tempDir, "release.yml");
+    await writeFile(
+      pagesPath,
+      `name: Pages
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        required: true
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: gh release download "$tag"
+      - run: node .github/scripts/prepare-pages-release-bundle.mjs
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist/pages
+`,
+    );
+    await writeFile(
+      releasePath,
+      `name: Release
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - run: node scripts/run-playwright.mjs install --with-deps
+      - run: bun run check:bundle:app
+      - run: bun run test:preview-smoke
+      - run: cp dist/index.html dist/404.html
+      - run: node .github/scripts/prepare-pages-release-bundle.mjs
+  pages-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: needs.pages.result == 'success'
+  pages:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    if: needs.web.result == 'success'
+  release:
+    needs:
+      - pages-deploy
+    if: needs.pages-deploy.result == 'success'
+`,
+    );
+
+    assert.deepEqual(
+      await validateReleasePagesContracts({
+        webPagesWorkflowPath: new URL(`file://${pagesPath}`),
+        releaseWorkflowPath: new URL(`file://${releasePath}`),
+      }),
+      [],
+    );
+
+    await writeFile(
+      pagesPath,
+      `${await readFile(pagesPath, "utf8")}  push:\n`,
+    );
+    assert.deepEqual(
+      await validateReleasePagesContracts({
+        webPagesWorkflowPath: new URL(`file://${pagesPath}`),
+        releaseWorkflowPath: new URL(`file://${releasePath}`),
+      }),
+      [
+        ".github/workflows/web-pages.yml: push-triggered source builds are not allowed",
+      ],
+    );
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 }
 
 {
