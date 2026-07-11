@@ -15,7 +15,6 @@ permissions: {}
 jobs:
   notify_failure:
     if: ${{ github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure' }}
-    timeout-minutes: 15
     uses: IvanLi-CN/github-workflows/.github/workflows/release-failure-telegram.yml@main
     with:
       repository: ${{ github.repository }}
@@ -33,7 +32,6 @@ jobs:
 
   smoke_test:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    timeout-minutes: 15
     uses: IvanLi-CN/github-workflows/.github/workflows/release-failure-telegram.yml@main
     with:
       alert_kind: "release-alert-smoke"

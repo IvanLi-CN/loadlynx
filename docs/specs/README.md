@@ -43,8 +43,8 @@
 | t5x4k | Web：仪器风格主界面（左监右控） | active | `t5x4k-web-instrument-control-ui/SPEC.md` | `t5x4k-web-instrument-control-ui/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | swzqu | 触摸弹簧（GPIO14）负载开关 + RGB 指示 + 语音播放（MAX98357A / I²S） | active | `swzqu-touch-spring-load-switch-rgb-led/SPEC.md` | `swzqu-touch-spring-load-switch-rgb-led/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | j6tmd | Storybook：隐藏断点竖线标尺（768/1024） | active | `j6tmd-storybook-hide-breakpoint-guides/SPEC.md` | `j6tmd-storybook-hide-breakpoint-guides/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
-| rjkcw | GitHub Pages：Web Deploy 失败修复（lockfile/CI） | active | `rjkcw-web-pages-deploy-lockfile/SPEC.md` | `rjkcw-web-pages-deploy-lockfile/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
-| yff7v | Web：版本号展示 + GitHub 分支跳转 | active | `yff7v-web-version-github-link/SPEC.md` | `yff7v-web-version-github-link/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
+| rjkcw | GitHub Pages：release Web artifact 部署 | active | `rjkcw-web-pages-deploy-lockfile/SPEC.md` | `rjkcw-web-pages-deploy-lockfile/IMPLEMENTATION.md` | Pages 只部署已验证的 release tarball，并作为 release 创建前置门槛。 |
+| yff7v | Web：版本号展示 + GitHub 分支跳转 | active | `yff7v-web-version-github-link/SPEC.md` | `yff7v-web-version-github-link/IMPLEMENTATION.md` | Pages footer、HTML shell 与 version.json 均来自同一 release artifact。 |
 | sjb5t | 服务端口规范化 | active | `sjb5t-service-ports-avoid-defaults/SPEC.md` | `sjb5t-service-ports-avoid-defaults/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | v3g2c | 触摸电源按键：睡眠待机白光低频呼吸 | active | `v3g2c-touch-power-button-standby-breathing-white/SPEC.md` | `v3g2c-touch-power-button-standby-breathing-white/IMPLEMENTATION.md` | 实现完成；旧规划来源与实现记录保留在 companion docs。 |
 | e3rv6 | LoadLynx devd 本地设备控制面 | active | `e3rv6-loadlynx-devd-control-plane/SPEC.md` | `e3rv6-loadlynx-devd-control-plane/IMPLEMENTATION.md` | 首版实现：devd/CLI、Web devd+Firmware、firmware catalog、digital identity/DNS-SD、Storybook/视觉证据 |

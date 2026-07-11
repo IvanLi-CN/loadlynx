@@ -3,6 +3,7 @@ import {
   validateCurrentTruthDocs,
   validateHttpSurfaceContracts,
   validateReleaseDecisionDocs,
+  validateReleasePagesContracts,
   validateReleasedCliDocs,
   loadWorkflowMetadata,
   validateWebToolingContracts,
@@ -13,6 +14,7 @@ const workflowsDir = new URL("../workflows/", import.meta.url);
 const { failures: workflowFailures, workflows } = await loadWorkflowMetadata(workflowsDir);
 const hygieneFailures = validateWorkflowHygiene({ workflows });
 const toolingFailures = await validateWebToolingContracts();
+const releasePagesFailures = await validateReleasePagesContracts();
 const currentTruthDocFailures = await validateCurrentTruthDocs();
 const httpSurfaceFailures = await validateHttpSurfaceContracts();
 const releasedCliDocFailures = await validateReleasedCliDocs();
@@ -21,6 +23,7 @@ const failures = [
   ...workflowFailures,
   ...hygieneFailures,
   ...toolingFailures,
+  ...releasePagesFailures,
   ...currentTruthDocFailures,
   ...httpSurfaceFailures,
   ...releasedCliDocFailures,

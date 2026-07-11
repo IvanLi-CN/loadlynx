@@ -10,6 +10,8 @@
 
 This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes.
 
+The Pages workflow now deploys only a validated release Web tarball. Release Web builds retain the Bun lockfile, bundle-budget, and production-preview gates before the tarball can reach Pages or GitHub Release.
+
 ## Milestones
 
 No explicit milestones were recorded in the legacy plan.

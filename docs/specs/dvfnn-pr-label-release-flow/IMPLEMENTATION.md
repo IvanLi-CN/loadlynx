@@ -13,6 +13,7 @@
 - Refactored release automation to consume merged PR labels and inject the computed release version into artifacts.
 - Bound host-tools Clap version output to release-injected metadata so released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the static crate package version.
 - Release asset assembly now publishes host-tools installer scripts, firmware catalog JSON, Web bundle, and `SHA256SUMS` covering all release files before creating the GitHub Release.
+- The release Web bundle now clears its budget and production-preview gates before packaging; its validated tarball is the only Pages deployment source, and the Pages deployment gate precedes GitHub Release creation.
 - Added a repo-local declaration check so CI fails if the quality-gates contract drifts away from the expected PR-only + zero-approval policy.
 - The quality-gates declaration check now also verifies that each declared workflow name resolves to a local workflow file and that every declared branch-protection job name still exists in the actual GitHub Actions workflow even if the workflow is internally split into additional jobs.
 - Refactored the quality-gates checker into reusable validation logic plus a dedicated regression test script so workflow/job contract drift is covered both by script-level fixtures and by the live repository declaration check.

@@ -10,6 +10,7 @@
     "commitlint": "commitlint --edit",
     "test:quality-gates": "node .github/scripts/check-quality-gates.test.mjs && node .github/scripts/check-quality-gates.mjs",
     "test:workflow-hygiene": "node .github/scripts/check-workflow-hygiene.test.mjs && node .github/scripts/check-workflow-hygiene.mjs",
+    "test:pages-release-bundle": "node .github/scripts/prepare-pages-release-bundle.test.mjs",
     "test:release-labels": "node .github/scripts/release-labels.test.mjs"
   }
 }

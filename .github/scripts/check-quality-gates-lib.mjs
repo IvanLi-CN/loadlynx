@@ -155,6 +155,10 @@ export function parseWorkflowMetadata(source, fileName) {
     if (/^ {4}timeout-minutes:\s*\d+\s*$/.test(line)) {
       currentJob.hasTimeoutMinutes = true;
     }
+
+    if (/^ {4}uses:\s*\S/.test(line)) {
+      currentJob.isReusableWorkflow = true;
+    }
   }
 
   return workflow;
@@ -252,7 +256,11 @@ export function validateWorkflowHygiene({ workflows }) {
     }
 
     for (const job of workflow.jobs) {
-      if (!job.hasTimeoutMinutes) {
+      if (job.isReusableWorkflow && job.hasTimeoutMinutes) {
+        failures.push(
+          `workflow ${workflow.fileName} reusable job ${JSON.stringify(job.name ?? job.id)}: timeout-minutes is not supported`,
+        );
+      } else if (!job.isReusableWorkflow && !job.hasTimeoutMinutes) {
         failures.push(`workflow ${workflow.fileName} job ${JSON.stringify(job.name ?? job.id)}: missing timeout-minutes`);
       }
     }
@@ -311,14 +319,12 @@ export async function validateWebToolingContracts({
   webPackageJsonPath = new URL("../../web/package.json", import.meta.url),
   webPackageLockPath = new URL("../../web/package-lock.json", import.meta.url),
   webCheckWorkflowPath = new URL("../workflows/web-check.yml", import.meta.url),
-  webPagesWorkflowPath = new URL("../workflows/web-pages.yml", import.meta.url),
   releaseWorkflowPath = new URL("../workflows/release.yml", import.meta.url),
 } = {}) {
   const failures = [];
   const webPackage = JSON.parse(await readFile(webPackageJsonPath, "utf8"));
   const scripts = webPackage.scripts ?? {};
   const webCheckWorkflow = await readFile(webCheckWorkflowPath, "utf8");
-  const webPagesWorkflow = await readFile(webPagesWorkflowPath, "utf8");
   const releaseWorkflow = await readFile(releaseWorkflowPath, "utf8");
   const webInstallGuard =
     'if [ -f package-lock.json ]; then\n            echo "ERROR: web/package-lock.json is not supported. Use Bun and web/bun.lock only." >&2\n            exit 1\n          fi\n          bun ci';
@@ -362,24 +368,6 @@ export async function validateWebToolingContracts({
     );
   }
 
-  if (!webPagesWorkflow.includes("run: node scripts/run-playwright.mjs install --with-deps")) {
-    failures.push(
-      ".github/workflows/web-pages.yml: Install Playwright browsers step must run node scripts/run-playwright.mjs install --with-deps",
-    );
-  }
-
-  if (/\bbunx\s+playwright\s+install\b/.test(webPagesWorkflow)) {
-    failures.push(
-      ".github/workflows/web-pages.yml: bunx playwright install is not allowed; use node scripts/run-playwright.mjs install --with-deps",
-    );
-  }
-
-  if (!webPagesWorkflow.includes("run: bun run test:preview-smoke")) {
-    failures.push(
-      ".github/workflows/web-pages.yml: Production preview smoke step must run bun run test:preview-smoke",
-    );
-  }
-
   try {
     await readFile(webPackageLockPath, "utf8");
     failures.push("web/package-lock.json must not exist; use web/bun.lock as the only lockfile");
@@ -391,7 +379,6 @@ export async function validateWebToolingContracts({
 
   const bunOnlyWorkflows = [
     [".github/workflows/web-check.yml", webCheckWorkflow],
-    [".github/workflows/web-pages.yml", webPagesWorkflow],
     [".github/workflows/release.yml", releaseWorkflow],
   ];
 
@@ -400,6 +387,56 @@ export async function validateWebToolingContracts({
       failures.push(
         `${label}: web install step must reject web/package-lock.json and run bun ci`,
       );
+    }
+  }
+
+  return failures;
+}
+
+export async function validateReleasePagesContracts({
+  webPagesWorkflowPath = new URL("../workflows/web-pages.yml", import.meta.url),
+  releaseWorkflowPath = new URL("../workflows/release.yml", import.meta.url),
+} = {}) {
+  const failures = [];
+  const webPagesWorkflow = await readFile(webPagesWorkflowPath, "utf8");
+  const releaseWorkflow = await readFile(releaseWorkflowPath, "utf8");
+
+  const pagesRequirements = [
+    ["workflow_dispatch:", "must only expose workflow_dispatch deployment"],
+    ["release_tag:", "must require a release_tag input"],
+    ["required: true", "release_tag input must be required"],
+    ["gh release download", "must download the published release Web asset"],
+    ["prepare-pages-release-bundle.mjs", "must validate the downloaded release bundle"],
+    ["path: dist/pages", "must upload the validated Pages directory"],
+  ];
+  for (const [snippet, message] of pagesRequirements) {
+    if (!webPagesWorkflow.includes(snippet)) {
+      failures.push(`.github/workflows/web-pages.yml: ${message}`);
+    }
+  }
+  if (/^\s*push:\s*$/m.test(webPagesWorkflow)) {
+    failures.push(
+      ".github/workflows/web-pages.yml: push-triggered source builds are not allowed",
+    );
+  }
+
+  const releaseRequirements = [
+    ["run: node scripts/run-playwright.mjs install --with-deps", "must install Playwright before release preview smoke"],
+    ["run: bun run check:bundle:app", "must enforce the app bundle budget before publishing"],
+    ["run: bun run test:preview-smoke", "must run production preview smoke before publishing"],
+    ["run: cp dist/index.html dist/404.html", "must package the SPA fallback in the release bundle"],
+    ["prepare-pages-release-bundle.mjs", "must validate the exact release Web bundle before Pages upload"],
+    ["needs.web.result == 'success'", "must prepare Pages only after the release Web bundle succeeds"],
+    ["pages-deploy:", "must contain a Pages deployment job"],
+    ["needs.host-tools.result == 'success'", "must deploy Pages only after host tools succeed"],
+    ["needs.firmware.result == 'success'", "must deploy Pages only after firmware succeeds"],
+    ["needs.pages.result == 'success'", "must deploy Pages only after bundle preparation succeeds"],
+    ["- pages-deploy", "must block Create GitHub release on Pages deployment"],
+    ["needs.pages-deploy.result == 'success'", "must require successful Pages deployment before release creation"],
+  ];
+  for (const [snippet, message] of releaseRequirements) {
+    if (!releaseWorkflow.includes(snippet)) {
+      failures.push(`.github/workflows/release.yml: ${message}`);
     }
   }
 
