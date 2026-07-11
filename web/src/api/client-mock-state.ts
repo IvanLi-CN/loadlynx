@@ -109,6 +109,7 @@ function createInitialCalibrationProfileWire(): CalibrationProfileWire {
 
   return {
     active,
+    persistence: { status: "factory-default" },
     current_ch1_points,
     current_ch2_points,
     v_local_points,

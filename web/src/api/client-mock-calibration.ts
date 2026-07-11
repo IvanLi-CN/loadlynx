@@ -17,6 +17,7 @@ function mapCalibrationProfileWireToUi(
 ): CalibrationProfile {
   return {
     active: profile.active,
+    persistence: profile.persistence,
     v_local_points: profile.v_local_points.map((point) => ({
       raw: point.raw_100uv,
       mv: point.meas_mv,
@@ -260,6 +261,7 @@ export async function mockPostCalibrationApply(
   const wire = mapCalibrationWriteRequestToWire(payload);
   const ram = state.calibration.ram;
   ram.active.source = "user-calibrated";
+  ram.persistence = { status: "ram-only" };
 
   switch (wire.kind) {
     case "v_local":
@@ -295,6 +297,7 @@ export async function mockPostCalibrationCommit(
 ): Promise<void> {
   const state = getOrCreateMockDevice(baseUrl);
   await mockPostCalibrationApply(baseUrl, payload);
+  state.calibration.ram.persistence = { status: "commit-verified" };
   state.calibration.eeprom = structuredClone(state.calibration.ram);
 }
 
@@ -307,6 +310,7 @@ export async function mockPostCalibrationReset(
 
   if (kind === "all") {
     state.calibration.ram = structuredClone(state.calibration.factory);
+    state.calibration.ram.persistence = { status: "factory-default" };
     state.calibration.eeprom = null;
     return;
   }
@@ -331,9 +335,11 @@ export async function mockPostCalibrationReset(
 
   if (mockProfileWireEqualsFactory(ram, factory)) {
     state.calibration.ram = structuredClone(factory);
+    state.calibration.ram.persistence = { status: "factory-default" };
     state.calibration.eeprom = null;
   } else {
     ram.active.source = "user-calibrated";
+    ram.persistence = { status: "commit-verified" };
     state.calibration.eeprom = structuredClone(ram);
   }
 }
