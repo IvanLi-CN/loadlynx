@@ -4630,7 +4630,7 @@ pub(crate) async fn handle_calibration_reset(
         };
         *candidate.points_for_mut(kind) = factory_curve;
         if profile_equals_factory(&candidate) {
-            (Some(kind), factory.clone(), true)
+            (None, factory.clone(), true)
         } else {
             candidate.source = ProfileSource::UserCalibrated;
             (Some(kind), candidate, false)
