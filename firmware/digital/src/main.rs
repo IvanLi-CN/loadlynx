@@ -8128,6 +8128,13 @@ async fn main(spawner: Spawner) {
     let (initial_profile, calibration_persistence_status) = {
         let mut guard = eeprom.lock().await;
         match guard.read_profile_blob().await {
+            Ok(blob) if blob.iter().all(|byte| *byte == 0xFF) => {
+                info!("EEPROM calibration profile is cleared; using factory-default");
+                (
+                    ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV),
+                    CalibrationPersistenceStatus::FactoryDefault,
+                )
+            }
             Ok(blob) => match calfmt::deserialize_profile(&blob, calfmt::DIGITAL_HW_REV) {
                 Ok(profile) => {
                     info!(

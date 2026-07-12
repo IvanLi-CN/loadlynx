@@ -620,6 +620,9 @@ export async function exportDiagnostics(
         psk: "<redacted>",
       },
       link_up: state.status.link_up,
+      calibration_persistence: state.calibration.ram.persistence ?? {
+        status: "unknown",
+      },
       last_status: {
         uptime_ms: state.status.raw.uptime_ms,
         fault_flags: state.status.raw.fault_flags,

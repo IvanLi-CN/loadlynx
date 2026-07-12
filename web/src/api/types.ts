@@ -46,6 +46,7 @@ export interface DiagnosticsExport {
     psk: "<redacted>";
   };
   link_up: boolean;
+  calibration_persistence: CalibrationPersistence;
   last_status: DiagnosticsLastStatus | null;
 }
 
