@@ -11,7 +11,7 @@
 
 ### Goals
 
-- Web Console 在非 Storybook 运行时，界面上始终可见一个简洁的版本号展示位（例如 `0.1.0+7c981b7`）。
+- Web Console 在非 Storybook 运行时，界面上始终可见一个简洁的版本号展示位；GitHub Pages 上显示发布工作流注入的 release version（例如 `0.6.9`）。
 - 版本号展示位可点击跳转到 GitHub 的“对应版本”（优先 `v*` tag，其次 commit），便于快速定位代码来源。
 - 版本信息不应依赖运行时网络请求；在构建期注入缺失等异常场景下，按 best-effort 降级但不影响主流程（不阻塞渲染）。
 
@@ -42,6 +42,7 @@
 
 - 版本展示位位置：shell 底部 footer 区域（当前为右下角 footer）。
 - 跳转策略：Option B（“`v*` tag 优先，否则 commit”）。
+- GitHub Pages 仅部署已验证的 release Web tarball，不独立从 `main` 计算开发构建版本。
 
 ## 接口契约（Interfaces & Contracts）
 
@@ -60,6 +61,7 @@
 ## 验收标准（Acceptance Criteria）
 
 - Given 打开 Web Console 任意页面，When 页面渲染完成，Then 在 shell footer 可见版本号展示位，且内容与构建期注入的 `import.meta.env.VITE_APP_VERSION` 一致。
+- Given 打开 GitHub Pages，When 发布成功，Then footer、HTML shell 与 `/version.json` 均显示同一 release version。
 - Given 点击版本号展示位，When 浏览器打开链接，Then 跳转到 GitHub 溯源页面（具体跳转目标按本计划的“开放问题”决策执行）。
 - Given 构建期注入缺失（例如本地未设置 env vars），When 打开页面，Then 不影响主界面正常使用，且版本展示位以“隐藏或降级文本”的方式处理（不抛异常、不白屏）。
 - Given Storybook 运行时，When 打开任意 story，Then 不显示版本展示位。

@@ -10,9 +10,9 @@
 
 - Type: `string`
 - Required (CI / production): yes
-- Example: `0.1.0+3423686`
-- Source of truth: `APP_EFFECTIVE_VERSION`（由 `.github/scripts/compute-version.sh` 计算）
-- Injection rule: CI 在执行 `bun run build` 前将 `VITE_APP_VERSION` 设为与 `APP_EFFECTIVE_VERSION` 一致。
+- Example: `0.6.9`
+- Source of truth: release workflow resolved version; non-release Web checks may still use `APP_EFFECTIVE_VERSION` from `.github/scripts/compute-version.sh`.
+- Injection rule: release CI 在执行 `bun run build` 前将 `VITE_APP_VERSION` 设为与 release version 一致；GitHub Pages 仅部署该 release build 的 tarball。
 
 ### `VITE_APP_GIT_SHA`
 

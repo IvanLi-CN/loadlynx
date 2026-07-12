@@ -4,7 +4,7 @@
 
 - PR labels are the source of truth for release intent.
 - `Label Gate` validates release labels before merge.
-- `Release (LoadLynx)` consumes the merged PR labels on `main`, computes the next version, builds all releaseable project artifacts, creates the GitHub Release, and comments back on the source PR.
+- `Release (LoadLynx)` consumes the merged PR labels on `main`, computes the next version, builds all releaseable project artifacts, deploys the validated release Web artifact to GitHub Pages, creates the GitHub Release, and comments back on the source PR.
 - Release failures continue to use the Telegram notifier; ordinary PR CI failures do not.
 
 ## Label Contract
@@ -24,6 +24,8 @@
 - Stable version discovery ignores `dev-*` tags and other non-stable tags.
 - Official release artifacts include analog ELF, digital ELF, firmware catalog, host tools for supported host targets, user installer scripts, Web bundle, and `SHA256SUMS` covering every release asset.
 - Release builds inject the computed version into firmware, Web, and released host-tools version metadata instead of rewriting package manifests.
+- The release Web bundle is budget-checked and production-preview-smoked before packaging. GitHub Pages receives that exact tarball only after its embedded shell version and `version.json` match the resolved release tag; a Pages failure blocks release creation.
+- The manual Pages recovery workflow accepts a required published `release_tag`, downloads the matching Web asset, and performs the same validation before deployment.
 - Released host tools must report that injected version through owner-facing `loadlynx -v` and `loadlynx-devd --version` output.
 
 ## Release Decision Matrix
@@ -50,6 +52,7 @@
 - A merged stable PR creates a GitHub Release containing analog, digital, firmware catalog, host-tools, installer, Web, and `SHA256SUMS` artifacts.
 - A docs/skill PR that changes owner-facing released operation guidance is labeled `type:patch` or higher; `type:none` is rejected by review or contract checks for that class of change.
 - Firmware/Web/host-tools release metadata reports the injected release version.
+- GitHub Pages returns the same version as the release Web tarball and cannot be updated by an independent `main` source build.
 - Released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the crate package version.
 - The source PR receives the release completion comment.
 - Ordinary PR CI failures do not trigger Telegram notifications.

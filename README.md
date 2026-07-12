@@ -195,9 +195,10 @@ owner-facing skill/docs 合同变更时，先使用
 与签名提交约束。
 
 合并到 `main` 后，`Release (LoadLynx)` 会读取源 PR 的 labels，计算下一版本，
-并把该版本注入固件、Web 与 host-tools 发布包。Stable 发布使用 `vX.Y.Z` tag；
-beta/dev 发布为 prerelease。发布成功后 workflow 会在源 PR 留下版本、release
-链接、产物列表和 run 链接。Telegram 通知只覆盖 release workflow 失败，不覆盖普通
+并把该版本注入固件、Web 与 host-tools 发布包。Web bundle 通过生产预览验证后，会先以
+同一份 release tarball 部署 GitHub Pages；Pages 部署失败会阻断 GitHub Release。Stable
+发布使用 `vX.Y.Z` tag；beta/dev 发布为 prerelease。发布成功后 workflow 会在源 PR 留下版本、
+release 链接、产物列表和 run 链接。Telegram 通知只覆盖 release workflow 失败，不覆盖普通
 PR CI 失败。
 
 ## 片间通信建议

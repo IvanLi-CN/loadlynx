@@ -46,3 +46,4 @@ No explicit milestones were recorded in the legacy plan.
 - [x] 构建期注入：将版本/溯源信息编译进 Vite bundle（`VITE_APP_VERSION` / `VITE_APP_GIT_*` / `VITE_GITHUB_REPO`）
 - [x] 在 `ConsoleLayout` 增加 `AppVersionLink` 展示位（并在 Storybook runtime 隐藏；数据主来源为构建期注入）
 - [x] 本地预览与 Pages 验证：版本展示正常、GitHub 跳转正确
+- [x] Pages 发布来源收敛为已验证的 release Web tarball，避免 package development version 覆盖 release version。
