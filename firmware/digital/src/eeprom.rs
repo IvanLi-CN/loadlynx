@@ -114,14 +114,11 @@ impl M24c64 {
             .map_err(|_| EepromError::I2c)
     }
 
-    pub async fn probe_ready<I2C: EhI2c>(
-        &self,
-        i2c: &mut I2C,
-        probe_addr: u16,
-        dummy: &mut [u8; 1],
-    ) -> Result<(), EepromError> {
-        let probe = probe_addr.to_be_bytes();
-        i2c.write_read(self.addr_7bit, &probe, dummy)
+    pub async fn probe_ready<I2C: EhI2c>(&self, i2c: &mut I2C) -> Result<(), EepromError> {
+        // M24C64 ACK polling: issue only the device address. A random read
+        // changes the internal address pointer and can fail independently of
+        // write-cycle completion on a shared bus.
+        i2c.write(self.addr_7bit, &[])
             .await
             .map_err(|_| EepromError::I2c)
     }
@@ -172,7 +169,7 @@ impl SharedM24c64 {
             }
 
             // Wait for internal write cycle completion via polling.
-            self.wait_ready(cur_addr as u16).await?;
+            self.wait_ready().await?;
 
             cur_addr += chunk_len;
             offset += chunk_len;
@@ -191,6 +188,39 @@ impl SharedM24c64 {
         let mut buf = [0u8; EEPROM_PROFILE_LEN];
         self.read(EEPROM_PROFILE_BASE_ADDR, &mut buf).await?;
         Ok(buf)
+    }
+
+    pub async fn verify_profile_blob(
+        &mut self,
+        expected: &[u8; EEPROM_PROFILE_LEN],
+    ) -> Result<bool, EepromError> {
+        let mut offset = 0usize;
+        let mut page = [0u8; EEPROM_PAGE_SIZE_BYTES];
+        while offset < expected.len() {
+            let len = (expected.len() - offset).min(page.len());
+            self.read(EEPROM_PROFILE_BASE_ADDR + offset as u16, &mut page[..len])
+                .await?;
+            if page[..len] != expected[offset..offset + len] {
+                return Ok(false);
+            }
+            offset += len;
+        }
+        Ok(true)
+    }
+
+    pub async fn profile_blob_is_cleared(&mut self) -> Result<bool, EepromError> {
+        let mut offset = 0usize;
+        let mut page = [0u8; EEPROM_PAGE_SIZE_BYTES];
+        while offset < EEPROM_PROFILE_LEN {
+            let len = (EEPROM_PROFILE_LEN - offset).min(page.len());
+            self.read(EEPROM_PROFILE_BASE_ADDR + offset as u16, &mut page[..len])
+                .await?;
+            if page[..len].iter().any(|byte| *byte != 0xFF) {
+                return Ok(false);
+            }
+            offset += len;
+        }
+        Ok(true)
     }
 
     pub async fn clear_profile_blob(&mut self) -> Result<(), EepromError> {
@@ -265,16 +295,15 @@ impl SharedM24c64 {
             .await
     }
 
-    async fn wait_ready(&mut self, probe_addr: u16) -> Result<(), EepromError> {
+    async fn wait_ready(&mut self) -> Result<(), EepromError> {
         // Typical tWR is a few ms; keep a generous timeout.
         const POLL_TIMEOUT_MS: u32 = 20;
         let start = crate::now_ms32();
-        let mut dummy = [0u8; 1];
         loop {
             let dev = self.dev;
             let res = {
                 let mut guard = self.bus.lock().await;
-                dev.probe_ready(&mut *guard, probe_addr, &mut dummy).await
+                dev.probe_ready(&mut *guard).await
             };
 
             match res {

@@ -240,6 +240,7 @@ preview = piecewise_linear(candidate_points, raw)
     "fmt_version": 1,
     "hw_rev": 42
   },
+  "persistence": { "status": "user-profile-loaded" },
   "current_ch1_points": [
     { "raw_100uv": 25000, "raw_dac_code": 1800, "meas_ma": 3050 }
   ],
@@ -281,8 +282,8 @@ preview = piecewise_linear(candidate_points, raw)
 
 `POST /api/v1/calibration/commit`
 
-请求同 `apply`。  
-行为：写 EEPROM → 更新 RAM active points → 预处理并下发多块 CalWrite。  
+请求同 `apply`。
+行为：构造完整四曲线候选 profile，写 EEPROM 后立即回读并校验格式、硬件版本、CRC 与全部点位；仅验证通过后才更新 RAM active points 并下发多块 CalWrite。即使同一曲线已通过 Apply 写入 RAM，Commit 仍必须执行 EEPROM 写入与回读验证。
 返回：200 或错误。
 
 ### 6.4 恢复默认校准
@@ -402,6 +403,7 @@ payload 结构（小端）：
 - 参数合法性：
   - 对每条曲线计算各段斜率 `k = Δmeas/Δraw`，要求落在合理范围（例如 0.8–1.2）且全段同号；异常则拒绝 apply/commit。
   - EEPROM 校验失败时自动回退 factory‑default，并在 UI 显示“未用户校准”。
+  - Profile 的 `persistence.status` 与 diagnostics 的 `calibration_persistence.status` 会返回加载或最近写入结果，包括 `user-profile-loaded`、`ram-only`、`commit-verified`、`invalid-format`、`hw-rev-mismatch`、`invalid-counts`、`crc-mismatch`、`read-failed`、`write-failed` 与 `verification-failed`。
 
 ---
 

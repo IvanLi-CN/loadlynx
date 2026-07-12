@@ -349,14 +349,59 @@ use loadlynx_calibration_format::{self as calfmt, ActiveProfile, CurveKind};
 #[derive(Clone, Debug)]
 pub struct CalibrationState {
     pub profile: ActiveProfile,
+    pub persistence_status: CalibrationPersistenceStatus,
     pub cal_mode: CalKind,
     pub pending_cal_mode: Option<CalKind>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CalibrationPersistenceStatus {
+    UserProfileLoaded,
+    FactoryDefault,
+    RamOnly,
+    InvalidFormat,
+    HwRevMismatch,
+    InvalidCounts,
+    CrcMismatch,
+    ReadFailed,
+    WriteFailed,
+    VerificationFailed,
+    CommitVerified,
+}
+
+impl CalibrationPersistenceStatus {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UserProfileLoaded => "user-profile-loaded",
+            Self::FactoryDefault => "factory-default",
+            Self::RamOnly => "ram-only",
+            Self::InvalidFormat => "invalid-format",
+            Self::HwRevMismatch => "hw-rev-mismatch",
+            Self::InvalidCounts => "invalid-counts",
+            Self::CrcMismatch => "crc-mismatch",
+            Self::ReadFailed => "read-failed",
+            Self::WriteFailed => "write-failed",
+            Self::VerificationFailed => "verification-failed",
+            Self::CommitVerified => "commit-verified",
+        }
+    }
+
+    pub const fn from_load_error(error: calfmt::ProfileLoadError) -> Self {
+        match error {
+            calfmt::ProfileLoadError::InvalidLength
+            | calfmt::ProfileLoadError::UnsupportedFmtVersion(_) => Self::InvalidFormat,
+            calfmt::ProfileLoadError::HwRevMismatch { .. } => Self::HwRevMismatch,
+            calfmt::ProfileLoadError::InvalidCounts => Self::InvalidCounts,
+            calfmt::ProfileLoadError::CrcMismatch { .. } => Self::CrcMismatch,
+        }
+    }
+}
+
 impl CalibrationState {
-    pub fn new(profile: ActiveProfile) -> Self {
+    pub fn new(profile: ActiveProfile, persistence_status: CalibrationPersistenceStatus) -> Self {
         Self {
             profile,
+            persistence_status,
             cal_mode: CalKind::Off,
             pending_cal_mode: None,
         }
@@ -913,9 +958,10 @@ async fn write_usb_calibration_profile_response(
     };
     let _ = core::write!(
         out,
-        "\",{},{}],\"c1\":",
+        "\",{},{}],\"s\":\"{}\",\"c1\":",
         profile.fmt_version,
-        profile.hw_rev
+        profile.hw_rev,
+        guard.persistence_status.as_str(),
     );
     write_usb_compact_current_curve(out, &profile.current_ch1);
     out.push_str(",\"c2\":").ok();
@@ -2217,9 +2263,11 @@ async fn write_usb_diagnostics_response(
     eeprom: &'static EepromMutex,
     wifi_state: &'static net::WifiStateMutex,
     telemetry: &'static TelemetryMutex,
+    calibration: &'static CalibrationMutex,
 ) {
     let mut body = String::new();
-    let result = net::render_diagnostics_json(&mut body, eeprom, wifi_state, telemetry).await;
+    let result =
+        net::render_diagnostics_json(&mut body, eeprom, wifi_state, telemetry, calibration).await;
     write_usb_net_body_response(
         out,
         request_id,
@@ -2331,7 +2379,15 @@ async fn handle_usb_jsonl_request(
         "soft_reset" => write_usb_soft_reset_response(out, request_id, line),
         #[cfg(feature = "net_http")]
         "get_diagnostics" => {
-            write_usb_diagnostics_response(out, request_id, eeprom, wifi_state, telemetry).await
+            write_usb_diagnostics_response(
+                out,
+                request_id,
+                eeprom,
+                wifi_state,
+                telemetry,
+                calibration,
+            )
+            .await
         }
         _ => write_usb_error_response(out, request_id, "UNSUPPORTED_OPERATION", "unsupported op"),
     }
@@ -8069,35 +8125,42 @@ async fn main(spawner: Spawner) {
     let eeprom = EEPROM.init(Mutex::new(eeprom::SharedM24c64::new(i2c0_bus)));
 
     // Load calibration profile from EEPROM; if invalid, fall back to firmware defaults.
-    let initial_profile = {
+    let (initial_profile, calibration_persistence_status) = {
         let mut guard = eeprom.lock().await;
         match guard.read_profile_blob().await {
+            Ok(blob) if blob.iter().all(|byte| *byte == 0xFF) => {
+                info!("EEPROM calibration profile is cleared; using factory-default");
+                (
+                    ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV),
+                    CalibrationPersistenceStatus::FactoryDefault,
+                )
+            }
             Ok(blob) => match calfmt::deserialize_profile(&blob, calfmt::DIGITAL_HW_REV) {
                 Ok(profile) => {
                     info!(
                         "EEPROM calibration profile loaded (fmt_version={}, hw_rev={})",
                         profile.fmt_version, profile.hw_rev
                     );
-                    profile
+                    (profile, CalibrationPersistenceStatus::UserProfileLoaded)
                 }
                 Err(err) => {
-                    let err_kind = match err {
-                        calfmt::ProfileLoadError::InvalidLength => "invalid_length",
-                        calfmt::ProfileLoadError::UnsupportedFmtVersion(_) => "fmt_version",
-                        calfmt::ProfileLoadError::HwRevMismatch { .. } => "hw_rev",
-                        calfmt::ProfileLoadError::InvalidCounts => "counts",
-                        calfmt::ProfileLoadError::CrcMismatch { .. } => "crc32",
-                    };
+                    let status = CalibrationPersistenceStatus::from_load_error(err);
                     warn!(
                         "EEPROM calibration profile invalid; using factory-default (err={})",
-                        err_kind
+                        status.as_str()
                     );
-                    ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV)
+                    (
+                        ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV),
+                        status,
+                    )
                 }
             },
             Err(err) => {
                 warn!("EEPROM read failed; using factory-default (err={:?})", err);
-                ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV)
+                (
+                    ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV),
+                    CalibrationPersistenceStatus::ReadFailed,
+                )
             }
         }
     };
@@ -8340,7 +8403,10 @@ async fn main(spawner: Spawner) {
     });
 
     let telemetry = TELEMETRY.init(Mutex::new(TelemetryModel::new()));
-    let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(initial_profile)));
+    let calibration = CALIBRATION.init(Mutex::new(CalibrationState::new(
+        initial_profile,
+        calibration_persistence_status,
+    )));
     let control = CONTROL.init(Mutex::new(ControlState::new(
         initial_presets,
         initial_pd,

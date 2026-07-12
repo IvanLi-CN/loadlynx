@@ -46,6 +46,7 @@ export interface DiagnosticsExport {
     psk: "<redacted>";
   };
   link_up: boolean;
+  calibration_persistence: CalibrationPersistence;
   last_status: DiagnosticsLastStatus | null;
 }
 
@@ -158,6 +159,10 @@ export interface CalibrationActiveProfile {
   hw_rev: number;
 }
 
+export interface CalibrationPersistence {
+  status: string;
+}
+
 export interface CalibrationPointVoltage {
   raw: number;
   mv: number;
@@ -171,6 +176,7 @@ export interface CalibrationPointCurrent {
 
 export interface CalibrationProfile {
   active: CalibrationActiveProfile;
+  persistence?: CalibrationPersistence;
   v_local_points: CalibrationPointVoltage[];
   v_remote_points: CalibrationPointVoltage[];
   current_ch1_points: CalibrationPointCurrent[];
@@ -222,6 +228,7 @@ export type CalibrationPointCurrentWireCompact = [
 
 export interface CalibrationProfileWire {
   active: CalibrationActiveProfile;
+  persistence?: CalibrationPersistence;
   current_ch1_points: CalibrationPointCurrentWire[];
   current_ch2_points: CalibrationPointCurrentWire[];
   v_local_points: CalibrationPointVoltageWire[];

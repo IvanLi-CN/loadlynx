@@ -23,6 +23,7 @@ export function mapCalibrationProfileWireToUi(
 ): CalibrationProfile {
   return {
     active: profile.active,
+    persistence: profile.persistence,
     v_local_points: profile.v_local_points.map((point) => ({
       raw: point.raw_100uv,
       mv: point.meas_mv,
@@ -49,6 +50,7 @@ export function mapCalibrationProfileUiToWire(
 ): CalibrationProfileWire {
   return {
     active: profile.active,
+    persistence: profile.persistence,
     v_local_points: profile.v_local_points.map((point) => ({
       raw_100uv: point.raw,
       meas_mv: point.mv,

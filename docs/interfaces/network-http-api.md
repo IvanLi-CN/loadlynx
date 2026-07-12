@@ -720,6 +720,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
     "psk": "<redacted>"
   },
   "link_up": true,
+  "calibration_persistence": { "status": "user-profile-loaded" },
   "last_status": {
     "uptime_ms": 123456,
     "fault_flags": 0
@@ -732,6 +733,7 @@ Raw 字段单位：`*_100uv` 为 ADC 引脚电压（100 µV/LSB 的 i16）；`
 - `GET /api/v1/diagnostics` 目前是同 payload 的兼容别名；新调用方应优先使用 `/api/v1/diagnostics/export`。
 - `wifi.psk` 必须始终为 `"<redacted>"`，不得返回真实凭据。
 - `last_status` 在尚未收到任何遥测帧时为 `null`。
+- `calibration_persistence.status` 标识启动加载或最近一次 EEPROM 持久化的结果；读取校准 profile 时同一信息位于顶层 `persistence.status`。
 
 - 典型错误：
   - `503 UNAVAILABLE`：诊断快照暂时不可生成。

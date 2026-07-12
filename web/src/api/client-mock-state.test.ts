@@ -392,6 +392,7 @@ test("mock diagnostics export matches firmware-facing diagnostics contract", asy
       psk: "<redacted>",
     },
     link_up: true,
+    calibration_persistence: { status: "factory-default" },
     last_status: {
       uptime_ms: 4242,
       fault_flags: 3,

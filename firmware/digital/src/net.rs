@@ -1176,7 +1176,9 @@ async fn handle_http_connection(
             }
         },
         ("GET", "/api/v1/diagnostics") | ("GET", "/api/v1/diagnostics/export") => {
-            match render_diagnostics_json(&mut body, eeprom, wifi_state, telemetry).await {
+            match render_diagnostics_json(&mut body, eeprom, wifi_state, telemetry, calibration)
+                .await
+            {
                 Ok(()) => {
                     write_http_response(socket, version, "200 OK", &body, cors_origin).await?;
                 }
@@ -1497,6 +1499,7 @@ pub(crate) async fn render_diagnostics_json(
     eeprom: &'static EepromMutex,
     wifi_state: &'static WifiStateMutex,
     telemetry: &'static TelemetryMutex,
+    calibration: &'static CalibrationMutex,
 ) -> Result<(), &'static str> {
     let (ssid, source) = read_wifi_status_identity(eeprom).await;
     let wifi = { *wifi_state.lock().await };
@@ -1516,6 +1519,10 @@ pub(crate) async fn render_diagnostics_json(
     } else {
         "false"
     });
+    let calibration_persistence_status = { calibration.lock().await.persistence_status };
+    buf.push_str(",\"calibration_persistence\":{\"status\":\"");
+    buf.push_str(calibration_persistence_status.as_str());
+    buf.push_str("\"}");
     if let Some(status) = status {
         let _ = core::write!(
             buf,
@@ -3643,6 +3650,26 @@ mod tests {
             Some(9_000)
         );
     }
+
+    #[test]
+    fn commit_verification_accepts_the_profile_applied_to_ram() {
+        let mut candidate = calfmt::ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV);
+        candidate.source = ProfileSource::UserCalibrated;
+        candidate.current_ch1[1].meas_physical = 4_730;
+        let blob = calfmt::serialize_profile(&candidate);
+
+        assert!(serialized_profile_matches(&blob, &candidate));
+    }
+
+    #[test]
+    fn commit_verification_rejects_corrupted_eeprom_readback() {
+        let mut candidate = calfmt::ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV);
+        candidate.source = ProfileSource::UserCalibrated;
+        let mut blob = calfmt::serialize_profile(&candidate);
+        blob[32] ^= 0x01;
+
+        assert!(!serialized_profile_matches(&blob, &candidate));
+    }
 }
 
 struct CcUpdateRequest {
@@ -3860,6 +3887,9 @@ pub(crate) async fn render_calibration_profile_json(
     body_out.push_str(",\"hw_rev\":");
     let _ = core::write!(body_out, "{}", profile.hw_rev);
     body_out.push_str("},");
+    body_out.push_str("\"persistence\":{\"status\":\"");
+    body_out.push_str(guard.persistence_status.as_str());
+    body_out.push_str("\"},");
 
     // current_ch1_points
     body_out.push_str("\"current_ch1_points\":[");
@@ -4411,6 +4441,7 @@ pub(crate) async fn handle_calibration_apply(
         // Apply is RAM-only (no EEPROM write), but the active profile is now user-supplied.
         guard.profile.source = ProfileSource::UserCalibrated;
         guard.profile.fmt_version = calfmt::CAL_FMT_VERSION_LATEST;
+        guard.persistence_status = crate::CalibrationPersistenceStatus::RamOnly;
     }
 
     body_out.clear();
@@ -4449,36 +4480,72 @@ pub(crate) async fn handle_calibration_commit(
         }
     };
 
-    let (prev, blob) = {
-        let mut guard = calibration.lock().await;
-        if guard.profile.source == ProfileSource::UserCalibrated
-            && guard.profile.points_for(kind) == points.as_slice()
-        {
-            body_out.clear();
-            body_out.push_str(r#"{"ok":true}"#);
-            return Ok(kind);
-        }
-        let prev = guard.profile.clone();
-        *guard.profile.points_for_mut(kind) = points;
-        guard.profile.source = ProfileSource::UserCalibrated;
-        guard.profile.fmt_version = calfmt::CAL_FMT_VERSION_LATEST;
-        let blob = calfmt::serialize_profile(&guard.profile);
-        (prev, blob)
+    let candidate = {
+        let guard = calibration.lock().await;
+        let mut candidate = guard.profile.clone();
+        *candidate.points_for_mut(kind) = points;
+        candidate.source = ProfileSource::UserCalibrated;
+        candidate.fmt_version = calfmt::CAL_FMT_VERSION_LATEST;
+        candidate
     };
+    let blob = calfmt::serialize_profile(&candidate);
+    if !serialized_profile_matches(&blob, &candidate) {
+        calibration.lock().await.persistence_status =
+            crate::CalibrationPersistenceStatus::VerificationFailed;
+        write_error_body(
+            body_out,
+            "UNAVAILABLE",
+            "EEPROM candidate validation failed",
+            true,
+            None,
+        );
+        return Err("503 Service Unavailable");
+    }
 
-    {
+    let verified = {
         let mut ep = eeprom.lock().await;
-        if let Err(_err) = ep.write_profile_blob(&blob).await {
-            let mut guard = calibration.lock().await;
-            guard.profile = prev;
+        if ep.write_profile_blob(&blob).await.is_err() {
+            calibration.lock().await.persistence_status =
+                crate::CalibrationPersistenceStatus::WriteFailed;
             write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
             return Err("503 Service Unavailable");
         }
+        ep.verify_profile_blob(&blob).await.unwrap_or(false)
+    };
+    if !verified {
+        calibration.lock().await.persistence_status =
+            crate::CalibrationPersistenceStatus::VerificationFailed;
+        write_error_body(
+            body_out,
+            "UNAVAILABLE",
+            "EEPROM write verification failed",
+            true,
+            None,
+        );
+        return Err("503 Service Unavailable");
+    }
+    {
+        let mut guard = calibration.lock().await;
+        guard.profile = candidate;
+        guard.persistence_status = crate::CalibrationPersistenceStatus::CommitVerified;
     }
 
     body_out.clear();
     body_out.push_str(r#"{"ok":true}"#);
     Ok(kind)
+}
+
+// The exact page-wise EEPROM comparison below proves that the stored bytes are
+// the candidate. Parsing this separately proves those bytes carry a valid
+// format/hardware revision/CRC and exactly the requested four-curve profile.
+fn serialized_profile_matches(
+    blob: &[u8; calfmt::EEPROM_PROFILE_LEN],
+    candidate: &calfmt::ActiveProfile,
+) -> bool {
+    matches!(
+        calfmt::deserialize_profile(blob, calfmt::DIGITAL_HW_REV),
+        Ok(profile) if profile == *candidate
+    )
 }
 
 fn profile_equals_factory(profile: &calfmt::ActiveProfile) -> bool {
@@ -4551,67 +4618,67 @@ pub(crate) async fn handle_calibration_reset(
         }
     };
 
-    // Apply reset to RAM first, then persist (either clear EEPROM or write updated blob).
-    let (factory, should_clear) = {
-        let factory = calfmt::ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV);
-        let should_clear = reset_kind.is_none();
-        (factory, should_clear)
-    };
-
-    if should_clear {
-        {
-            let mut guard = calibration.lock().await;
-            guard.profile = factory.clone();
-            guard.profile.source = ProfileSource::FactoryDefault;
-        }
-        {
-            let mut ep = eeprom.lock().await;
-            if let Err(_err) = ep.clear_profile_blob().await {
-                write_error_body(body_out, "UNAVAILABLE", "EEPROM clear failed", true, None);
-                return Err("503 Service Unavailable");
-            }
-        }
-        body_out.clear();
-        body_out.push_str(r#"{"ok":true}"#);
-        return Ok(None);
-    }
-
-    let kind = reset_kind.unwrap();
-    let blob_or_clear = {
-        let mut guard = calibration.lock().await;
+    let factory = calfmt::ActiveProfile::factory_default(calfmt::DIGITAL_HW_REV);
+    let (result_kind, candidate, should_clear) = if let Some(kind) = reset_kind {
+        let guard = calibration.lock().await;
+        let mut candidate = guard.profile.clone();
         let factory_curve = match kind {
             CurveKind::CurrentCh1 => factory.current_ch1.clone(),
             CurveKind::CurrentCh2 => factory.current_ch2.clone(),
             CurveKind::VLocal => factory.v_local.clone(),
             CurveKind::VRemote => factory.v_remote.clone(),
         };
-        *guard.profile.points_for_mut(kind) = factory_curve;
-
-        if profile_equals_factory(&guard.profile) {
-            guard.profile = factory.clone();
-            guard.profile.source = ProfileSource::FactoryDefault;
-            None
+        *candidate.points_for_mut(kind) = factory_curve;
+        if profile_equals_factory(&candidate) {
+            (None, factory.clone(), true)
         } else {
-            guard.profile.source = ProfileSource::UserCalibrated;
-            Some(calfmt::serialize_profile(&guard.profile))
+            candidate.source = ProfileSource::UserCalibrated;
+            (Some(kind), candidate, false)
         }
+    } else {
+        (None, factory.clone(), true)
     };
 
-    {
+    let verified = {
         let mut ep = eeprom.lock().await;
-        let res = match blob_or_clear {
-            None => ep.clear_profile_blob().await,
-            Some(ref blob) => ep.write_profile_blob(blob).await,
-        };
-        if res.is_err() {
-            write_error_body(body_out, "UNAVAILABLE", "EEPROM write failed", true, None);
-            return Err("503 Service Unavailable");
+        if should_clear {
+            ep.clear_profile_blob().await.is_ok()
+                && ep.profile_blob_is_cleared().await.unwrap_or(false)
+        } else {
+            let blob = calfmt::serialize_profile(&candidate);
+            serialized_profile_matches(&blob, &candidate)
+                && ep.write_profile_blob(&blob).await.is_ok()
+                && ep.verify_profile_blob(&blob).await.unwrap_or(false)
         }
+    };
+    if !verified {
+        calibration.lock().await.persistence_status = if should_clear {
+            crate::CalibrationPersistenceStatus::WriteFailed
+        } else {
+            crate::CalibrationPersistenceStatus::VerificationFailed
+        };
+        write_error_body(
+            body_out,
+            "UNAVAILABLE",
+            "EEPROM reset verification failed",
+            true,
+            None,
+        );
+        return Err("503 Service Unavailable");
+    }
+    {
+        let mut guard = calibration.lock().await;
+        guard.profile = candidate;
+        guard.persistence_status = if should_clear {
+            crate::CalibrationPersistenceStatus::FactoryDefault
+        } else {
+            crate::CalibrationPersistenceStatus::CommitVerified
+        };
     }
 
     body_out.clear();
     body_out.push_str(r#"{"ok":true}"#);
-    Ok(Some(kind))
+    Ok(result_kind)
 }
 
 pub(crate) fn parse_calibration_mode_request(

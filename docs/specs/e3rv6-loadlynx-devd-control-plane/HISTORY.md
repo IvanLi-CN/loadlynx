@@ -71,3 +71,7 @@ The generic `digital-esp32s3` identity remains rejected for bind and saved contr
 ## Documentation Model
 
 `SPEC.md` is the active topic contract. Historical rationale, evolution notes, and records moved out of the topic contract are kept here.
+
+## Calibration Persistence Integrity
+
+Calibration Apply is intentionally RAM-only so operators can inspect a candidate curve before saving it. Commit previously treated a matching RAM curve as already persisted, which made Apply followed by Commit report success without touching EEPROM. Commit and Reset now construct a complete candidate profile, serialize and validate it, write it, then compare every EEPROM page against the candidate before publishing the RAM profile. The profile and diagnostics contracts expose both boot fallback reasons and the most recent write outcome so a factory fallback cannot be mistaken for retained user calibration.
