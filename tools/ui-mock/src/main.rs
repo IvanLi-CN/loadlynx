@@ -388,6 +388,38 @@ fn render_calibration_dashboard_mocks(repo_root: &Path) -> Result<(), Box<dyn st
     )
 }
 
+fn render_standby_dashboard_mock_to_dir(out_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    std::fs::create_dir_all(out_dir)?;
+
+    let mut standby = ui::UiSnapshot::offline();
+    standby.set_control_overlay(
+        ui::CalibrationUiMode::Off,
+        1,
+        false,
+        LoadMode::Cc,
+        false,
+        false,
+        false,
+        false,
+        None,
+        None,
+    );
+    standby.set_control_row(0, 'A', control::AdjustDigit::DEFAULT);
+    render_snapshot(
+        &out_dir.join("main-display-standby.png"),
+        &standby,
+        None,
+        None,
+        None,
+    )?;
+
+    Ok(())
+}
+
+fn render_standby_dashboard_mock(repo_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    render_standby_dashboard_mock_to_dir(&repo_root.join("docs/assets/main-display"))
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -406,6 +438,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if mode.as_deref() == Some("calibration-tmp") {
         let out_dir = repo_root.join("tmp/ui-mock/calibration");
         return render_calibration_dashboard_mocks_to_dir(&out_dir);
+    }
+    if mode.as_deref() == Some("standby") {
+        return render_standby_dashboard_mock(&repo_root);
+    }
+    if mode.as_deref() == Some("standby-tmp") {
+        let out_dir = repo_root.join("tmp/ui-mock");
+        return render_standby_dashboard_mock_to_dir(&out_dir);
     }
     if mode.as_deref() == Some("pd") {
         return render_pd_toggle_mocks(&repo_root);
@@ -628,6 +667,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None,
         None,
     )?;
+    render_standby_dashboard_mock_to_dir(&out_dir)?;
 
     let preview_cv = preset_preview_panel::PresetPreviewPanelVm {
         preset_id: 2,
