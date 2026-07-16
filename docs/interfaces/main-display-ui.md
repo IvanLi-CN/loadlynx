@@ -4,10 +4,13 @@
 
 ![Main display mock (CV)](../assets/main-display/main-display-mock-cv.png)
 
+![Main display mock (standby)](../assets/main-display/main-display-standby.png)
+
 > Mock is rendered at 320×240 px, matching the landscape frame buffer of the P024C128-CTP module (`docs/other-datasheets/p024c128-ctp.md`).
 >
 > NOTE: The main-screen control row interaction is defined by `docs/specs/mq8ht-on-device-preset-ui/SPEC.md` and replaces the legacy “tap CC/CV + encoder digit adjust” behavior previously described here.
 > NOTE: The two controls below the remote/local voltage bar now follow `docs/specs/w4cpd-dashboard-extended-voltage-toggle/SPEC.md`: the left `PD` button is the extended-voltage toggle, and the right circular button is the PD settings entry.
+> NOTE: The standby/default screen follows `docs/specs/fqmns-boot-link-recovery/SPEC.md`: no demo telemetry, `M1 CC`, target `0.000A`, `PD/5V`, and status `OFF`.
 
 ## 需求说明
 
@@ -203,6 +206,7 @@
 
 - `docs/assets/main-display/main-display-mock-cc.png` — pixel-level mock (CC active).
 - `docs/assets/main-display/main-display-mock-cv.png` — pixel-level mock (CV active).
+- `docs/assets/main-display/main-display-standby.png` — pixel-level mock（production default standby / offline snapshot）。
 - `docs/assets/main-display/calibration/dashboard-calibration-current-ch1.png` — pixel-level mock（CH1 calibration active, 1.000 A target）。
 - `docs/assets/main-display/calibration/dashboard-calibration-current-ch2.png` — pixel-level mock（CH2 calibration active, 0.500 A target）。
 - `docs/assets/usb-pd-settings-panel/pd-settings-fixed.png` — USB‑PD Settings（Fixed）渲染 mock。

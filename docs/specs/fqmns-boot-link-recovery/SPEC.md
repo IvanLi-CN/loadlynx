@@ -94,6 +94,16 @@
 - `just d-build` 通过；如修改模拟板则 `just a-build` 通过。
 - HIL 可用时，flash digital/analog，monitor digital，并比对 `tmp/{digital,analog}-fw-version.txt` 与可用 boot/log evidence；analog RTT/defmt monitor 后端未实现时必须显式拒绝。
 
+## Visual Evidence
+
+- source_type: mock_ui
+  state: production default standby / offline snapshot
+  capture_scope: dashboard full frame
+  requested_viewport: 320x240
+  evidence_note: confirms the default screen no longer shows demo telemetry on boot and instead renders the latest offline contract with `M1 CC`, `0.000A`, `PD/5V`, and status `OFF`.
+
+![Dashboard standby default screen](../../assets/main-display/main-display-standby.png)
+
 ## 风险 / 开放问题 / 假设
 
 - 风险：若根因是硬件供电时序或隔离器方向异常，软件 watchdog 只能提升恢复概率，不能替代硬件修复。
