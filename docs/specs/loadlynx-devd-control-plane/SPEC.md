@@ -277,6 +277,8 @@ CLI must print target evidence before hardware-changing operations: device id, t
 
 ## Visual Evidence
 
+PR: none
+
 - source_type: storybook_canvas
   story_id_or_title: `Routes/Devices/DevdLeaseCreated`
   state: devd candidate scan and USB lease creation

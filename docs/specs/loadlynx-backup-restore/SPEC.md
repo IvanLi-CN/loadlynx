@@ -131,6 +131,8 @@ Device Settings route MUST include a Backup & Restore card:
 
 ## Visual Evidence
 
+PR: none
+
 - source_type: storybook_canvas
   story_id_or_title: `Routes/Settings/BackupRestorePreview`
   state: import preview with supported sections and unknown future setting warning

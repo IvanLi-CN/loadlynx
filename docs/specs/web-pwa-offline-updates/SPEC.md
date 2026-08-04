@@ -50,6 +50,8 @@ The existing version display is build-time injected and visible in the console. 
 
 ## Visual Evidence
 
+PR: none
+
 - source_type: storybook_canvas
   story_id_or_title: `Routes/Settings/PwaVersionRefreshReady`
   state: full settings page with non-blocking update-ready prompt

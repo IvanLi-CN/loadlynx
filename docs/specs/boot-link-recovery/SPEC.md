@@ -96,6 +96,8 @@
 
 ## Visual Evidence
 
+PR: none
+
 - source_type: mock_ui
   state: production default standby / offline snapshot
   capture_scope: dashboard full frame
