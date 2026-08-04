@@ -1030,15 +1030,15 @@ Use workflow_dispatch with pr_number=<PR>.
         path: new URL(`file://${developerSkillPath}`),
       },
       {
-        label: "docs/specs/dvfnn-pr-label-release-flow/SPEC.md",
+        label: "docs/specs/pr-label-release-flow/SPEC.md",
         path: new URL(`file://${specPath}`),
       },
       {
-        label: "docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md",
+        label: "docs/specs/pr-label-release-flow/IMPLEMENTATION.md",
         path: new URL(`file://${implementationPath}`),
       },
       {
-        label: "docs/specs/dvfnn-pr-label-release-flow/HISTORY.md",
+        label: "docs/specs/pr-label-release-flow/HISTORY.md",
         path: new URL(`file://${historyPath}`),
       },
     ];

@@ -602,16 +602,16 @@ export async function validateReleasedCliDocs({
       path: new URL("../../skills/loadlynx-user-operations/SKILL.md", import.meta.url),
     },
     {
-      label: "docs/specs/fhpfk-loadlynx-operational-skills/SPEC.md",
-      path: new URL("../../docs/specs/fhpfk-loadlynx-operational-skills/SPEC.md", import.meta.url),
+      label: "docs/specs/loadlynx-operational-skills/SPEC.md",
+      path: new URL("../../docs/specs/loadlynx-operational-skills/SPEC.md", import.meta.url),
     },
     {
-      label: "docs/specs/fhpfk-loadlynx-operational-skills/IMPLEMENTATION.md",
-      path: new URL("../../docs/specs/fhpfk-loadlynx-operational-skills/IMPLEMENTATION.md", import.meta.url),
+      label: "docs/specs/loadlynx-operational-skills/IMPLEMENTATION.md",
+      path: new URL("../../docs/specs/loadlynx-operational-skills/IMPLEMENTATION.md", import.meta.url),
     },
     {
-      label: "docs/specs/fhpfk-loadlynx-operational-skills/HISTORY.md",
-      path: new URL("../../docs/specs/fhpfk-loadlynx-operational-skills/HISTORY.md", import.meta.url),
+      label: "docs/specs/loadlynx-operational-skills/HISTORY.md",
+      path: new URL("../../docs/specs/loadlynx-operational-skills/HISTORY.md", import.meta.url),
     },
   ],
 } = {}) {
@@ -696,16 +696,16 @@ export async function validateReleaseDecisionDocs({
       path: new URL("../../skills/loadlynx-developer-operations/SKILL.md", import.meta.url),
     },
     {
-      label: "docs/specs/dvfnn-pr-label-release-flow/SPEC.md",
-      path: new URL("../../docs/specs/dvfnn-pr-label-release-flow/SPEC.md", import.meta.url),
+      label: "docs/specs/pr-label-release-flow/SPEC.md",
+      path: new URL("../../docs/specs/pr-label-release-flow/SPEC.md", import.meta.url),
     },
     {
-      label: "docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md",
-      path: new URL("../../docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md", import.meta.url),
+      label: "docs/specs/pr-label-release-flow/IMPLEMENTATION.md",
+      path: new URL("../../docs/specs/pr-label-release-flow/IMPLEMENTATION.md", import.meta.url),
     },
     {
-      label: "docs/specs/dvfnn-pr-label-release-flow/HISTORY.md",
-      path: new URL("../../docs/specs/dvfnn-pr-label-release-flow/HISTORY.md", import.meta.url),
+      label: "docs/specs/pr-label-release-flow/HISTORY.md",
+      path: new URL("../../docs/specs/pr-label-release-flow/HISTORY.md", import.meta.url),
     },
   ],
 } = {}) {
@@ -758,7 +758,7 @@ export async function validateReleaseDecisionDocs({
       ],
     },
     {
-      label: "docs/specs/dvfnn-pr-label-release-flow/SPEC.md",
+      label: "docs/specs/pr-label-release-flow/SPEC.md",
       snippets: [
         "Release Decision Matrix",
         "skills/loadlynx-release-decision/SKILL.md",
@@ -766,11 +766,11 @@ export async function validateReleaseDecisionDocs({
       ],
     },
     {
-      label: "docs/specs/dvfnn-pr-label-release-flow/IMPLEMENTATION.md",
+      label: "docs/specs/pr-label-release-flow/IMPLEMENTATION.md",
       snippets: ["v0.5.2"],
     },
     {
-      label: "docs/specs/dvfnn-pr-label-release-flow/HISTORY.md",
+      label: "docs/specs/pr-label-release-flow/HISTORY.md",
       snippets: ["v0.5.2", "pr_number=<PR>"],
     },
   ];

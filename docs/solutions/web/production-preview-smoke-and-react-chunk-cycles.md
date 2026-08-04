@@ -5,7 +5,7 @@ problem_type: production_runtime_crash
 component: vite-build
 tags: [vite, manual-chunks, react, github-pages, playwright, smoke-test]
 status: active
-related_specs: [n5nwv, m8k2v, rjkcw, xpm5n]
+related_specs: [web-production-preview-smoke, web-bundle-budget-gates, web-pages-deploy-lockfile, web-pwa-offline-updates]
 symptoms:
   - GitHub Pages served HTML/JS/CSS successfully but the page stayed blank.
   - dev server worked while built preview crashed on first paint.
@@ -60,5 +60,5 @@ Manual chunk boundaries split libraries that expect a single initialization path
 - `web/tests/e2e/pwa-preview.spec.ts`
 - `web/public/pwa-shell-guard.js`
 - `web/public/assets/index-SkMVprsZ.js`
-- `docs/specs/n5nwv-web-production-preview-smoke/SPEC.md`
-- `docs/specs/xpm5n-web-pwa-offline-updates/SPEC.md`
+- `docs/specs/web-production-preview-smoke/SPEC.md`
+- `docs/specs/web-pwa-offline-updates/SPEC.md`
