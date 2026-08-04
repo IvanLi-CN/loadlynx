@@ -111,7 +111,7 @@
 
 ### Digital persistence / API
 
-- `PdConfig` 允许 fixed target 保存到 `48_000mV`。
+- `PdConfig` 允许 fixed target 保存到 `28_000mV`。当前硬件输入上限为 40V，且本规格只交付并验收 28V EPR fixed；36V/48V 可以作为 Source 能力只读展示，但不得保存或应用为目标。
 - `GET /api/v1/pd`
   - `fixed_pdos` 仅返回当前 Source 真实上报的 fixed PDO；28V/36V/48V 只有真实出现时才返回；
   - 新增 `epr_active`；

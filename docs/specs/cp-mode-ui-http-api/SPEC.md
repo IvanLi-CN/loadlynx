@@ -36,7 +36,7 @@
 - CP 模式基本语义：
   - 目标值 `target_p_mw` 为恒功率设定（mW），UI 显示为 W；
   - 目标功率编辑分辨率：**0.1 W**（即 `100 mW`）；UI 必须按该步进调整数值；
-  - 目标功率可编辑范围：`0 <= target_p_mw <= max_p_mw`（`max_p_mw` 来自当前 preset 的功率上限；默认值见 `docs/specs/cv-mode-presets/SPEC.md`，为 `100_000 mW`；当前固件硬上限参考 `LIMIT_PROFILE_DEFAULT.max_p_mw = 100_000 mW`）；
+  - 目标功率可编辑范围：`0 <= target_p_mw <= max_p_mw`（`max_p_mw` 来自当前 preset 的功率上限；默认值与当前固件硬上限均为 `200_000 mW`，由 `LIMIT_PROFILE_DEFAULT.max_p_mw` 约束）；
   - 当 `output_enabled=false` 或触发 safing（fault/uv latch/link down）时，等效输出必须为安全关闭态；
   - 在 `v_main_mv` 合理且未触发限值时，稳态功率误差应满足本计划“CP 编程精度（规格书口径，冻结）”。
 - 限值与保护（与现有语义对齐）：
@@ -180,7 +180,7 @@ None.
 
 定义：
 
-- 满量程功率（Full Scale, FS）：本项目功率上限固定为 `FS_H = 100 W`；为对标商用负载的“双量程”口径，同时定义低量程 `FS_L = 10 W`（即 10%FS）。
+- 满量程功率（Full Scale, FS）：本项目功率上限固定为 `FS_H = 200 W`；为对标商用负载的“双量程”口径，同时定义低量程 `FS_L = 20 W`（即 10%FS）。
 - 目标功率：`T`（单位 W；实现与遥测内部为 `target_p_mw`，单位 mW）。
 - 被测功率：`P`（单位 W；用外部仪表测得 `V` 与 `I` 并计算 `P = V * I`；`FastStatus.raw.calc_p_mw` 仅作为 UI/HTTP 展示读数，不作为该指标的测量来源）。
 - 容差（对标 Chroma 6310A：`±(0.5% of reading + 0.5%FS)`）：
@@ -207,7 +207,7 @@ None.
 
 ### 测试条件（Test Conditions）
 
-- `FS = 100 W`。
+- `FS = 200 W`。
 - 固定输入电压：建议用 PD `20 V` contract（避免电流上限导致无法覆盖高功率区间；如无 PD，则使用可稳定输出 20 V 的电源）。
 - 模式：CP；输出开启；无欠压/故障/降额；`max_i_ma_total` 与 `max_p_mw` 不应成为限制因素。
 
