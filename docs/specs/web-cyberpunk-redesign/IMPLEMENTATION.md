@@ -18,6 +18,7 @@ Key implementation points:
 - Updated console layout, dialogs, route surfaces, focused Storybook stories and E2E selectors to use the new component vocabulary.
 - Added `?demo=true|false` as the persistent mode switch for the normal console routes. Demo mode swaps the device store/API data source without adding a separate route or page.
 - Stored final visual evidence from normal console routes in `assets/visual-evidence/`.
+- Localized the remaining visible CC trend/status copy and removed the stray daisyUI `link link-hover` token from the version link.
 
 ## Verification
 

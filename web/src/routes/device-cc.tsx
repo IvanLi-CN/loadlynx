@@ -520,7 +520,9 @@ export function DeviceCcRoute() {
                       {t("dashboard.controls.title")}
                     </div>
                     <div className="mt-1 text-[11px] text-slate-200/48">
-                      Setpoint: {view.activeSetpointLabel ?? "—"} · Uptime:{" "}
+                      {t("dashboard.trend.setpoint")}:{" "}
+                      {view.activeSetpointLabel ?? "—"} ·{" "}
+                      {t("dashboard.trend.uptime")}:{" "}
                       {formatUptimeSeconds(view.uptimeSeconds)}
                     </div>
                   </div>

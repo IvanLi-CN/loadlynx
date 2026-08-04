@@ -49,7 +49,7 @@ Use a local-first control plane:
 - Sensitive frame fields such as WiFi PSK are redacted at trace ingestion, before logs leave the daemon.
 - Keep device-local transports compact and purpose-built. When USB/serial frame budgets are tight, firmware may return a compact operation-specific payload while the daemon expands it back to the public HTTP/Web shape for CLI and browser callers.
 - Treat safe-control CLIs as mode-first entrypoints. `cc`, `cv` and `cp` should each own their target unit, preset/edit/apply path and explicit disable path; do not keep a user-facing `output set` toggle as the primary surface once the mode-specific commands exist.
-- Separate local physical-access writes from LAN writes in the user interface. LAN credential writes should require an explicit unsafe-network confirmation or flag, while USB/devd writes can rely on lease and selected-port evidence.
+- Separate local physical-access writes from LAN writes in the user interface. Credential writes over LAN must fail closed without an override; require USB/devd lease, selected-port evidence and matching device identity instead.
 - Web evidence should come from mock-first Storybook canvas/docs states so localhost hardware daemons are not required for UI review.
 - Web Serial can be a formal browser path when users need static GitHub Pages or release bundle operation, but it should save identity/profile metadata only and reconnect through browser-granted ports rather than OS serial paths.
 - If an owner-facing backup/export workflow explicitly needs secrets, expose that as a narrow read operation with a sensitive artifact contract. Keep ordinary status, diagnostics, traces and logs redacted; do not broaden generic observability paths just to make backups convenient.

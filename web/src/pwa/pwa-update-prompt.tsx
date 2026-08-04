@@ -1,7 +1,7 @@
 import { useRegisterSW } from "virtual:pwa-register/react";
 import { useEffect, useState } from "react";
 import { PwaUpdatePromptView } from "./pwa-update-prompt-view.tsx";
-import { waitForServiceWorkerWaiting } from "./service-worker-upgrade.ts";
+import { activateWaitingWorkerOrReload } from "./service-worker-upgrade.ts";
 import { type AppVersionPayload, hasRemoteAppUpdate } from "./version-check.ts";
 
 const VERSION_POLL_INTERVAL_MS = 60_000;
@@ -139,14 +139,12 @@ function PwaUpdatePromptRuntime() {
 
             const activeRegistration =
               registeredServiceWorker ?? registrations[0] ?? null;
-            if (activeRegistration) {
-              const waitingReady =
-                await waitForServiceWorkerWaiting(activeRegistration);
-              if (waitingReady) {
-                await updateServiceWorker(true);
-                return;
-              }
-            }
+            await activateWaitingWorkerOrReload(
+              activeRegistration,
+              updateServiceWorker,
+              () => window.location.reload(),
+            );
+            return;
           } else {
             await updateServiceWorker(true);
           }

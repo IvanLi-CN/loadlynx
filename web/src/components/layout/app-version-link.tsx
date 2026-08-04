@@ -35,7 +35,9 @@ export function AppVersionLink({
 
   const className = [
     "text-xs font-mono",
-    href ? "link link-hover" : "opacity-70",
+    href
+      ? "underline decoration-slate-400/45 underline-offset-2 transition-colors hover:text-cyan-100 hover:decoration-cyan-300/70"
+      : "opacity-70",
   ]
     .filter(Boolean)
     .join(" ");

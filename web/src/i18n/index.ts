@@ -1,6 +1,8 @@
 import i18next from "i18next";
 import { initReactI18next } from "react-i18next";
 
+import { resolveInitialLocale } from "./locale";
+
 export const resources = {
   "zh-CN": {
     translation: {
@@ -93,6 +95,43 @@ export const resources = {
         statusAttention: "需要关注",
       },
       dashboard: {
+        statusBar: {
+          runState: "运行状态",
+          constantCurrent: "恒流",
+          constantVoltage: "恒压",
+          constantPower: "恒功率",
+          constantResistance: "恒电阻",
+          unknown: "未知",
+          stale: "数据过期",
+          linkUp: "链路正常",
+          linkDown: "链路断开",
+          linkUnknown: "链路未知",
+          output: "输出",
+          outputOn: "开启",
+          outputOff: "关闭",
+          remoteActive: "远端控制已激活",
+          outputDisabled: "输出已关闭",
+          protection: "保护状态",
+          fault: "故障",
+          attention: "需注意",
+          allClear: "全部正常",
+          uvReady: "欠压锁存就绪",
+          faultPresent: "存在故障",
+        },
+        thermal: {
+          aria: "温度与故障",
+          title: "温度 / 故障",
+          sinkCore: "散热器核心",
+          exhaust: "出风口",
+          faults: "故障",
+          none: "无",
+          more: "另有 {{count}} 项",
+        },
+        readingDetail: {
+          remote: "远端 {{value}}",
+          calculatedPower: "计算负载功率",
+          calculatedResistance: "根据 V / I 计算",
+        },
         drawer: {
           tools: "工具",
           close: "关闭仪表盘工具抽屉",
@@ -130,6 +169,33 @@ export const resources = {
           outputHintApplyTurnsOff: "Apply 预设会先关闭输出",
           outputHintToggleOn: "打开输出以开始负载",
           toolSummaryAria: "工具摘要",
+        },
+        trend: {
+          primaryMonitor: "主仪表监视器",
+          mainDisplay: "主显示",
+          stale: "数据陈旧",
+          setpoint: "设定值",
+          uptime: "运行时间",
+          window: "时间窗口",
+          liveFocus: "实时焦点",
+          focusMetrics: "电压 / 电流 / 功率",
+          last30Seconds: "最近 30 秒",
+          pinnedSample: "已固定采样点",
+          clear: "清除",
+          title: "趋势",
+          description: "最近 30 秒的电压、电流与功率",
+          inspectHint: "悬停查看，点击固定。",
+          metric: {
+            voltage: "电压",
+            current: "电流",
+            power: "功率",
+            resistance: "电阻",
+          },
+          reference: {
+            voltage: "最低电压",
+            current: "目标电流",
+            power: "最大功率",
+          },
         },
         liveControl: {
           title: "实时控制",
@@ -338,6 +404,9 @@ export const resources = {
         scanNetwork: "扫描网络…",
         scanWarning: "这会用短 HTTP 探测扫描选中的子网。",
         seedIp: "种子 IP",
+        currentSubnet: "当前浏览器网段：{{ip}}/24",
+        currentSubnetUnavailable:
+          "当前页面地址不是可扫描的私有 IPv4，无法启动 LAN 扫描。",
         scanning: "扫描中…",
         startScan: "开始扫描",
         cancel: "取消",
@@ -530,6 +599,43 @@ export const resources = {
         statusAttention: "Needs attention",
       },
       dashboard: {
+        statusBar: {
+          runState: "Run state",
+          constantCurrent: "Constant current",
+          constantVoltage: "Constant voltage",
+          constantPower: "Constant power",
+          constantResistance: "Constant resistance",
+          unknown: "Unknown",
+          stale: "Stale",
+          linkUp: "Link up",
+          linkDown: "Link down",
+          linkUnknown: "Link unknown",
+          output: "Output",
+          outputOn: "On",
+          outputOff: "Off",
+          remoteActive: "Remote active",
+          outputDisabled: "Output disabled",
+          protection: "Protection",
+          fault: "Fault",
+          attention: "Attention",
+          allClear: "All clear",
+          uvReady: "UV latch ready",
+          faultPresent: "Fault present",
+        },
+        thermal: {
+          aria: "Thermal and faults",
+          title: "Thermal / Faults",
+          sinkCore: "Sink core",
+          exhaust: "Exhaust",
+          faults: "Faults",
+          none: "None",
+          more: "{{count}} more",
+        },
+        readingDetail: {
+          remote: "Remote {{value}}",
+          calculatedPower: "Calculated load power",
+          calculatedResistance: "Calculated from V / I",
+        },
         drawer: {
           tools: "Tools",
           close: "Close dashboard tools",
@@ -570,6 +676,33 @@ export const resources = {
           outputHintApplyTurnsOff: "Apply preset turns output off",
           outputHintToggleOn: "Toggle on to start the load",
           toolSummaryAria: "Tool summary",
+        },
+        trend: {
+          primaryMonitor: "Primary dashboard monitor",
+          mainDisplay: "Main display",
+          stale: "Stale",
+          setpoint: "Setpoint",
+          uptime: "Uptime",
+          window: "Window",
+          liveFocus: "Live focus",
+          focusMetrics: "Voltage / Current / Power",
+          last30Seconds: "Last 30 s",
+          pinnedSample: "Pinned sample",
+          clear: "Clear",
+          title: "Trend",
+          description: "Voltage, current and power over last 30 s",
+          inspectHint: "Hover to inspect. Click to pin.",
+          metric: {
+            voltage: "Voltage",
+            current: "Current",
+            power: "Power",
+            resistance: "Resistance",
+          },
+          reference: {
+            voltage: "Min V",
+            current: "Target I",
+            power: "Max P",
+          },
         },
         liveControl: {
           title: "Live control",
@@ -786,6 +919,9 @@ export const resources = {
         scanNetwork: "Scan network...",
         scanWarning: "This scans the selected subnet with short HTTP probes.",
         seedIp: "Seed IP",
+        currentSubnet: "Current browser subnet: {{ip}}/24",
+        currentSubnetUnavailable:
+          "The current page address is not a scannable private IPv4, so LAN scanning is unavailable.",
         scanning: "Scanning...",
         startScan: "Start scan",
         cancel: "Cancel",
@@ -894,7 +1030,9 @@ export const resources = {
 
 void i18next.use(initReactI18next).init({
   resources,
-  lng: window.localStorage.getItem("loadlynx.locale") ?? "zh-CN",
+  lng: resolveInitialLocale(globalThis.__LOADLYNX_STORYBOOK__ === true, () =>
+    window.localStorage.getItem("loadlynx.locale"),
+  ),
   fallbackLng: "zh-CN",
   interpolation: {
     escapeValue: false,

@@ -10,6 +10,8 @@
 
 This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes.
 
+- 2026-08-05 Storybook 在动态加载应用 i18n 前建立 runtime boundary，应用语言初始化在该环境下不读取 `localStorage`。
+
 ## Milestones
 
 No explicit milestones were recorded in the legacy plan.

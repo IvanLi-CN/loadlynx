@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 import { FixedNumber } from "./fixed-number.tsx";
 import { formatFixed } from "./format.ts";
 import { Sparkline } from "./sparkline.tsx";
@@ -17,12 +19,16 @@ export function ThermalPanel({
   faults,
   trend,
 }: ThermalPanelProps) {
+  const { t } = useTranslation();
   const hasFaults = faults.length > 0;
   return (
-    <section aria-label="Thermal and faults" className="instrument-card p-5">
+    <section
+      aria-label={t("dashboard.thermal.aria")}
+      className="instrument-card p-5"
+    >
       <div className="flex items-start justify-between gap-4">
         <div>
-          <div className="instrument-label">Thermal / Faults</div>
+          <div className="instrument-label">{t("dashboard.thermal.title")}</div>
           <div className="mt-2 flex items-baseline gap-3">
             <div className="instrument-glow-amber text-6xl font-bold tracking-tight">
               <FixedNumber value={sinkCoreC} digits={1} />
@@ -32,13 +38,13 @@ export function ThermalPanel({
 
           <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-200/55">
             <span>
-              Sink Core{" "}
+              {t("dashboard.thermal.sinkCore")}{" "}
               <span className="font-mono text-slate-100/90">
                 {formatFixed(sinkCoreC, 1)}°C
               </span>
             </span>
             <span>
-              Exhaust{" "}
+              {t("dashboard.thermal.exhaust")}{" "}
               <span className="font-mono text-slate-100/90">
                 {formatFixed(sinkExhaustC, 1)}°C
               </span>
@@ -53,7 +59,9 @@ export function ThermalPanel({
         </div>
 
         <div className="text-right">
-          <div className="instrument-label">Faults</div>
+          <div className="instrument-label">
+            {t("dashboard.thermal.faults")}
+          </div>
           {hasFaults ? (
             <div className="mt-2 space-y-1 text-[11px] text-red-200/85">
               {faults.slice(0, 3).map((f) => (
@@ -63,12 +71,14 @@ export function ThermalPanel({
               ))}
               {faults.length > 3 ? (
                 <div className="text-[10px] text-red-200/60">
-                  +{faults.length - 3} more
+                  +{t("dashboard.thermal.more", { count: faults.length - 3 })}
                 </div>
               ) : null}
             </div>
           ) : (
-            <div className="mt-2 text-[11px] text-emerald-200/80">None</div>
+            <div className="mt-2 text-[11px] text-emerald-200/80">
+              {t("dashboard.thermal.none")}
+            </div>
           )}
         </div>
       </div>

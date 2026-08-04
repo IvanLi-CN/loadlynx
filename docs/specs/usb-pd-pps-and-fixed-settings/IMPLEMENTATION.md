@@ -10,6 +10,8 @@
 
 This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes.
 
+- 2026-08-05 模拟板在 ACK 前按最近一次 live Source Capabilities 校验 object position、PDO/APDO 类型、电压范围、电流和功率；无效请求直接 NACK。
+
 ## Milestones
 
 No explicit milestones were recorded in the legacy plan.

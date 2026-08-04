@@ -1,5 +1,8 @@
 import { expect, test } from "vitest";
-import { waitForServiceWorkerWaiting } from "./service-worker-upgrade.ts";
+import {
+  activateWaitingWorkerOrReload,
+  waitForServiceWorkerWaiting,
+} from "./service-worker-upgrade.ts";
 
 class FakeServiceWorker extends EventTarget {}
 
@@ -26,4 +29,24 @@ test("waitForServiceWorkerWaiting times out when no waiting worker appears", asy
   await expect(waitForServiceWorkerWaiting(registration, 10)).resolves.toBe(
     false,
   );
+});
+
+test("activateWaitingWorkerOrReload reloads when no waiting worker appears", async () => {
+  const registration = new FakeRegistration();
+  const updates: boolean[] = [];
+  let reloads = 0;
+
+  await activateWaitingWorkerOrReload(
+    registration,
+    async (reloadPage) => {
+      updates.push(Boolean(reloadPage));
+    },
+    () => {
+      reloads += 1;
+    },
+    1,
+  );
+
+  expect(updates).toEqual([]);
+  expect(reloads).toBe(1);
 });

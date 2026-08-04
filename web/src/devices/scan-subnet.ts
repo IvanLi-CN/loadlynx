@@ -23,6 +23,18 @@ export function buildSubnetPlanFromSeedIp(seedIp: string): SubnetPlan {
     throw new Error(`Invalid IPv4 address segment in "${seedIp}"`);
   }
 
+  const [a, b] = parts;
+  const isPrivateOrLinkLocal =
+    a === 10 ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 169 && b === 254);
+  if (!isPrivateOrLinkLocal) {
+    throw new Error(
+      `IPv4 address is not on a private or link-local LAN: "${seedIp}"`,
+    );
+  }
+
   // Basic check for private ranges (RFC 1918) + Link-Local (RFC 3927) could be added here,
   // but for a generic LAN scanner helper, we might want to be permissive
   // or at least allow any valid unicast IPv4.
@@ -32,7 +44,7 @@ export function buildSubnetPlanFromSeedIp(seedIp: string): SubnetPlan {
 
   // Let's stick to valid IPv4 format check for now to avoid over-blocking valid lab setups.
 
-  const [a, b, c] = parts;
+  const [, , c] = parts;
   const base = `${a}.${b}.${c}`;
   const cidr = `${base}.0/24`;
   const hosts: string[] = [];
@@ -43,4 +55,14 @@ export function buildSubnetPlanFromSeedIp(seedIp: string): SubnetPlan {
   }
 
   return { cidr, hosts };
+}
+
+export function currentLanSeedFromHostname(hostname: string): string | null {
+  const trimmed = hostname.trim();
+  try {
+    buildSubnetPlanFromSeedIp(trimmed);
+    return trimmed;
+  } catch {
+    return null;
+  }
 }

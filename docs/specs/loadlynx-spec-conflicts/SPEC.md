@@ -102,11 +102,11 @@ None。本规格聚合既有契约；接口所有权仍属于下列 References �
 
 ## 验收清单（Acceptance checklist）
 
-- [ ] 八项实现冲突均有对应回归测试并通过。
-- [ ] 相关 canonical Specs 的实现状态与历史已同步。
-- [ ] Rust/Web/Storybook 的目标构建、lint 与测试通过。
-- [ ] UI 相关变更具有稳定 Storybook 入口和 owner-facing 视觉证据。
-- [ ] 200 W CP 与 EPR 28 V 决策未发生漂移。
+- [x] 八项实现冲突均有对应回归测试并通过。
+- [x] 相关 canonical Specs 的实现状态与历史已同步。
+- [x] Rust/Web/Storybook 的目标构建、lint 与测试通过。
+- [x] UI 相关变更具有稳定 Storybook 入口和 owner-facing 视觉证据。
+- [x] 200 W CP 与 EPR 28 V 决策未发生漂移。
 
 ## 非功能性验收 / 质量门槛（Quality Gates）
 
@@ -130,6 +130,9 @@ None。本规格聚合既有契约；接口所有权仍属于下列 References �
 ## Visual Evidence
 
 PR: none
+
+- `./assets/cc-route-chinese.jpg`：默认中文 CC route 的趋势区、状态与控制文案。
+- `./assets/app-version-link.jpg`：使用本地样式且不含 daisyUI semantic token 的版本链接。
 
 ## Related PRs
 

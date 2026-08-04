@@ -7,6 +7,7 @@
 - 新增 umbrella Spec 作为八项已确认实现冲突的共同验收入口，不复制或替代各领域 canonical Specs。
 - 将 200 W CP 满量程和 EPR 仅允许持久化/应用 28 V 记录为不可漂移约束；36 V/48 V capability 保持只读。
 - Initiative、Issue、分支与 PR 编排不属于本文的长期产品契约。
+- 2026-08-05 完成八项冲突修复；migration-only PWA takeover 由显式 build flag 控制，PD ACK 以最近 live capability 为准。
 
 ## Key Reasons / Replacements
 

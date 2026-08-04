@@ -1143,7 +1143,9 @@ export function useDeviceCcState(
       digits: 3,
       detail:
         remoteVoltageV != null
-          ? `Remote ${formatWithUnit(remoteVoltageV, 3, "V")}`
+          ? t("dashboard.readingDetail.remote", {
+              value: formatWithUnit(remoteVoltageV, 3, "V"),
+            })
           : null,
       emphasized: defaultChartMetric === "voltage",
     },
@@ -1155,7 +1157,9 @@ export function useDeviceCcState(
       digits: 3,
       detail:
         remoteCurrentA != null
-          ? `Remote ${formatWithUnit(remoteCurrentA, 3, "A")}`
+          ? t("dashboard.readingDetail.remote", {
+              value: formatWithUnit(remoteCurrentA, 3, "A"),
+            })
           : null,
       emphasized: defaultChartMetric === "current",
     },
@@ -1165,7 +1169,7 @@ export function useDeviceCcState(
       value: totalPowerW,
       unit: "W",
       digits: 2,
-      detail: "Calculated load power",
+      detail: t("dashboard.readingDetail.calculatedPower"),
       emphasized: defaultChartMetric === "power",
     },
     {
@@ -1174,7 +1178,7 @@ export function useDeviceCcState(
       value: resistanceOhms,
       unit: "Ω",
       digits: 2,
-      detail: "Calculated from V / I",
+      detail: t("dashboard.readingDetail.calculatedResistance"),
       emphasized: defaultChartMetric === "resistance",
     },
   ];

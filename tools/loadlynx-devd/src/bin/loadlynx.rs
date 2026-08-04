@@ -393,16 +393,12 @@ enum WifiCommand {
         psk: String,
         #[arg(long)]
         wait: bool,
-        #[arg(long)]
-        allow_insecure_lan_wifi: bool,
     },
     Clear {
         #[arg(long, hide = true)]
         url: Option<String>,
         #[arg(long)]
         device: Option<String>,
-        #[arg(long)]
-        allow_insecure_lan_wifi: bool,
     },
 }
 
@@ -524,8 +520,6 @@ enum BackupCommand {
         include: Vec<String>,
         #[arg(long)]
         dry_run: bool,
-        #[arg(long)]
-        allow_insecure_lan_wifi: bool,
     },
 }
 
@@ -1378,7 +1372,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     ssid,
                     psk,
                     wait,
-                    allow_insecure_lan_wifi,
                 } => {
                     request_api_value(
                         &client,
@@ -1388,15 +1381,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         reqwest::Method::POST,
                         "/api/v1/wifi",
                         Some(json!({"ssid": ssid, "psk": psk, "wait": wait})),
-                        allow_insecure_lan_wifi,
+                        false,
                     )
                     .await?
                 }
-                WifiCommand::Clear {
-                    url,
-                    device,
-                    allow_insecure_lan_wifi,
-                } => {
+                WifiCommand::Clear { url, device } => {
                     request_api_value(
                         &client,
                         &devd,
@@ -1405,7 +1394,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         reqwest::Method::DELETE,
                         "/api/v1/wifi",
                         None,
-                        allow_insecure_lan_wifi,
+                        false,
                     )
                     .await?
                 }
@@ -1611,7 +1600,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                     file,
                     include,
                     dry_run,
-                    allow_insecure_lan_wifi,
                 } => {
                     handle_backup_import(
                         &client,
@@ -1621,7 +1609,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                         &file,
                         &include,
                         dry_run,
-                        allow_insecure_lan_wifi,
+                        false,
                     )
                     .await?
                 }
@@ -2550,8 +2538,8 @@ mod tests {
     }
 
     #[test]
-    fn backup_import_parses_lan_wifi_write_opt_in() {
-        let cli = Cli::try_parse_from([
+    fn backup_import_rejects_lan_wifi_write_override() {
+        let error = Cli::try_parse_from([
             "loadlynx",
             "backup",
             "import",
@@ -2561,17 +2549,8 @@ mod tests {
             "-",
             "--allow-insecure-lan-wifi",
         ])
-        .expect("backup import parse");
-        match cli.command {
-            Command::Backup {
-                command:
-                    BackupCommand::Import {
-                        allow_insecure_lan_wifi,
-                        ..
-                    },
-            } => assert!(allow_insecure_lan_wifi),
-            _ => panic!("expected backup import command"),
-        }
+        .expect_err("unsafe LAN WiFi override must not be exposed");
+        assert!(error.to_string().contains("unexpected argument"));
     }
 
     #[test]
@@ -2597,13 +2576,13 @@ mod tests {
             false,
             &backup,
             selection,
-            false,
+            true,
         )
-        .expect_err("LAN WiFi restore should require an explicit opt-in");
+        .expect_err("LAN WiFi restore must fail closed even for legacy opt-in input");
 
         assert!(
             err.to_string()
-                .contains("LAN WiFi writes require --allow-insecure-lan-wifi")
+                .contains("LAN WiFi writes require the local USB/devd path")
         );
     }
 

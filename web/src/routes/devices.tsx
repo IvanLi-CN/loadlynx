@@ -37,6 +37,7 @@ import {
   clearManagedScan,
   isManagedScanCurrent,
 } from "../devices/scan-controller.ts";
+import { currentLanSeedFromHostname } from "../devices/scan-subnet.ts";
 import { useDeviceStore } from "../devices/store-context.tsx";
 import {
   getConnectionLabels,
@@ -158,7 +159,10 @@ export function DevicesRoute() {
   const scanMutation = useSubnetScanMutation();
   const activeScanControllerRef = useRef<AbortController | null>(null);
   const [isScanPanelOpen, setIsScanPanelOpen] = useState(false);
-  const [seedIp, setSeedIp] = useState("192.168.1.100");
+  const scanSeedIp = useMemo(
+    () => currentLanSeedFromHostname(window.location.hostname),
+    [],
+  );
   const [scanProgress, setScanProgress] = useState<ScanProgress | null>(null);
   const [scanResults, setScanResults] = useState<DiscoveredDevice[]>([]);
   const [scanError, setScanError] = useState<string | null>(null);
@@ -196,7 +200,7 @@ export function DevicesRoute() {
 
     scanMutation.mutate(
       {
-        options: { seedIp: seedIp.trim(), signal: controller.signal },
+        options: { seedIp: scanSeedIp ?? "", signal: controller.signal },
         onProgress: (p: ScanProgress) => {
           if (
             isManagedScanCurrent(activeScanControllerRef.current, controller)
@@ -708,27 +712,15 @@ export function DevicesRoute() {
                     </div>
 
                     <div className="flex flex-wrap gap-4 items-end">
-                      <label className="ll-form-control flex-1 min-w-[200px]">
-                        <div className="ll-label-row pb-1">
-                          <span className="ll-label-text">
-                            {t("devices.seedIp")}
-                          </span>
-                        </div>
-                        <input
-                          id="lan-scan-seed-ip"
-                          name="lan_scan_seed_ip"
-                          type="text"
-                          value={seedIp}
-                          onChange={(e) => setSeedIp(e.target.value)}
-                          placeholder="e.g. 192.168.1.100"
-                          disabled={isDemoMode || isScanning}
-                          className="ll-input w-full ll-input-sm"
-                        />
-                      </label>
+                      <div className="min-w-[200px] flex-1 text-xs text-base-content/65">
+                        {scanSeedIp
+                          ? t("devices.currentSubnet", { ip: scanSeedIp })
+                          : t("devices.currentSubnetUnavailable")}
+                      </div>
                       <button
                         type="button"
                         onClick={startScan}
-                        disabled={isDemoMode || isScanning || !seedIp}
+                        disabled={isDemoMode || isScanning || !scanSeedIp}
                         className="ll-button ll-button-primary ll-button-sm"
                       >
                         {isScanning
