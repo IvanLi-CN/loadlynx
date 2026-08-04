@@ -1,0 +1,78 @@
+# Web PWA Offline Shell and Update Prompt
+
+## Background
+
+LoadLynx Web Console is used as an operator surface beside real hardware. The app must remain reachable after the first successful visit, even when the frontend static server is temporarily unavailable, while still making device/API connectivity failures explicit.
+
+The existing version display is build-time injected and visible in the console. PWA update behavior must preserve that model: the app can cache a new build in the background, but it must not refresh an operator's active session without confirmation.
+
+## Goals
+
+- Provide a real PWA app shell for the production Web Console.
+- Cache core static assets after the first successful visit so the console can reload offline.
+- Show a non-blocking update prompt after a new service worker has cached the next version.
+- Refresh into the new version only after the user chooses the upgrade action.
+- Keep device/devd/API requests network-only so offline hardware state cannot be mistaken for fresh data.
+
+## Non-goals
+
+- No offline write queue or background sync.
+- No cached device readbacks, firmware artifacts, Web Serial sessions, devd responses, or control writes.
+- No automatic demo/mock-mode switching when the browser is offline.
+- No forced modal refresh for ordinary app updates.
+
+## Requirements
+
+- Vite production builds must emit a manifest, service worker, and Workbox runtime.
+- `version.json` must be generated before Vite build copies and precaches public assets.
+- The service worker must use prompt-style updates, not auto-refresh.
+- Precache and runtime caching must not include LoadLynx device APIs, devd endpoints, firmware artifacts, Web Serial flows, or `/version.json`.
+- The running app must actively probe `/version.json` with `cache: "no-store"` so a GitHub Pages or release-web deployment that publishes a newer build can surface an upgrade prompt even when the current tab is still controlled by an older service worker generation.
+- A cached HTML shell that embeds an older build version must compare itself against `/version.json` before booting the main bundle; if the server has a newer build, the page must avoid loading dead hashed assets, clear stale service-worker/cache state, and reload into the newer shell.
+- A legacy pre-guard dashboard shell that still requests `/assets/index-SkMVprsZ.js` must also recover by clearing stale PWA state and reloading into the current shell, so already-broken clients are not stranded after the migration release.
+- The legacy migration release may let the new service worker claim clients and skip waiting so refreshing an already-broken tab can route old subresource requests through the recovery shim; the visible app-shell refresh remains operator-driven outside this migration path.
+- The PWA update UI must use the existing LoadLynx console visual language and remain accessible through `role="status"` or `role="alert"`.
+- Storybook must expose stable states for update-ready, offline-ready, registration-error, and hidden states without registering a real service worker.
+- Production preview smoke must prove app-shell reload works while offline and that API fetches are not served from cache.
+
+## Acceptance
+
+- `cd web && bun run build` emits `dist/sw.js`, `dist/workbox-*.js`, and `dist/manifest.webmanifest`.
+- `cd web && bun run test:preview-smoke` passes a PWA offline reload scenario.
+- After first online load and service worker control, a browser offline reload still shows the `LoadLynx Web Console` app shell.
+- With the browser offline, `fetch("/api/v1/status", { cache: "no-store" })` and `fetch("/version.json", { cache: "no-store" })` fail instead of returning cached app-shell, stale API data, or stale version metadata.
+- When `needRefresh` is true, the UI shows a new-version prompt and calls `updateServiceWorker(true)` only after the user clicks the upgrade action.
+- When `/version.json` reports a newer build version than the running app, the UI shows the same non-blocking upgrade prompt even before Workbox emits `needRefresh`, and the refresh path still remains operator-confirmed.
+- Given a synthetic stale HTML shell that still points at dead hashed assets, when it opens against a newer `/version.json`, then it reloads into the latest shell before requesting the stale entry asset.
+- Given a synthetic pre-guard dashboard shell that still points at `/assets/index-SkMVprsZ.js`, when it opens against the migration release, then it clears stale PWA state and reloads into the current dashboard shell.
+- Given a browser already controlled by a pre-guard service worker, when it refreshes against the migration release, then the migration worker can take control without waiting for an in-app prompt so the legacy recovery shim becomes reachable.
+- Storybook CI passes the PWA prompt stories and existing route stories.
+
+## Visual Evidence
+
+- source_type: storybook_canvas
+  story_id_or_title: `Routes/Settings/PwaVersionRefreshReady`
+  state: full settings page with non-blocking update-ready prompt
+  capture_scope: page-level canvas
+  requested_viewport: `1600x1200`
+  viewport_strategy: storybook_canvas
+  target_program: mock-only
+  sensitive_exclusion: no real device data; Storybook mock settings page only
+  evidence_note: verifies the stale-build recovery prompt appears in the real Settings page shell instead of an isolated component surface.
+
+![PWA version refresh page](./assets/pwa-version-refresh-ready.png)
+
+## Related Specs
+
+- `docs/specs/web-version-github-link/SPEC.md`
+- `docs/specs/web-production-preview-smoke/SPEC.md`
+- `docs/specs/web-bundle-budget-gates/SPEC.md`
+- `docs/specs/storybook-component-workshop/SPEC.md`
+
+## References
+
+- `web/vite.config.ts`
+- `web/src/pwa/pwa-update-prompt.tsx`
+- `web/src/pwa/pwa-update-prompt-view.tsx`
+- `web/tests/e2e/pwa-preview.spec.ts`
+- `web/src/pwa/pwa-update-prompt.stories.tsx`

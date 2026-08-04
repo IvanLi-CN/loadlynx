@@ -162,7 +162,7 @@ const SPEAKER_WAV_DIAG_880: &[u8] = include_bytes!("../assets/audio/speaker-diag
 const SPEAKER_WAV_TEST: &[u8] = include_bytes!("../assets/audio/speaker-test-8k.wav");
 
 // Boot audio policy:
-// - The legacy long self-test playlist (Spec #swzqu) is disabled by default because it's noisy and
+// - The legacy long self-test playlist (spec docs/specs/touch-spring-load-switch-rgb-led/SPEC.md) is disabled by default because it's noisy and
 //   can be perceived as "stuttering" under heavy load.
 // - We keep a short "boot chirp" so the user can confirm the speaker path is alive.
 const ENABLE_BOOT_SELFTEST: bool = false;
@@ -826,7 +826,7 @@ pub async fn speaker_task(
     // We also support a hard mute by pulling SD_MODE LOW.
     amp.set_high();
 
-    // Start with a boot self-test playlist queued once (Spec #swzqu). Prompt tones
+    // Start with a boot self-test playlist queued once (spec docs/specs/touch-spring-load-switch-rgb-led/SPEC.md). Prompt tones
     // can overlay on top; continuous alarms will suppress voice output.
     let mut voice: Option<VoicePlayer> = if ENABLE_BOOT_SELFTEST {
         Some(VoicePlayer {

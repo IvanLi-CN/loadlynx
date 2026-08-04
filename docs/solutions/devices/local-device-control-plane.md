@@ -5,7 +5,7 @@ problem_type: local_hardware_control
 component: devd
 tags: [devd, usb-http-bridge, firmware-flash, mdns, cli, hardware-safety, api-performance]
 status: active
-related_specs: [e3rv6]
+related_specs: [loadlynx-devd-control-plane, mdns-and-lan-discovery]
 ---
 
 # Local device control plane for Web, CLI and firmware operations
@@ -85,8 +85,8 @@ Use a local-first control plane:
 
 ## References
 
-- `docs/specs/e3rv6-loadlynx-devd-control-plane/SPEC.md`
-- `docs/specs/yy7th-mdns-and-lan-discovery/SPEC.md`
+- `docs/specs/loadlynx-devd-control-plane/SPEC.md`
+- `docs/specs/mdns-and-lan-discovery/SPEC.md`
 - `docs/interfaces/network-http-api.md`
 - `docs/interfaces/uart-link.md`
 - `/Users/ivan/Projects/Ivan/mains-aegis/tools/mains-aegis-devd/src/main.rs`

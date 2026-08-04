@@ -1,3 +1,13 @@
+---
+title: Boot link recovery watchdog pattern
+module: firmware
+problem_type: boot_link_recovery
+component: digital-firmware
+tags: [uart, watchdog, cold-boot, telemetry, dual-mcu]
+status: active
+related_specs: [boot-link-recovery]
+---
+
 # Boot link recovery watchdog 模式
 
 ## 适用场景
@@ -36,7 +46,7 @@
 
 - 数字板 UART TX owner：`firmware/digital/src/main.rs`
 - Dashboard snapshot：`firmware/digital/src/ui/mod.rs`
-- 相关规格：`docs/specs/fqmns-boot-link-recovery/SPEC.md`
+- 相关规格：`docs/specs/boot-link-recovery/SPEC.md`
 
 ## 为什么这套模式有效
 

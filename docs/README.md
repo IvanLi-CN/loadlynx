@@ -35,11 +35,11 @@
   - ESP32-S3 启动流程：`dev-notes/software.md`
   - 硬件设计约定与易混点：`dev-notes/hardware-quirks.md`
   - LoadLynx CLI/devd 硬件操作：`dev-notes/loadlynx-devd-hardware-ops.md`
-  - LoadLynx devd 本地设备控制面规格：`specs/e3rv6-loadlynx-devd-control-plane/SPEC.md`
+  - LoadLynx devd 本地设备控制面规格：`specs/loadlynx-devd-control-plane/SPEC.md`
   - 本地设备控制面复用方案：`solutions/devices/local-device-control-plane.md`
   - 固件 catalog schema：`../schemas/firmware-catalog.schema.json`
   - 用户手动校准功能：`dev-notes/user-calibration.md`
-  - 蜂鸣器提示音管理器：`specs/bd4vh-prompt-tone-manager/SPEC.md`
+  - 蜂鸣器提示音管理器：`specs/prompt-tone-manager/SPEC.md`
 
 - 外部数据手册（Other Datasheets，MinerU 转换）
   - ESP32‑S3：`other-datasheets/esp32-s3.md`
