@@ -16,6 +16,11 @@ function isStorybookBuild(): boolean {
   );
 }
 
+export function pwaMigrationWorkerOptions(value: string | undefined) {
+  const enabled = value === "1";
+  return { clientsClaim: enabled, skipWaiting: enabled };
+}
+
 function hydrateLocalBuildVersion() {
   if (process.env.VITE_APP_VERSION?.trim()) {
     return;
@@ -54,6 +59,9 @@ export function createViteConfig(): UserConfig {
   const webDevPort = resolvePort("webDev").port;
   const webPreviewPort = resolvePort("webPreview").port;
   const enablePwa = !isStorybookBuild();
+  const migrationWorkerOptions = pwaMigrationWorkerOptions(
+    process.env.LOADLYNX_PWA_MIGRATION,
+  );
 
   return {
     base: "/",
@@ -93,10 +101,9 @@ export function createViteConfig(): UserConfig {
               ],
             },
             workbox: {
-              clientsClaim: true,
+              ...migrationWorkerOptions,
               cleanupOutdatedCaches: true,
               navigateFallback: "/index.html",
-              skipWaiting: true,
               globPatterns: [
                 "**/*.{js,css,html,ico,png,svg,webmanifest,woff2}",
               ],

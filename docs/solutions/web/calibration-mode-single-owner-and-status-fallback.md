@@ -9,6 +9,7 @@
 ## 结论
 
 - **设备模式写入必须单 owner。** 页签切换、按钮动作和初始化恢复都可以“提出目标 mode”，但真正调用 `postCalibrationMode(...)` 的地方必须唯一。
+- **单 owner 还必须串行化跨组件请求。** route、layout teardown 与 action 可能在同一时刻提出 mode；共享 coordinator 应按设备 URL 排队，不能只靠每个组件自己的 effect cleanup。
 - **storage hydrate 必须早于自动 side effect。** 如果页面 mount 时先跑默认值驱动的 side effect，再从 storage 恢复真实页签，就会把设备短暂切到错误模式。
 - **SSE 断流不等于页面离线。** 在嵌入式 HTTP 连接资源有限的设备上，短时断流或 worker 切换很常见；页面应该保留 last-good status，并自动回退到轻量 polling。
 - **fallback polling 不能在正常 SSE 启动期就并行打开。** 否则页面一挂载就会同时占用 SSE + 轮询请求，反而把嵌入式 HTTP worker 挤爆；应等到 stream 真实报错或启动超时后再启用 fallback。
@@ -38,6 +39,7 @@
 ## 本仓库落点
 
 - 页面主逻辑：`/Users/ivan/Projects/Ivan/loadlynx/web/src/routes/device-calibration.tsx`
+- 写入协调器：`/Users/ivan/Projects/Ivan/loadlynx/web/src/calibration/calibration-mode-coordinator.ts`
 - Route Storybook：`/Users/ivan/Projects/Ivan/loadlynx/web/src/stories/routes/calibration-route.stories.tsx`
 - Route harness：`/Users/ivan/Projects/Ivan/loadlynx/web/src/stories/router/route-story-harness.tsx`
 - E2E 回归：`/Users/ivan/Projects/Ivan/loadlynx/web/tests/e2e/calibration.spec.ts`

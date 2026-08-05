@@ -313,7 +313,7 @@ pub(crate) fn preflight_backup_restore(
     allow_interactive: bool,
     backup: &Value,
     selection: BackupSelection,
-    allow_insecure_lan_wifi: bool,
+    _allow_insecure_lan_wifi: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     ensure_one_api_selector(selector.url.as_ref(), selector.device.as_ref())?;
 
@@ -334,8 +334,8 @@ pub(crate) fn preflight_backup_restore(
         )
     };
 
-    if is_lan_restore && !allow_insecure_lan_wifi {
-        return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
+    if is_lan_restore {
+        return Err("LAN WiFi writes require the local USB/devd path".into());
     }
 
     Ok(())

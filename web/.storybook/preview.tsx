@@ -3,10 +3,10 @@ import type { Preview } from "@storybook/react-vite";
 import { INITIAL_VIEWPORTS } from "storybook/viewport";
 
 import "../src/index.css";
-import { i18next } from "../src/i18n/index.ts";
 import { BreakpointRulerOverlay } from "../src/stories/devtools/BreakpointRulerOverlay";
 
 globalThis.__LOADLYNX_STORYBOOK__ = true;
+const { i18next } = await import("../src/i18n/index.ts");
 
 const LOADLYNX_VIEWPORTS = {
   loadlynxSmall: {

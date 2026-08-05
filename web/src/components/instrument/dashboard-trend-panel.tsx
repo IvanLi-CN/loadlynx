@@ -1,4 +1,5 @@
 import { memo, useMemo, useState } from "react";
+import { useTranslation } from "react-i18next";
 import { Area } from "recharts/es6/cartesian/Area";
 import { CartesianGrid } from "recharts/es6/cartesian/CartesianGrid";
 import { Line } from "recharts/es6/cartesian/Line";
@@ -166,6 +167,7 @@ function TrendTooltip({
 }: TooltipContentProps<TooltipValueType, string | number> & {
   series: DashboardTrendPanelProps["trendSeries"];
 }) {
+  const { t } = useTranslation();
   if (!active || !payload || payload.length === 0) {
     return null;
   }
@@ -194,7 +196,7 @@ function TrendTooltip({
               style={{ backgroundColor: METRIC_TONES[metricKey].stroke }}
             />
             <span className="ll-trend-tooltip__label">
-              {metricSeries.label}
+              {t(`dashboard.trend.metric.${metricKey}`)}
             </span>
             <span className="ll-trend-tooltip__value">
               {formatMetricValue(
@@ -376,7 +378,7 @@ const DashboardTrendPlot = memo(function DashboardTrendPlot({
     </ResponsiveContainer>
   ) : (
     <div className="flex h-full items-center justify-center text-sm text-slate-200/42">
-      No data
+      —
     </div>
   );
 });
@@ -390,6 +392,7 @@ export function DashboardTrendPanel({
   metrics,
   trendSeries,
 }: DashboardTrendPanelProps) {
+  const { t } = useTranslation();
   const latestTime =
     trendSeries.current.times.at(-1) ??
     trendSeries.voltage.times.at(-1) ??
@@ -403,15 +406,20 @@ export function DashboardTrendPanel({
   const focusDigits = headline.unit === "W" || headline.unit === "Ω" ? 2 : 3;
   const rows = useMemo(() => buildTrendRows(trendSeries), [trendSeries]);
   const [pinnedIndex, setPinnedIndex] = useState<number | null>(null);
+  const metricLabel = (key: MetricKey) => t(`dashboard.trend.metric.${key}`);
+  const referenceLabel = (key: TrendMetricKey) =>
+    t(`dashboard.trend.reference.${key}`);
 
   return (
     <section
-      aria-label="Primary dashboard monitor"
+      aria-label={t("dashboard.trend.primaryMonitor")}
       className="instrument-card overflow-hidden p-5 sm:p-6"
     >
       <div className="flex flex-col gap-5 border-b border-slate-400/10 pb-5 xl:flex-row xl:items-start xl:justify-between">
         <div className="min-w-0 flex-1">
-          <div className="instrument-label">Main display</div>
+          <div className="instrument-label">
+            {t("dashboard.trend.mainDisplay")}
+          </div>
           <div className="mt-3 flex flex-wrap items-baseline gap-x-3 gap-y-2">
             <div className="instrument-glow-green text-5xl font-bold tracking-tight sm:text-6xl">
               <FixedNumber value={headline.value} digits={focusDigits} />
@@ -424,25 +432,25 @@ export function DashboardTrendPanel({
             </span>
             {stale ? (
               <span className="rounded-full border border-amber-400/20 bg-amber-500/10 px-2.5 py-1 text-[10px] font-semibold tracking-[0.14em] text-amber-200 uppercase">
-                Stale
+                {t("dashboard.trend.stale")}
               </span>
             ) : null}
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1 text-[11px] text-slate-200/55">
             <span>
-              Setpoint:{" "}
+              {t("dashboard.trend.setpoint")}:{" "}
               <span className="font-semibold text-slate-100/90">
                 {setpointLabel}
               </span>
             </span>
             <span>
-              Uptime:{" "}
+              {t("dashboard.trend.uptime")}:{" "}
               <span className="font-semibold text-slate-100/90">
                 {uptimeLabel}
               </span>
             </span>
             <span>
-              Window:{" "}
+              {t("dashboard.trend.window")}:{" "}
               <span className="font-semibold text-slate-100/90">
                 {formatTimeLabel(earliestTime)} → {formatTimeLabel(latestTime)}
               </span>
@@ -451,24 +459,26 @@ export function DashboardTrendPanel({
         </div>
 
         <div className="min-w-0 xl:min-w-[16rem] xl:pl-6 xl:text-right">
-          <div className="instrument-label">Live focus</div>
+          <div className="instrument-label">
+            {t("dashboard.trend.liveFocus")}
+          </div>
           <div className="mt-2 text-sm font-semibold text-slate-100">
-            Voltage / Current / Power
+            {t("dashboard.trend.focusMetrics")}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-200/52 xl:justify-end">
-            <span>Last 30 s</span>
+            <span>{t("dashboard.trend.last30Seconds")}</span>
             {pinnedIndex != null ? (
               <>
                 <span className="text-slate-200/30">•</span>
                 <span className="font-semibold text-slate-100/80">
-                  Pinned sample
+                  {t("dashboard.trend.pinnedSample")}
                 </span>
                 <button
                   type="button"
                   className="text-cyan-100/78 transition hover:text-cyan-100"
                   onClick={() => setPinnedIndex(null)}
                 >
-                  Clear
+                  {t("dashboard.trend.clear")}
                 </button>
               </>
             ) : null}
@@ -488,7 +498,7 @@ export function DashboardTrendPanel({
             ].join(" ")}
           >
             <div className="text-[10px] font-semibold tracking-[0.14em] text-slate-200/54 uppercase">
-              {metric.label}
+              {metricLabel(metric.key)}
             </div>
             <div className="mt-2 flex items-baseline gap-2">
               <div
@@ -514,9 +524,9 @@ export function DashboardTrendPanel({
       <div className="mt-5 border-t border-slate-400/10 pt-5">
         <div className="flex flex-wrap items-start justify-between gap-3">
           <div>
-            <div className="instrument-label">Trend</div>
+            <div className="instrument-label">{t("dashboard.trend.title")}</div>
             <div className="mt-1 text-sm font-semibold text-slate-100">
-              Voltage, current and power over last 30 s
+              {t("dashboard.trend.description")}
             </div>
           </div>
           <div className="grid gap-x-6 gap-y-3 text-right text-[11px] text-slate-200/54 sm:grid-cols-3 sm:text-left xl:min-w-[32rem]">
@@ -526,7 +536,7 @@ export function DashboardTrendPanel({
                   <div
                     className={`text-[10px] font-semibold tracking-[0.14em] uppercase ${METRIC_TONES[entry.key].labelClassName}`}
                   >
-                    {entry.label}
+                    {metricLabel(entry.key)}
                   </div>
                   <div className="mt-1 font-semibold text-slate-100">
                     <FixedNumber
@@ -536,7 +546,7 @@ export function DashboardTrendPanel({
                     {entry.unit}
                   </div>
                   <div className="mt-1 text-[10px] text-slate-200/48">
-                    {entry.referenceLabel}:{" "}
+                    {referenceLabel(entry.key)}:{" "}
                     <span className="font-semibold text-slate-100/80">
                       <FixedNumber
                         value={entry.referenceValue}
@@ -577,14 +587,14 @@ export function DashboardTrendPanel({
                     }}
                   />
                   <span className="font-semibold text-slate-100/88">
-                    {entry.label}
+                    {metricLabel(entry.key)}
                   </span>
-                  <span>{entry.referenceLabel}</span>
+                  <span>{referenceLabel(entry.key)}</span>
                 </div>
               ))}
             </div>
             <div className="text-[10px] text-slate-200/46">
-              Hover to inspect. Click to pin.
+              {t("dashboard.trend.inspectHint")}
             </div>
           </div>
 

@@ -10,6 +10,8 @@
 
 This canonical companion document was initialized from the legacy plan migration. Detailed implementation evidence remains in the migrated spec body and any referenced PR/HIL notes.
 
+- 2026-08-05 Web `/24` 扫描改为仅从当前页面的私网 IPv4 派生；不再接受任意用户 seed，非私网主机上明确禁用扫描。
+
 ## Milestones
 
 No explicit milestones were recorded in the legacy plan.

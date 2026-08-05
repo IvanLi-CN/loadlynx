@@ -5,7 +5,7 @@ import {
   useRouterState,
 } from "@tanstack/react-router";
 import { createContext, useContext, useEffect, useMemo, useRef } from "react";
-import { postCalibrationMode } from "../api/client.ts";
+import { coordinateCalibrationMode } from "../calibration/calibration-mode-coordinator.ts";
 import type { StoredDevice } from "../devices/device-store.ts";
 import { useDevicesQuery } from "../devices/hooks.ts";
 
@@ -57,7 +57,7 @@ export function DeviceLayout() {
     const baseUrl = device?.baseUrl ?? lastKnownBaseUrlRef.current;
     if (!baseUrl) return;
 
-    postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
+    coordinateCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
       // Best-effort; do not block rendering or show UI errors here.
     });
   }, [device?.baseUrl, isCalibrationPage, pathname]);

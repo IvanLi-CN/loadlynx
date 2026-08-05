@@ -75,6 +75,37 @@ export const Default: Story = {
   },
 };
 
+export const ChineseCopy: Story = {
+  globals: {
+    loadlynxLocale: "zh-CN",
+  },
+  play: async ({ canvas }) => {
+    await canvas.findByText("主显示", undefined, { timeout: 5_000 });
+    await canvas.findByText("实时焦点", undefined, { timeout: 5_000 });
+    await canvas.findByText("最近 30 秒的电压、电流与功率", undefined, {
+      timeout: 5_000,
+    });
+    await canvas.findByText("运行状态", undefined, { timeout: 5_000 });
+    await canvas.findByText("温度 / 故障", undefined, { timeout: 5_000 });
+    await canvas.findByText("目标电流 (mA)", undefined, { timeout: 5_000 });
+    await expect(canvas.queryByText("Main display")).not.toBeInTheDocument();
+    await expect(canvas.queryByText("Live focus")).not.toBeInTheDocument();
+    await expect(canvas.queryByText("Run State")).not.toBeInTheDocument();
+    await expect(
+      canvas.queryByText("Thermal / Faults"),
+    ).not.toBeInTheDocument();
+    await expect(
+      canvas.queryByText("Target current (mA)"),
+    ).not.toBeInTheDocument();
+  },
+};
+
+export const ChineseVisual: Story = {
+  globals: {
+    loadlynxLocale: "zh-CN",
+  },
+};
+
 export const LiveTelemetry: Story = {
   play: async ({ canvas }) => {
     await canvas.findByText(/Mode, output and setpoints/i, undefined, {

@@ -1,6 +1,7 @@
 import { useCallback, useRef } from "react";
-import { getStatus, postCalibrationMode } from "../../api/client.ts";
+import { getStatus } from "../../api/client.ts";
 import type { CalibrationModeRequest } from "../../api/types.ts";
+import { coordinateCalibrationMode } from "../../calibration/calibration-mode-coordinator.ts";
 import type { CalibrationTab } from "./shared.ts";
 import {
   formatDeviceCalKind,
@@ -62,11 +63,14 @@ export function useCalibrationModeSync(input: {
       let snapshotAfterCalKind: number | null = null;
       const attempt = (async (): Promise<void> => {
         await withStatusStreamPaused(async () => {
-          await retryDeviceCall(() => postCalibrationMode(baseUrl, { kind }), {
-            attempts: 4,
-            firstDelayMs: 120,
-            maxDelayMs: 600,
-          });
+          await retryDeviceCall(
+            () => coordinateCalibrationMode(baseUrl, { kind }),
+            {
+              attempts: 4,
+              firstDelayMs: 120,
+              maxDelayMs: 600,
+            },
+          );
 
           try {
             const snapshot = await retryDeviceCall(() => getStatus(baseUrl), {

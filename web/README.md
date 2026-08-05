@@ -130,7 +130,7 @@ PWA behavior:
 - `/version.json` is generated before build for the current server artifact but is not precached by the service worker.
 - A stable `/pwa-shell-guard.js` preflight compares the cached shell version against `/version.json`; when an old cached shell would boot dead hashed assets, it clears stale service workers/caches and reloads into the latest shell before the main app bundle starts.
 - A legacy recovery shim is also shipped at `/assets/index-SkMVprsZ.js` so already-broken pre-guard dashboard shells can clear old PWA state and bounce into the current app shell.
-- During the legacy stale-shell migration release, the generated service worker claims clients and skips waiting so refreshing a broken tab can hand subresource requests to the migration shim without waiting for an in-app prompt.
+- Only a deliberate migration build created with `LOADLYNX_PWA_MIGRATION=1 bun run build` makes the generated service worker claim clients and skip waiting. Ordinary production builds leave this unset and retain prompt-style activation.
 - App updates use prompt mode: a new service worker can cache the next build in the background, and the UI refreshes only after the user clicks `升级` / `Upgrade`.
 - Storybook uses a no-op PWA registration mock. Storybook is not itself built as a PWA target.
 

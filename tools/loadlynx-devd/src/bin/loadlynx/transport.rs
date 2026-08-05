@@ -15,14 +15,14 @@ pub(crate) async fn request_api_value(
     method: reqwest::Method,
     path: &str,
     body: Option<Value>,
-    allow_insecure_lan_wifi: bool,
+    _allow_insecure_lan_wifi: bool,
 ) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
     ensure_one_api_selector(selector.url.as_ref(), selector.device.as_ref())?;
     let is_wifi_write = path == "/api/v1/wifi"
         && (method == reqwest::Method::POST || method == reqwest::Method::DELETE);
     if let Some(url) = selector.url {
-        if is_wifi_write && !allow_insecure_lan_wifi {
-            return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
+        if is_wifi_write {
+            return Err("LAN WiFi writes require the local USB/devd path".into());
         }
         request_http_value(client, &url, method, path, body).await
     } else {
@@ -33,8 +33,8 @@ pub(crate) async fn request_api_value(
                 Ok(value)
             }
             ResolvedHardware::Http { hardware_id, url } => {
-                if is_wifi_write && !allow_insecure_lan_wifi {
-                    return Err("LAN WiFi writes require --allow-insecure-lan-wifi".into());
+                if is_wifi_write {
+                    return Err("LAN WiFi writes require the local USB/devd path".into());
                 }
                 let value = request_http_value(client, &url, method, path, body).await?;
                 let _ = mark_hardware_transport_used(&hardware_id, SavedTransport::Http);

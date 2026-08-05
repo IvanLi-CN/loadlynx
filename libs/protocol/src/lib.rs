@@ -656,6 +656,91 @@ pub struct PdStatus {
     pub epr_avs_pdos: EprAvsPdoList,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PdSinkRequestValidationError {
+    NotAttached,
+    UnsupportedMode,
+    CapabilityMissingOrWrongType,
+    TargetVoltageMismatch,
+    TargetVoltageOutOfRange,
+    RequestedCurrentOutOfRange,
+}
+
+impl PdSinkRequestValidationError {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::NotAttached => "source not attached",
+            Self::UnsupportedMode => "unsupported mode",
+            Self::CapabilityMissingOrWrongType => "capability missing or wrong type",
+            Self::TargetVoltageMismatch => "target voltage does not match fixed PDO",
+            Self::TargetVoltageOutOfRange => "target voltage outside APDO range",
+            Self::RequestedCurrentOutOfRange => "requested current exceeds capability",
+        }
+    }
+}
+
+pub fn validate_pd_sink_request(
+    status: &PdStatus,
+    request: &PdSinkRequest,
+) -> Result<(), PdSinkRequestValidationError> {
+    if !status.attached {
+        return Err(PdSinkRequestValidationError::NotAttached);
+    }
+    if request.target_mv > 28_000 {
+        return Err(PdSinkRequestValidationError::TargetVoltageOutOfRange);
+    }
+
+    match request.mode {
+        PdSinkMode::Fixed => {
+            let capability = status
+                .fixed_pdos
+                .iter()
+                .find(|pdo| pdo.pos == request.object_pos)
+                .ok_or(PdSinkRequestValidationError::CapabilityMissingOrWrongType)?;
+            if capability.mv != request.target_mv {
+                return Err(PdSinkRequestValidationError::TargetVoltageMismatch);
+            }
+            if request.i_req_ma == 0 || request.i_req_ma > capability.max_ma {
+                return Err(PdSinkRequestValidationError::RequestedCurrentOutOfRange);
+            }
+        }
+        PdSinkMode::Pps => {
+            let capability = status
+                .pps_pdos
+                .iter()
+                .find(|pdo| pdo.pos == request.object_pos)
+                .ok_or(PdSinkRequestValidationError::CapabilityMissingOrWrongType)?;
+            if request.target_mv < capability.min_mv || request.target_mv > capability.max_mv {
+                return Err(PdSinkRequestValidationError::TargetVoltageOutOfRange);
+            }
+            if request.i_req_ma == 0 || request.i_req_ma > capability.max_ma {
+                return Err(PdSinkRequestValidationError::RequestedCurrentOutOfRange);
+            }
+        }
+        PdSinkMode::Avs => {
+            let capability = status
+                .epr_avs_pdos
+                .iter()
+                .find(|pdo| pdo.pos == request.object_pos)
+                .ok_or(PdSinkRequestValidationError::CapabilityMissingOrWrongType)?;
+            if request.target_mv < capability.min_mv || request.target_mv > capability.max_mv {
+                return Err(PdSinkRequestValidationError::TargetVoltageOutOfRange);
+            }
+            let max_power_mw = u64::from(capability.pdp_w) * 1_000;
+            let requested_power_mw =
+                u64::from(request.target_mv) * u64::from(request.i_req_ma) / 1_000;
+            if request.i_req_ma == 0 || requested_power_mw > max_power_mw {
+                return Err(PdSinkRequestValidationError::RequestedCurrentOutOfRange);
+            }
+        }
+        PdSinkMode::Unknown(_) => {
+            return Err(PdSinkRequestValidationError::UnsupportedMode);
+        }
+    }
+
+    Ok(())
+}
+
 impl<C> Encode<C> for PdStatus {
     fn encode<W: minicbor::encode::Write>(
         &self,
@@ -1940,6 +2025,85 @@ mod tests {
         assert_eq!(hdr.seq, 7);
         assert_eq!(hdr.flags & FLAG_ACK_REQ, FLAG_ACK_REQ);
         assert_eq!(decoded, req);
+    }
+
+    #[test]
+    fn pd_sink_request_validation_rejects_wrong_live_capability_type() {
+        let mut status = PdStatus {
+            attached: true,
+            ..PdStatus::default()
+        };
+        status
+            .fixed_pdos
+            .push(FixedPdo {
+                pos: 2,
+                mv: 9_000,
+                max_ma: 3_000,
+            })
+            .unwrap();
+        let request = PdSinkRequest {
+            mode: PdSinkMode::Pps,
+            target_mv: 9_000,
+            object_pos: 2,
+            i_req_ma: 2_000,
+        };
+
+        assert_eq!(
+            validate_pd_sink_request(&status, &request),
+            Err(PdSinkRequestValidationError::CapabilityMissingOrWrongType)
+        );
+    }
+
+    #[test]
+    fn pd_sink_request_validation_accepts_matching_pps_capability() {
+        let mut status = PdStatus {
+            attached: true,
+            ..PdStatus::default()
+        };
+        status
+            .pps_pdos
+            .push(PpsPdo {
+                pos: 3,
+                min_mv: 3_300,
+                max_mv: 11_000,
+                max_ma: 3_000,
+            })
+            .unwrap();
+        let request = PdSinkRequest {
+            mode: PdSinkMode::Pps,
+            target_mv: 9_000,
+            object_pos: 3,
+            i_req_ma: 2_000,
+        };
+
+        assert_eq!(validate_pd_sink_request(&status, &request), Ok(()));
+    }
+
+    #[test]
+    fn pd_sink_request_validation_keeps_extended_epr_targets_read_only() {
+        let mut status = PdStatus {
+            attached: true,
+            ..PdStatus::default()
+        };
+        status
+            .fixed_pdos
+            .push(FixedPdo {
+                pos: 9,
+                mv: 36_000,
+                max_ma: 5_000,
+            })
+            .unwrap();
+        let request = PdSinkRequest {
+            mode: PdSinkMode::Fixed,
+            target_mv: 36_000,
+            object_pos: 9,
+            i_req_ma: 3_000,
+        };
+
+        assert_eq!(
+            validate_pd_sink_request(&status, &request),
+            Err(PdSinkRequestValidationError::TargetVoltageOutOfRange)
+        );
     }
 
     #[test]

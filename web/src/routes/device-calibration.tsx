@@ -5,9 +5,9 @@ import {
   getCalibrationProfile,
   type HttpApiError,
   isMockBaseUrl,
-  postCalibrationMode,
 } from "../api/client.ts";
 import type { CalibrationProfile } from "../api/types.ts";
+import { coordinateCalibrationMode } from "../calibration/calibration-mode-coordinator.ts";
 import { calibrationProfilesPointsEqual } from "../calibration/validation.ts";
 import { PageContainer } from "../components/layout/page-container.tsx";
 import {
@@ -79,7 +79,7 @@ function DeviceCalibrationPage({
       return;
     }
 
-    postCalibrationMode(previousBaseUrl, { kind: "off" }).catch(() => {
+    coordinateCalibrationMode(previousBaseUrl, { kind: "off" }).catch(() => {
       // Best-effort cleanup when switching devices.
     });
   }, [baseUrl]);
@@ -98,7 +98,7 @@ function DeviceCalibrationPage({
         return;
       }
 
-      postCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
+      coordinateCalibrationMode(baseUrl, { kind: "off" }).catch(() => {
         // Best-effort cleanup on route exit.
       });
     };

@@ -63,3 +63,20 @@ export function waitForServiceWorkerWaiting(
     }, timeoutMs);
   });
 }
+
+export async function activateWaitingWorkerOrReload(
+  registration: WaitingRegistration | null,
+  updateServiceWorker: (reloadPage?: boolean) => Promise<void>,
+  reloadPage: () => void,
+  waitTimeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
+): Promise<void> {
+  if (
+    registration &&
+    (await waitForServiceWorkerWaiting(registration, waitTimeoutMs))
+  ) {
+    await updateServiceWorker(true);
+    return;
+  }
+
+  reloadPage();
+}

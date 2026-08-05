@@ -63,3 +63,4 @@
 | `web-production-preview-smoke` | active | 修复 production-only 首屏崩溃；新增 dist preview smoke 并接入 web-check / web-pages | `web-production-preview-smoke/SPEC.md` | - | Web production preview smoke 与 chunk-cycle regression |
 | `web-pwa-offline-updates` | active | PWA app shell、prompt-style 更新、离线 reload smoke、Storybook 更新提示证据 | `web-pwa-offline-updates/SPEC.md` | - | Web PWA Offline Shell and Update Prompt |
 | `web-top-nav-device-workspace` | active | 顶部导航壳层、总览/仪表盘/系统 IA、设备 sheet/returnTo 切换与 about 页。 | `web-top-nav-device-workspace/SPEC.md` | - | Web Console 顶部导航与设备工作面 |
+| `loadlynx-spec-conflicts` | active | 八项跨规格冲突已修复并由 Rust、Web 与 Storybook 回归覆盖。 | `loadlynx-spec-conflicts/SPEC.md` | - | LoadLynx 跨规格实现一致性 |

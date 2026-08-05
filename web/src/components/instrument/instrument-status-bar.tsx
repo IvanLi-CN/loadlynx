@@ -1,3 +1,5 @@
+import { useTranslation } from "react-i18next";
+
 export type InstrumentStatusBarProps = {
   modeLabel: "CC" | "CV" | "CP" | "CR" | "UNKNOWN";
   linkState: "up" | "down" | "unknown";
@@ -15,16 +17,17 @@ export function InstrumentStatusBar({
   faultSummary,
   stale = false,
 }: InstrumentStatusBarProps) {
+  const { t } = useTranslation();
   const runStateText =
     modeLabel === "CC"
-      ? "Constant Current"
+      ? t("dashboard.statusBar.constantCurrent")
       : modeLabel === "CV"
-        ? "Constant Voltage"
+        ? t("dashboard.statusBar.constantVoltage")
         : modeLabel === "CP"
-          ? "Constant Power"
+          ? t("dashboard.statusBar.constantPower")
           : modeLabel === "CR"
-            ? "Constant Resistance"
-            : "Unknown";
+            ? t("dashboard.statusBar.constantResistance")
+            : t("dashboard.statusBar.unknown");
 
   const pillBase = "instrument-pill";
 
@@ -36,23 +39,23 @@ export function InstrumentStatusBar({
         : "";
 
   const outputText = outputState.enabled
-    ? `ON${outputState.setpointLabel ? ` · ${outputState.setpointLabel}` : ""}`
-    : "OFF";
+    ? `${t("dashboard.statusBar.outputOn")}${outputState.setpointLabel ? ` · ${outputState.setpointLabel}` : ""}`
+    : t("dashboard.statusBar.outputOff");
 
   const outputPillClass = outputState.enabled ? "instrument-pill-cyan" : "";
 
   const protectTitleText =
     protectionState.level === "danger"
-      ? "Fault"
+      ? t("dashboard.statusBar.fault")
       : protectionState.level === "warn"
-        ? "Attention"
-        : "All Clear";
+        ? t("dashboard.statusBar.attention")
+        : t("dashboard.statusBar.allClear");
 
   const protectPillText =
     protectionState.level === "ok" && !faultSummary
-      ? "UV LATCH READY"
+      ? t("dashboard.statusBar.uvReady")
       : protectionState.level === "ok" && faultSummary
-        ? "FAULT PRESENT"
+        ? t("dashboard.statusBar.faultPresent")
         : protectionState.summary.replaceAll("_", " ");
 
   const protectPillClass =
@@ -68,42 +71,50 @@ export function InstrumentStatusBar({
         <div>
           <div className="flex items-start justify-between gap-3">
             <div>
-              <div className="instrument-label">Run State</div>
+              <div className="instrument-label">
+                {t("dashboard.statusBar.runState")}
+              </div>
               <div className="mt-1 text-sm font-semibold text-slate-100">
                 {runStateText}
               </div>
             </div>
             {stale ? (
               <span className="rounded-full border border-amber-400/20 bg-amber-500/10 px-2 py-0.5 text-[10px] font-semibold tracking-[0.14em] text-amber-200">
-                STALE
+                {t("dashboard.statusBar.stale")}
               </span>
             ) : null}
           </div>
           <div className="mt-2">
             <span className={`${pillBase} ${linkPillClass} w-full`}>
               {linkState === "up"
-                ? "LINK UP"
+                ? t("dashboard.statusBar.linkUp")
                 : linkState === "down"
-                  ? "LINK DOWN"
-                  : "LINK UNKNOWN"}
+                  ? t("dashboard.statusBar.linkDown")
+                  : t("dashboard.statusBar.linkUnknown")}
             </span>
           </div>
         </div>
 
         <div>
-          <div className="instrument-label">Output</div>
+          <div className="instrument-label">
+            {t("dashboard.statusBar.output")}
+          </div>
           <div className="mt-1 text-sm font-semibold text-slate-100">
             {outputText}
           </div>
           <div className="mt-2">
             <span className={`${pillBase} ${outputPillClass} w-full`}>
-              {outputState.enabled ? "REMOTE ACTIVE" : "OUTPUT DISABLED"}
+              {outputState.enabled
+                ? t("dashboard.statusBar.remoteActive")
+                : t("dashboard.statusBar.outputDisabled")}
             </span>
           </div>
         </div>
 
         <div>
-          <div className="instrument-label">Protection</div>
+          <div className="instrument-label">
+            {t("dashboard.statusBar.protection")}
+          </div>
           <div className="mt-1 text-sm font-semibold text-slate-100">
             {protectTitleText}
           </div>
