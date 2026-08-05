@@ -28,7 +28,7 @@ export const Release: Story = {
 export const ReleaseVisual: Story = {
   render: (args) => (
     <div
-      className="inline-flex bg-base-100 p-2 text-base-content"
+      className="inline-flex bg-base-100 px-2 pt-[5px] pb-[7px] text-base-content"
       data-testid="app-version-link-evidence"
     >
       <AppVersionLink {...args} />
