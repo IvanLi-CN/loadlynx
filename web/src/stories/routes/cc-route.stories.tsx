@@ -87,11 +87,15 @@ export const ChineseCopy: Story = {
     });
     await canvas.findByText("运行状态", undefined, { timeout: 5_000 });
     await canvas.findByText("温度 / 故障", undefined, { timeout: 5_000 });
+    await canvas.findByText("目标电流 (mA)", undefined, { timeout: 5_000 });
     await expect(canvas.queryByText("Main display")).not.toBeInTheDocument();
     await expect(canvas.queryByText("Live focus")).not.toBeInTheDocument();
     await expect(canvas.queryByText("Run State")).not.toBeInTheDocument();
     await expect(
       canvas.queryByText("Thermal / Faults"),
+    ).not.toBeInTheDocument();
+    await expect(
+      canvas.queryByText("Target current (mA)"),
     ).not.toBeInTheDocument();
   },
 };
