@@ -131,8 +131,35 @@ None。本规格聚合既有契约；接口所有权仍属于下列 References �
 
 PR: none
 
-- `./assets/cc-route-chinese.jpg`：默认中文 CC route 的趋势区、状态与控制文案。
-- `./assets/app-version-link.jpg`：使用本地样式且不含 daisyUI semantic token 的版本链接。
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: element
+  requested_viewport: loadlynxLarge (1200x800)
+  viewport_strategy: storybook-viewport
+  margin_policy: trim_only
+  evidence_surface: page
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: routes-cc--chinese-visual
+  state: default Chinese CC dashboard
+  evidence_note: verifies localized status, trend, readout, and preset-control copy without Storybook chrome.
+  image:
+  ![CC route Chinese visual evidence](./assets/cc-route-chinese.png)
+
+- source_type: storybook_canvas
+  target_program: mock-only
+  capture_scope: element
+  requested_viewport: none
+  viewport_strategy: storybook-viewport
+  margin_policy: require_margin
+  evidence_surface: component
+  sensitive_exclusion: N/A
+  submission_gate: pending-owner-approval
+  story_id_or_title: components-app-version-link--release-visual
+  state: linked release version
+  evidence_note: verifies the release link uses local styling without the daisyUI semantic link token.
+  image:
+  ![App version link visual evidence](./assets/app-version-link.png)
 
 ## Related PRs
 
