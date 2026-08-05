@@ -25,7 +25,16 @@ export const Release: Story = {
   },
 };
 
-export const ReleaseVisual: Story = {};
+export const ReleaseVisual: Story = {
+  render: (args) => (
+    <div
+      className="bg-base-100 p-8 text-base-content"
+      data-testid="app-version-link-evidence"
+    >
+      <AppVersionLink {...args} />
+    </div>
+  ),
+};
 
 export const Unlinked: Story = {
   args: {
