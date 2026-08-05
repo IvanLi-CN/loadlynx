@@ -104,14 +104,16 @@ test.describe("Presets + Unified Control (mock://)", () => {
 
     await drawer.getByLabel("CV").check({ force: true });
     await drawer
-      .getByRole("textbox", { name: "Target voltage (mV)" })
+      .getByRole("textbox", { name: /目标电压 \(mV\)|Target voltage \(mV\)/ })
       .fill("15000");
-    await drawer.getByRole("textbox", { name: "Min voltage (mV)" }).fill("0");
     await drawer
-      .getByRole("textbox", { name: "Max current total (mA)" })
+      .getByRole("textbox", { name: /最低电压 \(mV\)|Min voltage \(mV\)/ })
+      .fill("0");
+    await drawer
+      .getByRole("textbox", { name: /最大总电流 \(mA\)|Max current total \(mA\)/ })
       .fill("8000");
     await drawer
-      .getByRole("textbox", { name: "Max power (mW)" })
+      .getByRole("textbox", { name: /最大功率 \(mW\)|Max power \(mW\)/ })
       .fill("120000");
     await drawer.getByRole("button", { name: /Save Slot|保存槽位/ }).click();
     await expect(drawer.getByText("已保存到槽位 #3。")).toBeVisible();
@@ -123,7 +125,7 @@ test.describe("Presets + Unified Control (mock://)", () => {
 
     await drawer.getByLabel("CC").check({ force: true });
     await drawer
-      .getByRole("textbox", { name: "Target current (mA)" })
+      .getByRole("textbox", { name: /目标电流 \(mA\)|Target current \(mA\)/ })
       .fill("2500");
     await drawer
       .getByRole("button", { name: /Save Active Slot|保存当前激活槽位/ })
@@ -144,14 +146,16 @@ test.describe("Presets + Unified Control (mock://)", () => {
 
     await drawer.getByLabel("CP").check({ force: true });
     await drawer
-      .getByRole("textbox", { name: "Target power (mW)" })
+      .getByRole("textbox", { name: /目标功率 \(mW\)|Target power \(mW\)/ })
       .fill("25000");
-    await drawer.getByRole("textbox", { name: "Min voltage (mV)" }).fill("0");
     await drawer
-      .getByRole("textbox", { name: "Max current total (mA)" })
+      .getByRole("textbox", { name: /最低电压 \(mV\)|Min voltage \(mV\)/ })
+      .fill("0");
+    await drawer
+      .getByRole("textbox", { name: /最大总电流 \(mA\)|Max current total \(mA\)/ })
       .fill("8000");
     await drawer
-      .getByRole("textbox", { name: "Max power (mW)" })
+      .getByRole("textbox", { name: /最大功率 \(mW\)|Max power \(mW\)/ })
       .fill("120000");
     await drawer.getByRole("button", { name: /Save Slot|保存槽位/ }).click();
     await expect(drawer.getByText("已保存到槽位 #4。")).toBeVisible();
