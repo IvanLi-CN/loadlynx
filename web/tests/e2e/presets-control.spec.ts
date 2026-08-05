@@ -110,7 +110,9 @@ test.describe("Presets + Unified Control (mock://)", () => {
       .getByRole("textbox", { name: /最低电压 \(mV\)|Min voltage \(mV\)/ })
       .fill("0");
     await drawer
-      .getByRole("textbox", { name: /最大总电流 \(mA\)|Max current total \(mA\)/ })
+      .getByRole("textbox", {
+        name: /最大总电流 \(mA\)|Max current total \(mA\)/,
+      })
       .fill("8000");
     await drawer
       .getByRole("textbox", { name: /最大功率 \(mW\)|Max power \(mW\)/ })
@@ -152,7 +154,9 @@ test.describe("Presets + Unified Control (mock://)", () => {
       .getByRole("textbox", { name: /最低电压 \(mV\)|Min voltage \(mV\)/ })
       .fill("0");
     await drawer
-      .getByRole("textbox", { name: /最大总电流 \(mA\)|Max current total \(mA\)/ })
+      .getByRole("textbox", {
+        name: /最大总电流 \(mA\)|Max current total \(mA\)/,
+      })
       .fill("8000");
     await drawer
       .getByRole("textbox", { name: /最大功率 \(mW\)|Max power \(mW\)/ })
