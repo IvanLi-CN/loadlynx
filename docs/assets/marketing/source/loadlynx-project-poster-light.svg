@@ -1,0 +1,66 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="2160" height="2700" viewBox="0 0 2160 2700" role="img" aria-labelledby="title description">
+  <title id="title">LoadLynx light project poster</title>
+  <desc id="description">A 4:5 layered light poster with an opaque product-and-environment hero image beneath SVG vector artwork.</desc>
+
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0.94" y2="1">
+      <stop offset="0" stop-color="#eff4f6"/>
+      <stop offset="0.48" stop-color="#fafcfd"/>
+      <stop offset="1" stop-color="#e8eef1"/>
+    </linearGradient>
+    <radialGradient id="hero-halo" cx="51%" cy="49%" r="56%">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.54"/>
+      <stop offset="0.7" stop-color="#dce8ed" stop-opacity="0.08"/>
+      <stop offset="1" stop-color="#dce8ed" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="micro-grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.48" numOctaves="4" seed="23" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+      <feComponentTransfer>
+        <feFuncA type="table" tableValues="0 0.032"/>
+      </feComponentTransfer>
+    </filter>
+    <clipPath id="cyan-content-clip">
+      <rect x="360" y="90" width="210" height="235"/>
+      <rect x="610" y="415" width="1235" height="65"/>
+      <rect x="250" y="480" width="1670" height="85"/>
+      <rect x="900" y="580" width="340" height="75"/>
+      <rect x="440" y="1955" width="450" height="115"/>
+      <rect x="1410" y="1955" width="430" height="115"/>
+      <rect x="420" y="2285" width="390" height="120"/>
+      <rect x="1080" y="2285" width="340" height="120"/>
+      <rect x="1620" y="2285" width="410" height="120"/>
+      <rect x="420" y="2485" width="390" height="120"/>
+      <rect x="1280" y="2485" width="760" height="120"/>
+    </clipPath>
+    <g id="hero-crosshair" fill="none" stroke="#344148" stroke-opacity="0.42" stroke-width="3">
+      <circle cx="0" cy="0" r="28"/>
+      <circle cx="0" cy="0" r="9"/>
+      <path d="M-58 0h40M18 0h40M0-58v40M0 18v40"/>
+    </g>
+  </defs>
+
+  <!-- Raster-free background layer retained behind the opaque hero image. -->
+  <g id="background-layer">
+    <rect width="2160" height="2700" fill="url(#background)"/>
+    <rect width="2160" height="2700" fill="url(#hero-halo)"/>
+    <rect width="2160" height="2700" fill="#8ea2aa" filter="url(#micro-grain)"/>
+  </g>
+
+  <!-- This image contains the approved product and its continuous light environment. -->
+  <g id="hero-raster-layer">
+    <image href="__HERO_RENDER_DATA_URI__" x="0" y="0" width="2160" height="2700" preserveAspectRatio="none"/>
+  </g>
+
+  <!-- The wording, icons, rules, and ornament are independent SVG path layers. -->
+  <g id="approved-vector-artwork">
+    <!-- Keep traced ornament behind the primary information paths. -->
+    <image href="__DECOR_VECTOR_DATA_URI__" x="0" y="0" width="2160" height="2700" preserveAspectRatio="none"/>
+    <image href="__PRIMARY_VECTOR_DATA_URI__" x="0" y="0" width="2160" height="2700" preserveAspectRatio="none"/>
+    <g clip-path="url(#cyan-content-clip)">
+      <image href="__CYAN_VECTOR_DATA_URI__" x="0" y="0" width="2160" height="2700" preserveAspectRatio="none"/>
+    </g>
+  </g>
+  <g id="hero-foreground-vector"><g transform="translate(1980 1724)"><use href="#hero-crosshair"/></g></g>
+</svg>
