@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, readFileSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -31,8 +32,11 @@ const outputHeight = 1402;
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
   console.log(
-    "Usage: node scripts/render-marketing-posters.mjs [--variant <dark|light>] [--out <path>] [--all]",
+    "Usage: node scripts/render-marketing-posters.mjs [--variant <dark|light>] [--out <path>] [--all] [--verify]",
   );
+  console.log("Requires rsvg-convert (librsvg) and ImageMagick compare.");
+  console.log("macOS: brew install librsvg imagemagick");
+  console.log("Debian/Ubuntu: sudo apt-get install librsvg2-bin imagemagick");
   process.exit(0);
 }
 
@@ -56,13 +60,32 @@ if (args.includes("--all") && outIndex !== -1) {
   console.error("--out cannot be combined with --all");
   process.exit(1);
 }
+if (
+  args.includes("--verify") &&
+  (args.includes("--all") || outIndex !== -1 || variantIndex !== -1)
+) {
+  console.error("--verify checks both committed poster variants and cannot be combined with --variant, --out, or --all");
+  process.exit(1);
+}
 
 function dataUri(path, mimeType) {
   return `data:${mimeType};base64,${readFileSync(path).toString("base64")}`;
 }
 
+function requireCommand(command, packageHint) {
+  const result = spawnSync(command, ["--version"], { stdio: "ignore" });
+  if (result.error?.code === "ENOENT") {
+    throw new Error(`${command} is required; install ${packageHint}`);
+  }
+  if (result.error) {
+    throw new Error(`${command} could not start: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    throw new Error(`${command} preflight failed with exit code ${result.status}`);
+  }
+}
+
 function renderPoster(variant, output) {
-  mkdirSync(dirname(output), { recursive: true });
 
   const renderedSvg = readFileSync(variant.source, "utf8")
     .replace("__HERO_RENDER_DATA_URI__", dataUri(variant.hero, "image/png"))
@@ -88,20 +111,89 @@ function renderPoster(variant, output) {
     { input: renderedSvg, stdio: ["pipe", "inherit", "inherit"] },
   );
 
+  if (result.error) {
+    throw new Error(`rsvg-convert could not start: ${result.error.message}`);
+  }
   if (result.status !== 0) {
-    process.exit(result.status ?? 1);
+    throw new Error(`rsvg-convert failed with exit code ${result.status ?? 1}`);
+  }
+}
+
+function stageOutput(output) {
+  const outputDirectory = dirname(output);
+  mkdirSync(outputDirectory, { recursive: true });
+  const stagingDirectory = mkdtempSync(join(outputDirectory, `.${basename(output)}.`));
+  return {
+    stagingDirectory,
+    stagedOutput: join(stagingDirectory, basename(output)),
+  };
+}
+
+function renderAtomically(jobs) {
+  const staged = [];
+  try {
+    for (const job of jobs) {
+      const stage = stageOutput(job.output);
+      staged.push({ ...job, ...stage });
+      renderPoster(job.variant, stage.stagedOutput);
+    }
+
+    for (const job of staged) {
+      renameSync(job.stagedOutput, job.output);
+    }
+  } finally {
+    for (const job of staged) {
+      rmSync(job.stagingDirectory, { force: true, recursive: true });
+    }
+  }
+}
+
+function verifyPosters() {
+  const verificationDirectory = mkdtempSync(join(tmpdir(), "loadlynx-marketing-posters-"));
+  try {
+    const jobs = Object.entries(posterVariants).map(([name, variant]) => ({
+      variant,
+      output: join(verificationDirectory, `${name}.png`),
+    }));
+    renderAtomically(jobs);
+
+    for (const [name, variant] of Object.entries(posterVariants)) {
+      const actual = join(verificationDirectory, `${name}.png`);
+      const result = spawnSync(
+        "compare",
+        ["-metric", "AE", actual, variant.output, "null:"],
+        { encoding: "utf8" },
+      );
+      if (result.error) {
+        throw new Error(`compare could not start: ${result.error.message}`);
+      }
+      if (result.status !== 0) {
+        const metric = `${result.stdout}${result.stderr}`.trim() || "unknown";
+        throw new Error(`${name} poster differs from its committed output (AE ${metric})`);
+      }
+    }
+  } finally {
+    rmSync(verificationDirectory, { force: true, recursive: true });
   }
 }
 
 try {
-  if (args.includes("--all")) {
-    for (const variant of Object.values(posterVariants)) {
-      renderPoster(variant, variant.output);
-    }
+  requireCommand("rsvg-convert", "librsvg (macOS: brew install librsvg; Debian/Ubuntu: sudo apt-get install librsvg2-bin)");
+  if (args.includes("--verify")) {
+    requireCommand("compare", "ImageMagick (macOS: brew install imagemagick; Debian/Ubuntu: sudo apt-get install imagemagick)");
+    verifyPosters();
   } else {
-    const variant = posterVariants[variantName];
-    const output = outIndex === -1 ? variant.output : resolve(process.cwd(), args[outIndex + 1]);
-    renderPoster(variant, output);
+    const jobs = args.includes("--all")
+      ? Object.values(posterVariants).map((variant) => ({ variant, output: variant.output }))
+      : [
+          {
+            variant: posterVariants[variantName],
+            output: outIndex === -1
+              ? posterVariants[variantName].output
+              : resolve(process.cwd(), args[outIndex + 1]),
+          },
+        ];
+    renderAtomically(jobs);
   }
 } catch (error) {
   console.error(error.message);

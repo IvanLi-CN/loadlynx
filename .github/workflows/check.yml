@@ -10,6 +10,8 @@ on:
       - 'libs/**'
       - 'tools/loadlynx-devd/**'
       - 'tools/ui-mock/**'
+      - 'docs/assets/marketing/**'
+      - 'scripts/render-marketing-posters.mjs'
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
@@ -28,6 +30,8 @@ on:
       - 'libs/**'
       - 'tools/loadlynx-devd/**'
       - 'tools/ui-mock/**'
+      - 'docs/assets/marketing/**'
+      - 'scripts/render-marketing-posters.mjs'
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
@@ -68,7 +72,10 @@ jobs:
         run: npm ci
 
       - name: Install host system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev librsvg2-bin imagemagick
+
+      - name: Verify marketing poster sources
+        run: npm run test:marketing-posters
 
       - name: Test release label tooling
         run: node .github/scripts/release-labels.test.mjs
