@@ -47,7 +47,7 @@ permissions:
 
 jobs:
   host-rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -76,7 +76,11 @@ jobs:
 
       - name: Verify marketing poster sources
         # Linux librsvg 2.54/2.58 measurements peak at AE 47927; local checks remain exact.
-        run: node scripts/render-marketing-posters.mjs --verify --max-ae 60000
+        run: |
+          renderer_version="$(rsvg-convert --version)"
+          printf 'rsvg-convert: %s\n' "$renderer_version"
+          test "$renderer_version" = "rsvg-convert version 2.58.0"
+          npm run test:marketing-posters:ci
 
       - name: Test release label tooling
         run: node .github/scripts/release-labels.test.mjs

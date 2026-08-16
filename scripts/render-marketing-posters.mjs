@@ -12,7 +12,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -37,6 +37,8 @@ const posterVariants = {
 };
 const outputWidth = 1122;
 const outputHeight = 1402;
+const transactionLockName = ".loadlynx-marketing-poster.lock";
+const transactionJournalName = "transaction.json";
 
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
@@ -151,22 +153,115 @@ function stageOutput(output) {
   return {
     stagingDirectory,
     stagedOutput: join(stagingDirectory, basename(output)),
-    backupOutput: join(stagingDirectory, `previous-${basename(output)}`),
-    discardedOutput: join(stagingDirectory, `discarded-${basename(output)}`),
   };
 }
 
-function restoreReplacements(staged) {
+function renderSingleAtomically(job) {
+  const stage = stageOutput(job.output);
+  try {
+    renderPoster(job.variant, stage.stagedOutput);
+    renameSync(stage.stagedOutput, job.output);
+  } finally {
+    rmSync(stage.stagingDirectory, { force: true, recursive: true });
+  }
+}
+
+function commonOutputDirectory(jobs) {
+  const directories = [...new Set(jobs.map((job) => dirname(job.output)))];
+  if (directories.length !== 1) {
+    throw new Error("Multi-poster rendering requires one shared output directory");
+  }
+  return directories[0];
+}
+
+function isPathInside(parent, child) {
+  const pathFromParent = relative(parent, child);
+  return pathFromParent !== "" && !pathFromParent.startsWith("..");
+}
+
+function transactionJournalPath(lockDirectory) {
+  return join(lockDirectory, transactionJournalName);
+}
+
+function writeTransactionJournal(transaction) {
+  const journalPath = transactionJournalPath(transaction.lockDirectory);
+  const temporaryPath = join(transaction.lockDirectory, `transaction-${process.pid}.tmp`);
+  writeFileSync(temporaryPath, `${JSON.stringify(transaction)}\n`);
+  renameSync(temporaryPath, journalPath);
+}
+
+function isProcessRunning(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function transactionMatchesJobs(transaction, lockDirectory, jobs) {
+  if (
+    !transaction ||
+    transaction.version !== 1 ||
+    !Number.isSafeInteger(transaction.pid) ||
+    transaction.pid <= 0 ||
+    transaction.lockDirectory !== lockDirectory ||
+    !["rendering", "publishing", "published"].includes(transaction.phase) ||
+    !Array.isArray(transaction.jobs)
+  ) {
+    return false;
+  }
+
+  const expectedOutputs = jobs.map((job) => job.output).sort();
+  const recordedOutputs = transaction.jobs.map((job) => job.output).sort();
+  if (
+    expectedOutputs.length !== recordedOutputs.length ||
+    expectedOutputs.some((output, index) => output !== recordedOutputs[index])
+  ) {
+    return false;
+  }
+
+  return transaction.jobs.every(
+    (job) =>
+      typeof job.hadOriginal === "boolean" &&
+      typeof job.output === "string" &&
+      typeof job.stagedOutput === "string" &&
+      typeof job.backupOutput === "string" &&
+      typeof job.discardedOutput === "string" &&
+      isPathInside(lockDirectory, job.stagedOutput) &&
+      isPathInside(lockDirectory, job.backupOutput) &&
+      isPathInside(lockDirectory, job.discardedOutput),
+  );
+}
+
+function readTransaction(lockDirectory, jobs) {
+  const journalPath = transactionJournalPath(lockDirectory);
+  if (!existsSync(journalPath)) {
+    throw new Error(`Poster transaction lock is incomplete: ${lockDirectory}`);
+  }
+
+  let transaction;
+  try {
+    transaction = JSON.parse(readFileSync(journalPath, "utf8"));
+  } catch (error) {
+    throw new Error(`Poster transaction journal is unreadable: ${error.message}`);
+  }
+  if (!transactionMatchesJobs(transaction, lockDirectory, jobs)) {
+    throw new Error(`Poster transaction journal does not match this output set: ${lockDirectory}`);
+  }
+  return transaction;
+}
+
+function restoreTransactionOutputs(transaction) {
   const rollbackErrors = [];
-  for (const job of [...staged].reverse()) {
+  for (const job of [...transaction.jobs].reverse()) {
     try {
-      if (!job.replacementCommitted) {
-        continue;
-      }
-      if (job.backupReady && existsSync(job.backupOutput)) {
+      if (job.hadOriginal && existsSync(job.backupOutput)) {
         renameSync(job.backupOutput, job.output);
-      } else if (existsSync(job.output)) {
+      } else if (!job.hadOriginal && !existsSync(job.stagedOutput) && existsSync(job.output)) {
         renameSync(job.output, job.discardedOutput);
+      } else if (job.hadOriginal) {
+        throw new Error(`missing backup for ${job.output}`);
       }
     } catch (error) {
       rollbackErrors.push(error instanceof Error ? error.message : String(error));
@@ -175,39 +270,109 @@ function restoreReplacements(staged) {
   return rollbackErrors;
 }
 
-function renderAtomically(jobs) {
-  const staged = [];
-  try {
-    for (const job of jobs) {
-      const stage = stageOutput(job.output);
-      staged.push({ ...job, ...stage });
-      renderPoster(job.variant, stage.stagedOutput);
-    }
+function removeTransactionLock(lockDirectory) {
+  rmSync(lockDirectory, { force: true, recursive: true });
+}
 
-    try {
-      for (const job of staged) {
-        job.backupReady = false;
-        job.replacementCommitted = false;
-        if (existsSync(job.output)) {
-          copyFileSync(job.output, job.backupOutput);
-          job.backupReady = true;
-        }
-        renameSync(job.stagedOutput, job.output);
-        job.replacementCommitted = true;
-      }
-    } catch (error) {
-      const rollbackErrors = restoreReplacements(staged);
-      const message = error instanceof Error ? error.message : String(error);
-      if (rollbackErrors.length > 0) {
-        throw new Error(`${message}; output rollback failed: ${rollbackErrors.join("; ")}`);
-      }
-      throw new Error(`${message}; poster outputs were restored`);
-    }
-  } finally {
-    for (const job of staged) {
-      rmSync(job.stagingDirectory, { force: true, recursive: true });
+function recoverInterruptedTransaction(outputDirectory, jobs) {
+  const lockDirectory = join(outputDirectory, transactionLockName);
+  if (!existsSync(lockDirectory)) {
+    return;
+  }
+
+  const transaction = readTransaction(lockDirectory, jobs);
+  if (isProcessRunning(transaction.pid)) {
+    throw new Error(`Another poster render owns the transaction lock: ${lockDirectory}`);
+  }
+
+  if (transaction.phase === "publishing") {
+    const rollbackErrors = restoreTransactionOutputs(transaction);
+    if (rollbackErrors.length > 0) {
+      throw new Error(`Interrupted poster transaction could not be restored: ${rollbackErrors.join("; ")}`);
     }
   }
+  removeTransactionLock(lockDirectory);
+}
+
+function createTransaction(outputDirectory, jobs) {
+  const lockDirectory = join(outputDirectory, transactionLockName);
+  try {
+    mkdirSync(lockDirectory);
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      throw new Error(`Another poster render acquired the transaction lock: ${lockDirectory}`);
+    }
+    throw error;
+  }
+
+  const transaction = {
+    version: 1,
+    pid: process.pid,
+    phase: "rendering",
+    lockDirectory,
+    jobs: jobs.map((job, index) => ({
+      output: job.output,
+      stagedOutput: join(lockDirectory, `staged-${index}-${basename(job.output)}`),
+      backupOutput: join(lockDirectory, `previous-${index}-${basename(job.output)}`),
+      discardedOutput: join(lockDirectory, `discarded-${index}-${basename(job.output)}`),
+      hadOriginal: existsSync(job.output),
+    })),
+  };
+  try {
+    writeTransactionJournal(transaction);
+  } catch (error) {
+    removeTransactionLock(lockDirectory);
+    throw error;
+  }
+  return transaction;
+}
+
+function renderPosterPairAtomically(jobs) {
+  const outputDirectory = commonOutputDirectory(jobs);
+  recoverInterruptedTransaction(outputDirectory, jobs);
+
+  let transaction;
+  try {
+    transaction = createTransaction(outputDirectory, jobs);
+    const stagedJobs = jobs.map((job, index) => ({
+      ...job,
+      ...transaction.jobs[index],
+    }));
+    for (const job of stagedJobs) {
+      renderPoster(job.variant, job.stagedOutput);
+    }
+
+    for (const job of transaction.jobs) {
+      if (job.hadOriginal) {
+        copyFileSync(job.output, job.backupOutput);
+      }
+    }
+    transaction.phase = "publishing";
+    writeTransactionJournal(transaction);
+    for (const job of transaction.jobs) {
+      renameSync(job.stagedOutput, job.output);
+    }
+    transaction.phase = "published";
+    writeTransactionJournal(transaction);
+  } finally {
+    if (transaction?.phase === "publishing") {
+      const rollbackErrors = restoreTransactionOutputs(transaction);
+      if (rollbackErrors.length > 0) {
+        throw new Error(`Poster outputs could not be restored: ${rollbackErrors.join("; ")}`);
+      }
+      removeTransactionLock(transaction.lockDirectory);
+    } else if (transaction?.phase === "rendering" || transaction?.phase === "published") {
+      removeTransactionLock(transaction.lockDirectory);
+    }
+  }
+}
+
+function renderAtomically(jobs) {
+  if (jobs.length === 1) {
+    renderSingleAtomically(jobs[0]);
+    return;
+  }
+  renderPosterPairAtomically(jobs);
 }
 
 function verifyPosters(maxAllowedAe) {
