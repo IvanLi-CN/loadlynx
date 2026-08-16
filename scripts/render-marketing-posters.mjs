@@ -1,7 +1,16 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -32,7 +41,7 @@ const outputHeight = 1402;
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
   console.log(
-    "Usage: node scripts/render-marketing-posters.mjs [--variant <dark|light>] [--out <path>] [--all] [--verify]",
+    "Usage: node scripts/render-marketing-posters.mjs [--variant <dark|light>] [--out <path>] [--all] [--verify] [--max-ae <non-negative integer>]",
   );
   console.log("Requires rsvg-convert (librsvg) and ImageMagick compare.");
   console.log("macOS: brew install librsvg imagemagick");
@@ -41,8 +50,22 @@ if (args.includes("--help")) {
 }
 
 const outIndex = args.indexOf("--out");
+const maxAeIndex = args.indexOf("--max-ae");
 if (outIndex !== -1 && !args[outIndex + 1]) {
   console.error("--out requires a file path");
+  process.exit(1);
+}
+if (maxAeIndex !== -1 && !args[maxAeIndex + 1]) {
+  console.error("--max-ae requires a non-negative integer");
+  process.exit(1);
+}
+if (maxAeIndex !== -1 && !args.includes("--verify")) {
+  console.error("--max-ae can only be used with --verify");
+  process.exit(1);
+}
+const maxAe = maxAeIndex === -1 ? 0 : Number(args[maxAeIndex + 1]);
+if (!Number.isSafeInteger(maxAe) || maxAe < 0) {
+  console.error("--max-ae requires a non-negative integer");
   process.exit(1);
 }
 
@@ -86,7 +109,6 @@ function requireCommand(command, packageHint) {
 }
 
 function renderPoster(variant, output) {
-
   const renderedSvg = readFileSync(variant.source, "utf8")
     .replace("__HERO_RENDER_DATA_URI__", dataUri(variant.hero, "image/png"))
     .replace("__PRIMARY_VECTOR_DATA_URI__", dataUri(variant.primary, "image/svg+xml"))
@@ -97,6 +119,9 @@ function renderPoster(variant, output) {
     throw new Error("A layered poster source placeholder is missing");
   }
 
+  const renderedSvgPath = join(dirname(output), `${basename(output)}.svg`);
+  writeFileSync(renderedSvgPath, renderedSvg);
+
   const result = spawnSync(
     "rsvg-convert",
     [
@@ -106,9 +131,9 @@ function renderPoster(variant, output) {
       String(outputHeight),
       "--output",
       output,
-      "-",
+      renderedSvgPath,
     ],
-    { input: renderedSvg, stdio: ["pipe", "inherit", "inherit"] },
+    { stdio: "inherit" },
   );
 
   if (result.error) {
@@ -126,7 +151,28 @@ function stageOutput(output) {
   return {
     stagingDirectory,
     stagedOutput: join(stagingDirectory, basename(output)),
+    backupOutput: join(stagingDirectory, `previous-${basename(output)}`),
+    discardedOutput: join(stagingDirectory, `discarded-${basename(output)}`),
   };
+}
+
+function restoreReplacements(staged) {
+  const rollbackErrors = [];
+  for (const job of [...staged].reverse()) {
+    try {
+      if (!job.replacementCommitted) {
+        continue;
+      }
+      if (job.backupReady && existsSync(job.backupOutput)) {
+        renameSync(job.backupOutput, job.output);
+      } else if (existsSync(job.output)) {
+        renameSync(job.output, job.discardedOutput);
+      }
+    } catch (error) {
+      rollbackErrors.push(error instanceof Error ? error.message : String(error));
+    }
+  }
+  return rollbackErrors;
 }
 
 function renderAtomically(jobs) {
@@ -138,8 +184,24 @@ function renderAtomically(jobs) {
       renderPoster(job.variant, stage.stagedOutput);
     }
 
-    for (const job of staged) {
-      renameSync(job.stagedOutput, job.output);
+    try {
+      for (const job of staged) {
+        job.backupReady = false;
+        job.replacementCommitted = false;
+        if (existsSync(job.output)) {
+          copyFileSync(job.output, job.backupOutput);
+          job.backupReady = true;
+        }
+        renameSync(job.stagedOutput, job.output);
+        job.replacementCommitted = true;
+      }
+    } catch (error) {
+      const rollbackErrors = restoreReplacements(staged);
+      const message = error instanceof Error ? error.message : String(error);
+      if (rollbackErrors.length > 0) {
+        throw new Error(`${message}; output rollback failed: ${rollbackErrors.join("; ")}`);
+      }
+      throw new Error(`${message}; poster outputs were restored`);
     }
   } finally {
     for (const job of staged) {
@@ -148,7 +210,7 @@ function renderAtomically(jobs) {
   }
 }
 
-function verifyPosters() {
+function verifyPosters(maxAllowedAe) {
   const verificationDirectory = mkdtempSync(join(tmpdir(), "loadlynx-marketing-posters-"));
   try {
     const jobs = Object.entries(posterVariants).map(([name, variant]) => ({
@@ -167,9 +229,18 @@ function verifyPosters() {
       if (result.error) {
         throw new Error(`compare could not start: ${result.error.message}`);
       }
-      if (result.status !== 0) {
-        const metric = `${result.stdout}${result.stderr}`.trim() || "unknown";
-        throw new Error(`${name} poster differs from its committed output (AE ${metric})`);
+      if (result.status !== 0 && result.status !== 1) {
+        throw new Error(`compare failed with exit code ${result.status ?? 1}`);
+      }
+      const metricOutput = `${result.stdout}${result.stderr}`.trim();
+      const metricMatch = metricOutput.match(/(?:^|\s)(\d+)(?:\s+\(|$)/);
+      const metric = metricMatch ? Number(metricMatch[1]) : Number.NaN;
+      if (!Number.isSafeInteger(metric)) {
+        throw new Error(`${name} poster comparison returned an unreadable AE metric: ${metricOutput || "unknown"}`);
+      }
+      console.log(`${name} poster AE ${metric} (limit ${maxAllowedAe})`);
+      if (metric > maxAllowedAe) {
+        throw new Error(`${name} poster differs from its committed output (AE ${metric}, limit ${maxAllowedAe})`);
       }
     }
   } finally {
@@ -181,7 +252,7 @@ try {
   requireCommand("rsvg-convert", "librsvg (macOS: brew install librsvg; Debian/Ubuntu: sudo apt-get install librsvg2-bin)");
   if (args.includes("--verify")) {
     requireCommand("compare", "ImageMagick (macOS: brew install imagemagick; Debian/Ubuntu: sudo apt-get install imagemagick)");
-    verifyPosters();
+    verifyPosters(maxAe);
   } else {
     const jobs = args.includes("--all")
       ? Object.values(posterVariants).map((variant) => ({ variant, output: variant.output }))
