@@ -6,9 +6,11 @@ import {
   copyFileSync,
   existsSync,
   fsyncSync,
+  linkSync,
   mkdirSync,
   mkdtempSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -42,7 +44,9 @@ const outputWidth = 1122;
 const outputHeight = 1402;
 const transactionLockName = ".loadlynx-marketing-poster.lock";
 const transactionJournalName = "transaction.json";
-const transactionVersion = 2;
+const recoveryMarkerName = "recovery.json";
+const recoveryClaimPrefix = "recovery-claim-";
+const transactionVersion = 3;
 const approvedPosterOutputs = new Set(
   Object.values(posterVariants).map((variant) => variant.output),
 );
@@ -172,8 +176,13 @@ function syncDirectory(directory) {
 }
 
 function renameAndSync(source, destination) {
+  const sourceDirectory = dirname(source);
+  const destinationDirectory = dirname(destination);
   renameSync(source, destination);
-  syncDirectory(dirname(destination));
+  syncDirectory(destinationDirectory);
+  if (sourceDirectory !== destinationDirectory) {
+    syncDirectory(sourceDirectory);
+  }
 }
 
 function interruptPublicationForTest(point) {
@@ -190,6 +199,19 @@ function pauseAfterLockPublicationForTest() {
   const duration = Number(process.env.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_PUBLISH_MS);
   if (Number.isSafeInteger(duration) && duration > 0) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
+  }
+}
+
+function pauseAfterRecoveryClaimForTest() {
+  const duration = Number(process.env.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_RECOVERY_CLAIM_MS);
+  if (Number.isSafeInteger(duration) && duration > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
+  }
+}
+
+function interruptAfterRollbackRenameForTest(index) {
+  if (process.env.LOADLYNX_MARKETING_TEST_INTERRUPT_AFTER_ROLLBACK_RENAME === String(index)) {
+    process.exit(87);
   }
 }
 
@@ -297,8 +319,20 @@ function processStartIdentity(pid) {
   return identity ? `ps:${identity}` : null;
 }
 
+function currentProcessOwner() {
+  const ownerStartedAt = processStartIdentity(process.pid);
+  if (ownerStartedAt === null) {
+    throw new Error("ps could not identify poster transaction owner");
+  }
+  return { pid: process.pid, ownerStartedAt };
+}
+
+function isOwnerRunning(owner) {
+  return processStartIdentity(owner.pid) === owner.ownerStartedAt;
+}
+
 function isTransactionOwnerRunning(transaction) {
-  return processStartIdentity(transaction.pid) === transaction.ownerStartedAt;
+  return isOwnerRunning(transaction);
 }
 
 function transactionMatchesJobs(transaction, lockDirectory, permittedOutputs) {
@@ -310,7 +344,7 @@ function transactionMatchesJobs(transaction, lockDirectory, permittedOutputs) {
     typeof transaction.ownerStartedAt !== "string" ||
     !transaction.ownerStartedAt ||
     transaction.lockDirectory !== lockDirectory ||
-    !["rendering", "publishing", "published"].includes(transaction.phase) ||
+    !["rendering", "publishing", "rolling-back", "published"].includes(transaction.phase) ||
     !Array.isArray(transaction.jobs)
   ) {
     return false;
@@ -332,9 +366,12 @@ function transactionMatchesJobs(transaction, lockDirectory, permittedOutputs) {
       typeof job.stagedOutput === "string" &&
       typeof job.backupOutput === "string" &&
       typeof job.discardedOutput === "string" &&
+      typeof job.restoreOutput === "string" &&
+      ["pending", "restored"].includes(job.rollbackState) &&
       isPathInside(lockDirectory, job.stagedOutput) &&
       isPathInside(lockDirectory, job.backupOutput) &&
-      isPathInside(lockDirectory, job.discardedOutput),
+      isPathInside(lockDirectory, job.discardedOutput) &&
+      isPathInside(lockDirectory, job.restoreOutput),
   );
 }
 
@@ -356,17 +393,58 @@ function readTransaction(lockDirectory, permittedOutputs) {
   return transaction;
 }
 
+function removeRollbackArtifact(path, transaction) {
+  if (existsSync(path)) {
+    rmSync(path, { force: true });
+    syncDirectory(transaction.lockDirectory);
+  }
+}
+
+function markRollbackRestored(transaction, job) {
+  job.rollbackState = "restored";
+  writeTransactionJournal(transaction);
+  removeRollbackArtifact(job.hadOriginal ? job.backupOutput : job.discardedOutput, transaction);
+}
+
+function restoreTransactionOutput(transaction, job, index) {
+  if (job.rollbackState === "restored") {
+    removeRollbackArtifact(job.hadOriginal ? job.backupOutput : job.discardedOutput, transaction);
+    return;
+  }
+
+  if (job.hadOriginal) {
+    if (!existsSync(job.backupOutput)) {
+      throw new Error(`missing backup for ${job.output}`);
+    }
+    copyFileSync(job.backupOutput, job.restoreOutput);
+    syncFile(job.restoreOutput);
+    renameAndSync(job.restoreOutput, job.output);
+    interruptAfterRollbackRenameForTest(index + 1);
+    markRollbackRestored(transaction, job);
+    return;
+  }
+
+  if (existsSync(job.stagedOutput)) {
+    if (existsSync(job.output)) {
+      throw new Error(`unexpected output before publication for ${job.output}`);
+    }
+  } else if (existsSync(job.output)) {
+    renameAndSync(job.output, job.discardedOutput);
+    interruptAfterRollbackRenameForTest(index + 1);
+  }
+  markRollbackRestored(transaction, job);
+}
+
 function restoreTransactionOutputs(transaction) {
+  if (transaction.phase !== "rolling-back") {
+    transaction.phase = "rolling-back";
+    writeTransactionJournal(transaction);
+  }
+
   const rollbackErrors = [];
-  for (const job of [...transaction.jobs].reverse()) {
+  for (let index = transaction.jobs.length - 1; index >= 0; index -= 1) {
     try {
-      if (job.hadOriginal && existsSync(job.backupOutput)) {
-        renameAndSync(job.backupOutput, job.output);
-      } else if (!job.hadOriginal && !existsSync(job.stagedOutput) && existsSync(job.output)) {
-        renameAndSync(job.output, job.discardedOutput);
-      } else if (job.hadOriginal) {
-        throw new Error(`missing backup for ${job.output}`);
-      }
+      restoreTransactionOutput(transaction, transaction.jobs[index], index);
     } catch (error) {
       rollbackErrors.push(error instanceof Error ? error.message : String(error));
     }
@@ -377,7 +455,165 @@ function restoreTransactionOutputs(transaction) {
   return rollbackErrors;
 }
 
-function removeTransactionLock(lockDirectory) {
+function recoveryMarkerPath(lockDirectory) {
+  return join(lockDirectory, recoveryMarkerName);
+}
+
+function recoveryClaimPath(lockDirectory, owner) {
+  const encodedOwner = Buffer.from(owner.ownerStartedAt).toString("base64url");
+  return join(lockDirectory, `${recoveryClaimPrefix}${owner.pid}-${encodedOwner}.json`);
+}
+
+function recoveryOwnerMatches(owner) {
+  return (
+    owner &&
+    owner.version === 1 &&
+    Number.isSafeInteger(owner.pid) &&
+    owner.pid > 0 &&
+    typeof owner.ownerStartedAt === "string" &&
+    owner.ownerStartedAt
+  );
+}
+
+function readRecoveryOwner(path) {
+  let owner;
+  try {
+    owner = JSON.parse(readFileSync(path, "utf8"));
+  } catch (error) {
+    throw new Error(`Poster recovery marker is unreadable: ${error.message}`);
+  }
+  if (!recoveryOwnerMatches(owner)) {
+    throw new Error(`Poster recovery marker is invalid: ${path}`);
+  }
+  return owner;
+}
+
+function recoveryOwnerFromClaimName(name) {
+  if (!name.startsWith(recoveryClaimPrefix) || !name.endsWith(".json")) {
+    return null;
+  }
+  const encoded = name.slice(recoveryClaimPrefix.length, -".json".length);
+  const separator = encoded.indexOf("-");
+  if (separator === -1) {
+    return null;
+  }
+  const pid = Number(encoded.slice(0, separator));
+  const encodedIdentity = encoded.slice(separator + 1);
+  let ownerStartedAt;
+  try {
+    ownerStartedAt = Buffer.from(encodedIdentity, "base64url").toString();
+  } catch {
+    return null;
+  }
+  const owner = { version: 1, pid, ownerStartedAt };
+  return recoveryOwnerMatches(owner) && Buffer.from(ownerStartedAt).toString("base64url") === encodedIdentity
+    ? owner
+    : null;
+}
+
+function readRecoveryState(lockDirectory) {
+  let entries;
+  try {
+    entries = readdirSync(lockDirectory);
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return null;
+    }
+    throw error;
+  }
+  const claimNames = entries.filter((entry) => entry.startsWith(recoveryClaimPrefix));
+  const hasMarker = entries.includes(recoveryMarkerName);
+  if ((hasMarker && claimNames.length > 0) || claimNames.length > 1) {
+    throw new Error(`Poster recovery markers are ambiguous: ${lockDirectory}`);
+  }
+  if (hasMarker) {
+    const path = recoveryMarkerPath(lockDirectory);
+    return { path, owner: readRecoveryOwner(path) };
+  }
+  if (claimNames.length === 1) {
+    const owner = recoveryOwnerFromClaimName(claimNames[0]);
+    if (owner === null) {
+      throw new Error(`Poster recovery claim is invalid: ${join(lockDirectory, claimNames[0])}`);
+    }
+    return { path: join(lockDirectory, claimNames[0]), owner };
+  }
+  return null;
+}
+
+function publishRecoveryMarker(lockDirectory, owner) {
+  const markerPath = recoveryMarkerPath(lockDirectory);
+  const temporaryPath = join(
+    lockDirectory,
+    `.recovery-${owner.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}.tmp`,
+  );
+  const descriptor = openSync(temporaryPath, "wx");
+  try {
+    writeFileSync(descriptor, `${JSON.stringify({ version: 1, ...owner })}\n`);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+
+  try {
+    linkSync(temporaryPath, markerPath);
+  } catch (error) {
+    if (error?.code === "EEXIST") {
+      return false;
+    }
+    throw error;
+  } finally {
+    rmSync(temporaryPath, { force: true });
+    syncDirectory(lockDirectory);
+  }
+  return true;
+}
+
+function acquireRecoveryClaim(lockDirectory) {
+  const owner = currentProcessOwner();
+  const ownClaimPath = recoveryClaimPath(lockDirectory, owner);
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    if (!existsSync(lockDirectory)) {
+      return null;
+    }
+    const recovery = readRecoveryState(lockDirectory);
+    if (recovery === null) {
+      if (publishRecoveryMarker(lockDirectory, owner)) {
+        return { path: recoveryMarkerPath(lockDirectory), owner };
+      }
+      continue;
+    }
+    if (isOwnerRunning(recovery.owner)) {
+      throw new Error(`Another poster recovery owns the transaction lock: ${lockDirectory}`);
+    }
+    if (existsSync(ownClaimPath)) {
+      throw new Error(`Poster recovery claim is already occupied: ${ownClaimPath}`);
+    }
+    try {
+      renameSync(recovery.path, ownClaimPath);
+      syncDirectory(lockDirectory);
+      return { path: ownClaimPath, owner };
+    } catch (error) {
+      if (error?.code === "ENOENT") {
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw new Error(`Poster recovery claim could not be acquired: ${lockDirectory}`);
+}
+
+function removeTransactionLock(lockDirectory, recoveryClaim = null) {
+  if (recoveryClaim !== null) {
+    const currentRecovery = readRecoveryState(lockDirectory);
+    if (
+      currentRecovery === null ||
+      currentRecovery.path !== recoveryClaim.path ||
+      currentRecovery.owner.pid !== recoveryClaim.owner.pid ||
+      currentRecovery.owner.ownerStartedAt !== recoveryClaim.owner.ownerStartedAt
+    ) {
+      throw new Error(`Poster recovery claim was lost before cleanup: ${lockDirectory}`);
+    }
+  }
   rmSync(lockDirectory, { force: true, recursive: true });
   syncDirectory(dirname(lockDirectory));
 }
@@ -388,35 +624,37 @@ function recoverInterruptedTransaction(outputDirectory, permittedOutputs) {
     return;
   }
 
-  const transaction = readTransaction(lockDirectory, permittedOutputs);
-  if (transaction === null) {
-    removeTransactionLock(lockDirectory);
-    return;
-  }
-  if (isTransactionOwnerRunning(transaction)) {
+  const initialTransaction = readTransaction(lockDirectory, permittedOutputs);
+  if (initialTransaction !== null && isTransactionOwnerRunning(initialTransaction)) {
     throw new Error(`Another poster render owns the transaction lock: ${lockDirectory}`);
   }
 
-  if (transaction.phase === "publishing") {
+  const recoveryClaim = acquireRecoveryClaim(lockDirectory);
+  if (recoveryClaim === null) {
+    return;
+  }
+  pauseAfterRecoveryClaimForTest();
+
+  const transaction = readTransaction(lockDirectory, permittedOutputs);
+  if (transaction !== null && isTransactionOwnerRunning(transaction)) {
+    throw new Error(`Another poster render owns the transaction lock: ${lockDirectory}`);
+  }
+  if (transaction !== null && ["publishing", "rolling-back"].includes(transaction.phase)) {
     const rollbackErrors = restoreTransactionOutputs(transaction);
     if (rollbackErrors.length > 0) {
       throw new Error(`Interrupted poster transaction could not be restored: ${rollbackErrors.join("; ")}`);
     }
   }
-  removeTransactionLock(lockDirectory);
+  removeTransactionLock(lockDirectory, recoveryClaim);
 }
 
 function createTransaction(outputDirectory, jobs) {
   const lockDirectory = join(outputDirectory, transactionLockName);
-  const ownerStartedAt = processStartIdentity(process.pid);
-  if (ownerStartedAt === null) {
-    throw new Error("ps could not identify poster transaction owner");
-  }
+  const owner = currentProcessOwner();
   const pendingLockDirectory = mkdtempSync(join(outputDirectory, `.${transactionLockName}.pending-`));
   const transaction = {
     version: transactionVersion,
-    pid: process.pid,
-    ownerStartedAt,
+    ...owner,
     phase: "rendering",
     lockDirectory,
     jobs: jobs.map((job, index) => ({
@@ -424,7 +662,9 @@ function createTransaction(outputDirectory, jobs) {
       stagedOutput: join(lockDirectory, `staged-${index}-${basename(job.output)}`),
       backupOutput: join(lockDirectory, `previous-${index}-${basename(job.output)}`),
       discardedOutput: join(lockDirectory, `discarded-${index}-${basename(job.output)}`),
+      restoreOutput: join(lockDirectory, `restoring-${index}-${basename(job.output)}`),
       hadOriginal: existsSync(job.output),
+      rollbackState: "pending",
     })),
   };
   try {
@@ -479,7 +719,7 @@ function renderPosterSetAtomically(jobs, permittedOutputs) {
     transaction.phase = "published";
     writeTransactionJournal(transaction);
   } finally {
-    if (transaction?.phase === "publishing") {
+    if (transaction && ["publishing", "rolling-back"].includes(transaction.phase)) {
       const rollbackErrors = restoreTransactionOutputs(transaction);
       if (rollbackErrors.length > 0) {
         throw new Error(`Poster outputs could not be restored: ${rollbackErrors.join("; ")}`);

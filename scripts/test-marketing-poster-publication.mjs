@@ -25,6 +25,7 @@ const darkOutputName = "loadlynx-project-poster-dark.png";
 const lightOutputName = "loadlynx-project-poster-light.png";
 const darkSourceName = "loadlynx-project-poster-dark.svg";
 const lockName = ".loadlynx-marketing-poster.lock";
+const recoveryMarkerName = "recovery.json";
 
 function createFixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "loadlynx-marketing-poster-publication-")));
@@ -48,8 +49,10 @@ function createFixture() {
 function runRenderer(fixture, args, overrides = {}) {
   const environment = { ...process.env };
   delete environment.LOADLYNX_MARKETING_TEST_INTERRUPT_AFTER_OUTPUT_RENAME;
+  delete environment.LOADLYNX_MARKETING_TEST_INTERRUPT_AFTER_ROLLBACK_RENAME;
   delete environment.LOADLYNX_MARKETING_TEST_INTERRUPT_BEFORE_LOCK_PUBLISH;
   delete environment.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_PUBLISH_MS;
+  delete environment.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_RECOVERY_CLAIM_MS;
   Object.assign(environment, overrides);
   return spawnSync(process.execPath, [fixture.renderer, ...args], {
     cwd: fixture.root,
@@ -99,6 +102,17 @@ function makeDarkRenderDifferent(fixture) {
 
 function removeDarkSource(fixture) {
   rmSync(join(fixture.source, darkSourceName));
+}
+
+function prepareInterruptedPair(fixture) {
+  const original = outputBuffers(fixture);
+  makeDarkRenderDifferent(fixture);
+  const interrupted = runRenderer(fixture, ["--all"], {
+    LOADLYNX_MARKETING_TEST_INTERRUPT_AFTER_OUTPUT_RENAME: "1",
+  });
+  assert.equal(interrupted.status, 86, `expected deterministic publication interruption: ${interrupted.stderr}`);
+  assert.notDeepEqual(outputBuffers(fixture).dark, original.dark, "interruption must occur after dark output replacement");
+  return original;
 }
 
 function assertRecoveryPreservesApprovedPair(fixture, original, result) {
@@ -169,7 +183,7 @@ function verifyPidReuseDoesNotOwnStaleLock() {
     writeFileSync(
       join(lockDirectory, "transaction.json"),
       `${JSON.stringify({
-        version: 2,
+        version: 3,
         pid: process.pid,
         ownerStartedAt: "stale-owner-identity",
         phase: "rendering",
@@ -180,7 +194,9 @@ function verifyPidReuseDoesNotOwnStaleLock() {
             stagedOutput: join(lockDirectory, `staged-0-${darkOutputName}`),
             backupOutput: join(lockDirectory, `previous-0-${darkOutputName}`),
             discardedOutput: join(lockDirectory, `discarded-0-${darkOutputName}`),
+            restoreOutput: join(lockDirectory, `restoring-0-${darkOutputName}`),
             hadOriginal: true,
+            rollbackState: "pending",
           },
         ],
       })}\n`,
@@ -191,6 +207,56 @@ function verifyPidReuseDoesNotOwnStaleLock() {
     assert.doesNotMatch(result.stderr, /Another poster render owns the transaction lock/);
     assertRecoveryPreservesApprovedPair(fixture, original, result);
   } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+}
+
+function verifyRecoveryRollbackCanResume() {
+  const fixture = createFixture();
+  try {
+    const original = prepareInterruptedPair(fixture);
+    removeDarkSource(fixture);
+    const interruptedRecovery = runRenderer(fixture, ["--all"], {
+      LOADLYNX_MARKETING_TEST_INTERRUPT_AFTER_ROLLBACK_RENAME: "2",
+    });
+    assert.equal(interruptedRecovery.status, 87, `expected deterministic rollback interruption: ${interruptedRecovery.stderr}`);
+    assert.equal(existsSync(join(fixture.output, lockName)), true, "rollback interruption must retain the transaction lock");
+    assert.deepEqual(outputBuffers(fixture).light, original.light, "the first rollback rename must restore one output");
+
+    const recovered = runRenderer(fixture, ["--all"]);
+    assertRecoveryPreservesApprovedPair(fixture, original, recovered);
+  } finally {
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+}
+
+async function verifyRecoveryClaimSerializesSecondWriter() {
+  const fixture = createFixture();
+  const lockPath = join(fixture.output, lockName);
+  const recoveryPath = join(lockPath, recoveryMarkerName);
+  const original = prepareInterruptedPair(fixture);
+  removeDarkSource(fixture);
+  const child = spawn(process.execPath, [fixture.renderer, "--all"], {
+    cwd: fixture.root,
+    env: {
+      ...process.env,
+      LOADLYNX_MARKETING_TEST_PAUSE_AFTER_RECOVERY_CLAIM_MS: "2000",
+    },
+    stdio: "ignore",
+  });
+  try {
+    waitForFile(recoveryPath, 5000);
+    const contender = runRenderer(fixture, ["--all"]);
+    assert.notEqual(contender.status, 0, "a second writer must not enter recovery while the claim is active");
+    assert.match(contender.stderr, /Another poster recovery owns the transaction lock/);
+    assert.equal(existsSync(lockPath), true, "the active recovery claim must retain the transaction lock");
+    assert.deepEqual(await waitForChild(child), { status: 1, signal: null });
+    assert.deepEqual(outputBuffers(fixture), original, "the single recovery owner must restore the approved pair");
+    assert.equal(existsSync(lockPath), false, "the recovery owner must remove the transaction lock before render failure");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) {
+      child.kill("SIGKILL");
+    }
     rmSync(fixture.root, { force: true, recursive: true });
   }
 }
@@ -225,5 +291,7 @@ verifyInterruptedPublication(["--variant", "dark"]);
 verifyPendingLockIsNeverPublished();
 verifyIncompleteLockDoesNotBlockRecovery();
 verifyPidReuseDoesNotOwnStaleLock();
+verifyRecoveryRollbackCanResume();
+await verifyRecoveryClaimSerializesSecondWriter();
 await verifyActiveSingleWriterBlocksPairPublication();
 console.log("marketing poster publication recovery passed");
