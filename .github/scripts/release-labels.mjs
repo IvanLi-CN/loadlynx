@@ -7,6 +7,41 @@ import { fileURLToPath } from "node:url";
 
 const DEFAULT_POLICY_PATH = ".github/release-label-policy.json";
 const RELEASE_COMMENT_MARKER = "<!-- loadlynx-release-version-comment -->";
+const SOURCE_PULL_REQUEST_ATTEMPTS = 4;
+const SOURCE_PULL_REQUEST_RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
+const MAX_RETRY_AFTER_MS = 30_000;
+const SOURCE_PULL_REQUEST_QUERY = `
+  query SourcePullRequest($owner: String!, $name: String!, $expression: String!) {
+    repository(owner: $owner, name: $name) {
+      object(expression: $expression) {
+        ... on Commit {
+          associatedPullRequests(first: 100) {
+            nodes {
+              number
+              state
+              mergedAt
+              baseRefName
+              mergeCommit {
+                oid
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+class GitHubApiError extends Error {
+  constructor(message, { source, status = null, retryAfterMs = null, retryable = false } = {}) {
+    super(message);
+    this.name = "GitHubApiError";
+    this.source = source;
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
+    this.retryable = retryable;
+  }
+}
 
 export function loadPolicy(policyPath = DEFAULT_POLICY_PATH) {
   return JSON.parse(readFileSync(policyPath, "utf8"));
@@ -207,35 +242,247 @@ async function githubApi(endpoint, { method = "GET", body } = {}) {
   if (!token) throw new Error("GITHUB_TOKEN is required");
   if (!repository) throw new Error("GITHUB_REPOSITORY is required");
 
-  const response = await fetch(`https://api.github.com/repos/${repository}${endpoint}`, {
-    method,
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${token}`,
-      "X-GitHub-Api-Version": "2022-11-28",
-      ...(body == null ? {} : { "Content-Type": "application/json" }),
-    },
-    body: body == null ? undefined : JSON.stringify(body),
-  });
+  let response;
+  try {
+    response = await fetch(`https://api.github.com/repos/${repository}${endpoint}`, {
+      method,
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        ...(body == null ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body == null ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new GitHubApiError(
+      `GitHub REST ${method} ${endpoint} failed: network error`,
+      { source: "REST", retryable: true },
+    );
+  }
 
   if (!response.ok) {
-    const text = await response.text();
-    throw new Error(`GitHub API ${method} ${endpoint} failed: ${response.status} ${text}`);
+    throw new GitHubApiError(
+      `GitHub REST ${method} ${endpoint} failed: HTTP ${response.status}`,
+      {
+        source: "REST",
+        status: response.status,
+        retryAfterMs: retryAfterMsFrom(response.headers.get("retry-after")),
+        retryable: isRetryableStatus(response.status),
+      },
+    );
   }
   if (response.status === 204) return null;
   return response.json();
 }
 
-async function findPullRequestForSha(sha, prNumber) {
+function githubRepository() {
+  const repository = process.env.GITHUB_REPOSITORY;
+  if (!repository) throw new Error("GITHUB_REPOSITORY is required");
+  const [owner, name] = repository.split("/", 2);
+  if (!owner || !name) {
+    throw new Error(`Invalid GITHUB_REPOSITORY: ${repository}`);
+  }
+  return { owner, name };
+}
+
+function isRetryableStatus(status) {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+function retryAfterMsFrom(value) {
+  if (!value) return null;
+  const seconds = Number(value);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(seconds * 1_000, MAX_RETRY_AFTER_MS);
+  }
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return null;
+  return Math.min(Math.max(timestamp - Date.now(), 0), MAX_RETRY_AFTER_MS);
+}
+
+async function githubGraphql(query, variables) {
+  const token = process.env.GITHUB_TOKEN;
+  if (!token) throw new Error("GITHUB_TOKEN is required");
+
+  let response;
+  try {
+    response = await fetch("https://api.github.com/graphql", {
+      method: "POST",
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ query, variables }),
+    });
+  } catch {
+    throw new GitHubApiError("GitHub GraphQL query failed: network error", {
+      source: "GraphQL",
+      retryable: true,
+    });
+  }
+
+  if (!response.ok) {
+    throw new GitHubApiError(`GitHub GraphQL query failed: HTTP ${response.status}`, {
+      source: "GraphQL",
+      status: response.status,
+      retryAfterMs: retryAfterMsFrom(response.headers.get("retry-after")),
+      retryable: isRetryableStatus(response.status),
+    });
+  }
+
+  const payload = await response.json();
+  if (payload.errors?.length > 0) {
+    throw new GitHubApiError("GitHub GraphQL query returned errors", {
+      source: "GraphQL",
+    });
+  }
+  return payload.data;
+}
+
+async function githubAssociatedPullRequests({ sha }) {
+  const { owner, name } = githubRepository();
+  const data = await githubGraphql(SOURCE_PULL_REQUEST_QUERY, {
+    owner,
+    name,
+    expression: sha,
+  });
+  return data?.repository?.object?.associatedPullRequests?.nodes ?? [];
+}
+
+function isCanonicalSourcePullRequest(pull, { sha, baseRef }) {
+  return Boolean(
+    pull?.merged_at
+      && pull.base?.ref === baseRef
+      && pull.merge_commit_sha === sha,
+  );
+}
+
+function isGraphqlSourcePullRequest(pull, { sha, baseRef }) {
+  return Boolean(
+    pull?.state === "MERGED"
+      && pull.mergedAt
+      && pull.baseRefName === baseRef
+      && pull.mergeCommit?.oid === sha,
+  );
+}
+
+function candidateNumbers(pulls, matches) {
+  return [...new Set(pulls.filter(matches).map((pull) => pull.number))];
+}
+
+function sourcePullRequestNotFoundError(sha, sources) {
+  return new Error(
+    `No merged pull request found for commit ${sha} after ${SOURCE_PULL_REQUEST_ATTEMPTS} attempts via ${[...sources].join(", ")}`,
+  );
+}
+
+function sourcePullRequestAmbiguousError(sha, numbers) {
+  const error = new Error(
+    `Multiple merged pull requests match commit ${sha}: ${numbers.map((number) => `#${number}`).join(", ")}`,
+  );
+  error.code = "SOURCE_PULL_REQUEST_AMBIGUOUS";
+  return error;
+}
+
+async function resolveCanonicalCandidates(numbers, criteria, rest) {
+  const pulls = [];
+  for (const number of numbers) {
+    const pull = await rest(`/pulls/${number}`);
+    if (isCanonicalSourcePullRequest(pull, criteria)) {
+      pulls.push(pull);
+    }
+  }
+  if (pulls.length > 1) {
+    throw sourcePullRequestAmbiguousError(criteria.sha, pulls.map((pull) => pull.number));
+  }
+  return pulls[0] ?? null;
+}
+
+function retryDelayMs(attempt, retryAfterMs) {
+  return retryAfterMs ?? SOURCE_PULL_REQUEST_RETRY_DELAYS_MS[attempt - 1];
+}
+
+function retryableError(error) {
+  return Boolean(error?.retryable);
+}
+
+function ambiguousSourcePullRequestError(error) {
+  return error?.code === "SOURCE_PULL_REQUEST_AMBIGUOUS";
+}
+
+function sourceErrorSummary(source, error) {
+  if (error instanceof GitHubApiError && error.status != null) {
+    return `${source} HTTP ${error.status}`;
+  }
+  return `${source} error`;
+}
+
+export async function resolveSourcePullRequest(
+  { sha, prNumber = null, baseRef = "main" },
+  {
+    rest = githubApi,
+    graphql = githubAssociatedPullRequests,
+    sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
+  } = {},
+) {
   if (prNumber) {
-    return githubApi(`/pulls/${prNumber}`);
+    return rest(`/pulls/${prNumber}`);
   }
-  const pulls = await githubApi(`/commits/${sha}/pulls`);
-  if (Array.isArray(pulls) && pulls.length > 0) {
-    const merged = pulls.find((pull) => pull.merged_at) ?? pulls[0];
-    return githubApi(`/pulls/${merged.number}`);
+
+  const criteria = { sha, baseRef };
+  const sources = new Set();
+  let retryAfterMs = null;
+
+  for (let attempt = 0; attempt < SOURCE_PULL_REQUEST_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) {
+      await sleep(retryDelayMs(attempt, retryAfterMs));
+      retryAfterMs = null;
+    }
+
+    let graphqlError = null;
+    try {
+      sources.add("GraphQL");
+      const graphqlNumbers = candidateNumbers(
+        await graphql({ sha, baseRef }),
+        (pull) => isGraphqlSourcePullRequest(pull, criteria),
+      );
+      const pull = await resolveCanonicalCandidates(graphqlNumbers, criteria, rest);
+      if (pull) return pull;
+    } catch (error) {
+      if (ambiguousSourcePullRequestError(error)) throw error;
+      graphqlError = error;
+      console.warn(`Source PR lookup attempt ${attempt + 1}: ${sourceErrorSummary("GraphQL", error)}`);
+      if (retryableError(error)) {
+        retryAfterMs = Math.max(retryAfterMs ?? 0, error.retryAfterMs ?? 0) || null;
+      }
+    }
+
+    let restError = null;
+    try {
+      sources.add("REST");
+      const restNumbers = candidateNumbers(
+        await rest(`/commits/${sha}/pulls?per_page=100`),
+        (pull) => isCanonicalSourcePullRequest(pull, criteria),
+      );
+      const pull = await resolveCanonicalCandidates(restNumbers, criteria, rest);
+      if (pull) return pull;
+    } catch (error) {
+      if (ambiguousSourcePullRequestError(error)) throw error;
+      restError = error;
+      console.warn(`Source PR lookup attempt ${attempt + 1}: ${sourceErrorSummary("REST", error)}`);
+      if (retryableError(error)) {
+        retryAfterMs = Math.max(retryAfterMs ?? 0, error.retryAfterMs ?? 0) || null;
+      }
+    }
+
+    if (graphqlError && !retryableError(graphqlError)) throw graphqlError;
+    if (restError && !retryableError(restError)) throw restError;
   }
-  throw new Error(`No pull request associated with commit ${sha}`);
+
+  throw sourcePullRequestNotFoundError(sha, sources);
 }
 
 export function releaseMergeCommitSha(pull, fallbackSha) {
@@ -313,7 +560,7 @@ async function resolveCommand(args) {
   if (!sha) throw new Error("A commit sha is required");
 
   const prNumber = args["pr-number"] || event.inputs?.pr_number || null;
-  const pull = await findPullRequestForSha(sha, prNumber);
+  const pull = await resolveSourcePullRequest({ sha, prNumber });
   const intent = validateLabels(pull.labels ?? [], policy);
   const version = releaseTag
     ? resolveExplicitTag(releaseTag)

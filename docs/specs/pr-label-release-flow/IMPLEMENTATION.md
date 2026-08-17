@@ -10,6 +10,7 @@
 - Added a repo-local release label policy and `Label Gate` workflow.
 - Added `.github/quality-gates.json` to declare `Label Gate` as the required release-intent check and to keep the review policy at `0` approvals for the protected `main` branch.
 - Added release intent tooling for label validation, version computation, and PR release comments.
+- Hardened automatic source-PR lookup with a GraphQL commit-association primary path, REST fallback, bounded retry for transient or empty results, and canonical merged/main/merge-SHA validation before labels are consumed.
 - Refactored release automation to consume merged PR labels and inject the computed release version into artifacts.
 - Bound host-tools Clap version output to release-injected metadata so released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the static crate package version.
 - Release asset assembly now publishes host-tools installer scripts, firmware catalog JSON, Web bundle, and `SHA256SUMS` covering all release files before creating the GitHub Release.
@@ -36,6 +37,7 @@
 ## Verification
 
 - Local label validator tests cover valid, missing, duplicate, and unknown labels.
+- Local release-label tests cover the PR #126-style empty REST association, GraphQL resolution, REST fallback, bounded retry, explicit dispatch PR lookup, invalid candidates, ambiguity, and authorization failures without real GitHub API access.
 - Local quality-gates validation covers protected branch name, PR-only semantics, zero required approvals, the `Label Gate` required check contract, and workflow/job-name drift between `.github/quality-gates.json` and `.github/workflows/*.yml`.
 - `npm run test:quality-gates` now runs both fixture-style regression tests for the checker and the live repository declaration check; `Code Check` consumes the same script in CI.
 - `npm run test:workflow-hygiene` runs fixture-style and live-repository checks for workflow `permissions` and `timeout-minutes`; `Code Check` consumes the same script in CI.
