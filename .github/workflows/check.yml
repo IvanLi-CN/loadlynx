@@ -10,6 +10,9 @@ on:
       - 'libs/**'
       - 'tools/loadlynx-devd/**'
       - 'tools/ui-mock/**'
+      - 'docs/assets/marketing/**'
+      - 'scripts/render-marketing-posters.mjs'
+      - 'scripts/test-marketing-poster-publication.mjs'
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
@@ -28,6 +31,9 @@ on:
       - 'libs/**'
       - 'tools/loadlynx-devd/**'
       - 'tools/ui-mock/**'
+      - 'docs/assets/marketing/**'
+      - 'scripts/render-marketing-posters.mjs'
+      - 'scripts/test-marketing-poster-publication.mjs'
       - '.gitmodules'
       - 'justfile'
       - 'Justfile'
@@ -43,7 +49,7 @@ permissions:
 
 jobs:
   host-rust:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     steps:
@@ -68,7 +74,16 @@ jobs:
         run: npm ci
 
       - name: Install host system dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev librsvg2-bin imagemagick procps
+
+      - name: Verify marketing poster sources
+        # CI pins librsvg 2.58 for its measured AE budget; local checks remain exact.
+        run: |
+          renderer_version="$(rsvg-convert --version)"
+          printf 'rsvg-convert: %s\n' "$renderer_version"
+          test "$renderer_version" = "rsvg-convert version 2.58.0"
+          npm run test:marketing-posters:ci
+          npm run test:marketing-poster-publication
 
       - name: Test release label tooling
         run: node .github/scripts/release-labels.test.mjs
