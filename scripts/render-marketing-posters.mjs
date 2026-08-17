@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { spawnSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import {
   closeSync,
   copyFileSync,
@@ -47,10 +48,14 @@ const transactionJournalName = "transaction.json";
 const recoveryMarkerName = "recovery.json";
 const recoveryClaimPrefix = "recovery-claim-";
 const transactionRetirementPrefix = ".loadlynx-marketing-poster.retired-";
+const transactionRetirementPattern = /^\.loadlynx-marketing-poster\.retired-\d+-\d+-[0-9a-f]+$/;
+const maxRetiredDirectoriesPerRun = 32;
 const transactionVersion = 3;
 const approvedPosterOutputs = new Set(
   Object.values(posterVariants).map((variant) => variant.output),
 );
+const processOwnerToken = randomUUID().replaceAll("-", "").slice(0, 24);
+process.title = `loadlynx-marketing-poster-${processOwnerToken}`;
 
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
@@ -314,7 +319,7 @@ function processStartIdentity(pid) {
   if (linuxIdentity !== undefined) {
     return linuxIdentity;
   }
-  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+  const result = spawnSync("ps", ["-o", "lstart=", "-o", "command=", "-p", String(pid)], {
     encoding: "utf8",
   });
   if (result.error) {
@@ -633,6 +638,29 @@ function removeTransactionLock(lockDirectory, recoveryClaim = null) {
   syncDirectory(parentDirectory);
 }
 
+function cleanupRetiredTransactionDirectories(outputDirectory) {
+  let entries;
+  try {
+    entries = readdirSync(outputDirectory, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return;
+    }
+    throw error;
+  }
+
+  const retiredDirectories = entries
+    .filter((entry) => entry.isDirectory() && transactionRetirementPattern.test(entry.name))
+    .map((entry) => join(outputDirectory, entry.name))
+    .slice(0, maxRetiredDirectoriesPerRun);
+  for (const retiredDirectory of retiredDirectories) {
+    rmSync(retiredDirectory, { force: true, recursive: true });
+  }
+  if (retiredDirectories.length > 0) {
+    syncDirectory(outputDirectory);
+  }
+}
+
 function recoverInterruptedTransaction(outputDirectory, permittedOutputs) {
   const lockDirectory = join(outputDirectory, transactionLockName);
   if (!existsSync(lockDirectory)) {
@@ -704,6 +732,7 @@ function createTransaction(outputDirectory, jobs) {
 
 function renderPosterSetAtomically(jobs, permittedOutputs) {
   const outputDirectory = commonOutputDirectory(jobs);
+  cleanupRetiredTransactionDirectories(outputDirectory);
   recoverInterruptedTransaction(outputDirectory, permittedOutputs);
 
   let transaction;

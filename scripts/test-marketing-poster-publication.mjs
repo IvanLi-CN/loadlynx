@@ -8,6 +8,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -25,6 +26,7 @@ const darkOutputName = "loadlynx-project-poster-dark.png";
 const lightOutputName = "loadlynx-project-poster-light.png";
 const darkSourceName = "loadlynx-project-poster-dark.svg";
 const lockName = ".loadlynx-marketing-poster.lock";
+const retiredLockPrefix = ".loadlynx-marketing-poster.retired-";
 const recoveryMarkerName = "recovery.json";
 
 function createFixture() {
@@ -81,6 +83,26 @@ function waitForAbsence(path, timeoutMilliseconds) {
   while (existsSync(path)) {
     if (Date.now() >= deadline) {
       throw new Error(`timed out waiting for ${path} to disappear`);
+    }
+    pause(20);
+  }
+}
+
+function retiredLockPaths(fixture) {
+  return readdirSync(fixture.output)
+    .filter((entry) => entry.startsWith(retiredLockPrefix))
+    .map((entry) => join(fixture.output, entry));
+}
+
+function waitForRetiredLock(fixture, timeoutMilliseconds) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (true) {
+    const paths = retiredLockPaths(fixture);
+    if (paths.length > 0) {
+      return paths[0];
+    }
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for a retired transaction lock in ${fixture.output}`);
     }
     pause(20);
   }
@@ -193,13 +215,19 @@ function verifyPidReuseDoesNotOwnStaleLock() {
     const original = outputBuffers(fixture);
     const lockDirectory = join(fixture.output, lockName);
     const darkOutput = join(fixture.output, darkOutputName);
+    const coarseOwnerIdentity =
+      process.platform === "darwin"
+        ? `ps:${spawnSync("ps", ["-o", "lstart=", "-p", String(process.pid)], {
+            encoding: "utf8",
+          }).stdout.trim().replace(/\s+/g, " ")}`
+        : "stale-owner-identity";
     mkdirSync(lockDirectory);
     writeFileSync(
       join(lockDirectory, "transaction.json"),
       `${JSON.stringify({
         version: 3,
         pid: process.pid,
-        ownerStartedAt: "stale-owner-identity",
+        ownerStartedAt: coarseOwnerIdentity,
         phase: "rendering",
         lockDirectory,
         jobs: [
@@ -315,6 +343,37 @@ async function verifyLockRetirementDoesNotDeleteNewWriter() {
   }
 }
 
+async function verifyRetiredLockIsReclaimedAfterCrash() {
+  const fixture = createFixture();
+  const lockPath = join(fixture.output, lockName);
+  const original = prepareInterruptedPair(fixture);
+  removeDarkSource(fixture);
+  const recovery = spawn(process.execPath, [fixture.renderer, "--all"], {
+    cwd: fixture.root,
+    env: {
+      ...process.env,
+      LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_RETIRE_MS: "5000",
+    },
+    stdio: "ignore",
+  });
+  try {
+    waitForAbsence(lockPath, 5000);
+    const retiredPath = waitForRetiredLock(fixture, 5000);
+    recovery.kill("SIGKILL");
+    assert.deepEqual(await waitForChild(recovery), { status: null, signal: "SIGKILL" });
+    assert.equal(existsSync(retiredPath), true, "a crash during retirement must leave a recoverable retired directory");
+
+    const retry = runRenderer(fixture, ["--all"]);
+    assertRecoveryPreservesApprovedPair(fixture, original, retry);
+    assert.deepEqual(retiredLockPaths(fixture), [], "the next render must reclaim retired transaction directories");
+  } finally {
+    if (recovery.exitCode === null && recovery.signalCode === null) {
+      recovery.kill("SIGKILL");
+    }
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+}
+
 async function verifyActiveSingleWriterBlocksPairPublication() {
   const fixture = createFixture();
   const lockPath = join(fixture.output, lockName);
@@ -348,5 +407,6 @@ verifyPidReuseDoesNotOwnStaleLock();
 verifyRecoveryRollbackCanResume();
 await verifyRecoveryClaimSerializesSecondWriter();
 await verifyLockRetirementDoesNotDeleteNewWriter();
+await verifyRetiredLockIsReclaimedAfterCrash();
 await verifyActiveSingleWriterBlocksPairPublication();
 console.log("marketing poster publication recovery passed");
