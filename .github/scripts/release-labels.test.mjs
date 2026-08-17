@@ -4,6 +4,8 @@ import {
   buildReleaseComment,
   bumpVersion,
   loadPolicy,
+  isRetryableGraphqlErrors,
+  isRetryableStatus,
   releaseMergeCommitSha,
   resolveExplicitTag,
   resolveSourcePullRequest,
@@ -172,6 +174,10 @@ assert.equal(
   "source-pr-merge",
 );
 assert.equal(releaseMergeCommitSha({}, "workflow-head"), "workflow-head");
+assert.equal(isRetryableGraphqlErrors([{ type: "RATE_LIMITED" }]), true);
+assert.equal(isRetryableGraphqlErrors([{ message: "Field does not exist" }]), false);
+assert.equal(isRetryableStatus(403, new Headers({ "retry-after": "30" })), true);
+assert.equal(isRetryableStatus(403, new Headers()), false);
 
 const comment = buildReleaseComment(
   {
@@ -208,7 +214,10 @@ const resolvedPr126 = await resolveSourcePullRequest(
   },
 );
 assert.equal(resolvedPr126.number, 126);
-assert.deepEqual(pr126RestCalls, ["/pulls/126"]);
+assert.deepEqual(pr126RestCalls, [
+  `/commits/${mergeSha}/pulls?per_page=100`,
+  "/pulls/126",
+]);
 assert.deepEqual(validateLabels(resolvedPr126.labels, loadPolicy()), {
   labels: ["channel:stable", "component:docs", "type:none"],
   type: "none",
@@ -297,6 +306,7 @@ await withoutWarnings(() => mustReject(
         if (endpoint === `/commits/${mergeSha}/pulls?per_page=100`) {
           return [pull(126, { merge_commit_sha: "different-sha" })];
         }
+        if (endpoint === "/pulls/126") return pull(126, { merge_commit_sha: "different-sha" });
         throw new Error(`Unexpected REST endpoint: ${endpoint}`);
       },
       sleep: async (milliseconds) => missingDelays.push(milliseconds),
@@ -320,6 +330,24 @@ await withoutWarnings(() => mustReject(
       sleep: async () => assert.fail("ambiguous matches should fail immediately"),
     },
   ),
+ /Multiple merged pull requests match commit .*: #126, #127/,
+));
+
+await withoutWarnings(() => mustReject(
+  "rejects candidates that disagree across GraphQL and REST associations",
+  () => resolveSourcePullRequest(
+    { sha: mergeSha },
+    {
+      graphql: async () => [graphqlPull(126)],
+      rest: async (endpoint) => {
+        if (endpoint === `/commits/${mergeSha}/pulls?per_page=100`) return [pull(127)];
+        if (endpoint === "/pulls/126") return pr126;
+        if (endpoint === "/pulls/127") return pull(127);
+        throw new Error(`Unexpected REST endpoint: ${endpoint}`);
+      },
+      sleep: async () => assert.fail("cross-source ambiguity should fail immediately"),
+    },
+  ),
   /Multiple merged pull requests match commit .*: #126, #127/,
 ));
 
@@ -340,6 +368,46 @@ const resolvedExplicitPull = await resolveSourcePullRequest(
 );
 assert.equal(resolvedExplicitPull.number, 126);
 assert.equal(explicitGraphqlCalled, false);
+
+await mustReject(
+  "rejects an explicit release backfill for an unmerged PR",
+  () => resolveSourcePullRequest(
+    { sha: mergeSha, prNumber: 128 },
+    {
+      graphql: async () => assert.fail("explicit PR lookup must skip associations"),
+      rest: async (endpoint) => {
+        assert.equal(endpoint, "/pulls/128");
+        return pull(128, { merged_at: null });
+      },
+    },
+  ),
+  /Explicit release backfill requires merged pull request #128 targeting main/,
+);
+
+let mixedFailureCalls = 0;
+const mixedFailureDelays = [];
+const permanentGraphqlFailure = new Error("GitHub GraphQL access denied");
+permanentGraphqlFailure.retryable = false;
+const resolvedAfterMixedFailures = await withoutWarnings(() => resolveSourcePullRequest(
+  { sha: mergeSha },
+  {
+    graphql: async () => {
+      throw permanentGraphqlFailure;
+    },
+    rest: async (endpoint) => {
+      if (endpoint === `/commits/${mergeSha}/pulls?per_page=100`) {
+        mixedFailureCalls += 1;
+        if (mixedFailureCalls < 3) throw retryableFailure("GitHub REST unavailable");
+        return [pr126];
+      }
+      if (endpoint === "/pulls/126") return pr126;
+      throw new Error(`Unexpected REST endpoint: ${endpoint}`);
+    },
+    sleep: async (milliseconds) => mixedFailureDelays.push(milliseconds),
+  },
+));
+assert.equal(resolvedAfterMixedFailures.number, 126);
+assert.deepEqual(mixedFailureDelays, [2_000, 4_000]);
 
 const authFailure = new Error("GitHub GraphQL access denied");
 authFailure.retryable = false;

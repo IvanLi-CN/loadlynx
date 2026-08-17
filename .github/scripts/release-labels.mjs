@@ -267,8 +267,8 @@ async function githubApi(endpoint, { method = "GET", body } = {}) {
       {
         source: "REST",
         status: response.status,
-        retryAfterMs: retryAfterMsFrom(response.headers.get("retry-after")),
-        retryable: isRetryableStatus(response.status),
+        retryAfterMs: retryAfterMsFromHeaders(response.headers),
+        retryable: isRetryableStatus(response.status, response.headers),
       },
     );
   }
@@ -286,8 +286,20 @@ function githubRepository() {
   return { owner, name };
 }
 
-function isRetryableStatus(status) {
-  return status === 408 || status === 429 || status >= 500;
+export function isRetryableStatus(status, headers = new Headers()) {
+  return (
+    status === 408
+    || status === 429
+    || status >= 500
+    || (status === 403 && isRateLimited(headers))
+  );
+}
+
+function isRateLimited(headers) {
+  return (
+    headers.get("retry-after") != null
+    || headers.get("x-ratelimit-remaining") === "0"
+  );
 }
 
 function retryAfterMsFrom(value) {
@@ -299,6 +311,20 @@ function retryAfterMsFrom(value) {
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return null;
   return Math.min(Math.max(timestamp - Date.now(), 0), MAX_RETRY_AFTER_MS);
+}
+
+function retryAfterMsFromHeaders(headers) {
+  return retryAfterMsFrom(headers.get("retry-after"));
+}
+
+export function isRetryableGraphqlErrors(errors) {
+  return errors.some((error) => {
+    const detail = [error?.type, error?.extensions?.code, error?.message]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return /rate[ _-]?limit|timeout|temporar(?:y|ily)|service unavailable/.test(detail);
+  });
 }
 
 async function githubGraphql(query, variables) {
@@ -328,8 +354,8 @@ async function githubGraphql(query, variables) {
     throw new GitHubApiError(`GitHub GraphQL query failed: HTTP ${response.status}`, {
       source: "GraphQL",
       status: response.status,
-      retryAfterMs: retryAfterMsFrom(response.headers.get("retry-after")),
-      retryable: isRetryableStatus(response.status),
+      retryAfterMs: retryAfterMsFromHeaders(response.headers),
+      retryable: isRetryableStatus(response.status, response.headers),
     });
   }
 
@@ -337,6 +363,8 @@ async function githubGraphql(query, variables) {
   if (payload.errors?.length > 0) {
     throw new GitHubApiError("GitHub GraphQL query returned errors", {
       source: "GraphQL",
+      retryAfterMs: retryAfterMsFromHeaders(response.headers),
+      retryable: isRetryableGraphqlErrors(payload.errors),
     });
   }
   return payload.data;
@@ -369,8 +397,8 @@ function isGraphqlSourcePullRequest(pull, { sha, baseRef }) {
   );
 }
 
-function candidateNumbers(pulls, matches) {
-  return [...new Set(pulls.filter(matches).map((pull) => pull.number))];
+function candidateNumbers(pulls, matches = () => true) {
+  return [...new Set(pulls.filter(matches).map((pull) => pull.number))].sort((left, right) => left - right);
 }
 
 function sourcePullRequestNotFoundError(sha, sources) {
@@ -395,10 +423,7 @@ async function resolveCanonicalCandidates(numbers, criteria, rest) {
       pulls.push(pull);
     }
   }
-  if (pulls.length > 1) {
-    throw sourcePullRequestAmbiguousError(criteria.sha, pulls.map((pull) => pull.number));
-  }
-  return pulls[0] ?? null;
+  return pulls;
 }
 
 function retryDelayMs(attempt, retryAfterMs) {
@@ -429,7 +454,13 @@ export async function resolveSourcePullRequest(
   } = {},
 ) {
   if (prNumber) {
-    return rest(`/pulls/${prNumber}`);
+    const pull = await rest(`/pulls/${prNumber}`);
+    if (!pull?.merged_at || pull.base?.ref !== baseRef) {
+      throw new Error(
+        `Explicit release backfill requires merged pull request #${prNumber} targeting ${baseRef}`,
+      );
+    }
+    return pull;
   }
 
   const criteria = { sha, baseRef };
@@ -442,44 +473,56 @@ export async function resolveSourcePullRequest(
       retryAfterMs = null;
     }
 
-    let graphqlError = null;
+    const errors = [];
+    const candidateNumberSet = new Set();
     try {
       sources.add("GraphQL");
       const graphqlNumbers = candidateNumbers(
         await graphql({ sha, baseRef }),
         (pull) => isGraphqlSourcePullRequest(pull, criteria),
       );
-      const pull = await resolveCanonicalCandidates(graphqlNumbers, criteria, rest);
-      if (pull) return pull;
+      for (const number of graphqlNumbers) candidateNumberSet.add(number);
     } catch (error) {
       if (ambiguousSourcePullRequestError(error)) throw error;
-      graphqlError = error;
+      errors.push({ source: "GraphQL", error });
       console.warn(`Source PR lookup attempt ${attempt + 1}: ${sourceErrorSummary("GraphQL", error)}`);
-      if (retryableError(error)) {
-        retryAfterMs = Math.max(retryAfterMs ?? 0, error.retryAfterMs ?? 0) || null;
-      }
     }
 
-    let restError = null;
     try {
       sources.add("REST");
       const restNumbers = candidateNumbers(
         await rest(`/commits/${sha}/pulls?per_page=100`),
-        (pull) => isCanonicalSourcePullRequest(pull, criteria),
       );
-      const pull = await resolveCanonicalCandidates(restNumbers, criteria, rest);
-      if (pull) return pull;
+      for (const number of restNumbers) candidateNumberSet.add(number);
     } catch (error) {
       if (ambiguousSourcePullRequestError(error)) throw error;
-      restError = error;
+      errors.push({ source: "REST", error });
       console.warn(`Source PR lookup attempt ${attempt + 1}: ${sourceErrorSummary("REST", error)}`);
-      if (retryableError(error)) {
-        retryAfterMs = Math.max(retryAfterMs ?? 0, error.retryAfterMs ?? 0) || null;
+    }
+
+    if (candidateNumberSet.size > 0) {
+      try {
+        const pulls = await resolveCanonicalCandidates([...candidateNumberSet], criteria, rest);
+        if (pulls.length > 1) {
+          throw sourcePullRequestAmbiguousError(sha, pulls.map((pull) => pull.number));
+        }
+        if (pulls.length === 1) return pulls[0];
+      } catch (error) {
+        if (ambiguousSourcePullRequestError(error)) throw error;
+        errors.push({ source: "REST", error });
+        console.warn(`Source PR lookup attempt ${attempt + 1}: ${sourceErrorSummary("REST", error)}`);
       }
     }
 
-    if (graphqlError && !retryableError(graphqlError)) throw graphqlError;
-    if (restError && !retryableError(restError)) throw restError;
+    const transientErrors = errors.filter(({ error }) => retryableError(error));
+    if (transientErrors.length > 0) {
+      retryAfterMs = Math.max(
+        ...transientErrors.map(({ error }) => error.retryAfterMs ?? 0),
+        0,
+      ) || null;
+      continue;
+    }
+    if (errors.length > 0) throw errors[0].error;
   }
 
   throw sourcePullRequestNotFoundError(sha, sources);

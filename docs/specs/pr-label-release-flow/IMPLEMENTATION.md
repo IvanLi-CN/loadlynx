@@ -10,7 +10,7 @@
 - Added a repo-local release label policy and `Label Gate` workflow.
 - Added `.github/quality-gates.json` to declare `Label Gate` as the required release-intent check and to keep the review policy at `0` approvals for the protected `main` branch.
 - Added release intent tooling for label validation, version computation, and PR release comments.
-- Hardened automatic source-PR lookup with a GraphQL commit-association primary path, REST fallback, bounded retry for transient or empty results, and canonical merged/main/merge-SHA validation before labels are consumed.
+- Hardened automatic source-PR lookup with GraphQL and REST commit-association collection, canonical merged/main/merge-SHA validation before labels are consumed, bounded retry for transient or empty results, and fail-closed cross-source ambiguity handling. Explicit dispatch backfills remain direct PR lookups but require a merged `main` PR.
 - Refactored release automation to consume merged PR labels and inject the computed release version into artifacts.
 - Bound host-tools Clap version output to release-injected metadata so released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the static crate package version.
 - Release asset assembly now publishes host-tools installer scripts, firmware catalog JSON, Web bundle, and `SHA256SUMS` covering all release files before creating the GitHub Release.

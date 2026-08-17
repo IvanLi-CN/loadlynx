@@ -22,7 +22,7 @@
 - `channel:beta` creates a prerelease `vX.Y.Z-beta.<run-number>`.
 - `channel:dev` creates a prerelease `dev-<timestamp>-<sha>`.
 - Stable version discovery ignores `dev-*` tags and other non-stable tags.
-- An automatic `push` release resolves exactly one source PR whose merged state, `main` base ref, and `merge_commit_sha` match the workflow commit. It queries GraphQL commit associations first, falls back to the REST commit association endpoint, and retries bounded transient or empty results; no resolution failure is treated as `type:none`.
+- An automatic `push` release resolves exactly one source PR whose merged state, `main` base ref, and `merge_commit_sha` match the workflow commit. It collects GraphQL and REST commit associations, canonicalizes candidate numbers through `/pulls/{number}`, and fails on conflicting exact candidates; transient or empty results retry within the bounded budget, while no resolution failure is treated as `type:none`.
 - Official release artifacts include analog ELF, digital ELF, firmware catalog, host tools for supported host targets, user installer scripts, Web bundle, and `SHA256SUMS` covering every release asset.
 - Release builds inject the computed version into firmware, Web, and released host-tools version metadata instead of rewriting package manifests.
 - The release Web bundle is budget-checked and production-preview-smoked before packaging. GitHub Pages receives that exact tarball only after its embedded shell version and `version.json` match the resolved release tag; a Pages failure blocks release creation.
@@ -36,7 +36,7 @@
 - A skill/docs PR changes the operation contract when it changes what an operator may install, run, verify, trust, or treat as released behavior.
 - `type:none` is allowed only for internal documentation, spec/solution maintenance, comments, or tooling notes that do not change an owner-facing or user-facing operation contract.
 - Release label decisions and release backfills are governed by `skills/loadlynx-release-decision/SKILL.md`.
-- If a merged PR should have released but carried `type:none`, update the source PR labels and dispatch `Release (LoadLynx)` with `workflow_dispatch` input `pr_number=<PR>`.
+- If a merged PR on `main` should have released but carried `type:none`, update the source PR labels and dispatch `Release (LoadLynx)` with `workflow_dispatch` input `pr_number=<PR>`. This preserves the existing backfill behavior and does not require building that historical merge SHA.
 
 ## GitHub Integration
 
