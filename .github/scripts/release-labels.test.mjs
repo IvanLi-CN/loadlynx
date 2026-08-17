@@ -6,6 +6,7 @@ import {
   loadPolicy,
   isRetryableGraphqlErrors,
   isRetryableStatus,
+  retryAfterMsFromHeaders,
   releaseMergeCommitSha,
   resolveExplicitTag,
   resolveSourcePullRequest,
@@ -178,6 +179,12 @@ assert.equal(isRetryableGraphqlErrors([{ type: "RATE_LIMITED" }]), true);
 assert.equal(isRetryableGraphqlErrors([{ message: "Field does not exist" }]), false);
 assert.equal(isRetryableStatus(403, new Headers({ "retry-after": "30" })), true);
 assert.equal(isRetryableStatus(403, new Headers()), false);
+assert.equal(
+  retryAfterMsFromHeaders(new Headers({
+    "x-ratelimit-reset": `${Math.ceil((Date.now() + 90_000) / 1_000)}`,
+  })),
+  30_000,
+);
 
 const comment = buildReleaseComment(
   {
@@ -214,10 +221,7 @@ const resolvedPr126 = await resolveSourcePullRequest(
   },
 );
 assert.equal(resolvedPr126.number, 126);
-assert.deepEqual(pr126RestCalls, [
-  `/commits/${mergeSha}/pulls?per_page=100`,
-  "/pulls/126",
-]);
+assert.deepEqual(pr126RestCalls, ["/pulls/126"]);
 assert.deepEqual(validateLabels(resolvedPr126.labels, loadPolicy()), {
   labels: ["channel:stable", "component:docs", "type:none"],
   type: "none",
@@ -331,24 +335,6 @@ await withoutWarnings(() => mustReject(
     },
   ),
  /Multiple merged pull requests match commit .*: #126, #127/,
-));
-
-await withoutWarnings(() => mustReject(
-  "rejects candidates that disagree across GraphQL and REST associations",
-  () => resolveSourcePullRequest(
-    { sha: mergeSha },
-    {
-      graphql: async () => [graphqlPull(126)],
-      rest: async (endpoint) => {
-        if (endpoint === `/commits/${mergeSha}/pulls?per_page=100`) return [pull(127)];
-        if (endpoint === "/pulls/126") return pr126;
-        if (endpoint === "/pulls/127") return pull(127);
-        throw new Error(`Unexpected REST endpoint: ${endpoint}`);
-      },
-      sleep: async () => assert.fail("cross-source ambiguity should fail immediately"),
-    },
-  ),
-  /Multiple merged pull requests match commit .*: #126, #127/,
 ));
 
 let explicitGraphqlCalled = false;

@@ -313,8 +313,17 @@ function retryAfterMsFrom(value) {
   return Math.min(Math.max(timestamp - Date.now(), 0), MAX_RETRY_AFTER_MS);
 }
 
-function retryAfterMsFromHeaders(headers) {
-  return retryAfterMsFrom(headers.get("retry-after"));
+export function retryAfterMsFromHeaders(headers) {
+  return (
+    retryAfterMsFrom(headers.get("retry-after"))
+    ?? rateLimitResetMsFrom(headers.get("x-ratelimit-reset"))
+  );
+}
+
+function rateLimitResetMsFrom(value) {
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds)) return null;
+  return Math.min(Math.max((seconds * 1_000) - Date.now(), 0), MAX_RETRY_AFTER_MS);
 }
 
 export function isRetryableGraphqlErrors(errors) {
@@ -474,14 +483,17 @@ export async function resolveSourcePullRequest(
     }
 
     const errors = [];
-    const candidateNumberSet = new Set();
     try {
       sources.add("GraphQL");
       const graphqlNumbers = candidateNumbers(
         await graphql({ sha, baseRef }),
         (pull) => isGraphqlSourcePullRequest(pull, criteria),
       );
-      for (const number of graphqlNumbers) candidateNumberSet.add(number);
+      const pulls = await resolveCanonicalCandidates(graphqlNumbers, criteria, rest);
+      if (pulls.length > 1) {
+        throw sourcePullRequestAmbiguousError(sha, pulls.map((pull) => pull.number));
+      }
+      if (pulls.length === 1) return pulls[0];
     } catch (error) {
       if (ambiguousSourcePullRequestError(error)) throw error;
       errors.push({ source: "GraphQL", error });
@@ -493,25 +505,15 @@ export async function resolveSourcePullRequest(
       const restNumbers = candidateNumbers(
         await rest(`/commits/${sha}/pulls?per_page=100`),
       );
-      for (const number of restNumbers) candidateNumberSet.add(number);
+      const pulls = await resolveCanonicalCandidates(restNumbers, criteria, rest);
+      if (pulls.length > 1) {
+        throw sourcePullRequestAmbiguousError(sha, pulls.map((pull) => pull.number));
+      }
+      if (pulls.length === 1) return pulls[0];
     } catch (error) {
       if (ambiguousSourcePullRequestError(error)) throw error;
       errors.push({ source: "REST", error });
       console.warn(`Source PR lookup attempt ${attempt + 1}: ${sourceErrorSummary("REST", error)}`);
-    }
-
-    if (candidateNumberSet.size > 0) {
-      try {
-        const pulls = await resolveCanonicalCandidates([...candidateNumberSet], criteria, rest);
-        if (pulls.length > 1) {
-          throw sourcePullRequestAmbiguousError(sha, pulls.map((pull) => pull.number));
-        }
-        if (pulls.length === 1) return pulls[0];
-      } catch (error) {
-        if (ambiguousSourcePullRequestError(error)) throw error;
-        errors.push({ source: "REST", error });
-        console.warn(`Source PR lookup attempt ${attempt + 1}: ${sourceErrorSummary("REST", error)}`);
-      }
     }
 
     const transientErrors = errors.filter(({ error }) => retryableError(error));
