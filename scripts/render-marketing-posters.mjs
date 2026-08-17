@@ -46,6 +46,7 @@ const transactionLockName = ".loadlynx-marketing-poster.lock";
 const transactionJournalName = "transaction.json";
 const recoveryMarkerName = "recovery.json";
 const recoveryClaimPrefix = "recovery-claim-";
+const transactionRetirementPrefix = ".loadlynx-marketing-poster.retired-";
 const transactionVersion = 3;
 const approvedPosterOutputs = new Set(
   Object.values(posterVariants).map((variant) => variant.output),
@@ -204,6 +205,13 @@ function pauseAfterLockPublicationForTest() {
 
 function pauseAfterRecoveryClaimForTest() {
   const duration = Number(process.env.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_RECOVERY_CLAIM_MS);
+  if (Number.isSafeInteger(duration) && duration > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
+  }
+}
+
+function pauseAfterLockRetirementForTest() {
+  const duration = Number(process.env.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_RETIRE_MS);
   if (Number.isSafeInteger(duration) && duration > 0) {
     Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
   }
@@ -614,8 +622,15 @@ function removeTransactionLock(lockDirectory, recoveryClaim = null) {
       throw new Error(`Poster recovery claim was lost before cleanup: ${lockDirectory}`);
     }
   }
-  rmSync(lockDirectory, { force: true, recursive: true });
-  syncDirectory(dirname(lockDirectory));
+  const parentDirectory = dirname(lockDirectory);
+  const retiredDirectory = join(
+    parentDirectory,
+    `${transactionRetirementPrefix}${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`,
+  );
+  renameAndSync(lockDirectory, retiredDirectory);
+  pauseAfterLockRetirementForTest();
+  rmSync(retiredDirectory, { force: true, recursive: true });
+  syncDirectory(parentDirectory);
 }
 
 function recoverInterruptedTransaction(outputDirectory, permittedOutputs) {

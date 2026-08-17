@@ -53,6 +53,7 @@ function runRenderer(fixture, args, overrides = {}) {
   delete environment.LOADLYNX_MARKETING_TEST_INTERRUPT_BEFORE_LOCK_PUBLISH;
   delete environment.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_PUBLISH_MS;
   delete environment.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_RECOVERY_CLAIM_MS;
+  delete environment.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_RETIRE_MS;
   Object.assign(environment, overrides);
   return spawnSync(process.execPath, [fixture.renderer, ...args], {
     cwd: fixture.root,
@@ -75,7 +76,20 @@ function waitForFile(path, timeoutMilliseconds) {
   }
 }
 
+function waitForAbsence(path, timeoutMilliseconds) {
+  const deadline = Date.now() + timeoutMilliseconds;
+  while (existsSync(path)) {
+    if (Date.now() >= deadline) {
+      throw new Error(`timed out waiting for ${path} to disappear`);
+    }
+    pause(20);
+  }
+}
+
 function waitForChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return Promise.resolve({ status: child.exitCode, signal: child.signalCode });
+  }
   return new Promise((resolve, reject) => {
     child.once("error", reject);
     child.once("close", (status, signal) => resolve({ status, signal }));
@@ -261,6 +275,46 @@ async function verifyRecoveryClaimSerializesSecondWriter() {
   }
 }
 
+async function verifyLockRetirementDoesNotDeleteNewWriter() {
+  const fixture = createFixture();
+  const lockPath = join(fixture.output, lockName);
+  const original = prepareInterruptedPair(fixture);
+  removeDarkSource(fixture);
+  const recovery = spawn(process.execPath, [fixture.renderer, "--all"], {
+    cwd: fixture.root,
+    env: {
+      ...process.env,
+      LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_RETIRE_MS: "2500",
+    },
+    stdio: "ignore",
+  });
+  let writer;
+  try {
+    waitForAbsence(lockPath, 5000);
+    writer = spawn(process.execPath, [fixture.renderer, "--variant", "dark"], {
+      cwd: fixture.root,
+      env: {
+        ...process.env,
+        LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_PUBLISH_MS: "4000",
+      },
+      stdio: "ignore",
+    });
+    waitForFile(lockPath, 5000);
+    assert.deepEqual(await waitForChild(recovery), { status: 1, signal: null });
+    assert.equal(existsSync(lockPath), true, "retiring the old lock must not remove the new writer lock");
+    assert.deepEqual(await waitForChild(writer), { status: 1, signal: null });
+    assert.deepEqual(outputBuffers(fixture), original, "lock retirement must preserve the recovered approved pair");
+    assert.equal(existsSync(lockPath), false, "the new writer must clean up its own lock");
+  } finally {
+    for (const child of [recovery, writer]) {
+      if (child?.exitCode === null && child.signalCode === null) {
+        child.kill("SIGKILL");
+      }
+    }
+    rmSync(fixture.root, { force: true, recursive: true });
+  }
+}
+
 async function verifyActiveSingleWriterBlocksPairPublication() {
   const fixture = createFixture();
   const lockPath = join(fixture.output, lockName);
@@ -293,5 +347,6 @@ verifyIncompleteLockDoesNotBlockRecovery();
 verifyPidReuseDoesNotOwnStaleLock();
 verifyRecoveryRollbackCanResume();
 await verifyRecoveryClaimSerializesSecondWriter();
+await verifyLockRetirementDoesNotDeleteNewWriter();
 await verifyActiveSingleWriterBlocksPairPublication();
 console.log("marketing poster publication recovery passed");
