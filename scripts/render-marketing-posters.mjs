@@ -2,10 +2,13 @@
 
 import { spawnSync } from "node:child_process";
 import {
+  closeSync,
   copyFileSync,
   existsSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   renameSync,
   rmSync,
@@ -39,6 +42,10 @@ const outputWidth = 1122;
 const outputHeight = 1402;
 const transactionLockName = ".loadlynx-marketing-poster.lock";
 const transactionJournalName = "transaction.json";
+const transactionVersion = 2;
+const approvedPosterOutputs = new Set(
+  Object.values(posterVariants).map((variant) => variant.output),
+);
 
 const args = process.argv.slice(2);
 if (args.includes("--help")) {
@@ -146,6 +153,46 @@ function renderPoster(variant, output) {
   }
 }
 
+function syncFile(path) {
+  const descriptor = openSync(path, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function syncDirectory(directory) {
+  const descriptor = openSync(directory, "r");
+  try {
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
+  }
+}
+
+function renameAndSync(source, destination) {
+  renameSync(source, destination);
+  syncDirectory(dirname(destination));
+}
+
+function interruptPublicationForTest(point) {
+  if (
+    (point === "before-lock-publish" && process.env.LOADLYNX_MARKETING_TEST_INTERRUPT_BEFORE_LOCK_PUBLISH === "1") ||
+    (point.startsWith("after-output-") &&
+      process.env.LOADLYNX_MARKETING_TEST_INTERRUPT_AFTER_OUTPUT_RENAME === point.slice("after-output-".length))
+  ) {
+    process.exit(point === "before-lock-publish" ? 85 : 86);
+  }
+}
+
+function pauseAfterLockPublicationForTest() {
+  const duration = Number(process.env.LOADLYNX_MARKETING_TEST_PAUSE_AFTER_LOCK_PUBLISH_MS);
+  if (Number.isSafeInteger(duration) && duration > 0) {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, duration);
+  }
+}
+
 function stageOutput(output) {
   const outputDirectory = dirname(output);
   mkdirSync(outputDirectory, { recursive: true });
@@ -160,7 +207,8 @@ function renderSingleAtomically(job) {
   const stage = stageOutput(job.output);
   try {
     renderPoster(job.variant, stage.stagedOutput);
-    renameSync(stage.stagedOutput, job.output);
+    syncFile(stage.stagedOutput);
+    renameAndSync(stage.stagedOutput, job.output);
   } finally {
     rmSync(stage.stagingDirectory, { force: true, recursive: true });
   }
@@ -183,28 +231,84 @@ function transactionJournalPath(lockDirectory) {
   return join(lockDirectory, transactionJournalName);
 }
 
-function writeTransactionJournal(transaction) {
-  const journalPath = transactionJournalPath(transaction.lockDirectory);
-  const temporaryPath = join(transaction.lockDirectory, `transaction-${process.pid}.tmp`);
-  writeFileSync(temporaryPath, `${JSON.stringify(transaction)}\n`);
-  renameSync(temporaryPath, journalPath);
-}
-
-function isProcessRunning(pid) {
+function writeTransactionJournal(transaction, journalDirectory = transaction.lockDirectory) {
+  const journalPath = transactionJournalPath(journalDirectory);
+  const temporaryPath = join(journalDirectory, `transaction-${process.pid}.tmp`);
+  const descriptor = openSync(temporaryPath, "w");
   try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return error?.code === "EPERM";
+    writeFileSync(descriptor, `${JSON.stringify(transaction)}\n`);
+    fsyncSync(descriptor);
+  } finally {
+    closeSync(descriptor);
   }
+  renameAndSync(temporaryPath, journalPath);
 }
 
-function transactionMatchesJobs(transaction, lockDirectory, jobs) {
+function linuxProcessStartIdentity(pid) {
+  let stat;
+  try {
+    stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") {
+      return existsSync("/proc") ? null : undefined;
+    }
+    if (error?.code === "EACCES") {
+      return undefined;
+    }
+    throw error;
+  }
+  const commandEnd = stat.lastIndexOf(") ");
+  if (commandEnd === -1) {
+    return null;
+  }
+  const fields = stat.slice(commandEnd + 2).trim().split(/\s+/);
+  const startTime = fields[19];
+  if (!startTime) {
+    return null;
+  }
+  let bootId;
+  try {
+    bootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+  } catch (error) {
+    if (error?.code === "ENOENT" || error?.code === "EACCES") {
+      bootId = "unknown-boot";
+    } else {
+      throw error;
+    }
+  }
+  return `linux:${bootId}:${startTime}`;
+}
+
+function processStartIdentity(pid) {
+  const linuxIdentity = linuxProcessStartIdentity(pid);
+  if (linuxIdentity !== undefined) {
+    return linuxIdentity;
+  }
+  const result = spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    encoding: "utf8",
+  });
+  if (result.error) {
+    throw new Error(`ps could not inspect poster transaction owner: ${result.error.message}`);
+  }
+  if (result.status !== 0) {
+    return null;
+  }
+  const identity = result.stdout.trim().replace(/\s+/g, " ");
+  return identity ? `ps:${identity}` : null;
+}
+
+function isTransactionOwnerRunning(transaction) {
+  return processStartIdentity(transaction.pid) === transaction.ownerStartedAt;
+}
+
+function transactionMatchesJobs(transaction, lockDirectory, permittedOutputs) {
   if (
     !transaction ||
-    transaction.version !== 1 ||
+    transaction.version !== transactionVersion ||
     !Number.isSafeInteger(transaction.pid) ||
     transaction.pid <= 0 ||
+    typeof transaction.ownerStartedAt !== "string" ||
+    !transaction.ownerStartedAt ||
     transaction.lockDirectory !== lockDirectory ||
     !["rendering", "publishing", "published"].includes(transaction.phase) ||
     !Array.isArray(transaction.jobs)
@@ -212,11 +316,11 @@ function transactionMatchesJobs(transaction, lockDirectory, jobs) {
     return false;
   }
 
-  const expectedOutputs = jobs.map((job) => job.output).sort();
   const recordedOutputs = transaction.jobs.map((job) => job.output).sort();
   if (
-    expectedOutputs.length !== recordedOutputs.length ||
-    expectedOutputs.some((output, index) => output !== recordedOutputs[index])
+    recordedOutputs.length === 0 ||
+    recordedOutputs.length !== new Set(recordedOutputs).size ||
+    recordedOutputs.some((output) => !permittedOutputs.has(output))
   ) {
     return false;
   }
@@ -234,10 +338,10 @@ function transactionMatchesJobs(transaction, lockDirectory, jobs) {
   );
 }
 
-function readTransaction(lockDirectory, jobs) {
+function readTransaction(lockDirectory, permittedOutputs) {
   const journalPath = transactionJournalPath(lockDirectory);
   if (!existsSync(journalPath)) {
-    throw new Error(`Poster transaction lock is incomplete: ${lockDirectory}`);
+    return null;
   }
 
   let transaction;
@@ -246,7 +350,7 @@ function readTransaction(lockDirectory, jobs) {
   } catch (error) {
     throw new Error(`Poster transaction journal is unreadable: ${error.message}`);
   }
-  if (!transactionMatchesJobs(transaction, lockDirectory, jobs)) {
+  if (!transactionMatchesJobs(transaction, lockDirectory, permittedOutputs)) {
     throw new Error(`Poster transaction journal does not match this output set: ${lockDirectory}`);
   }
   return transaction;
@@ -257,9 +361,9 @@ function restoreTransactionOutputs(transaction) {
   for (const job of [...transaction.jobs].reverse()) {
     try {
       if (job.hadOriginal && existsSync(job.backupOutput)) {
-        renameSync(job.backupOutput, job.output);
+        renameAndSync(job.backupOutput, job.output);
       } else if (!job.hadOriginal && !existsSync(job.stagedOutput) && existsSync(job.output)) {
-        renameSync(job.output, job.discardedOutput);
+        renameAndSync(job.output, job.discardedOutput);
       } else if (job.hadOriginal) {
         throw new Error(`missing backup for ${job.output}`);
       }
@@ -267,21 +371,29 @@ function restoreTransactionOutputs(transaction) {
       rollbackErrors.push(error instanceof Error ? error.message : String(error));
     }
   }
+  if (rollbackErrors.length === 0) {
+    syncDirectory(transaction.lockDirectory);
+  }
   return rollbackErrors;
 }
 
 function removeTransactionLock(lockDirectory) {
   rmSync(lockDirectory, { force: true, recursive: true });
+  syncDirectory(dirname(lockDirectory));
 }
 
-function recoverInterruptedTransaction(outputDirectory, jobs) {
+function recoverInterruptedTransaction(outputDirectory, permittedOutputs) {
   const lockDirectory = join(outputDirectory, transactionLockName);
   if (!existsSync(lockDirectory)) {
     return;
   }
 
-  const transaction = readTransaction(lockDirectory, jobs);
-  if (isProcessRunning(transaction.pid)) {
+  const transaction = readTransaction(lockDirectory, permittedOutputs);
+  if (transaction === null) {
+    removeTransactionLock(lockDirectory);
+    return;
+  }
+  if (isTransactionOwnerRunning(transaction)) {
     throw new Error(`Another poster render owns the transaction lock: ${lockDirectory}`);
   }
 
@@ -296,18 +408,15 @@ function recoverInterruptedTransaction(outputDirectory, jobs) {
 
 function createTransaction(outputDirectory, jobs) {
   const lockDirectory = join(outputDirectory, transactionLockName);
-  try {
-    mkdirSync(lockDirectory);
-  } catch (error) {
-    if (error?.code === "EEXIST") {
-      throw new Error(`Another poster render acquired the transaction lock: ${lockDirectory}`);
-    }
-    throw error;
+  const ownerStartedAt = processStartIdentity(process.pid);
+  if (ownerStartedAt === null) {
+    throw new Error("ps could not identify poster transaction owner");
   }
-
+  const pendingLockDirectory = mkdtempSync(join(outputDirectory, `.${transactionLockName}.pending-`));
   const transaction = {
-    version: 1,
+    version: transactionVersion,
     pid: process.pid,
+    ownerStartedAt,
     phase: "rendering",
     lockDirectory,
     jobs: jobs.map((job, index) => ({
@@ -319,17 +428,28 @@ function createTransaction(outputDirectory, jobs) {
     })),
   };
   try {
-    writeTransactionJournal(transaction);
+    writeTransactionJournal(transaction, pendingLockDirectory);
+    interruptPublicationForTest("before-lock-publish");
+    try {
+      renameSync(pendingLockDirectory, lockDirectory);
+    } catch (error) {
+      if (error?.code === "EEXIST" || error?.code === "ENOTEMPTY") {
+        throw new Error(`Another poster render acquired the transaction lock: ${lockDirectory}`);
+      }
+      throw error;
+    }
+    syncDirectory(outputDirectory);
+    pauseAfterLockPublicationForTest();
   } catch (error) {
-    removeTransactionLock(lockDirectory);
+    rmSync(pendingLockDirectory, { force: true, recursive: true });
     throw error;
   }
   return transaction;
 }
 
-function renderPosterPairAtomically(jobs) {
+function renderPosterSetAtomically(jobs, permittedOutputs) {
   const outputDirectory = commonOutputDirectory(jobs);
-  recoverInterruptedTransaction(outputDirectory, jobs);
+  recoverInterruptedTransaction(outputDirectory, permittedOutputs);
 
   let transaction;
   try {
@@ -340,17 +460,21 @@ function renderPosterPairAtomically(jobs) {
     }));
     for (const job of stagedJobs) {
       renderPoster(job.variant, job.stagedOutput);
+      syncFile(job.stagedOutput);
     }
 
     for (const job of transaction.jobs) {
       if (job.hadOriginal) {
         copyFileSync(job.output, job.backupOutput);
+        syncFile(job.backupOutput);
       }
     }
+    syncDirectory(transaction.lockDirectory);
     transaction.phase = "publishing";
     writeTransactionJournal(transaction);
-    for (const job of transaction.jobs) {
-      renameSync(job.stagedOutput, job.output);
+    for (const [index, job] of transaction.jobs.entries()) {
+      renameAndSync(job.stagedOutput, job.output);
+      interruptPublicationForTest(`after-output-${index + 1}`);
     }
     transaction.phase = "published";
     writeTransactionJournal(transaction);
@@ -368,11 +492,19 @@ function renderPosterPairAtomically(jobs) {
 }
 
 function renderAtomically(jobs) {
+  const approvedOutputJobs = jobs.filter((job) => approvedPosterOutputs.has(job.output));
+  if (approvedOutputJobs.length > 0) {
+    if (approvedOutputJobs.length !== jobs.length) {
+      throw new Error("Approved poster outputs cannot be mixed with custom output paths");
+    }
+    renderPosterSetAtomically(jobs, approvedPosterOutputs);
+    return;
+  }
   if (jobs.length === 1) {
     renderSingleAtomically(jobs[0]);
     return;
   }
-  renderPosterPairAtomically(jobs);
+  renderPosterSetAtomically(jobs, new Set(jobs.map((job) => job.output)));
 }
 
 function verifyPosters(maxAllowedAe) {
