@@ -91,6 +91,9 @@ jobs:
       - name: Run quality-gates contract tests
         run: npm run test:quality-gates
 
+      - name: Run release failure notifier contract tests
+        run: npm run test:release-failure-notifier
+
       - name: Run workflow hygiene tests
         run: npm run test:workflow-hygiene
 
