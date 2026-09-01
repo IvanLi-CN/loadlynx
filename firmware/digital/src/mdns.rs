@@ -615,11 +615,7 @@ fn parse_query(packet: &[u8]) -> Option<Query<'_>> {
 
     let mut offset = 12usize;
     let mut name = String::<64>::new();
-    if let Some(next) = decode_name(packet, offset, &mut name) {
-        offset = next;
-    } else {
-        return None;
-    }
+    offset = decode_name(packet, offset, &mut name)?;
 
     if offset + 4 > packet.len() {
         return None;
