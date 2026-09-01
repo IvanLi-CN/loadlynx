@@ -26,12 +26,22 @@ assert.match(workflow, /    types:\n      - completed\n/);
 assert.match(workflow, /    branches:\n      - main\n/);
 assert.match(workflow, /  workflow_dispatch:\n/);
 assert.match(workflow, /^permissions:\n  id-token: write\n/m);
-assert.equal(countOccurrences(workflow, "      - Release (LoadLynx)"), 1);
+const workflowRunStart = workflow.indexOf("  workflow_run:\n");
+const workflowDispatchStart = workflow.indexOf("  workflow_dispatch:\n", workflowRunStart);
+const workflowRunBlock = workflow.slice(workflowRunStart, workflowDispatchStart);
+const workflowsStart = workflowRunBlock.indexOf("    workflows:\n");
+const typesStart = workflowRunBlock.indexOf("    types:\n", workflowsStart);
+const watchedWorkflowNames = workflowRunBlock
+  .slice(workflowsStart, typesStart)
+  .split("\n")
+  .filter((line) => line.startsWith("      - "))
+  .map((line) => line.slice("      - ".length));
+assert.deepEqual(watchedWorkflowNames, ["Release (LoadLynx)"]);
 
 assert.equal(countOccurrences(workflow, oidruneReference), 2);
 assert.doesNotMatch(workflow, /IvanLi-CN\/github-workflows/);
 assert.doesNotMatch(workflow, /\.github\/workflows\/[^\n]+@main/);
-assert.doesNotMatch(workflow, /^\s+secrets:\s*$/m);
+assert.doesNotMatch(workflow, /\bsecrets\s*:/);
 assert.doesNotMatch(workflow, /^\s+(gateway_url|oidc_audience):/m);
 assert.doesNotMatch(workflow, /^\s+(push|pull_request|schedule):/m);
 
