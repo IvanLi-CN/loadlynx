@@ -89,6 +89,7 @@ check-root:
   just _require-root-deps
   npm run test:release-labels
   npm run test:quality-gates
+  npm run test:release-failure-notifier
   npm run test:workflow-hygiene
 
 # Host-side Rust crate and tool tests.
