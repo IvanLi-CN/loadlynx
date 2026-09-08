@@ -235,6 +235,46 @@ function labelsFromEvent(event) {
   return event.pull_request.labels ?? [];
 }
 
+async function githubApi(endpoint, { method = "GET", body } = {}) {
+  const token = process.env.GITHUB_TOKEN;
+  const repository = process.env.GITHUB_REPOSITORY;
+  if (!token) throw new Error("GITHUB_TOKEN is required");
+  if (!repository) throw new Error("GITHUB_REPOSITORY is required");
+
+  let response;
+  try {
+    response = await fetch(`https://api.github.com/repos/${repository}${endpoint}`, {
+      method,
+      headers: {
+        Accept: "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        "X-GitHub-Api-Version": "2022-11-28",
+        ...(body == null ? {} : { "Content-Type": "application/json" }),
+      },
+      body: body == null ? undefined : JSON.stringify(body),
+    });
+  } catch {
+    throw new GitHubApiError(
+      `GitHub REST ${method} ${endpoint} failed: network error`,
+      { source: "REST", retryable: true },
+    );
+  }
+
+  if (!response.ok) {
+    throw new GitHubApiError(
+      `GitHub REST ${method} ${endpoint} failed: HTTP ${response.status}`,
+      {
+        source: "REST",
+        status: response.status,
+        retryAfterMs: retryAfterMsFromHeaders(response.headers),
+        retryable: isRetryableStatus(response.status, response.headers),
+      },
+    );
+  }
+  if (response.status === 204) return null;
+  return response.json();
+}
+
 function githubRepository() {
   const repository = process.env.GITHUB_REPOSITORY;
   if (!repository) throw new Error("GITHUB_REPOSITORY is required");
