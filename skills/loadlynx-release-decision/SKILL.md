@@ -60,12 +60,11 @@ gh pr edit <pr-number> --repo IvanLi-CN/loadlynx --remove-label type:none --add-
 gh workflow run release.yml --repo IvanLi-CN/loadlynx -f pr_number=<pr-number>
 ```
 
-4. Watch the workflow to completion and verify the release plus PR comment:
+4. Watch the workflow to completion and verify the release:
 
 ```bash
 gh run watch <run-id> --repo IvanLi-CN/loadlynx --interval 30
 gh release view <tag> --repo IvanLi-CN/loadlynx --json tagName,url,isPrerelease,assets
-gh pr view <pr-number> --repo IvanLi-CN/loadlynx --json comments
 ```
 
 ## Guardrails

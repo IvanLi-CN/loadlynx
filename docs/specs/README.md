@@ -51,7 +51,7 @@
 | `loadlynx-operational-skills` | active | 新增 owner-facing 电脑安装/更新主指南；公开 skill 命令统一为 global install + official `skills update` | `loadlynx-operational-skills/SPEC.md` | - | LoadLynx operational skills packaging and workflow boundary |
 | `boot-link-recovery` | active | 软件实现与构建验证完成；HIL 因当前 worktree 缺失 selector 阻断 | `boot-link-recovery/SPEC.md` | - | Dashboard Boot Link Recovery |
 | `release-failure-telegram-alerts` | active | 统一监听 `Release (LoadLynx)`；普通 PR CI 失败不触发 Telegram，release failure 保留 smoke path | `release-failure-telegram-alerts/SPEC.md` | - | Release 失败 Telegram 告警接入 |
-| `pr-label-release-flow` | active | PR label release contract、Label Gate、`main` PR-only + `0 approvals`、发布后 PR 自动评论 | `pr-label-release-flow/SPEC.md` | - | PR Label Release Flow |
+| `pr-label-release-flow` | active | PR label release contract、Label Gate、`main` PR-only + `0 approvals` | `pr-label-release-flow/SPEC.md` | - | PR Label Release Flow |
 | `web-bundle-budget-gates` | active | 显式 app/Storybook bundle budget、Storybook framework runtime 单独验收、CI 门禁 | `web-bundle-budget-gates/SPEC.md` | - | Web Bundle Budget Gates |
 | `buzzer-to-speaker-audio` | active | 实现完成；旧规划来源与实现记录保留在 companion docs。 | `buzzer-to-speaker-audio/SPEC.md` | - | 音频迁移：蜂鸣器 → 扬声器 |
 | `usb-pd-epr-28v-sink` | active | PR #72；实现与构建已完成；owner-facing fixed PDO 语义已收敛为 live-only；HIL 仍待 EPR 线材补验 | `usb-pd-epr-28v-sink/SPEC.md` | - | USB-PD EPR 28V Sink Enablement |

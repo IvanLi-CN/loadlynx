@@ -418,7 +418,6 @@ jobs:
     timeout-minutes: 20
     env:
       RELEASE_TAG: ${{ needs.intent.outputs.tag }}
-      RELEASE_URL: https://github.com/${{ github.repository }}/releases/tag/${{ needs.intent.outputs.tag }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -477,13 +476,6 @@ jobs:
           cat CHANGELOG.md >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Collect asset names
-        id: assets
-        run: |
-          set -euo pipefail
-          find dist/release -maxdepth 1 -type f -printf '%f\n' | sort | paste -sd, - > assets.csv
-          echo "csv=$(cat assets.csv)" >> "$GITHUB_OUTPUT"
-
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
@@ -511,12 +503,3 @@ jobs:
           files: dist/release/*
           prerelease: ${{ needs.intent.outputs.prerelease }}
           draft: false
-
-      - name: Comment on source PR
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          node .github/scripts/release-labels.mjs comment \
-            --snapshot dist/intent/release-intent.json \
-            --release-url "$RELEASE_URL" \
-            --assets "${{ steps.assets.outputs.csv }}"

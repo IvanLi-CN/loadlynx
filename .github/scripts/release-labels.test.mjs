@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
 import {
-  buildReleaseComment,
   bumpVersion,
   loadPolicy,
   isRetryableGraphqlErrors,
@@ -185,21 +184,6 @@ assert.equal(
   })),
   30_000,
 );
-
-const comment = buildReleaseComment(
-  {
-    tag: "v0.1.1",
-    channel: "stable",
-    type: "patch",
-    merge_commit_sha: "abc123",
-    run_url: "https://github.com/IvanLi-CN/loadlynx/actions/runs/1",
-  },
-  "https://github.com/IvanLi-CN/loadlynx/releases/tag/v0.1.1",
-  ["loadlynx-web-v0.1.1.tar.gz"],
-);
-assert.match(comment, /loadlynx-release-version-comment/);
-assert.match(comment, /Version: `v0\.1\.1`/);
-assert.match(comment, /loadlynx-web-v0\.1\.1\.tar\.gz/);
 
 const pr126 = pull(126);
 const pr126RestCalls = [];

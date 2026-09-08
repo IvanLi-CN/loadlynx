@@ -9,7 +9,7 @@
 
 - Added a repo-local release label policy and `Label Gate` workflow.
 - Added `.github/quality-gates.json` to declare `Label Gate` as the required release-intent check and to keep the review policy at `0` approvals for the protected `main` branch.
-- Added release intent tooling for label validation, version computation, and PR release comments.
+- Added release intent tooling for label validation and version computation.
 - Hardened automatic source-PR lookup with a GraphQL commit-association primary path and REST fallback, canonical merged/main/merge-SHA validation before labels are consumed, bounded retry for transient or empty results, and fail-closed ambiguity handling. Explicit dispatch backfills remain direct PR lookups but require a merged `main` PR.
 - Refactored release automation to consume merged PR labels and inject the computed release version into artifacts.
 - Bound host-tools Clap version output to release-injected metadata so released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the static crate package version.
@@ -48,5 +48,5 @@
 - Workflow hygiene now verifies the release decision skill, README/AGENTS references, and owner-facing operation contract release-label wording so docs/skill-only release decisions do not silently drift back to `type:none`.
 - Release intent dry-run confirms `v0.1.0` plus `type:patch` resolves to `v0.1.1`.
 - Full release validation completes after this PR merges and the automatic `Release (LoadLynx)` run finishes.
-- Release backfill validation for PR #100 produced `v0.5.2`, including host-tools archives, firmware catalog/assets, Web bundle, installers, `SHA256SUMS`, and a source PR release completion comment.
+- Release backfill validation for PR #100 produced `v0.5.2`, including host-tools archives, firmware catalog/assets, Web bundle, installers, and `SHA256SUMS`.
 - Host-tools release-version validation now includes rebuilding the CLI and daemon with `LOADLYNX_RELEASE_VERSION` set and checking that `loadlynx -v` plus `loadlynx-devd --version` report the injected release tag.
