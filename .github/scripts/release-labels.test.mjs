@@ -205,6 +205,34 @@ const resolvedPr126 = await resolveSourcePullRequest(
   },
 );
 assert.equal(resolvedPr126.number, 126);
+
+const originalFetch = globalThis.fetch;
+const originalToken = process.env.GITHUB_TOKEN;
+const originalRepository = process.env.GITHUB_REPOSITORY;
+process.env.GITHUB_TOKEN = "test-token";
+process.env.GITHUB_REPOSITORY = "IvanLi-CN/loadlynx";
+globalThis.fetch = async (url, options) => {
+  assert.equal(url, "https://api.github.com/repos/IvanLi-CN/loadlynx/pulls/126");
+  assert.equal(options.method, "GET");
+  return new Response(JSON.stringify(pr126), {
+    status: 200,
+    headers: { "content-type": "application/json" },
+  });
+};
+try {
+  const resolvedWithDefaultRest = await resolveSourcePullRequest({
+    sha: mergeSha,
+    prNumber: 126,
+  });
+  assert.equal(resolvedWithDefaultRest.number, 126);
+} finally {
+  globalThis.fetch = originalFetch;
+  if (originalToken == null) delete process.env.GITHUB_TOKEN;
+  else process.env.GITHUB_TOKEN = originalToken;
+  if (originalRepository == null) delete process.env.GITHUB_REPOSITORY;
+  else process.env.GITHUB_REPOSITORY = originalRepository;
+}
+
 assert.deepEqual(pr126RestCalls, ["/pulls/126"]);
 assert.deepEqual(validateLabels(resolvedPr126.labels, loadPolicy()), {
   labels: ["channel:stable", "component:docs", "type:none"],
