@@ -6,7 +6,6 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const DEFAULT_POLICY_PATH = ".github/release-label-policy.json";
-const RELEASE_COMMENT_MARKER = "<!-- loadlynx-release-version-comment -->";
 const SOURCE_PULL_REQUEST_ATTEMPTS = 4;
 const SOURCE_PULL_REQUEST_RETRY_DELAYS_MS = [2_000, 4_000, 8_000];
 const MAX_RETRY_AFTER_MS = 30_000;
@@ -234,46 +233,6 @@ function labelsFromEvent(event) {
     throw new Error("Event does not contain pull_request labels");
   }
   return event.pull_request.labels ?? [];
-}
-
-async function githubApi(endpoint, { method = "GET", body } = {}) {
-  const token = process.env.GITHUB_TOKEN;
-  const repository = process.env.GITHUB_REPOSITORY;
-  if (!token) throw new Error("GITHUB_TOKEN is required");
-  if (!repository) throw new Error("GITHUB_REPOSITORY is required");
-
-  let response;
-  try {
-    response = await fetch(`https://api.github.com/repos/${repository}${endpoint}`, {
-      method,
-      headers: {
-        Accept: "application/vnd.github+json",
-        Authorization: `Bearer ${token}`,
-        "X-GitHub-Api-Version": "2022-11-28",
-        ...(body == null ? {} : { "Content-Type": "application/json" }),
-      },
-      body: body == null ? undefined : JSON.stringify(body),
-    });
-  } catch {
-    throw new GitHubApiError(
-      `GitHub REST ${method} ${endpoint} failed: network error`,
-      { source: "REST", retryable: true },
-    );
-  }
-
-  if (!response.ok) {
-    throw new GitHubApiError(
-      `GitHub REST ${method} ${endpoint} failed: HTTP ${response.status}`,
-      {
-        source: "REST",
-        status: response.status,
-        retryAfterMs: retryAfterMsFromHeaders(response.headers),
-        retryable: isRetryableStatus(response.status, response.headers),
-      },
-    );
-  }
-  if (response.status === 204) return null;
-  return response.json();
 }
 
 function githubRepository() {
@@ -534,23 +493,6 @@ export function releaseMergeCommitSha(pull, fallbackSha) {
   return pull.merge_commit_sha ?? fallbackSha;
 }
 
-export function buildReleaseComment(snapshot, releaseUrl, assets = []) {
-  return [
-    RELEASE_COMMENT_MARKER,
-    "LoadLynx release completed for this PR.",
-    "",
-    `- Version: \`${snapshot.tag}\``,
-    `- Channel: \`${snapshot.channel}\``,
-    `- Type: \`${snapshot.type}\``,
-    `- Release: ${releaseUrl}`,
-    `- Merge commit: \`${snapshot.merge_commit_sha}\``,
-    `- Workflow run: ${snapshot.run_url}`,
-    assets.length > 0 ? `- Assets: ${assets.map((asset) => `\`${asset}\``).join(", ")}` : null,
-  ]
-    .filter(Boolean)
-    .join("\n");
-}
-
 function writeOutputs(outputs) {
   if (!process.env.GITHUB_OUTPUT) return;
   const lines = Object.entries(outputs).map(([key, value]) => `${key}=${value}`);
@@ -642,42 +584,11 @@ async function resolveCommand(args) {
   console.log(JSON.stringify(snapshot, null, 2));
 }
 
-async function commentCommand(args) {
-  const snapshot = JSON.parse(readFileSync(args.snapshot, "utf8"));
-  const releaseUrl = args["release-url"];
-  const assets = (args.assets ?? "")
-    .split(",")
-    .map((asset) => asset.trim())
-    .filter(Boolean);
-  const body = buildReleaseComment(snapshot, releaseUrl, assets);
-
-  const comments = await githubApi(`/issues/${snapshot.pull_request}/comments?per_page=100`);
-  const existing = comments.find(
-    (comment) =>
-      comment.body?.includes(RELEASE_COMMENT_MARKER) && comment.user?.type === "Bot",
-  );
-  if (existing) {
-    await githubApi(`/issues/comments/${existing.id}`, {
-      method: "PATCH",
-      body: { body },
-    });
-    console.log(`Updated release comment on PR #${snapshot.pull_request}`);
-    return;
-  }
-
-  await githubApi(`/issues/${snapshot.pull_request}/comments`, {
-    method: "POST",
-    body: { body },
-  });
-  console.log(`Created release comment on PR #${snapshot.pull_request}`);
-}
-
 async function main() {
   const [command, ...rest] = process.argv.slice(2);
   const args = parseArgs(rest);
   if (command === "validate") return validateCommand(args);
   if (command === "resolve") return resolveCommand(args);
-  if (command === "comment") return commentCommand(args);
   throw new Error(`Unknown command: ${command}`);
 }
 

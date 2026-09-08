@@ -4,7 +4,7 @@
 
 - PR labels are the source of truth for release intent.
 - `Label Gate` validates release labels before merge.
-- `Release (LoadLynx)` consumes the merged PR labels on `main`, computes the next version, builds all releaseable project artifacts, deploys the validated release Web artifact to GitHub Pages, creates the GitHub Release, and comments back on the source PR.
+- `Release (LoadLynx)` consumes the merged PR labels on `main`, computes the next version, builds all releaseable project artifacts, deploys the validated release Web artifact to GitHub Pages, and creates the GitHub Release.
 - Release failures continue to use the Telegram notifier; ordinary PR CI failures do not.
 
 ## Label Contract
@@ -43,7 +43,6 @@
 - `Label Gate` is declared in `.github/quality-gates.json` as the required check.
 - `Code Check` and `Web Check` remain informational PR checks; embedded digital firmware coverage is consolidated into `Code Check` instead of a separate `Digital Check` workflow.
 - The default branch is protected through GitHub branch protection as a PR-only branch: direct pushes are disallowed, admins are still enforced, and the PR review requirement remains at `0` approvals.
-- The release workflow comments on the source PR after a successful release with version, release URL, asset list, workflow run URL, and merge commit.
 - Telegram notification scope remains release failures only.
 
 ## Acceptance
@@ -55,6 +54,5 @@
 - Firmware/Web/host-tools release metadata reports the injected release version.
 - GitHub Pages returns the same version as the release Web tarball and cannot be updated by an independent `main` source build.
 - Released `loadlynx` and `loadlynx-devd` binaries report the release tag version instead of the crate package version.
-- The source PR receives the release completion comment.
 - Editing labels after merge does not start another release. The existing explicit `workflow_dispatch` input `pr_number=<PR>` remains the only release backfill path.
 - Ordinary PR CI failures do not trigger Telegram notifications.
