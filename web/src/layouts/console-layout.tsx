@@ -11,7 +11,6 @@ import {
   Check,
   ChevronRight,
   LoaderCircle,
-  MonitorCog,
   SquareTerminal,
   Wifi,
 } from "lucide-react";
@@ -715,9 +714,13 @@ export function ConsoleLayout() {
             <div className="flex flex-wrap items-start justify-between gap-4 lg:grid lg:grid-cols-[minmax(0,260px)_1fr_minmax(0,360px)] lg:items-center">
               <div className="min-w-0">
                 <div className="flex items-center gap-3">
-                  <span className="inline-flex h-11 w-11 items-center justify-center rounded-2xl border border-cyan-300/30 bg-cyan-400/10 text-cyan-100 shadow-[0_0_24px_oklch(0.82_0.17_210/.12)]">
-                    <MonitorCog size={20} aria-hidden="true" />
-                  </span>
+                  <img
+                    src="/loadlynx-icon.svg"
+                    alt=""
+                    width={44}
+                    height={44}
+                    className="h-11 w-11 shrink-0 object-contain"
+                  />
                   <div className="min-w-0">
                     <h1 className="truncate text-lg font-bold sm:text-xl">
                       {t("app.title")}
