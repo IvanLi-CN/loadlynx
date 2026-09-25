@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title">
+  <title id="title">LoadLynx</title>
+  <rect width="256" height="256" fill="#071017" />
+  <g transform="translate(25.6 25.6) scale(.8)">
+    <path
+      d="M32 52 66 20h22v178h120l-34 46H32V52Z"
+      fill="#f4f8f8"
+    />
+    <path d="M112 20h72l40 40v104H112V20Z" fill="#00bdd0" />
+  </g>
+</svg>

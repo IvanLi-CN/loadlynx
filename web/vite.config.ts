@@ -93,10 +93,28 @@ export function createViteConfig(): UserConfig {
               categories: ["utilities", "productivity"],
               icons: [
                 {
-                  src: "/favicon.svg",
-                  sizes: "any",
-                  type: "image/svg+xml",
-                  purpose: "any maskable",
+                  src: "/loadlynx-icon-192.png",
+                  sizes: "192x192",
+                  type: "image/png",
+                  purpose: "any",
+                },
+                {
+                  src: "/loadlynx-icon-512.png",
+                  sizes: "512x512",
+                  type: "image/png",
+                  purpose: "any",
+                },
+                {
+                  src: "/loadlynx-icon-maskable-192.png",
+                  sizes: "192x192",
+                  type: "image/png",
+                  purpose: "maskable",
+                },
+                {
+                  src: "/loadlynx-icon-maskable-512.png",
+                  sizes: "512x512",
+                  type: "image/png",
+                  purpose: "maskable",
                 },
               ],
             },

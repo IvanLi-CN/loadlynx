@@ -1,11 +1,11 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img">
-  <title>LoadLynx</title>
-  <rect width="64" height="64" rx="14" fill="#0b1220" />
-  <path
-    d="M20 22c0-4 3-7 7-7h10c4 0 7 3 7 7v20c0 4-3 7-7 7H27c-4 0-7-3-7-7V22z"
-    fill="#38bdf8"
-    opacity="0.85"
-  />
-  <path d="M28 23h8v18h-8z" fill="#0b1220" opacity="0.55" />
-  <path d="M40 23h4v18h-4z" fill="#0b1220" opacity="0.35" />
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-labelledby="title">
+  <title id="title">LoadLynx</title>
+  <rect width="64" height="64" rx="14" fill="#071017" />
+  <g transform="translate(6.4 6.4) scale(.2)">
+    <path
+      d="M32 52 66 20h22v178h120l-34 46H32V52Z"
+      fill="#f4f8f8"
+    />
+    <path d="M112 20h72l40 40v104H112V20Z" fill="#00bdd0" />
+  </g>
 </svg>

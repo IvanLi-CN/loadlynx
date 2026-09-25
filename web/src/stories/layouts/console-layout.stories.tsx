@@ -63,7 +63,12 @@ export const Large: Story = {
   play: async ({ canvas, canvasElement }) => {
     await waitFor(
       () => {
-        canvas.getByText("LoadLynx Web Console");
+        const title = canvas.getByRole("heading", {
+          name: "LoadLynx Web Console",
+        });
+        if (title.classList.contains("truncate")) {
+          throw new Error("Expected the desktop brand title to remain visible");
+        }
         canvas.getByRole("navigation", { name: "主导航" });
         canvas.getByRole("link", { name: "总览" });
         canvas.getByRole("button", { name: "仪表盘" });
